@@ -12,6 +12,8 @@ mod cli_contract;
 mod edit_contract;
 #[path = "edit_source_preservation.rs"]
 mod edit_source_preservation;
+#[path = "exchange_contract.rs"]
+mod exchange_contract;
 #[path = "export_contract.rs"]
 mod export_contract;
 #[path = "local_data_contract.rs"]

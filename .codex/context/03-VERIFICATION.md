@@ -318,6 +318,13 @@ anki-repo migrate-layout --root . --apply --json     # повтор: summary.exp
 
 ## Проверки CI
 
+Библиотечный контракт обмена проверяется синтетическими сценариями
+`cargo test -p anki-repo --test integration exchange_contract --locked`:
+идентичности, A/C/B, цепочка ревизий, повторное открытие состояния, конфликты,
+конкурентные вызовы, отказы записи и файловые границы. Эти тесты входят в обычный
+workspace-набор; живой Anki и пользовательский `decks/input/` им не нужны.
+Полный контракт ревизий и границы доказательств — в `tools/anki-repo/exchange.md`.
+
 `.github/workflows/ci.yml` (workflow «Проверки репозитория») прогоняет те же
 проверки, что и локально, но независимо от машины разработчика. Он запускается
 на `pull_request`, на `push` и вручную (`workflow_dispatch`); push-job выполняется

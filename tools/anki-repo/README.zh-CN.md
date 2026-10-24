@@ -2,9 +2,15 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: cf4c051e39d649969d08fa819a37cdfe7c7332e2 -->
+<!-- i18n-source-git-blob: 65fbb16261c3cd53332b5f82fc197e950eb14435 -->
 
 `anki-repo` 是一套用于确定性分析 CrowdAnki 导出数据、并对其内容实施严格受限修改的工具。它使智能体能够快速、可预测地了解 `deck.json` 的结构，而无需人工通读数 MB 的 JSON 文件。
+
+[`anki_repo::exchange`](exchange.md) 库 API 提供配置档案与牌组身份、A/C/B 语义比较、
+持久化修订状态，以及未来与 Anki 进行程序化交换所需的前置条件。
+它在内存中接收已确认的输入，不读取 `decks/input/`，不搬移导出数据，
+也不提供绕过该受保护区域限制的 CLI 接口。元数据存放在 Git 忽略的
+`decks/.exchange/revisions.json` 中。
 
 `inspect`、`find`、`stats`、`validate`、`qa`、`review`、`review-check` 和 `models` 只读取导出数据。`visual-report` 读取导出数据，并且只写入新的独立报告目录。这些只读命令都不修改导出数据：交互式磁盘维护提示（参见“磁盘维护”）只会将用户偏好保存到导出目录之外的私有文件。独立的 `maintenance` 命令组完全不访问导出数据，而是查看自动清理状态并管理用户的 `systemd --user` 定时器。会修改导出数据的命令有：
 

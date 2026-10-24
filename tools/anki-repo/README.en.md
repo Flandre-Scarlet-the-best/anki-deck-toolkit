@@ -2,9 +2,15 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: cf4c051e39d649969d08fa819a37cdfe7c7332e2 -->
+<!-- i18n-source-git-blob: 65fbb16261c3cd53332b5f82fc197e950eb14435 -->
 
 `anki-repo` is a toolkit for deterministic analysis of CrowdAnki exports and strictly constrained edits to their contents in the `Anki-decks` repository. It gives agents fast, predictable access to the structure of `deck.json` without requiring them to read a multi-megabyte JSON file manually.
+
+The [`anki_repo::exchange`](exchange.md) library API provides profile/deck identities,
+semantic A/C/B comparison, persistent revisions, and preconditions for future
+programmatic exchange with Anki. It accepts confirmed input in memory, does not read
+`decks/input/` or move exports, and adds no CLI bypass for that protected area.
+Metadata lives in the ignored `decks/.exchange/revisions.json`.
 
 The `inspect`, `find`, `stats`, `validate`, `qa`, `review`, `review-check`, and `models` commands only read the export. `visual-report` reads exports and writes only a separate report directory. None of these read-only commands modifies an export: the interactive disk-maintenance prompt (see “Disk maintenance”) stores the user's preference in a private file outside the export. The separate `maintenance` command group does not access exports at all: it reports automatic-cleanup status and manages the user's `systemd --user` timer. Commands that modify an export are:
 

@@ -260,17 +260,30 @@ pub fn validate(export_dir: &Path) -> Result<ValidateResult, DomainError> {
 /// полей на набор media-имён не влияют, а media-проверки не дают ERROR.
 pub fn validate_document(root: &DeckNode, export_dir: &Path) -> ValidateResult {
     let index = ExportIndex::build(root);
-    let mut issues: Vec<Issue> = Vec::new();
-
-    check_deck_nodes(&index, &mut issues);
-    check_models(&index, &mut issues);
-    check_configs(&index, &mut issues);
-    check_note_guids(&index, &mut issues);
-    check_templates(&index, &mut issues);
+    let mut issues = structural_issues(&index);
     check_media(export_dir, &index, &mut issues);
     check_summary_diagnostics(&index, &mut issues);
-
     finish(issues)
+}
+
+/// Проверяет структуру уже разобранного CrowdAnki без обращения к файловой системе.
+/// Используется также доверенным программным обменом для снимков в памяти.
+pub fn validate_structure(root: &DeckNode) -> ValidateResult {
+    let index = ExportIndex::build(root);
+    let mut issues = structural_issues(&index);
+    check_summary_diagnostics(&index, &mut issues);
+    finish(issues)
+}
+
+fn structural_issues(index: &ExportIndex<'_>) -> Vec<Issue> {
+    let mut issues: Vec<Issue> = Vec::new();
+
+    check_deck_nodes(index, &mut issues);
+    check_models(index, &mut issues);
+    check_configs(index, &mut issues);
+    check_note_guids(index, &mut issues);
+    check_templates(index, &mut issues);
+    issues
 }
 
 fn push(

@@ -39,6 +39,7 @@
 
 pub mod cli;
 pub mod error;
+pub mod exchange;
 pub mod guid;
 pub mod htmlscan;
 pub mod index;
