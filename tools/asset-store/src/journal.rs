@@ -9,8 +9,8 @@
 //! состояние получилось, и позволяет обнаружить изменение, зафиксированное в
 //! манифесте, но не закрытое событием результата.
 //!
-//! Запись выполняется только под уже удерживаемой эксклюзивной блокировкой store:
-//! ни один worker пакета не обращается к журналу, поэтому многоворкерное получение
+//! Запись выполняется только под уже удерживаемой эксклюзивной блокировкой хранилища:
+//! ни один исполнитель пакета не обращается к журналу, поэтому получение несколькими исполнителями
 //! не замедляется.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AssetError, ErrorCode};
 use crate::hashing::sha256_hex;
-use crate::model::{AssetIdentity, LifecycleState, Manifest, Provenance};
+use crate::model::{AssetIdentity, DetectedFormat, LifecycleState, Manifest, Provenance};
 use crate::store::{directory_entry_error, ensure_dir_entry, open_directory_at, sync_directory};
 
 /// Каталог журнала в корне хранилища.
@@ -211,6 +211,10 @@ pub struct JournalEvent {
     pub provenance: Option<String>,
     pub reason: Option<String>,
     pub snapshot: Option<JournalSnapshot>,
+    /// Формат записи у домена с форматными вариантами (`kanji`): вместе с
+    /// идентичностью задаёт слот. В событиях прежних версий отсутствует.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<DetectedFormat>,
 }
 
 impl JournalEvent {
@@ -234,6 +238,8 @@ pub struct JournalOpenIntent {
     pub namespace: String,
     pub operation: JournalOperation,
     pub recorded_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<DetectedFormat>,
 }
 
 /// Готовое к записи событие без вычисляемых полей.
@@ -256,6 +262,7 @@ pub struct JournalDraft {
     provenance: Option<String>,
     reason: Option<String>,
     snapshot: Option<JournalSnapshot>,
+    format: Option<DetectedFormat>,
 }
 
 impl JournalDraft {
@@ -301,7 +308,15 @@ impl JournalDraft {
             provenance: None,
             reason: None,
             snapshot: None,
+            format: None,
         }
+    }
+
+    /// Указывает формат записи, если домен различает записи по формату.
+    #[must_use]
+    pub fn format(mut self, format: Option<DetectedFormat>) -> Self {
+        self.format = format;
+        self
     }
 
     /// Указывает интент, который закрывает это событие.
@@ -410,6 +425,7 @@ impl JournalDraft {
             new_sha256: self.new_sha256.as_deref(),
             manifest_revision: self.manifest_revision,
             intent_id: self.intent_id.as_deref(),
+            format: self.format,
         })
     }
 }
@@ -424,10 +440,11 @@ struct EventKeyFields<'a> {
     new_sha256: Option<&'a str>,
     manifest_revision: Option<u64>,
     intent_id: Option<&'a str>,
+    format: Option<DetectedFormat>,
 }
 
 fn event_key_for_fields(fields: EventKeyFields<'_>) -> String {
-    let material = format!(
+    let mut material = format!(
         "{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}",
         fields.domain,
         fields.namespace,
@@ -442,6 +459,12 @@ fn event_key_for_fields(fields: EventKeyFields<'_>) -> String {
         fields.intent_id.unwrap_or("-"),
         sep = FIELD_SEPARATOR,
     );
+    // Формат дописывается только когда задан: ключи прежних событий не меняются.
+    if let Some(format) = fields.format {
+        material.push(FIELD_SEPARATOR);
+        material.push_str("format=");
+        material.push_str(crate::domain::extension_for_format(format));
+    }
     sha256_hex(material.as_bytes())
 }
 
@@ -456,6 +479,7 @@ fn expected_event_key(event: &JournalEvent) -> String {
         new_sha256: event.new_sha256.as_deref(),
         manifest_revision: event.manifest_revision,
         intent_id: event.intent_id.as_deref(),
+        format: event.format,
     })
 }
 
@@ -524,7 +548,7 @@ struct JournalState {
 /// Дескриптор каталога и разобранное состояние кешируются в памяти: файл
 /// перечитывается только тогда, когда его размер или время изменения отличаются
 /// от последнего чтения. Это не мешает другому процессу: он пишет под той же
-/// эксклюзивной блокировкой store.
+/// эксклюзивной блокировкой хранилища.
 #[derive(Debug)]
 pub struct Journal {
     root: File,
@@ -538,7 +562,7 @@ impl Journal {
     /// Открывает журнал, не создавая каталог и не читая файл.
     pub fn open(root: &File) -> Result<Self, AssetError> {
         let root = root.try_clone().map_err(|error| {
-            AssetError::io("не удалось клонировать дескриптор store root", error)
+            AssetError::io("не удалось клонировать дескриптор корня хранилища", error)
         })?;
         Ok(Self {
             root,
@@ -746,6 +770,7 @@ impl Journal {
             provenance: draft.provenance.clone(),
             reason: draft.reason.clone(),
             snapshot: draft.snapshot.clone(),
+            format: draft.format,
         })
     }
 
@@ -942,8 +967,9 @@ pub(crate) fn inspect(read: &JournalRead, manifest_revision_max: u64) -> Journal
             structurally_valid = false;
             problems.push(format!("event_id {} повторяется", event.event_id));
         }
+        // Прежние ключи появились раньше поля `format` и его не защищают.
         if event.event_key != expected_event_key(event)
-            && event.event_key != legacy_event_key(event)
+            && !(event.format.is_none() && event.event_key == legacy_event_key(event))
         {
             structurally_valid = false;
             problems.push(format!(
@@ -972,14 +998,14 @@ pub(crate) fn inspect(read: &JournalRead, manifest_revision_max: u64) -> Journal
             {
                 structurally_valid = false;
                 problems.push(format!(
-                    "baseline seq={} должен быть однофазным completed-событием со снимком",
+                    "базовое событие seq={} должно быть однофазным событием completed со снимком",
                     event.seq
                 ));
             }
         } else if event.snapshot.is_some() {
             structurally_valid = false;
             problems.push(format!(
-                "снимок состояния разрешён только для baseline, seq={}",
+                "снимок состояния разрешён только для базового события, seq={}",
                 event.seq
             ));
         }
@@ -1043,6 +1069,7 @@ pub(crate) fn inspect(read: &JournalRead, manifest_revision_max: u64) -> Journal
         if intent.domain != event.domain
             || intent.namespace != event.namespace
             || intent.identity != event.identity
+            || intent.format != event.format
             || intent.operation != event.operation
         {
             structurally_valid = false;
@@ -1084,6 +1111,7 @@ pub(crate) fn inspect(read: &JournalRead, manifest_revision_max: u64) -> Journal
             namespace: event.namespace.clone(),
             operation: event.operation,
             recorded_at: event.recorded_at.clone(),
+            format: event.format,
         })
         .collect();
     for intent in &open_intents {
@@ -1753,6 +1781,23 @@ mod tests {
     }
 
     #[test]
+    fn check_rejects_a_schema_one_key_on_an_event_with_a_format() {
+        let mut slotted = event(1, "slotted", None, JournalOutcome::Completed);
+        slotted.format = Some(DetectedFormat::Png);
+        slotted.event_key = legacy_event_key(&slotted);
+
+        let inspection = inspect(
+            &JournalRead {
+                events: vec![slotted],
+                torn_tail: false,
+                corrupt_lines: Vec::new(),
+            },
+            5,
+        );
+        assert!(!inspection.structurally_valid);
+    }
+
+    #[test]
     fn check_rejects_redirected_and_malformed_intent_links() {
         let pending = |seq, id, identity: &str| {
             let mut intent = event(seq, id, None, JournalOutcome::Pending);
@@ -1970,6 +2015,7 @@ mod tests {
             provenance: None,
             reason: None,
             snapshot: None,
+            format: None,
         };
         event.event_key = expected_event_key(&event);
         event

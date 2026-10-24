@@ -137,6 +137,19 @@ pub trait AssetDomainPolicy: std::fmt::Debug + Send + Sync {
         true
     }
 
+    /// Может ли одна идентичность иметь по независимой записи на каждый
+    /// публикуемый формат. Тогда ключ записи — пара «идентичность, формат», а
+    /// замена по CAS действует только внутри записи того же формата.
+    fn allows_format_variants(&self) -> bool {
+        false
+    }
+
+    /// Порядок предпочтения форматов, когда потребитель запрашивает
+    /// идентичность без формата. Пустой список — формат не различается.
+    fn format_preference(&self) -> &'static [DetectedFormat] {
+        &[]
+    }
+
     /// Доменный предел размера ресурса, если он установлен.
     fn max_asset_bytes(&self) -> Option<u64>;
 
@@ -334,6 +347,16 @@ impl AssetDomainPolicy for KanjiDomainPolicy {
         matches!(format, DetectedFormat::Gif | DetectedFormat::Png)
     }
 
+    /// `漢.gif` и `漢.png` — независимые записи одного символа.
+    fn allows_format_variants(&self) -> bool {
+        true
+    }
+
+    /// Подлинный GIF предпочтительнее PNG, если вызывающий не указал формат.
+    fn format_preference(&self) -> &'static [DetectedFormat] {
+        &[DetectedFormat::Gif, DetectedFormat::Png]
+    }
+
     fn max_asset_bytes(&self) -> Option<u64> {
         Some(crate::kanji_validator::MAX_MEDIA_BYTES as u64)
     }
@@ -422,7 +445,7 @@ pub fn validate_safe_storage_path(storage_path: &str) -> Result<(), AssetError> 
 ///
 /// Это единый контракт asset-store для имён внутри хранилища и плоских имён,
 /// которые получает потребитель. Для `Unknown` используется `bin`; потребители,
-/// которым нужны только известные media-форматы, должны отдельно отклонить его.
+/// которым нужны только известные медиаформаты, должны отдельно отклонить его.
 pub fn extension_for_format(format: DetectedFormat) -> &'static str {
     match format {
         DetectedFormat::Png => "png",
@@ -443,7 +466,7 @@ fn validate_sha256(sha256: &str) -> Result<(), AssetError> {
     {
         return Err(AssetError::new(
             ErrorCode::ManifestCorrupt,
-            "SHA-256 должен состоять из 64 строчных hex-символов",
+            "SHA-256 должен состоять из 64 строчных шестнадцатеричных символов",
         ));
     }
     Ok(())

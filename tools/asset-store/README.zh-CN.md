@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: c90c40b3aca25b5b3a6a9fd3550c94275ca69cc1 -->
+<!-- i18n-source-git-blob: 1189916027fd5186a7217c11659e513d56c38014 -->
 
 `asset-store` 是用于程序管理资源的公共 Rust 库，负责清单、校验和、完整性及生命周期。领域专用 CLI `kanji-assets` 负责查找 Yarxi 条目、验证汉字图片，并把通过验证的文件发布到规范资源库。本工具不读取 `decks/**/media/`，不更改 `media_files`，也不会把图片复制到牌组中。
 
@@ -36,7 +36,7 @@
 
 清单中的内部 `storage_path` 与消费者文件名不同。例如 `assets/gif/漢.gif` 的 `consumer_filename: "漢.gif"`，使用时对应 `media/漢.gif`。`anki-repo` 读取明确声明的消费者文件名，而不是由资源存储布局猜测。
 
-`.runtime/manifest.json` 与主清单使用相同 `store_id`，`verify_integrity` 检查两者。`Pending`、`Quarantined` 保存在 `.runtime`；验证规范资源库时还会确保其身份与 `.runtime` 无重叠。资源库不存在也允许。
+`.runtime/manifest.json` 与主清单使用相同 `store_id`，`verify_integrity` 检查两者。`Pending`、`Quarantined` 保存在 `.runtime`；验证规范资源库时还会确保其槽位与 `.runtime` 无重叠：即身份，对于有格式变体的领域则为身份与格式的组合。资源库不存在也允许。
 
 ## 领域策略与清单
 
@@ -54,11 +54,11 @@
 
 深色主题证据关联浏览器配色设置、文档类、计算得到的背景颜色与 PNG 像素。至少一个背景像素与观察到的颜色在**每个 RGB 通道**上相差不超过 **8**；至少八个图形像素在至少一个通道上相差**超过 16**。PNG **所有**像素必须 `alpha=255`。此外，所选图形绘制区域之外的所有像素（允许其边缘有一个物理像素的抗锯齿）都必须在同样的容差 8 内与观察到的背景一致：由此实际字节证明边距干净、相邻变体和按钮未被截入、线条和字符不接触 PNG 边缘。边距是原生截图中页面的真实背景，而不是后期绘制的边框。必须有浏览器来源证据。验证器 v6 实现现行绘制/证据契约；早期版本的证据不会继承可信状态，不完整证据或早期形式的证据（例如带有版本 5 的 `graph_count` 和 `graph_union_rect`）返回 `UNCERTAIN`。
 
-清单版本为 `5`。每条记录包括 SHA-256、字节大小、格式、状态、来源、语义判断及 `consumer_filename`；存储整体包括 `domain_id`。自动 `ValidationRecord` 与可选 `HumanAttestation` 绑定准确身份和 SHA。对于音高重音，人的 `Approve` 不能取代自动 `ValidationRecord` 记录：相同字节仍需要一条状态为 `VERIFIED`、且 `validator.id`/`validator.version` 符合 `PitchAccentImageValidator` v6 预期的记录。人工批准无法使旧版、不完整证据或 `REJECTED`、`CORRUPT` 变得可信；汉字领域原有人工批准规则不变。新 SHA 不继承旧字节的决定；替换记录必须按预期旧 SHA 做 compare-and-swap。
+清单版本为 `6`。每条记录包括 SHA-256、字节大小、格式、状态、来源、语义判断及 `consumer_filename`；存储整体包括 `domain_id`。记录按槽位寻址：在汉字领域中槽位是（身份，格式）对，因此同一字符的 `漢.gif` 与 `漢.png` 独立存在，各自拥有 SHA-256、来源、证据和状态。在没有格式变体的领域（音高重音）中，槽位仍等于身份。版本 `5` 的清单在写入模式打开时通过原子替换清单升级为 `6`：只改变 `schema_version` 和修订号，记录、字节、SHA 和决定保持不变。自动 `ValidationRecord` 与可选 `HumanAttestation` 绑定准确身份和 SHA。对于音高重音，人的 `Approve` 不能取代自动 `ValidationRecord` 记录：相同字节仍需要一条状态为 `VERIFIED`、且 `validator.id`/`validator.version` 符合 `PitchAccentImageValidator` v6 预期的记录。人工批准无法使旧版、不完整证据或 `REJECTED`、`CORRUPT` 变得可信；汉字领域原有人工批准规则不变。新 SHA 不继承旧字节的决定；替换记录必须按预期旧 SHA 做 compare-and-swap。它只在槽位内生效：同一身份另一格式记录的预期 SHA 以 `identity_conflict` 拒绝，因此发布 PNG 既不会替换 GIF，也不会撤销对它的信任。
 
 旧版 v3/v4 清单和原先平铺的汉字目录仍可读取。以写入模式打开时会在独占锁内执行版本迁移：通过硬链接保留旧字节、验证 SHA-256、原子更新清单，再删除旧平铺链接。`.tmp/` 中的事务标记允许中断后继续或回滚。未变化的 SHA、`ValidationRecord`、`HumanAttestation` 均保留，无需重新下载。完成后新旧规范路径不会同时存在。CLI JSON 报告 `store.layout_migrated_on_open`。
 
-`AssetStore::read_verified` 仍是兼容读取的汉字 API。其他领域使用 `read_verified_with_policy`；该 API 可通过旧映射读取 v3/v4，并返回明确的消费者文件名，**不修改清单、不创建状态或锁文件、不迁移布局或触发恢复**。只有写入模式打开才会迁移；读取时验证精确字节、校验和、大小、格式、验证器身份及人工决定。
+`AssetStore::read_verified` 仍是兼容读取的汉字 API；对具有两种可信格式的字符返回首选格式：先 GIF，后 PNG。`read_verified_variants_with_policy` 读取明确指定的（身份，格式）对。其他领域使用 `read_verified_with_policy`；该 API 可通过旧映射读取 v3/v4，并返回明确的消费者文件名，**不修改清单、不创建状态或锁文件、不迁移布局或触发恢复**。只有写入模式打开才会迁移；读取时验证精确字节、校验和、大小、格式、验证器身份及人工决定。每次读取调用都会获取共享锁并重新验证整个清单和语料库中的每个文件，因此读取多个资源时应作为一个批次，而不是每个资源调用一次。`visit_verified_variants_with_policy` 在一次锁和一次完整验证下流式读取批次：整个存储的错误在第一个结果之前返回，单个请求的错误连同请求索引传给处理函数且不中断批次，字节不会在内存中累积。
 
 公共批处理运行时负责 `.runtime/batches/<batch-id>` 下安全的文件机制：`NOFOLLOW`、锁、修订号/CAS、原子状态写入、有界读取和按 SHA 寻址的内容。它不依赖 `KanjiBatch`、`KanjiMetrics`、Yarxi 数据或 HTML 报告，这些都由领域适配器负责。纯文本测试状态验证重新打开和读取内容，无需汉字或图片规则。
 
@@ -110,6 +110,7 @@ cargo run --quiet --locked -p asset-store --bin pitch-corpus-gate
 | `intent_id` | 结束事件所引用的意图事件 `event_id` |
 | `manifest_revision` | 规范清单与 `.runtime` 清单的合计修订号 |
 | `previous_sha256`, `new_sha256`, `previous_lifecycle`, `new_lifecycle` | 事件前后的真实状态 |
+| `format` | 具有格式变体的领域中的槽位格式（`gif`、`png`）；其他领域不存在，也不计入 `event_key` |
 | `verified` | 事件后已验证则 `true`，未验证或已删除则 `false`，非单条记录事件为 `null` |
 | `run_id`, `batch_id` | 可选的执行上下文 |
 | `provenance` | 不含路径的 `source_kind:source_name` |
@@ -124,7 +125,7 @@ cargo run --quiet --locked -p asset-store --bin pitch-corpus-gate
 
 ### 对账与恢复
 
-如果进程在 `save_manifest` 后、结束事件前退出，意图会保持打开。`journal reconcile` 持锁对照规范及 `.runtime` 清单；有效未结束意图可以恢复。日志出现无效引用、损坏/截断的行、`domain`/`namespace`/`identity`/`operation` 不匹配、顺序错误、重复结束或 `event_key` 错误时，以 `manifest_corrupt` 拒绝且不写入。
+如果进程在 `save_manifest` 后、结束事件前退出，意图会保持打开。`journal reconcile` 持锁对照规范及 `.runtime` 清单；有效未结束意图可以恢复。日志出现无效引用、损坏/截断的行、`domain`/`namespace`/`identity`/`format`/`operation` 不匹配、顺序错误、重复结束或 `event_key` 错误时，以 `manifest_corrupt` 拒绝且不写入。
 
 - 实际状态等于预期 `new_*` → `outcome: recovered`。
 - 实际状态等于先前 `previous_*` → `outcome: aborted`。
@@ -477,11 +478,11 @@ ZIP 必需项：`summary.md`、`manifest.sha256`、`raw-evidence/events.jsonl`�
 
 主要参考字形库来自 KanjiVG 发布版 `r20250816`，提交 `bd13ffbcc9d85cb86ae98bbbf001d9069220b901`。按 Unicode 码点查找的 SVG 被规范化为 64×64 二值遮罩，包含 **6,430** 个字符，压缩于 `src/data/kanjivg-r20250816.maskdb.zlib`，SHA-256 为 `5581e65d5a681cdf8e441be04c1cea5f6ec61342ce8830ed083ba417d83a88ff`。KanjiVG 使用 CC BY-SA 3.0；版权归属、版本与原始档案 SHA-256 见 `src/data/kanjivg-ATTRIBUTION.txt`。
 
-深色方块另采用公开发布的 Noto Serif JP Regular 1.001 字体作为附加像素参考：`google/fonts` 仓库固定提交 `beff1d8226e598dfaf06f9f8312c01021f70e9d2` 中的 `ofl/notoserifjp/NotoSerifJP-Regular.otf`，SHA-256 为 `a12875dcde3979f7901cd52c6f750f763e5ad2824cf3c27019a61dd5de5a8d9d`，许可为 SIL Open Font License 1.1。这是独立来源，而不是 Yarxi 网站过去提供的字体文件：那个 TTF 已无法获取，网站及其数据也不再是生成输入。由该字体生成 **6,428** 个规范遮罩，存于 `src/data/noto-serif-jp-1.001-regular.maskdb.zlib`，SHA-256 `cce25df61382ccb8e14d1eca181609916aac483b4949fcbf637f4fb5ac353608`；字体本身**未提交**仓库。来源、许可和重新生成命令见 `src/data/noto-serif-jp-ATTRIBUTION.txt`。
+深色方块另采用公开发布的 Noto Serif JP Regular 1.001 字体作为附加像素参考：`google/fonts` 仓库固定提交 `beff1d8226e598dfaf06f9f8312c01021f70e9d2` 中的 `ofl/notoserifjp/NotoSerifJP-Regular.otf`，SHA-256 为 `a12875dcde3979f7901cd52c6f750f763e5ad2824cf3c27019a61dd5de5a8d9d`，许可为 SIL Open Font License 1.1。这是独立来源，而不是 Yarxi 网站过去提供的字体文件：那个 TTF 已无法获取，网站及其数据也不再是生成输入。由该字体生成 **6,428** 个规范遮罩，存于 `src/data/noto-serif-jp-1.001-regular.maskdb.zlib`，SHA-256 `cce25df61382ccb8e14d1eca181609916aac483b4949fcbf637f4fb5ac353608`；这个固定的源字体文件未纳入仓库：`tools/asset-store/fonts/` 中存放的是 `local-png` 使用的另一个已校准文件（同为 1.001 版，SHA-256 不同，见 `local-png` 一节）。来源、许可和重新生成命令见 `src/data/noto-serif-jp-ATTRIBUTION.txt`。
 
 生成器 `build-noto-font-reference` 校验字体 SHA-256，只使用固定 KanjiVG 字形库中同时存在于字体 cmap 的字符。对 cmap 之外的字符，`resvg` 会绘制 `.notdef` 字形，同一个方框会成为多个无关 Unicode 字符的参考；因此跳过 U+55BB 和 U+27491。测试 `noto_catalog_has_no_notdef_templates` 只允许规范等价的字符（CJK 兼容表意文字及其统一形式）具有相同遮罩。
 
-参考库生成器仅在 `reference-generator` 功能中使用 `resvg` 和 `skrifa`；生产验证器读取已嵌入的字形库，与 `resvg` 版本无关。两个字形库在 `resvg 0.48.1` 上均可逐字节复现，并与 `resvg 0.47.0` 在相同输入上的结果一致。新的 Noto 字形库与先前基于 Yarxi TTF 的字形库在 6,428 个遮罩中有 6,257 个不同（中位数为 4,096 个像素中的 7 个），因此只在新的验证器版本下被接受。测试 `embedded_reference_catalogs_match_registered_identity_and_attribution` 将两个嵌入字形库及原始字体的 SHA-256 与验证器版本及版权归属文件绑定，未同步更换验证器标识就替换字形库将无法通过检查。
+参考库生成器仅在 `reference-generator` 功能中使用 `resvg`；`skrifa` 是必需依赖，`local_render` 和生成器都用它读取字体表。生产验证器读取已嵌入的字形库，与 `resvg` 版本无关。两个字形库在 `resvg 0.48.1` 上均可逐字节复现，并与 `resvg 0.47.0` 在相同输入上的结果一致。新的 Noto 字形库与先前基于 Yarxi TTF 的字形库在 6,428 个遮罩中有 6,257 个不同（中位数为 4,096 个像素中的 7 个），因此只在新的验证器版本下被接受。测试 `embedded_reference_catalogs_match_registered_identity_and_attribution` 将两个嵌入字形库及原始字体的 SHA-256 与验证器版本及版权归属文件绑定，未同步更换验证器标识就替换字形库将无法通过检查。
 
 验证器先从图像四角估计背景，通过对比度决定极性，删除边缘相连的边框成分，并提取前景字形遮罩。参考库生成器和生产验证器共用 `kanji_mask::normalize_binary_mask`：裁剪到非空前景，缩放适配到 56×56，再居中放入 64×64。每个输出像素按照 `(2*i+1)*source_size/(2*output_size)` 选择原始网格中心最近的像素。因此 KanjiVG、Noto 和候选图都采用相同规范化算法。
 
@@ -590,6 +591,50 @@ cargo run --locked --bin kanji-assets -- --output json batch import \
 `identify` 的应答不遵循存储的通用 JSON 应答形式：包含 `schema_version`、`operation`、`outcome`（`completed` 或 `completed_with_errors`）、`method_version`、`validator`、`counts`（按状态与 `error` 统计的条目数）以及按参数顺序排列的 `items[]`。每个条目包含 `path`，以及 `sha256`、`byte_length`、`oversized`、`identification`（含 `status`、`reason`、`proposed`、`margin`、`candidates`、`raster` 的报告）或带 `code` 与 `message` 的 `error` 之一。`--top` 默认为 5（1 到 20）。`ambiguous`、`unknown` 和 `corrupt` 状态本身以退出码 `0` 结束；仅当存在带 `error` 的条目时退出码为 `3`。
 
 `batch import --batch-id ID --source-dir DIR` 遍历批次当前边界，为每个身份查找恰好一个不经 symlink 的普通文件 `<字符>.gif` 或 `<字符>.png`。目录不得位于 `decks/` 内；文件只读。边界在打开存储之前针对已打开的目录描述符检查，文件只相对于该描述符打开：检查之后替换 `DIR` 或其父级路径组件不会重定向读取。字节由与 Yarxi 获取相同的验证器检查：`VERIFIED` 由所有者发布，其他技术上有效的候选进入 `awaiting_human`，再经 `batch ocr`、`review-export` 和人工决定处理。缺少文件（`local_source_missing`）、GIF 与 PNG 并存（`local_source_ambiguous`）、签名与扩展名不符（`media_format_mismatch`）以及空文件或超大文件，都作为技术尝试保存，并受同样的五轮限制。每个结果单独保存，因此中断的导入在下次调用时继续，不会重新处理已记录的字符。候选来源记为 `local_source`（`provider: local-directory`、文件名）；在清单中表现为 `source_kind: local-directory` 和 `domain_metadata.local_source`。文件名只说明以哪个身份读取该文件。
+
+### 本地生成 PNG：`local-png`
+
+`kanji-assets local-png` 在不使用 Yarxi、网络和外部解释器的情况下生成 Yarxi 风格的 174×174 汉字 PNG：系统 Chromium 通过 CDP 使用本地 Noto Serif JP 文件绘制字符，截图以原生 174×174 获取，不做缩放。已校准的 `NotoSerifJP-Regular.otf` 1.001 版与 SIL Open Font License 1.1 文本（`OFL.txt`）一起存放在 `tools/asset-store/fonts/` 中，默认相对于 `--repository-root` 使用；`--font` 可指定其他路径。只接受具有已校准 SHA-256 的文件（`local_render::CALIBRATED_FONT_SHA256`，测试固定其与仓库文件一致）。其他文件只能通过 `render --allow-uncalibrated-font` 使用，结果标记为未校准；`run` 和发布不接受它。
+
+```bash
+# 在 decks/ 之外的新目录中生成 PNG；存储不变。
+cargo run --locked --bin kanji-assets -- --output json local-png render \
+  --out ./local-png 亜漢 --raw
+
+# 可恢复的语料库运行：渲染、验证器、盲 OCR、发布。
+cargo run --locked --bin kanji-assets -- --output json local-png run \
+  --work-dir ./local-png-run --from-corpus --ocr --publish
+
+# 运行后的存储检查及工作目录的 HTML 报告。
+cargo run --locked --bin kanji-assets -- --output json local-png report --work-dir ./local-png-run
+
+# 未通过关卡字符的审查快照及其决定的应用。
+cargo run --locked --bin kanji-assets -- --output json local-png review-export --work-dir ./local-png-run
+cargo run --locked --bin kanji-assets -- --output json local-png review-apply \
+  --work-dir ./local-png-run --review-id <review_id>
+
+# 两个 <字符>.png 目录的相似度指标。
+cargo run --locked --bin kanji-assets -- --output json local-png compare \
+  --reference ./reference --generated ./local-png
+```
+
+算法 `kanji-local-png-v1` 对所有字符使用同一套几何参数，没有按字符的表：字号 70 CSS px，`line-height: 1`，字形偏移 (+0.3125; −4) CSS px，背景 `#222`，1 px `#808080` 边框，字形 `#fff`，`deviceScaleFactor` 2.175。配置 `b`（图块起点 (21.0625; 0.0625) CSS px）为默认；配置 `a`（5.0625; 4.9375）只能通过显式 `--profile a` 选择。随后对边框内的通道应用指数为 1.10 的覆盖率校正。该指数针对 Chromium 的 Linux 光栅化，在冻结的校准字符集上校准，并在独立的保留集上检验；边框不校正。`--raw` 另外保存未校正的截图用于诊断。每张图像都附带证据：字体 SHA-256 与版本、Chromium 版本、配置、几何、校正以及 `CSS.getPlatformFontsForNode` 的结果——字符必须恰好由一个自定义字体绘制。`cmap` 中缺少字形时在启动浏览器之前给出 `glyph_missing`；回退到系统字体、页面发起网络请求、浏览器故障、透明或截图尺寸不符都会产生该字符的错误，而不是图像。`--browsers`（1–4）设置浏览器池。
+
+`run --work-dir DIR` 将每个码位的状态原子写入单独文件 `items/U+XXXX.json`，因此中断的运行可用同一调用继续，不会重做已完成的阶段；`--limit N` 限制每次调用处理的未完成字符数，`progress.log` 显示阶段进度。算法参数和存储的 `store_id` 记录在 `run.json` 中：以不同字体、配置或存储复用该目录会被拒绝；若 `run.json` 缺失、损坏或属于另一个存储，`report`、`review-export` 和 `review-apply` 会在任何更改之前拒绝执行。阶段的临时失败最多连续自动重试三次：渲染（持久性的 `glyph_missing` 和 `font_fallback` 除外）、OCR 技术失败以及 `publish_error`。用尽的尝试和 `font_fallback` 只有 `--retry-failed` 才会重试，因此 `--limit N` 不会反复选中同一批字符，而能推进到其余目标。PNG、原始截图或证据彼此之间或与 `run.json` 不一致的渲染被视为不完整，会重新绘制。目标为显式字符，以及使用 `--from-corpus` 时所有具有可信 GIF 或历史 PNG 的字符；`inventory-before.json` 记录首次运行前的存储状态。阶段：
+
+1. 渲染；
+2. 对 PNG 字节运行 `KanjiImageValidator`；
+3. 对有历史 PNG 的字符，与原件副本进行对照比较；存储中的原件不变。中断的对照会继续执行；若原件没有可信决定或本身就是本地渲染，跳过会保存在 `control_skip` 中，只有 `--retry-failed` 才会重试；
+4. 使用 `--ocr` 时进行盲 OCR：模型只收到图像，预期字符不在请求中，在回答之后才比较。技术失败（超时、模型不可用）最多自动重试三次；无效的模型回答（`invalid_observed_json`、`observed_not_single_han`）和不可用的帧（`image_prepare_failed`）只在 `--rescan` 时重试；`--rescan` 会对所有已渲染目标重新请求 OCR，因此不能与 `--limit` 同时使用；
+5. 使用 `--publish`（需要 `--ocr`）时发布——仅当验证器返回 `VERIFIED` 且 OCR 恰好识别出预期字符。
+
+OCR 是附加检查，而不是信任来源：信任来自验证器，OCR 只拦截不一致。`?`、其他字符、超时、`UNCERTAIN` 或 `REJECTED` 进入问题登记且不会自动发布：由下文的第三阶段处理。发布通过 `ingest_verified` 写入空的 PNG 槽位：来源 `source_kind: local-render`，`domain_metadata.local_render` 包含证据和 `not_yarxi_capture: true`。已有的历史 PNG 保留（`existing_original_kept`），被其他 PNG 占用的槽位不会被覆盖（`png_slot_occupied`），GIF 不参与 `compare-and-swap`。已保存的发布结果不是最终结论：每次运行都会按当前存储重新评估 PNG 槽位。空出的槽位会被发布；相同字节但来源不同的记录不算本地渲染（`png_slot_occupied`）；人在存储中撤销信任的字节不会被恢复（`trust_revoked`）。发布前会将 PNG、SHA-256 和证据与状态及 `run.json` 核对；不一致时存储不变（`evidence_mismatch`），下一次运行会重新绘制该字符。对已发布字符重复执行既不改变修订号，也不改变日志。
+
+未通过两个自动阶段的字符进入第三阶段——与 GIF 批次相同，对精确字节作出决定。`review-export` 创建快照 `review/<review_id>/`，其中按组包含 `decisions.tsv` 和 `index.html`：`validator_doubt_ocr_match`（验证器不确定，OCR 一致）、`ocr_mismatch`、`ocr_unrecognized`、`ocr_failed` 和 `validator_doubt_ocr_mismatch`。PNG 槽位已被占用或已作出决定的字符不会进入快照；`review_id` 由行集合（码位与 SHA-256）导出。`decision` 列填写 `approve`、`reject` 或 `-`，空值表示没有决定；`approve` 和 `reject` 需要在 `reason` 中给出依据。`review-apply` 在第一次修改之前检查整个文件：快照、当前渲染的 SHA-256 以及该字符仍需审查。`approve` 与批次中人工决定走同一存储路径：带 `local-render` 来源的 `pending` 候选、精确自动检查以及针对精确 SHA-256 的 `HumanAttestation` `Approve`；字符结果为 `published_after_review`。决定只适用于该渲染自身的记录：不会转移到存放相同字节但来源或证据不同的已占用槽位。`reject` 不改变存储（`review_rejected`）。重复已应用的快照不会改变任何内容；发布出错时退出码为 `3`。决定在发布之前保存：若发布失败，字符结果为 `approved_publish_error`（或 `approved_png_slot_occupied`），`issues.json` 给出 `recovery`，排除原因后重复同一 `review-apply --review-id` 即可完成发布，无需新的决定。此类字符不会进入新的快照。
+
+`report` 在运行后检查存储：完整性、所有 GIF 和历史 PNG 的 SHA 相对 `inventory-before.json` 未变、GIF 与已发布 PNG 可同时读取、尺寸 174×174 以及日志一致性。它写出 `report/summary.json`、`report/issues.json`（Unicode、预期与识别字符、SHA-256、验证器状态、产物路径）和 `report/index.html`，其中包含对照字符的预览、放大片段和差异图。任一检查失败时退出码为 `3`。运行完成度与完整性分开：`progress.unfinished` 统计重复 `run` 或先前的 `review-apply` 仍可推进的字符，不影响退出码。工作目录和 `render --out` 目录不能位于 `decks/` 内、存储内或包含存储（包括通过 symlink）；工作目录的子目录不能是 symlink。检查在创建任何目录之前进行。`report` 和 `review-export` 本身不修改存储，但与其他命令一样，打开存储时可能完成被中断的发布或迁移清单 schema；`run`、`report`、`review-export` 和 `review-apply` 的响应通过 `store_changed_on_open` 字段报告这一点。
+
+`ensure` 和 `batch` 仍将具有任一可信格式的字符视为就绪并优先使用 GIF：本地 PNG 不会替代 GIF，也不会由普通获取创建。
 
 ### 汉字批处理
 

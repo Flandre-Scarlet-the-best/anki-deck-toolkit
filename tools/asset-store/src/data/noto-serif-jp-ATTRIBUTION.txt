@@ -26,7 +26,24 @@ The Noto CJK upstream history is available at:
 
   https://github.com/notofonts/noto-cjk/blob/main/Serif/HISTORY.md
 
-This repository does not redistribute the font. The generated catalog contains
+This repository does not redistribute the pinned source font above; the separate
+calibrated file used by `local-png` lives in `tools/asset-store/fonts/`:
+
+  NotoSerifJP-Regular.otf
+  SHA-256: c837828057fff744236d2df79f872d41b609cc011a8a7e768a2e4371c6a64a09
+  (`CALIBRATED_FONT_SHA256` in `src/local_render.rs`)
+
+Its name table reports the same family and version 1.001 as the pinned source
+font, but the file is not byte-identical to it: it has no `BASE` and `DSIG`
+tables, and its `cmap`, `CFF`, `GSUB`, `GPOS`, `hmtx` and `vmtx` tables differ,
+so it is a Modified Version in the sense of the OFL. Its upstream download
+location is not recorded in this repository; the calibration of `local-png`
+(coverage correction and geometry profiles) belongs to this exact SHA-256, and
+any other file is rejected unless `render --allow-uncalibrated-font` is used.
+The font is distributed under the SIL Open Font License, Version 1.1, without a
+Reserved Font Name; the license text is in `tools/asset-store/fonts/OFL.txt`.
+
+The generated catalog contains
 6,428 normalized 64x64 binary glyph masks for the Unicode characters that are
 present both in the pinned KanjiVG catalog and in the font's character map.
 U+55BB and U+27491 are absent from the character map and are skipped instead of

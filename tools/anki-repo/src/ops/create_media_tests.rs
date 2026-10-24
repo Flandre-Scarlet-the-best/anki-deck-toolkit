@@ -418,7 +418,7 @@ fn create_reads_human_approved_exact_bytes_through_asset_owner_api() {
                 self.0,
                 vec![ValidationEvidence {
                     kind: "synthetic".into(),
-                    summary: "синтетическое спорное semantic решение".into(),
+                    summary: "синтетическое спорное семантическое решение".into(),
                     details: None,
                 }],
             ))
@@ -449,7 +449,7 @@ fn create_reads_human_approved_exact_bytes_through_asset_owner_api() {
                 identity: identity.clone(),
                 expected_sha256: pending.asset.sha256.clone(),
                 decision: HumanDecision::Approve,
-                reason: "пользователь подтвердил точный candidate в review".into(),
+                reason: "пользователь подтвердил точного кандидата при проверке".into(),
             })
             .unwrap();
         assert_eq!(approved.asset.validation.as_ref().unwrap().status, status);
@@ -571,7 +571,7 @@ fn config_routing_depends_on_identity_and_exact_field_only() {
         &f.run(&["<img src=一.gif>"], false).unwrap_err(),
         "processor_not_enabled",
     );
-    f.run(&["обычный текст"], false).unwrap(); // неизвестная foreign модель не блокирует.
+    f.run(&["обычный текст"], false).unwrap(); // неизвестная чужая модель не блокирует.
     fs::write(
         f.options.config.as_ref().unwrap(),
         policy("model-1", "Толкование"),
@@ -773,16 +773,28 @@ fn pinned_missing_asset_and_filename_drift_are_stale_before_destination_checks()
         "stale_pinned_asset",
     );
 
+    // Форматы — независимые записи: появление доверенного GIF рядом с PNG
+    // меняет предпочтительное имя файла, и закреплённый запрос устаревает.
     let f = Fixture::new();
-    let old = f.asset("一", GIF, None);
-    let request = f.resolved_request(&["<img src=一.gif>"]);
+    f.asset("一", PNG, None);
+    let request = f.resolved_request(&["<img src=一.png>"]);
     fs::create_dir(f.export.join("media")).unwrap();
-    fs::write(f.export.join("media/一.gif"), GIF).unwrap();
-    f.asset("一", PNG, Some(old));
+    fs::write(f.export.join("media/一.png"), PNG).unwrap();
+    f.asset("一", GIF, None);
     reason(
         &create_with_options(&f.export, &request, true, None, &f.options).unwrap_err(),
         "stale_pinned_asset",
     );
+
+    // Обратное направление: GIF остаётся предпочтительным, поэтому закреплённый
+    // `一.gif` не устаревает от появления PNG рядом.
+    let f = Fixture::new();
+    f.asset("一", GIF, None);
+    let request = f.resolved_request(&["<img src=一.gif>"]);
+    f.asset("一", PNG, None);
+    create_with_options(&f.export, &request, true, None, &f.options).unwrap();
+    assert_eq!(fs::read(f.export.join("media/一.gif")).unwrap(), GIF);
+    assert!(!f.export.join("media/一.png").exists());
 }
 
 #[test]
@@ -1451,7 +1463,7 @@ fn missing_asset_reason_stays_specific_to_the_domain() {
 }
 
 /// Два домена разрешаются одним запросом: каждый читает своё хранилище, и оба
-/// файла попадают в плоский media. Повторный прогон остаётся идемпотентным.
+/// файла попадают в плоский каталог `media`. Повторный прогон остаётся идемпотентным.
 #[test]
 fn dual_domain_request_resolves_both_stores_in_one_run() {
     let f = Fixture::new();
@@ -1499,7 +1511,7 @@ fn dual_domain_request_resolves_both_stores_in_one_run() {
 }
 
 /// Отсутствие переопределения хранилища блокирует только свой домен: запрос с
-/// kanji-ресурсом и без pitch-ресурса не должен проходить из-за чужого store.
+/// kanji-ресурсом и без pitch-ресурса не должен проходить из-за чужого хранилища.
 #[test]
 fn each_domain_needs_its_own_resolved_store() {
     let f = Fixture::new();
@@ -1598,7 +1610,7 @@ fn pitch_asset_requires_current_automated_validation() {
                 SemanticStatus::Uncertain,
                 vec![ValidationEvidence {
                     kind: "synthetic".into(),
-                    summary: "синтетическое спорное semantic решение".into(),
+                    summary: "синтетическое спорное семантическое решение".into(),
                     details: None,
                 }],
             ))
@@ -1627,7 +1639,7 @@ fn pitch_asset_requires_current_automated_validation() {
             identity: identity.clone(),
             expected_sha256: pending.asset.sha256.clone(),
             decision: HumanDecision::Approve,
-            reason: "пользователь подтвердил точный candidate в review".into(),
+            reason: "пользователь подтвердил точного кандидата при проверке".into(),
         })
         .unwrap();
     assert_eq!(

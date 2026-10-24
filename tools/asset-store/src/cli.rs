@@ -32,6 +32,13 @@ mod review_ui;
 mod batch_cli;
 pub use batch_cli::{BatchActionArg, BatchCommand};
 
+#[path = "local_png_cli.rs"]
+mod local_png_cli;
+pub use local_png_cli::LocalPngCommand;
+
+#[path = "local_png_pipeline.rs"]
+mod local_png_pipeline;
+
 /// Командная строка `kanji-assets`.
 #[derive(Debug, Parser)]
 #[command(
@@ -43,7 +50,7 @@ pub struct Cli {
     /// Корень локальных ресурсов, которыми владеет программа; по умолчанию содержимое исключено из Git.
     #[arg(long, global = true)]
     pub store: Option<PathBuf>,
-    /// Корень checkout, относительно которого запрещено пересечение с `decks/`.
+    /// Корень рабочей копии, относительно которого запрещено пересечение с `decks/`.
     #[arg(long, global = true, default_value = ".")]
     pub repository_root: PathBuf,
     /// Формат вывода.
@@ -68,7 +75,7 @@ pub struct Cli {
 /// Команды CLI.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Создаёт пустой store либо проверяет уже существующий.
+    /// Создаёт пустое хранилище либо проверяет уже существующее.
     Init,
     /// Явно импортирует ровно один локальный файл как кандидат в состоянии `pending`.
     Ingest {
@@ -78,7 +85,7 @@ pub enum Command {
         /// Один явно указанный исходный файл.
         #[arg(long)]
         file: PathBuf,
-        /// Разрешает замену только если текущий hash совпадает с этим значением.
+        /// Разрешает замену только если текущий хеш совпадает с этим значением.
         #[arg(long)]
         replace_expected_sha256: Option<String>,
     },
@@ -92,7 +99,7 @@ pub enum Command {
         #[arg(required = true, num_args = 1..)]
         files: Vec<PathBuf>,
     },
-    /// Проверяет целостность и выводит текущие записи manifest.
+    /// Проверяет целостность и выводит текущие записи манифеста.
     List,
     /// Показывает детерминированный набор целей без записи.
     Plan {
@@ -124,7 +131,12 @@ pub enum Command {
         #[command(subcommand)]
         command: JournalCommand,
     },
-    /// Конфигурация и диагностика локального inference (общая с `pitch-assets`).
+    /// Локальный рендер PNG кандзи в стиле плитки Yarxi без обращения к сайту.
+    LocalPng {
+        #[command(subcommand)]
+        command: LocalPngCommand,
+    },
+    /// Конфигурация и диагностика локального инференса (общая с `pitch-assets`).
     Inference {
         #[command(subcommand)]
         command: crate::inference_cli::InferenceCommand,
@@ -301,6 +313,14 @@ pub fn execute(mut cli: Cli) -> CliOutput {
             }
         }
         return render_identify(identify_files(files, *top, &protected_roots), cli.output);
+    }
+    if let Command::LocalPng { command } = &cli.command {
+        for path in command.paths() {
+            protected_roots.extend(discover_decks_roots(path));
+        }
+        let result =
+            local_png_cli::execute(command, &store_path, &protected_roots, &cli.repository_root);
+        return render_local_png(operation, result, cli.output);
     }
     let prevalidated = match &cli.command {
         Command::Ingest {
@@ -510,6 +530,51 @@ fn identify_files(
     )
 }
 
+fn render_local_png(
+    operation: String,
+    result: Result<(serde_json::Value, u8), AssetError>,
+    format: OutputFormat,
+) -> CliOutput {
+    let (value, exit_code, failed) = match result {
+        Ok((value, exit_code)) => (value, exit_code, false),
+        Err(error) => (
+            serde_json::json!({
+                "schema_version": 1,
+                "operation": operation,
+                "outcome": "failed",
+                "error": {
+                    "code": error.code.as_str(),
+                    "message": error.message,
+                    "details": error.details,
+                },
+            }),
+            error.exit_code(),
+            true,
+        ),
+    };
+    match format {
+        OutputFormat::Json => CliOutput {
+            stdout: format!(
+                "{}\n",
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into())
+            ),
+            stderr: String::new(),
+            exit_code,
+        },
+        // Как у остальных команд: человекочитаемая ошибка уходит в stderr.
+        OutputFormat::Human if failed => CliOutput {
+            stdout: String::new(),
+            stderr: local_png_cli::human_summary(&value),
+            exit_code,
+        },
+        OutputFormat::Human => CliOutput {
+            stdout: local_png_cli::human_summary(&value),
+            stderr: String::new(),
+            exit_code,
+        },
+    }
+}
+
 fn render_identify((value, exit_code): (serde_json::Value, u8), format: OutputFormat) -> CliOutput {
     let stdout = match format {
         OutputFormat::Json => format!(
@@ -570,7 +635,7 @@ fn validate_source_directory(
         if lexical_source.starts_with(&lexical_root) {
             return Err(AssetError::new(
                 ErrorCode::BoundaryViolation,
-                "CLI kanji не читает исходные файлы из защищённого дерева decks",
+                "CLI kanji не читает исходные файлы из защищённого дерева `decks/`",
             ));
         }
     }
@@ -582,7 +647,7 @@ fn validate_source_directory(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(AssetError::io(
-                    "не удалось проверить защищённый каталог decks",
+                    "не удалось проверить защищённый каталог `decks/`",
                     error,
                 ));
             }
@@ -590,7 +655,7 @@ fn validate_source_directory(
         if canonical_root.is_some_and(|root| opened_source.starts_with(root)) {
             return Err(AssetError::new(
                 ErrorCode::BoundaryViolation,
-                "CLI kanji не читает исходные файлы из защищённого дерева decks",
+                "CLI kanji не читает исходные файлы из защищённого дерева `decks/`",
             ));
         }
     }
@@ -607,7 +672,7 @@ fn validate_explicit_source(
         if lexical_source.starts_with(&lexical_root) {
             return Err(AssetError::new(
                 ErrorCode::BoundaryViolation,
-                "CLI kanji не читает исходные файлы из защищённого дерева decks",
+                "CLI kanji не читает исходные файлы из защищённого дерева `decks/`",
             ));
         }
     }
@@ -620,7 +685,7 @@ fn validate_explicit_source(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(AssetError::io(
-                    "не удалось проверить защищённый каталог decks",
+                    "не удалось проверить защищённый каталог `decks/`",
                     error,
                 ));
             }
@@ -628,7 +693,7 @@ fn validate_explicit_source(
         if canonical_root.is_some_and(|root| opened_source.starts_with(root)) {
             return Err(AssetError::new(
                 ErrorCode::BoundaryViolation,
-                "CLI kanji не читает исходные файлы из защищённого дерева decks",
+                "CLI kanji не читает исходные файлы из защищённого дерева `decks/`",
             ));
         }
     }
@@ -640,7 +705,7 @@ fn normalize_absolute_path(path: &std::path::Path) -> Result<PathBuf, AssetError
         path.to_path_buf()
     } else {
         std::env::current_dir()
-            .map_err(|error| AssetError::io("не удалось определить cwd", error))?
+            .map_err(|error| AssetError::io("не удалось определить текущий каталог", error))?
             .join(path)
     };
     let mut normalized = PathBuf::new();
@@ -677,8 +742,8 @@ fn find_workspace_root(start: &std::path::Path) -> Option<PathBuf> {
     })
 }
 
-/// Находит только прямые `decks/` у предков cwd и указанного store path.
-/// Это проверка владения путём, не обход дерева и не чтение media.
+/// Находит только прямые `decks/` у предков текущего каталога и указанного пути хранилища.
+/// Это проверка владения путём, не обход дерева и не чтение медиафайлов.
 fn discover_decks_roots(path: &std::path::Path) -> Vec<PathBuf> {
     let absolute = match normalize_absolute_path(path) {
         Ok(absolute) => absolute,
@@ -723,6 +788,7 @@ impl Command {
             Self::Journal { command } => command.operation_name(),
             Self::Batch { command } => command.operation(),
             Self::Inference { command } => command.operation(),
+            Self::LocalPng { command } => command.operation(),
         }
     }
 }
@@ -870,8 +936,9 @@ fn execute_with_store(
             "команда batch должна выполняться через отдельный адаптер CLI",
         )),
         Command::Journal { command } => execute_journal(store, store_summary, command),
-        Command::Inference { .. } => unreachable!("inference исполняется без хранилища"),
-        Command::Identify { .. } => unreachable!("identify исполняется без хранилища"),
+        Command::Inference { .. } => unreachable!("команда inference исполняется без хранилища"),
+        Command::Identify { .. } => unreachable!("команда identify исполняется без хранилища"),
+        Command::LocalPng { .. } => unreachable!("local-png открывает хранилище самостоятельно"),
         Command::Validate { mode } => {
             let selection_mode: SelectionMode = mode.into();
             let validator = KanjiImageValidator::new();
@@ -1055,12 +1122,18 @@ fn ensure_characters(
     let mut blockers = Vec::new();
 
     for character in &characters {
+        // У символа могут быть независимые GIF и PNG; достаточно любого
+        // доверенного (GIF предпочтительнее), чтобы не обращаться к Yarxi.
+        let trusted = |asset: &&AssetRecord| {
+            asset.identity == character.identity()
+                && asset.lifecycle == LifecycleState::Verified
+                && asset.is_trusted_for(&validator_id)
+        };
         let existing = current
             .iter()
-            .find(|asset| asset.identity == character.identity());
-        let is_current = existing.is_some_and(|asset| {
-            asset.lifecycle == LifecycleState::Verified && asset.is_trusted_for(&validator_id)
-        });
+            .filter(trusted)
+            .min_by_key(|asset| asset.format != DetectedFormat::Gif);
+        let is_current = existing.is_some();
         if is_current {
             let mut summary =
                 summary_for_current(existing.expect("подтверждённая запись существует").clone());
@@ -1117,11 +1190,17 @@ fn ensure_characters(
                     let metadata = acquired_metadata(character, media);
                     if let Err(message) = validate_selected_format(media.selection, &media.bytes) {
                         blockers.push(format!("media_format_mismatch:{character}"));
+                        // Состояние берётся из слота формата, который выбран источником.
+                        let selected_format = selection_format(media.selection);
+                        let selected_slot = current.iter().find(|asset| {
+                            asset.identity == KanjiCharacter(character.clone()).identity()
+                                && asset.format == selected_format
+                        });
                         summaries[target_index] = Some(failed_summary(
                             character,
                             "media_format_mismatch",
                             &message,
-                            old.map(|asset| asset.lifecycle),
+                            selected_slot.map(|asset| asset.lifecycle),
                             Some(sha256_hex(&media.bytes)),
                             Vec::new(),
                             Some(metadata),
@@ -1133,6 +1212,13 @@ fn ensure_characters(
                         SelectionResult::LeftmostPngFallback => "yarxi-leftmost.png",
                         SelectionResult::RenderedFontSamplePng => "yarxi-font-sample.png",
                     };
+                    // CAS действует только внутри записи того же формата: PNG
+                    // не заменяет GIF символа и наоборот.
+                    let acquired_format = DetectedFormat::from_signature(&media.bytes);
+                    let same_format = current.iter().find(|asset| {
+                        asset.identity == KanjiCharacter(character.clone()).identity()
+                            && asset.format == acquired_format
+                    });
                     let request = VerifiedIngestRequest {
                         identity: KanjiCharacter(character.clone()).identity(),
                         bytes: media.bytes.clone(),
@@ -1141,7 +1227,7 @@ fn ensure_characters(
                             source_name: source_name.into(),
                         },
                         domain_metadata: Some(metadata.clone()),
-                        replace_expected_sha256: old.map(|asset| asset.sha256.clone()),
+                        replace_expected_sha256: same_format.map(|asset| asset.sha256.clone()),
                     };
                     match store.ingest_verified(request, &validator) {
                         Ok(outcome) => {
@@ -1151,10 +1237,10 @@ fn ensure_characters(
                                     effective_status: Some(outcome.status),
                                     human_decision: None,
                                     identity: KanjiCharacter(character.clone()).identity(),
-                                    from_state: old.map(|asset| asset.lifecycle),
+                                    from_state: same_format.map(|asset| asset.lifecycle),
                                     to_state: None,
                                     sha256: Some(outcome.sha256),
-                                    previous_sha256: old.map(|asset| asset.sha256.clone()),
+                                    previous_sha256: same_format.map(|asset| asset.sha256.clone()),
                                     validation_status: Some(outcome.status),
                                     validator: Some(validator_id.clone()),
                                     evidence: outcome.evidence,
@@ -1165,7 +1251,8 @@ fn ensure_characters(
                             } else if let Some(record) = outcome.asset {
                                 let mut summary = summary_for_current(record);
                                 summary.changed = outcome.changed;
-                                summary.previous_sha256 = old.map(|asset| asset.sha256.clone());
+                                summary.previous_sha256 =
+                                    same_format.map(|asset| asset.sha256.clone());
                                 summary.item_outcome = Some(if outcome.changed {
                                     "verified_published".into()
                                 } else {
@@ -1181,7 +1268,7 @@ fn ensure_characters(
                                 character,
                                 error.code.as_str(),
                                 &error.message,
-                                old.map(|asset| asset.lifecycle),
+                                same_format.map(|asset| asset.lifecycle),
                                 Some(candidate_hash),
                                 Vec::new(),
                                 Some(metadata),
@@ -1217,14 +1304,18 @@ fn ensure_characters(
     Ok((response, if successful { 0 } else { 3 }))
 }
 
-fn validate_selected_format(selection: SelectionResult, bytes: &[u8]) -> Result<(), String> {
-    let actual = DetectedFormat::from_signature(bytes);
-    let expected = match selection {
+fn selection_format(selection: SelectionResult) -> DetectedFormat {
+    match selection {
         SelectionResult::PrimaryGif => DetectedFormat::Gif,
         SelectionResult::LeftmostPngFallback | SelectionResult::RenderedFontSamplePng => {
             DetectedFormat::Png
         }
-    };
+    }
+}
+
+fn validate_selected_format(selection: SelectionResult, bytes: &[u8]) -> Result<(), String> {
+    let actual = DetectedFormat::from_signature(bytes);
+    let expected = selection_format(selection);
     if actual != expected {
         return Err(format!(
             "выбранный формат {selection:?} требует сигнатуру {expected:?}, получена {actual:?}"
@@ -1509,7 +1600,7 @@ mod tests {
         let decks = repository.join("decks");
         fs::create_dir_all(&decks).expect("создаётся защищённое дерево");
         let protected_source = decks.join("protected.bin");
-        let protected_bytes = "нельзя читать из decks".as_bytes();
+        let protected_bytes = "нельзя читать из `decks/`".as_bytes();
         fs::write(&protected_source, protected_bytes).expect("записывается защищённая фикстура");
 
         let candidate = temp.path().join("candidate.bin");
@@ -1524,7 +1615,7 @@ mod tests {
 
         let store_root = temp.path().join("store");
         let store = AssetStore::open(StoreOptions::new(&store_root).protect_from(&decks))
-            .expect("отдельный store открывается");
+            .expect("отдельное хранилище открывается");
         let outcome = store
             .ingest_from_file(
                 IngestRequest {
@@ -1536,7 +1627,7 @@ mod tests {
                 },
                 opened,
             )
-            .expect("ingest использует проверенный открытый дескриптор");
+            .expect("команда ingest использует проверенный открытый дескриптор");
 
         assert_eq!(
             outcome.asset.sha256,

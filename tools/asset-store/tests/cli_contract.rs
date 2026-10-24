@@ -11,7 +11,8 @@ struct TempDir {
 
 impl TempDir {
     fn new() -> Self {
-        let workspace = TempWorkspace::create("kanji-assets-cli").expect("fixture root создаётся");
+        let workspace =
+            TempWorkspace::create("kanji-assets-cli").expect("корень фикстуры создаётся");
         fs::create_dir_all(workspace.path().join("repository/decks"))
             .expect("создаётся корень тестового репозитория");
         Self { workspace }
@@ -182,7 +183,7 @@ fn list_and_plan_reject_a_missing_store_without_creating_it() {
 fn list_does_not_initialize_an_existing_empty_directory() {
     let temp = TempDir::new();
     let store = temp.path().join("owned-store");
-    fs::create_dir(&store).expect("создаётся пустой каталог store");
+    fs::create_dir(&store).expect("создаётся пустой каталог хранилища");
 
     let output = cli(&temp, &["list"]);
 
@@ -220,7 +221,7 @@ fn cli_rejects_explicit_source_under_decks_before_creating_the_store() {
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     fs::write(
         &source,
-        "синтетический пользовательский media-файл".as_bytes(),
+        "синтетический пользовательский медиафайл".as_bytes(),
     )
     .unwrap();
     let source_text = source.to_str().unwrap();
@@ -234,7 +235,7 @@ fn cli_rejects_explicit_source_under_decks_before_creating_the_store() {
     assert_eq!(json(&output)["error"]["code"], "boundary_violation");
     assert!(
         !temp.path().join("owned-store").exists(),
-        "защищённый source отклоняется до создания store"
+        "защищённый источник отклоняется до создания хранилища"
     );
 }
 
@@ -252,7 +253,7 @@ fn cli_rejects_decks_source_reached_through_a_symlink_alias() {
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     fs::write(
         &source,
-        "синтетический пользовательский media-файл".as_bytes(),
+        "синтетический пользовательский медиафайл".as_bytes(),
     )
     .unwrap();
     symlink(&actual_decks, &decks).unwrap();
@@ -268,7 +269,7 @@ fn cli_rejects_decks_source_reached_through_a_symlink_alias() {
     assert_eq!(json(&output)["error"]["code"], "boundary_violation");
     assert!(
         !temp.path().join("owned-store").exists(),
-        "symlink alias не даёт прочитать source или создать store"
+        "псевдоним через symlink не даёт прочитать источник или создать хранилище"
     );
 }
 
@@ -411,7 +412,7 @@ fn cli_json_reports_layout_migration_only_on_the_migrating_open() {
     assert_eq!(first_json["store"]["layout_migrated_on_open"], true);
     let migrated_manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    assert_eq!(migrated_manifest["schema_version"], 5);
+    assert_eq!(migrated_manifest["schema_version"], 6);
     assert!(migrated_manifest["assets"].as_array().unwrap().is_empty());
     assert!(!legacy_path.exists());
 
@@ -439,7 +440,7 @@ fn cli_argument_usage_error_writes_stderr_without_json_stdout() {
     assert!(!output.stderr.is_empty());
     assert!(
         !temp.path().join(".asset-store/kanji").exists(),
-        "ошибка разбора аргументов не запускает операцию с store"
+        "ошибка разбора аргументов не запускает операцию с хранилищем"
     );
 }
 
@@ -675,4 +676,63 @@ fn batch_import_reads_a_checked_safe_directory_through_the_cli() {
         value["batch"]["items"][0]["attempts"][0]["result"]["code"],
         "local_source_missing"
     );
+}
+
+#[test]
+fn local_png_run_refuses_rescan_with_limit_before_any_work() {
+    let temp = TempDir::new();
+    let work_dir = temp.path().join("work");
+    let output = Command::new(env!("CARGO_BIN_EXE_kanji-assets"))
+        .arg("--store")
+        .arg(temp.path().join("owned-store"))
+        .args([
+            "--output",
+            "json",
+            "local-png",
+            "run",
+            "--from-corpus",
+            "--ocr",
+        ])
+        .args(["--rescan", "--limit", "1", "--work-dir"])
+        .arg(&work_dir)
+        .output()
+        .expect("процесс kanji-assets запускается");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--rescan"));
+    assert!(!work_dir.exists());
+}
+
+#[test]
+fn local_png_human_error_goes_to_stderr_only() {
+    let temp = TempDir::new();
+    let missing = temp.path().join("missing");
+    let run = |format: &str| {
+        Command::new(env!("CARGO_BIN_EXE_kanji-assets"))
+            .arg("--store")
+            .arg(temp.path().join("owned-store"))
+            .arg("--repository-root")
+            .arg(temp.path().join("repository"))
+            .arg("--output")
+            .arg(format)
+            .args(["local-png", "compare", "--reference"])
+            .arg(&missing)
+            .arg("--generated")
+            .arg(&missing)
+            .output()
+            .expect("процесс kanji-assets запускается")
+    };
+    let human = run("human");
+    assert!(!human.status.success());
+    assert!(human.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&human.stderr).contains("local-png compare"),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let machine = run("json");
+    let value = json(&machine);
+    assert_eq!(value["outcome"], "failed");
+    assert!(value["error"]["details"].is_object(), "{value}");
+    assert!(machine.stderr.is_empty());
 }

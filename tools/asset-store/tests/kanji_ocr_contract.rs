@@ -232,7 +232,7 @@ impl Mock {
                         "/api/tags" => json!({"models":if state.installed {vec![json!({"name":"fixture:vision","digest":state.digest})]} else {vec![]}}).to_string(),
                         "/api/show" => json!({"capabilities":if state.vision {vec!["vision"]}else{vec!["completion"]}}).to_string(),
                         "/api/version" => json!({"version":"0.0.0-fixture"}).to_string(),
-                        "/api/chat" => state.chat.clone(), other=>panic!("неожиданный endpoint {other}"),
+                        "/api/chat" => state.chat.clone(), other=>panic!("неожиданная конечная точка {other}"),
                     };
                     (
                         response,
@@ -340,7 +340,7 @@ fn blind_saved_sha_cache_review_and_explicit_group_confirmation_use_public_cli()
     let html = fs::read_to_string(decisions.parent().unwrap().join("index.html")).unwrap();
     assert!(html.contains("observed=𠀀"));
     assert!(html.contains("Совпадения OCR"));
-    // Mock намеренно возвращает неверную метку для видимого рисунка.
+    // Заглушка намеренно возвращает неверную метку для видимого рисунка.
     // Совпадение не публикует ресурс: требуется явная команда человека.
     assert!(fixture.state().items[0].human_decisions.is_empty());
     let refusal = fixture.cli(&[
@@ -617,7 +617,7 @@ fn confirmed_canonical_resources_need_zero_provider_or_browser_requests() {
 }
 
 fn reference_png(character: char) -> Vec<u8> {
-    // Только генератор входного fixture из закреплённых масок, без собственного
+    // Только генератор входной фикстуры из закреплённых масок, без собственного
     // валидатора или классификатора. Статус ниже определяет настоящий v6.
     let mut bytes = Vec::new();
     flate2::read::ZlibDecoder::new(
@@ -741,7 +741,7 @@ fn gif_delta_frames_are_composited_and_the_v6_frame_is_sent_as_scaled_png() {
     );
     assert!(
         image.get_pixel(93, 60)[0] < 30,
-        "сохранён штрих из delta-frame"
+        "сохранён штрих из разностного кадра"
     );
 }
 
@@ -792,7 +792,7 @@ fn interrupted_process_resumes_completed_cache_and_discards_stale_network_result
     interrupted_gate.store(true, Ordering::Release);
     let before = fixture.state();
     assert_eq!(before.review_queue().len(), 1);
-    // Завершённая запись пережила остановку процесса; повтор без rescan не вызывает chat.
+    // Завершённая запись пережила остановку процесса; повтор без `--rescan` не вызывает `chat`.
     assert_ok(&fixture.ocr(&mock, &[]));
     assert_eq!(mock.chats(), 2);
     let ledger = fixture.ledger();
@@ -1267,7 +1267,7 @@ fn managed_llama_server_is_started_verified_used_and_stopped_by_batch_ocr() {
         record["config"]["model"]["projector"],
         format!("sha256:{}", sha256_hex(b"fake projector"))
     );
-    // Слепой запрос: без ожидаемого символа и имени файла, с ключом и alias запуска.
+    // Слепой запрос: без ожидаемого символа и имени файла, с ключом и псевдонимом запуска.
     let chat = &managed.chats()[0];
     assert!(chat["model"].as_str().unwrap().starts_with("anki-"));
     assert!(!chat.to_string().contains('𠀀'));
@@ -1319,15 +1319,50 @@ fn managed_llama_server_is_started_verified_used_and_stopped_by_batch_ocr() {
 }
 
 /// Ждёт, пока поддельный сервер начнёт слушать порт; иначе останавливает его.
-fn wait_for_port(port: u16, server: &mut std::process::Child) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-        if std::time::Instant::now() > deadline {
-            let _ = server.kill();
-            panic!("поддельный сервер не начал слушать порт {port}");
+/// Запускает поддельный сервер на свободном порту и ждёт, пока порт обслуживает
+/// именно этот процесс. Свободный порт выбирается заранее, поэтому параллельный
+/// тест может занять его раньше: тогда сервер завершается на `bind`, а порт
+/// отвечает чужим `/props` — попытка повторяется на новом порту.
+fn spawn_fake_server(
+    model: &str,
+    mut command: impl FnMut(u16) -> Command,
+) -> (std::process::Child, u16) {
+    for _ in 0..5 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut server = command(port).spawn().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if server.try_wait().unwrap().is_some() {
+                break;
+            }
+            if fake_server_model(port).as_deref() == Some(model) {
+                return (server, port);
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = server.kill();
+                panic!("поддельный сервер не начал слушать порт {port}");
+            }
+            thread::sleep(Duration::from_millis(20));
         }
-        thread::sleep(Duration::from_millis(20));
     }
+    panic!("поддельный сервер не смог занять свободный порт за пять попыток");
+}
+
+fn fake_server_model(port: u16) -> Option<String> {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    write!(
+        stream,
+        "GET /props HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let (_, body) = response.split_once("\r\n\r\n")?;
+    let props: Value = serde_json::from_str(body).ok()?;
+    props["model_path"].as_str().map(str::to_owned)
 }
 
 #[test]
@@ -1406,20 +1441,18 @@ fn orphaned_server_from_a_killed_run_is_stopped_by_the_next_owner() {
     use std::os::unix::process::CommandExt;
     let fixture = Fixture::new();
     let managed = Managed::new(&fixture, "");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
     let alias = "anki-0123456789abcdef0123456789abcdef";
-    let mut orphan = Command::new(&managed.script)
-        .args(["--model", "/orphan.gguf", "--host", "127.0.0.1", "--port"])
-        .arg(port.to_string())
-        .args(["--alias", alias])
-        .env(fake_llama::LOG, &managed.log)
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let (mut orphan, port) = spawn_fake_server("/orphan.gguf", |port| {
+        let mut command = Command::new(&managed.script);
+        command
+            .args(["--model", "/orphan.gguf", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .args(["--alias", alias])
+            .env(fake_llama::LOG, &managed.log)
+            .process_group(0);
+        command
+    });
     let pid = orphan.id() as i32;
-    wait_for_port(port, &mut orphan);
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     let ticks: u64 = stat
         .rsplit_once(')')
@@ -1558,24 +1591,22 @@ fn external_llama_server_is_used_but_never_stopped() {
     let fixture = Fixture::new();
     fixture.batch(&['𠀀'], &png());
     let managed = Managed::new(&fixture, "");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut external = Command::new(&managed.script)
-        .args([
-            "--model",
-            "/srv/external.gguf",
-            "--host",
-            "127.0.0.1",
-            "--port",
-        ])
-        .arg(port.to_string())
-        .args(["--alias", "shared-model"])
-        .env(fake_llama::LOG, &managed.log)
-        .env(fake_llama::CONTENT, json!({"observed": "保"}).to_string())
-        .spawn()
-        .unwrap();
-    wait_for_port(port, &mut external);
+    let (mut external, port) = spawn_fake_server("/srv/external.gguf", |port| {
+        let mut command = Command::new(&managed.script);
+        command
+            .args([
+                "--model",
+                "/srv/external.gguf",
+                "--host",
+                "127.0.0.1",
+                "--port",
+            ])
+            .arg(port.to_string())
+            .args(["--alias", "shared-model"])
+            .env(fake_llama::LOG, &managed.log)
+            .env(fake_llama::CONTENT, json!({"observed": "保"}).to_string());
+        command
+    });
     fs::write(
         &managed.config,
         format!("[backends.llama]\nmode = \"external\"\nendpoint = \"http://127.0.0.1:{port}\"\n"),

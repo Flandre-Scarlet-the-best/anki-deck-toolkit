@@ -37,9 +37,18 @@ pub fn write_script(directory: &Path) -> PathBuf {
 }
 
 /// События поддельного сервера из журнала.
+///
+/// Тесты опрашивают журнал, пока сервер ещё пишет: строка без завершающего
+/// перевода строки дописывается прямо сейчас и в результат не входит.
 pub fn events(log: &Path) -> Vec<Value> {
-    std::fs::read_to_string(log)
-        .unwrap_or_default()
+    let bytes = std::fs::read(log).unwrap_or_default();
+    // Декодируется только завершённая часть: хвост может обрываться посреди символа.
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(&[][..], |end| &bytes[..end]);
+    std::str::from_utf8(complete)
+        .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
@@ -60,7 +69,7 @@ fn append(log: &Option<String>, event: Value) {
             .append(true)
             .open(log)
             .unwrap();
-        writeln!(file, "{event}").unwrap();
+        file.write_all(format!("{event}\n").as_bytes()).unwrap();
     }
 }
 

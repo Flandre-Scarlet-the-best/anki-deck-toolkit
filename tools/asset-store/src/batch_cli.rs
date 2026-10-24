@@ -101,7 +101,7 @@ pub enum BatchCommand {
         #[command(flatten)]
         options: crate::kanji_ocr::OcrOptions,
     },
-    /// Подтверждает просмотренные совпадения OCR из точного review-снимка.
+    /// Подтверждает просмотренные совпадения OCR из точного снимка проверки.
     ReviewConfirmMatches {
         #[arg(long)]
         batch_id: String,
@@ -714,7 +714,7 @@ pub(super) fn execute(
 ) -> CliOutput {
     // События журнала, записанные путём проверки и публикации этого пакета,
     // помечаются его идентификатором. Сами события пишутся только из методов
-    // store под эксклюзивной блокировкой, не из worker'ов пакета.
+    // хранилища под эксклюзивной блокировкой, не из исполнителей пакета.
     store.set_journal_context(None, command.id());
     let mut progress = StderrProgressSink { output };
     execute_with_progress(
@@ -841,7 +841,7 @@ fn execute_with_progress_and_interaction(
         let batch_id = command.id().expect("команда запуска содержит batch_id");
         let path = diagnostic_log
             .as_deref()
-            .expect("runtime вернул путь к диагностическому файлу");
+            .expect("среда выполнения вернула путь к диагностическому файлу");
         if matches!(output, OutputFormat::Human)
             && let Err(error) = io::stderr()
                 .lock()
@@ -1213,8 +1213,10 @@ fn localized_item_outcome(outcome: &str) -> &str {
 /// Один раз проверенный полный снимок корпуса. Индексированные записи повторно
 /// используются на всей границе; изменения обновляют этот локальный вид по
 /// точным результатам владельца.
+/// Снимок записей владельца. У домена kanji у одной идентичности может быть по
+/// независимой записи на формат, поэтому ключ — пара «идентичность, формат».
 struct OwnerSnapshot {
-    records: BTreeMap<AssetIdentity, AssetRecord>,
+    records: BTreeMap<(AssetIdentity, DetectedFormat), AssetRecord>,
     error: Option<AssetError>,
 }
 
@@ -1224,7 +1226,7 @@ impl OwnerSnapshot {
             Ok(records) => Self {
                 records: records
                     .into_iter()
-                    .map(|record| (record.identity.clone(), record))
+                    .map(|record| ((record.identity.clone(), record.format), record))
                     .collect(),
                 error: None,
             },
@@ -1240,11 +1242,40 @@ impl OwnerSnapshot {
         }
         Ok(())
     }
+    fn records_of(&self, identity: &AssetIdentity) -> Vec<&AssetRecord> {
+        KanjiDomainPolicy
+            .format_preference()
+            .iter()
+            .filter_map(|format| self.records.get(&(identity.clone(), *format)))
+            .collect()
+    }
+    /// Запись идентичности в порядке предпочтения форматов домена (GIF, PNG).
     fn current(&self, identity: &AssetIdentity) -> Option<&AssetRecord> {
-        self.records.get(identity)
+        self.records_of(identity).into_iter().next()
+    }
+    /// Доверенная запись идентичности в порядке предпочтения форматов.
+    fn trusted(
+        &self,
+        identity: &AssetIdentity,
+        validator: &ValidatorIdentity,
+    ) -> Option<&AssetRecord> {
+        self.records_of(identity).into_iter().find(|record| {
+            record.lifecycle == LifecycleState::Verified && record.is_trusted_for(validator)
+        })
+    }
+    /// Запись точного слота «идентичность, формат».
+    fn slot(&self, identity: &AssetIdentity, format: DetectedFormat) -> Option<&AssetRecord> {
+        self.records.get(&(identity.clone(), format))
+    }
+    /// Запись идентичности с точным SHA-256.
+    fn by_sha(&self, identity: &AssetIdentity, sha256: &str) -> Option<&AssetRecord> {
+        self.records_of(identity)
+            .into_iter()
+            .find(|record| record.sha256 == sha256)
     }
     fn committed(&mut self, record: AssetRecord) {
-        self.records.insert(record.identity.clone(), record);
+        self.records
+            .insert((record.identity.clone(), record.format), record);
     }
 }
 
@@ -1495,7 +1526,7 @@ fn execute_command_with_snapshots_and_progress(
             let source_dir = checked_source.as_ref().ok_or_else(|| {
                 AssetError::new(
                     ErrorCode::BoundaryViolation,
-                    "каталог локального импорта не прошёл проверку границы decks",
+                    "каталог локального импорта не прошёл проверку границы `decks/`",
                 )
             })?;
             let (state, changed, issues) =
@@ -2180,7 +2211,9 @@ where
                             invalid("поставщик сообщил ожидание вне очереди раунда")
                         })?;
                         if frontier_state[index] != (FrontierItemState::Active { worker_id: 0 }) {
-                            return Err(invalid("heartbeat получен без активного назначения"));
+                            return Err(invalid(
+                                "сигнал heartbeat получен без активного назначения",
+                            ));
                         }
                         progress.emit("heartbeat", Some(identity), None, Some(attempt), None, None)
                     }
@@ -2218,7 +2251,7 @@ where
                 },
                 BatchAcquisitionEvent::Worker(event) => {
                     if event.worker_id == 0 || event.worker_id > workers {
-                        return Err(invalid("worker сообщил неизвестный worker_id"));
+                        return Err(invalid("исполнитель сообщил неизвестный worker_id"));
                     }
                     match event.event {
                         AcquisitionWorkerEventKind::Assigned => {
@@ -2234,7 +2267,7 @@ where
                                 || active_workers.contains_key(&event.worker_id)
                             {
                                 return Err(invalid(
-                                    "worker получил повторное или параллельное назначение",
+                                    "исполнитель получил повторное или параллельное назначение",
                                 ));
                             }
                             frontier_state[index] = FrontierItemState::Active {
@@ -2278,7 +2311,7 @@ where
                                 })
                             {
                                 return Err(invalid(
-                                    "bootstrap не соответствует активному assignment token",
+                                    "начальная подготовка не соответствует активному токену назначения",
                                 ));
                             }
                             let identity = &frontier[index];
@@ -2327,7 +2360,7 @@ where
                                         })
                                 {
                                     return Err(invalid(
-                                        "provider report не соответствует активному assignment token",
+                                        "отчёт поставщика не соответствует активному токену назначения",
                                     ));
                                 }
                             }
@@ -2529,7 +2562,7 @@ where
                                 || active_workers.get(&event.worker_id) != Some(&index)
                             {
                                 return Err(invalid(
-                                    "worker попытался отложить неактивное назначение",
+                                    "исполнитель попытался отложить неактивное назначение",
                                 ));
                             }
                             frontier_state[index] = FrontierItemState::Pending;
@@ -2561,7 +2594,7 @@ where
                             )?;
                             if frontier_state[index] != FrontierItemState::Pending {
                                 return Err(invalid(
-                                    "worker сообщил requeue без незавершённого pending элемента",
+                                    "исполнитель сообщил о возврате в очередь без незавершённого элемента pending",
                                 ));
                             }
                             progress.emit_with_context(
@@ -2771,7 +2804,7 @@ where
                 .map(|index| frontier[*index].key.as_str())
                 .collect::<Vec<_>>();
             let reason = format!(
-                "batch_frontier_incomplete: поставщик вернул успех до terminal checkpoint: {identities:?}"
+                "batch_frontier_incomplete: поставщик вернул успех до завершающей контрольной точки: {identities:?}"
             );
             let _ = progress.emit("run_stopped", None, None, None, None, Some(reason.clone()));
             return Err(invalid(reason));
@@ -3023,7 +3056,7 @@ fn validated_candidate(
     {
         return Ok(failure(
             "source_identity_mismatch",
-            "символ или Unicode статьи Yarxi не совпадает с запрошенной identity",
+            "символ или Unicode статьи Yarxi не совпадает с запрошенной идентичностью",
         ));
     }
     if let Err(message) = validate_selected_format(media.selection, &media.bytes) {
@@ -3203,10 +3236,7 @@ fn reuse_existing(snapshot: &OwnerSnapshot, state: &mut KanjiBatch) -> Result<()
         if item.is_ready() || item.status.semantic_resolved() || !item.human_decisions.is_empty() {
             continue;
         }
-        let Some(record) = snapshot.current(&item.identity).filter(|record| {
-            record.lifecycle == LifecycleState::Verified
-                && record.is_trusted_for(&state.policy.validator)
-        }) else {
+        let Some(record) = snapshot.trusted(&item.identity, &state.policy.validator) else {
             continue;
         };
         state.mark_existing_ready(&item.identity, &record.sha256)?;
@@ -3226,7 +3256,14 @@ fn reconcile_owner_trust(
     // не сбрасываем доверие всех элементов по частичному/пустому снимку.
     snapshot.checked()?;
     for item in state.items.clone() {
-        let current = snapshot.current(&item.identity);
+        // Готовность пакета привязана к точному опубликованному SHA: запись
+        // другого формата той же идентичности её не подменяет.
+        let current = item
+            .published_sha256
+            .as_deref()
+            .or(item.current_sha256.as_deref())
+            .and_then(|sha256| snapshot.by_sha(&item.identity, sha256))
+            .or_else(|| snapshot.current(&item.identity));
         let owner_rejection = current
             .filter(|record| record.current_human_decision() == Some(HumanDecision::Reject))
             .map(|record| HumanBatchDecision {
@@ -3272,7 +3309,7 @@ fn reconcile_owner_trust(
         } else {
             AssetError::new(
                 ErrorCode::MissingAssetFile,
-                "готовая identity отсутствует в проверенном снимке владельца",
+                "готовая идентичность отсутствует в проверенном снимке владельца",
             )
         };
         state.invalidate_owner_trust(
@@ -3301,7 +3338,12 @@ fn publish_pending(
             )
             && !item.observed_owner_rejections.contains(decision)
         {
-            let current = snapshot.current(&item.identity);
+            // Найденный кандидат сверяется только со своим слотом: запись другого
+            // формата той же идентичности не подменяет его.
+            let current = match candidate_by_hash(&item, &decision.candidate_sha256) {
+                Some(candidate) => snapshot.slot(&item.identity, candidate.format),
+                None => snapshot.current(&item.identity),
+            };
             let already_rejected = current.is_some_and(|record| {
                 record.sha256 == decision.candidate_sha256
                     && record.current_human_decision() == Some(HumanDecision::Reject)
@@ -3463,7 +3505,7 @@ fn decide_exact(
         .items
         .iter()
         .find(|item| item.identity == identity)
-        .ok_or_else(|| invalid("identity отсутствует в пакете"))?;
+        .ok_or_else(|| invalid("идентичность отсутствует в пакете"))?;
     let candidate = if item.status == BatchItemStatus::ExistingVerified {
         // Для повторно использованного канонического элемента нет попытки получения.
         // Закрепляем байты владельца и добавляем локальные свидетельства, чтобы
@@ -3490,8 +3532,7 @@ fn decide_exact(
             validate_exact_snapshot(store, &identity, &record.sha256, &mut snapshot)?;
         }
         let automated = snapshot
-            .current(&identity)
-            .filter(|current| current.sha256 == decision.candidate_sha256)
+            .by_sha(&identity, &decision.candidate_sha256)
             .and_then(|current| current.validation.clone())
             .ok_or_else(|| {
                 invalid("для существующего канонического кандидата отсутствуют актуальные автоматические свидетельства")
@@ -3553,7 +3594,7 @@ fn materialize_candidate(
             "байты, подготовленные к публикации, не совпадают с SHA-256",
         ));
     }
-    let current = snapshot.current(identity).cloned();
+    let current = snapshot.slot(identity, candidate.format).cloned();
     if current
         .as_ref()
         .is_some_and(|record| record.sha256 == candidate.sha256 && record.validation.is_some())
@@ -3601,8 +3642,7 @@ fn validate_exact_snapshot(
         .status
         .ok_or_else(|| invalid("в точной проверке владельца отсутствует семантический статус"))?;
     let mut record = snapshot
-        .current(identity)
-        .filter(|record| record.sha256 == sha256)
+        .by_sha(identity, sha256)
         .cloned()
         .ok_or_else(|| invalid("в снимке отсутствует запись с точным результатом проверки"))?;
     record.validation = Some(ValidationRecord {
@@ -3632,7 +3672,7 @@ fn apply_rejection(
             "байты отклоняемого ресурса не совпадают с SHA-256",
         ));
     }
-    let current = snapshot.current(identity).cloned();
+    let current = snapshot.slot(identity, candidate.format).cloned();
     if current
         .as_ref()
         .is_some_and(|record| record.sha256 != candidate.sha256)
@@ -3683,7 +3723,7 @@ fn verified_request(
         provenance: candidate_provenance(candidate),
         domain_metadata: Some(candidate_metadata(identity, candidate)),
         replace_expected_sha256: snapshot
-            .current(identity)
+            .slot(identity, candidate.format)
             .map(|record| record.sha256.clone()),
     })
 }
@@ -3771,7 +3811,7 @@ impl SemanticValidator for AggregateValidator {
         {
             return Err(ValidatorFailure::new(
                 "aggregate_candidate_mismatch",
-                "решение агрегации не соответствует точным identity, SHA-256 и текущему валидатору",
+                "решение агрегации не соответствует точной идентичности, SHA-256 и текущему валидатору",
             ));
         }
         validate_image_decode(&actual)
@@ -4180,7 +4220,7 @@ mod candidate_cost_tests {
         let mut runtime = BatchRuntime::open(store.root(), "candidate-cost").unwrap();
         let mut state = runtime.load().unwrap().unwrap();
         // Агрегатная политика оставляет `Uncertain` в границе обхода,
-        // поэтому запуск проходит через checkpoint каждого кандидата.
+        // поэтому запуск проходит через контрольную точку каждого кандидата.
         state.policy = crate::batch::AggregatePolicy::current(state.policy.validator.clone());
         for (index, character) in characters.iter().enumerate() {
             let identity = parse_character(character).unwrap().identity();
@@ -4222,7 +4262,7 @@ mod candidate_cost_tests {
         // квадратичный путь давал ITEMS^2 = 40000.
         assert!(
             reads <= 8 * ITEMS as usize,
-            "candidate-файлы перечитаны {reads} раз при {ITEMS} identity"
+            "файлы кандидатов перечитаны {reads} раз при {ITEMS} идентичностях"
         );
     }
 
@@ -4290,7 +4330,7 @@ fn apply_review_with_matches(
         }
     }
     if review.validator != state.policy.validator {
-        return Err(invalid("валидатор review устарел"));
+        return Err(invalid("валидатор проверки устарел"));
     }
     let mut owner = StoreSnapshotReader.capture(store);
     owner.checked()?;
@@ -4308,7 +4348,7 @@ fn apply_review_with_matches(
             .items
             .iter()
             .find(|item| item.identity == row.identity)
-            .ok_or_else(|| invalid("review ссылается на чужой Unicode"))?;
+            .ok_or_else(|| invalid("проверка ссылается на чужой Unicode"))?;
         let candidate = crate::kanji_review::candidate(&state, row)?;
         let bytes = runtime.read_candidate(candidate)?;
         let repeated = decision.as_ref().is_some_and(|decision| {
@@ -4334,7 +4374,7 @@ fn apply_review_with_matches(
             || item.current_sha256.as_ref() != Some(&row.sha256)
         {
             return Err(invalid(
-                "review устарел: статус, поколение, попытка или текущий SHA изменились",
+                "проверка устарела: статус, поколение, попытка или текущий SHA изменились",
             ));
         }
         if let Some(decision) = decision {
@@ -4356,7 +4396,7 @@ fn apply_review_with_matches(
     }
     state = next;
     let mut issues = Vec::new();
-    // KanjiBatch.human_decisions — сохраняемый журнал. Сбой после save
+    // KanjiBatch.human_decisions — сохраняемый журнал. Сбой после сохранения
     // возобновляется здесь или через batch run; чужие байты не подтверждаются.
     publish_pending(store, &mut runtime, &mut state, &mut issues, &mut owner)?;
     let owner = StoreSnapshotReader.capture(store);

@@ -16,7 +16,8 @@ impl Fixture {
     fn new(purpose: &str) -> Self {
         let workspace = TempWorkspace::create(purpose).expect("создаётся временный каталог теста");
         let root = workspace.path().join("store");
-        let store = AssetStore::open_kanji(StoreOptions::new(&root)).expect("открывается store");
+        let store =
+            AssetStore::open_kanji(StoreOptions::new(&root)).expect("открывается хранилище");
         Self {
             store,
             root,
@@ -29,7 +30,8 @@ impl Fixture {
     }
 
     fn reopen(&self) -> AssetStore {
-        AssetStore::open_kanji_existing(StoreOptions::new(&self.root)).expect("store переоткрыт")
+        AssetStore::open_kanji_existing(StoreOptions::new(&self.root))
+            .expect("хранилище переоткрыто")
     }
 
     fn events(&self) -> Vec<JournalEvent> {
@@ -137,7 +139,7 @@ fn journal_keeps_sequence_and_intent_pair_across_store_reopen() {
     let outcome = fixture.ingest_candidate(&identity, CANDIDATE_BYTES);
     let sha256 = outcome.asset.sha256.clone();
 
-    // Перезапуск CLI — это новое открытие того же store.
+    // Перезапуск CLI — это новое открытие того же хранилища.
     let reopened = fixture.reopen();
     let events = reopened.journal_events(None, None, None).unwrap();
     assert_eq!(events.len(), 2, "интент и результат записи кандидата");
@@ -198,7 +200,10 @@ fn repeated_trusted_reuse_writes_one_reused_event_and_no_second_publication() {
     let first = fixture.publish(&identity, CANDIDATE_BYTES).unwrap();
     assert!(first.changed);
     let second = fixture.publish(&identity, CANDIDATE_BYTES).unwrap();
-    assert!(!second.changed, "повторный reuse ничего не меняет");
+    assert!(
+        !second.changed,
+        "повторное переиспользование ничего не меняет"
+    );
     let third = fixture.publish(&identity, CANDIDATE_BYTES).unwrap();
     assert!(!third.changed);
 
@@ -215,7 +220,10 @@ fn repeated_trusted_reuse_writes_one_reused_event_and_no_second_publication() {
         .iter()
         .filter(|event| event.operation == JournalOperation::VerifiedReused)
         .count();
-    assert_eq!(reused, 1, "повторный reuse не пишет второе событие");
+    assert_eq!(
+        reused, 1,
+        "повторное переиспользование не пишет второе событие"
+    );
     assert!(fixture.store.journal_check().unwrap().is_clean());
 }
 
@@ -412,7 +420,11 @@ fn recovery_facts_survive_a_failing_reconciliation() {
         .unwrap()
         .asset
         .unwrap();
-    fixture.publish(&marker, CANDIDATE_BYTES).unwrap();
+    let marker_record = fixture
+        .publish(&marker, CANDIDATE_BYTES)
+        .unwrap()
+        .asset
+        .unwrap();
 
     // Смерть процесса между фиксацией удаления и снятием байтов: открытие
     // завершит удаление и обязано записать событие о нём.
@@ -429,13 +441,14 @@ fn recovery_facts_survive_a_failing_reconciliation() {
         .unwrap_err();
         lock.unlock().unwrap();
     }
-    // Второй сбой — расхождение transition marker: сверка откажет уже после
+    // Второй сбой — расхождение маркера перехода: сверка откажет уже после
     // того, как восстановление удаления состоялось.
+    let mut mismatched = marker_record.clone();
+    mismatched.sha256 = "a".repeat(64);
     begin_transition(
         &fixture.store.root_handle,
-        &marker,
+        &mismatched,
         TransitionTarget::Canonical,
-        &"a".repeat(64),
     )
     .unwrap();
 
@@ -483,6 +496,54 @@ fn recovery_describes_the_surviving_record_of_an_overlap() {
     assert_eq!(recovered[0].new_sha256.as_deref(), Some(sha256.as_str()));
     assert_eq!(recovered[0].new_lifecycle.as_deref(), Some("verified"));
     assert_eq!(recovered[0].verified, Some(true));
+}
+
+#[test]
+fn an_operation_after_an_interrupted_transition_continues_from_reconciled_manifests() {
+    let fixture = Fixture::new("asset-store-journal-reconcile-in-operation");
+    let identity = AssetIdentity::new("kanji", "日").unwrap();
+    let sha256 = fixture
+        .ingest_candidate(&identity, CANDIDATE_BYTES)
+        .asset
+        .sha256;
+    FAIL_AFTER_CANONICAL_TRANSITION.with(|hook| hook.set(true));
+    let error = fixture.publish(&identity, CANDIDATE_BYTES).unwrap_err();
+    assert!(failed_publish(&error), "{error:?}");
+
+    // Без переоткрытия следующая операция того же хранилища сама завершает
+    // прерванный переход. Её собственная запись в `.runtime` обязана исходить из
+    // манифестов после сверки, а не из прочитанных до неё: иначе удалённая
+    // сверкой локальная запись вернулась бы вместе с новым кандидатом.
+    let other = AssetIdentity::new("kanji", "月").unwrap();
+    let candidate = fixture.ingest_candidate(&other, b"GIF89a other candidate");
+    assert_eq!(candidate.asset.lifecycle, LifecycleState::Pending);
+
+    let records = fixture.store.verify_integrity().unwrap();
+    let published: Vec<_> = records
+        .iter()
+        .filter(|record| record.identity == identity)
+        .collect();
+    assert_eq!(
+        published.len(),
+        1,
+        "идентичность осталась ровно в одной области"
+    );
+    assert_eq!(published[0].sha256, sha256);
+    assert_eq!(published[0].lifecycle, LifecycleState::Verified);
+    assert!(records.iter().any(|record| record.identity == other));
+    let recovered = fixture
+        .events_for(&identity)
+        .into_iter()
+        .filter(|event| event.operation == JournalOperation::Recovered)
+        .count();
+    assert_eq!(
+        recovered, 1,
+        "сверка внутри операции записала факт восстановления"
+    );
+    // Интент прерванной публикации закрывает только явная сверка журнала.
+    fixture.store.reconcile_journal().unwrap();
+    let check = fixture.store.journal_check().unwrap();
+    assert!(check.is_clean(), "{:?}", check.problems);
 }
 
 #[test]
@@ -591,7 +652,7 @@ fn audit_events_distinguish_publication_refusal_and_reuse() {
         .collect();
     assert_eq!(audit.len(), 3);
     let unique: BTreeSet<_> = audit.iter().collect();
-    assert_eq!(unique.len(), 3, "три разных audit-события: {audit:?}");
+    assert_eq!(unique.len(), 3, "три разных события аудита: {audit:?}");
 }
 
 #[test]
@@ -628,7 +689,10 @@ fn baseline_is_written_once_and_refuses_a_repeat() {
     assert_eq!(baseline.outcome, JournalOutcome::Completed);
     assert_eq!(baseline.identity, STORE_WIDE_IDENTITY);
     assert_eq!(baseline.namespace, "kanji");
-    let snapshot = baseline.snapshot.as_ref().expect("baseline несёт снимок");
+    let snapshot = baseline
+        .snapshot
+        .as_ref()
+        .expect("базовое событие несёт снимок");
     assert_eq!(snapshot.assets, 1);
     assert_eq!(snapshot.pending, 1);
     assert_eq!(snapshot.verified, 0);
@@ -639,7 +703,7 @@ fn baseline_is_written_once_and_refuses_a_repeat() {
         .store
         .journal_events(None, None, Some(JournalOperation::Baseline))
         .unwrap();
-    assert_eq!(events.len(), 1, "baseline записан ровно один раз");
+    assert_eq!(events.len(), 1, "базовое событие записано ровно один раз");
 }
 
 #[test]
