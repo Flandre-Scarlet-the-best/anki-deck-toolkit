@@ -13,7 +13,8 @@ Cargo.toml                   # корневое рабочее простран�
 Cargo.lock
 .github/
 └── workflows/
-    └── ci.yml               # CI: код/тесты, заявленная MSRV, контракты скриптов и Agent Skills
+    ├── ci.yml               # CI: код/тесты, заявленная MSRV, actionlint, cargo-deny, Chromium
+    └── reference-catalogs.yml  # воспроизводимость встроенных эталонов кандзи
 .agents/
 └── skills/
 .codex/
@@ -65,7 +66,9 @@ tools/
   MSRV (`rust-version`) и `edition` для всех Rust-участников. `Cargo.lock` тоже
   лежит в корне.
 - `.github/workflows/ci.yml` — независимый CI репозитория: форматирование,
-  Clippy, тесты, заявленная MSRV и проверки контрактов скриптов и Agent Skills.
+  Clippy, тесты, заявленная MSRV, проверки контрактов скриптов и Agent Skills,
+  `actionlint`, а также дополнительные тесты возможностей Cargo и браузерные тесты, cargo-deny
+  (`deny.toml`).
   Читает репозиторий, не публикует артефакты и не использует секреты.
   Подробности — в `03-VERIFICATION.md`.
 - `AGENTS.md` — короткий обязательный контракт для любого агента.

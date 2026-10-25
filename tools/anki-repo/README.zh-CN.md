@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 65fbb16261c3cd53332b5f82fc197e950eb14435 -->
+<!-- i18n-source-git-blob: ed29db6d5d1af7e203ea0fa420abb747d282ad1d -->
 
 `anki-repo` 是一套用于确定性分析 CrowdAnki 导出数据、并对其内容实施严格受限修改的工具。它使智能体能够快速、可预测地了解 `deck.json` 的结构，而无需人工通读数 MB 的 JSON 文件。
 
@@ -1213,7 +1213,7 @@ CI 有意不验证用户自身的牌组和资源：这些区域在干净克隆�
 
 常规工具测试自行构造合成导出，绝不读取 `decks/**`。
 
-独立 MSRV 检查通过 `cargo metadata` 读取根目录 `[workspace.package] rust-version`，验证各工作区成员版本一致，并按该版本构建（`cargo +<msrv> check --workspace --all-targets --locked`）。CI 和本文件都不重复存储版本。可在本地复现：
+独立 MSRV 检查通过 `cargo metadata` 读取根目录 `[workspace.package] rust-version`，验证各工作区成员版本一致，并确认 `rust-toolchain.toml` 和实际编译器与该版本相同。因此，在 MSRV 上构建工作区由 CI 中覆盖所有目标的 Clippy 使用同一编译器完成；本地可单独重复（`cargo +<msrv> check --workspace --all-targets --locked`）。CI 和本文件都不重复存储版本。可在本地复现：
 
 ```bash
 MSRV=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].rust_version] | unique | .[]')

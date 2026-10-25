@@ -1,0 +1,33 @@
+{
+  "problemMatcher": [
+    {
+      "owner": "rustc",
+      "pattern": [
+        {
+          "regexp": "^(?:\\u001b\\[[0-9;]*m)*(warning|error)(?:\\[(\\S+)\\])?(?:\\u001b\\[[0-9;]*m)*: (?:\\u001b\\[[0-9;]*m)*(.*?)(?:\\u001b\\[[0-9;]*m)*$",
+          "severity": 1,
+          "code": 2,
+          "message": 3
+        },
+        {
+          "regexp": "^\\s+(?:\\u001b\\[[0-9;]*m)*-->\\s(?:\\u001b\\[[0-9;]*m)*(\\S+):(\\d+):(\\d+)(?:\\u001b\\[[0-9;]*m)*$",
+          "file": 1,
+          "line": 2,
+          "column": 3
+        }
+      ]
+    },
+    {
+      "owner": "rustfmt",
+      "severity": "error",
+      "pattern": [
+        {
+          "regexp": "^(Diff in (\\S+):(\\d+):)$",
+          "message": 1,
+          "file": 2,
+          "line": 3
+        }
+      ]
+    }
+  ]
+}

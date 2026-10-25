@@ -1,0 +1,33 @@
+# Политика зависимостей Cargo workspace для cargo-deny. Её исполняет задание
+# «Зависимости Rust (cargo-deny)» в .github/workflows/ci.yml по фактическому
+# Cargo.lock; локально — `cargo deny --locked check`.
+
+[graph]
+# Граф включает и необязательные возможности (`reference-generator` тянет resvg):
+# политика относится ко всему, что workspace умеет собрать.
+all-features = true
+
+[advisories]
+# Значения по умолчанию: уязвимости, unsound и unmaintained из RustSec — ошибки,
+# yanked — предупреждение. Игнорирование advisory допустимо только точечно,
+# с идентификатором RUSTSEC и причиной.
+ignore = []
+
+[licenses]
+# Лицензии, фактически выбранные для графа зависимостей (с учётом выражений OR).
+# Новая лицензия в графе — осознанное решение и правка этого списка, а не
+# автоматическое согласие.
+allow = ["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "MIT", "Unicode-3.0", "Zlib"]
+
+[bans]
+# Несколько версий одного crate в графе — обычное следствие экосистемы, а не дефект.
+multiple-versions = "allow"
+# Версии из реестра без ограничения (`*`) запрещены; path-зависимости между
+# неопубликуемыми участниками workspace — не wildcard в этом смысле.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Только crates.io: сторонние реестры и git-источники требуют явного решения.
+unknown-registry = "deny"
+unknown-git = "deny"

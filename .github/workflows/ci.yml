@@ -5,10 +5,18 @@ name: Проверки репозитория
 # - `push` — событие покрывает интеграцию в поддерживаемую ветку, а какой именно
 #   ветка является основной, задание определяет через `github.event.repository`
 #   (см. `if` у заданий), поэтому имя ветки в процессе не зашито;
+# - `schedule` — еженедельный прогон основной ветки: новые уведомления RustSec и
+#   обновлённый браузер образа исполнителя проявляются и без новых коммитов;
 # - `workflow_dispatch` — ручной запуск.
+#
+# Push в рабочую ветку создаёт запуск, в котором все задания пропущены (`skipped`):
+# такой запуск не занимает исполнитель, а отказ от события `push` без имени ветки
+# по умолчанию в фильтре невозможен без потери проверки после интеграции.
 on:
   pull_request:
   push:
+  schedule:
+    - cron: '41 3 * * 1'
   workflow_dispatch:
 
 # CI только читает репозиторий: ни одно задание не пишет в него, не публикует
@@ -19,7 +27,7 @@ permissions:
 concurrency:
   # Новый прогон отменяет предыдущий только для PR: проверку основной ветки
   # нельзя отменять на середине.
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -27,6 +35,12 @@ env:
   # Предупреждения компиляции делают сборку и тесты красными, как и Clippy.
   CARGO_BUILD_WARNINGS: deny
 
+# Обязательные контексты ruleset — значения `name:` заданий `lint`
+# («Форматирование и Clippy»), `code` («Код и тесты»), `msrv` («Заявленная MSRV»)
+# и `pr-body` из pr-body.yml («Структура PR»). Эти `name:` не менять: ruleset
+# ждёт именно эти контексты.
+# Задания `asset-store-extended` и `dependencies` дополнительные: они видны на
+# каждом PR, но merge не блокируют, пока сопровождающий не добавит их в ruleset.
 jobs:
   lint:
     name: Форматирование и Clippy
@@ -49,6 +63,27 @@ jobs:
           python3 .github/scripts/check_skill_contracts.py
           python3 .github/scripts/check_documentation_i18n.py
 
+      - name: Проверить workflow GitHub Actions (actionlint)
+        # Семантика workflow: выражения `${{ }}`, контексты, `needs`, matrix,
+        # события и скрипты `run:` (shellcheck образа исполнителя). Бинарник —
+        # официальный релиз закреплённой версии, проверенный по SHA-256;
+        # версию и сумму обновляют вместе.
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          # Каждая ошибка — аннотация `::error` с файлом, строкой и колонкой.
+          ACTIONLINT_FORMAT: >-
+            {{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}},title=actionlint [{{$err.Kind}}]::{{$err.Message}}\n{{end}}
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -version
+          "$RUNNER_TEMP/actionlint" -format "$ACTIONLINT_FORMAT"
+
       - name: Установить Rust из rust-toolchain.toml
         run: |
           rustup toolchain install
@@ -62,10 +97,16 @@ jobs:
       - name: Восстановить кэш Rust
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
+      - name: Включить аннотации rustc и rustfmt
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
       - name: Проверить форматирование
         run: cargo fmt --all --check
 
       - name: Проверить статику Clippy
+        # rust-toolchain.toml закрепляет ровно заявленную MSRV (это доказывает шаг
+        # контракта выше), поэтому Clippy по всем целям и возможностям — одновременно
+        # проверка сборки рабочей области на MSRV.
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   code:
@@ -104,17 +145,32 @@ jobs:
       - name: Восстановить кэш Rust
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          # Всё задание использует один специализированный профиль (тесты и `cargo run`),
-          # поэтому используем отдельное поколение кэша зависимостей.
-          key: unified-ci-v1
+          # Всё задание использует один специализированный профиль (тесты и `cargo run`).
+          # Общий ключ без имени задания позволяет `asset-store-extended` читать этот
+          # кэш, не сохраняя собственную копию.
+          shared-key: unified-ci-v1
+
+      - name: Включить аннотации rustc
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
 
       - name: Собрать и выполнить тесты
         # Шаг собирает тесты без дополнительных возможностей Cargo. `reference-generator`
-        # включает resvg и skrifa только для двух служебных исполняемых файлов генератора; тесты
+        # включает resvg только для двух служебных исполняемых файлов генератора; тесты
         # их общего модуля публикации входят в интеграционную цель asset-store и
-        # исполняются здесь. Тесты возможности `session-rotation-acceptance` этот шаг
-        # не исполняет. Сборку всех целей и возможностей проверяют задания Clippy и MSRV.
-        run: cargo test --workspace --locked --profile ci
+        # исполняются здесь, а сами генераторы проверяет reference-catalogs.yml.
+        # Тесты возможности `session-rotation-acceptance` исполняет задание
+        # `asset-store-extended`. `--no-fail-fast` показывает все упавшие тестовые
+        # цели одного прогона, а не только первую.
+        shell: bash
+        run: cargo test --workspace --locked --profile ci --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+
+      - name: Сводка тестов
+        if: always()
+        run: >-
+          python3 .github/scripts/report_cargo_tests.py
+          --log "$RUNNER_TEMP/cargo-test.log"
+          --title "Код и тесты: cargo test --workspace"
+          --step "Собрать и выполнить тесты"
 
       - name: Проверить, что пользовательские данные не отслеживаются Git
         # Постоянная граница: колоды и локальное доверенное хранилище ресурсов
@@ -138,11 +194,18 @@ jobs:
 
   msrv:
     name: Заявленная MSRV
+    # Обязательный контекст ruleset. Отдельной сборки здесь нет: rust-toolchain.toml
+    # обязан закреплять ровно `[workspace.package] rust-version`, и шаг контракта
+    # ниже доказывает это вместе с фактической версией компилятора. Значит, Clippy
+    # задания `lint` по всем целям и возможностям уже собирает рабочую область на
+    # заявленной MSRV; прежний `cargo check` повторял ту же работу тем же
+    # компилятором и держал отдельный кэш. Если закреплённая версия и MSRV
+    # разойдутся, этот шаг станет красным, и тогда сюда возвращается сборка на MSRV.
     if: >-
       github.event_name != 'push'
       || github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -157,10 +220,171 @@ jobs:
       - name: Проверить контракт MSRV, rustup и компилятора
         run: python3 .github/scripts/check_rust_toolchain.py
 
-      - name: Восстановить кэш Rust для MSRV
+  asset-store-extended:
+    name: Возможности asset-store и Chromium
+    # Дополнительное покрытие, которого нет в `code`: тесты возможности Cargo
+    # `session-rotation-acceptance` и три браузерных теста `jpdb`, помеченные
+    # `#[ignore]` из-за Chromium. Обе группы берутся из одной тестовой сборки
+    # библиотеки с этой возможностью: браузерный код `jpdb` от неё не зависит.
+    # Страницы браузерных тестов синтетические и задаются через `set_content`;
+    # личный профиль и публичные сайты не нужны.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      # sccache не кэширует тестовые бинарники (crate-type bin), поэтому тестовая
+      # сборка asset-store компилируется в каждом прогоне. Для восьми коротких тестов
+      # оптимизация не нужна: `opt-level=0` только для asset-store сокращает эту
+      # компиляцию, не меняя зависимостей и ключа кэша `code`.
+      TEST_ARGS: >-
+        -p asset-store --lib --locked --profile ci --features session-rotation-acceptance
+        --config profile.ci.package.asset-store.opt-level=0
+      ROTATION_TESTS: >-
+        cli::batch_cli::tests::cli_parser_supports_structured_batch_actions_and_rejects_free_text
+        cli::batch_cli::tests::run_error_response_exposes_a_flushed_per_run_diagnostic_log
+        cli::batch_cli::tests::successful_run_response_exposes_a_flushed_per_run_diagnostic_log
+        yarxi::tests::acceptance_rotation_checkpoints_each_prefix_and_keeps_item_failures_local
+        yarxi::tests::acceptance_rotation_is_opt_in_and_keeps_production_limits
+      BROWSER_TESTS: >-
+        jpdb::tests::browser_capture_refuses_unsafe_regions_with_typed_failures
+        jpdb::tests::browser_capture_takes_one_padded_variant_with_overflowing_paint
+        jpdb::tests::browser_search_script_reports_canonical_evidence_of_single_entries
+    if: >-
+      github.event_name != 'push'
+      || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Найти Chromium образа исполнителя
+        # Образ GitHub-hosted Ubuntu содержит Google Chrome и задаёт `CHROME_BIN`;
+        # `find_browser_executable` выбирает его первым. Без браузера шаг
+        # красный: отсутствие окружения не выдаётся за пройденные тесты.
+        run: |
+          if [ -z "${CHROME_BIN:-}" ] || [ ! -x "$CHROME_BIN" ]; then
+            echo "::error title=Chromium::CHROME_BIN не указывает на исполняемый браузер"
+            exit 1
+          fi
+          version="$("$CHROME_BIN" --version)"
+          echo "$version"
+          echo "Браузер: \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Установить Rust из rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Настроить sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Восстановить кэш Rust задания «Код и тесты»
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: msrv
+          shared-key: unified-ci-v1
+          # Граф зависимостей этого задания — подмножество графа `code`: читаем его
+          # кэш и не храним вторую копию.
+          save-if: false
 
-      - name: Проверить сборку на заявленной MSRV
-        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Включить аннотации rustc
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Собрать тесты asset-store с session-rotation-acceptance
+        shell: bash
+        run: |
+          read -ra args <<< "$TEST_ARGS"
+          cargo test "${args[@]}" --no-run
+
+      - name: Выполнить тесты ротации сессий
+        shell: bash
+        run: |
+          read -ra tests <<< "$ROTATION_TESTS"
+          read -ra args <<< "$TEST_ARGS"
+          cargo test "${args[@]}" -- --exact "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/rotation.log"
+
+      - name: Сводка тестов ротации сессий
+        if: always()
+        shell: bash
+        run: |
+          read -ra tests <<< "$ROTATION_TESTS"
+          required=()
+          for test in "${tests[@]}"; do required+=(--require "$test"); done
+          python3 .github/scripts/report_cargo_tests.py --log "$RUNNER_TEMP/rotation.log" \
+            --title "session-rotation-acceptance" --step "Выполнить тесты ротации сессий" "${required[@]}"
+
+      - name: Выполнить браузерные тесты на синтетических страницах
+        # Отказ тестов ротации не скрывает результат браузерной группы.
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          read -ra tests <<< "$BROWSER_TESTS"
+          read -ra args <<< "$TEST_ARGS"
+          cargo test "${args[@]}" -- --ignored --exact "${tests[@]}" 2>&1 | tee "$RUNNER_TEMP/browser.log"
+
+      - name: Сводка браузерных тестов
+        if: always()
+        shell: bash
+        run: |
+          read -ra tests <<< "$BROWSER_TESTS"
+          required=()
+          for test in "${tests[@]}"; do required+=(--require "$test"); done
+          python3 .github/scripts/report_cargo_tests.py --log "$RUNNER_TEMP/browser.log" \
+            --title "Chromium: jpdb" --step "Выполнить браузерные тесты на синтетических страницах" "${required[@]}"
+
+  dependencies:
+    name: Зависимости Rust (cargo-deny)
+    # Политика deny.toml по фактическому Cargo.lock: известные уязвимости и
+    # уведомления RustSec о unsound/unmaintained, лицензии, источники и wildcard-версии.
+    # База уведомлений меняется без коммитов, поэтому задание дополнительное и
+    # повторяется еженедельным `schedule`; найденное уведомление делает его красным.
+    if: >-
+      github.event_name != 'push'
+      || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Установить Rust из rust-toolchain.toml
+        run: rustup toolchain install
+
+      - name: Установить cargo-deny
+        # Официальный статический релиз закреплённой версии, проверенный по SHA-256;
+        # версию и сумму обновляют вместе.
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          cargo deny --version
+
+      - name: Проверить зависимости по deny.toml
+        shell: bash
+        run: cargo deny --locked --color never check --hide-inclusion-graph 2>&1 | tee "$RUNNER_TEMP/cargo-deny.log"
+
+      - name: Сводка cargo-deny
+        if: always()
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/cargo-deny.log"
+          {
+            echo "### Зависимости Rust (cargo-deny)"
+            echo
+            if [ -f "$log" ]; then
+              grep -E '^(advisories|bans|licenses|sources) ' "$log" | sed 's/^/- /' || true
+              grep -E '^error\[' "$log" | sort -u | head -n 30 | sed "s/.*/- \`&\`/" || true
+            else
+              echo "Проверка не выполнялась."
+            fi
+            echo
+            echo "Подробности — в журнале шага «Проверить зависимости по deny.toml»."
+          } >> "$GITHUB_STEP_SUMMARY"

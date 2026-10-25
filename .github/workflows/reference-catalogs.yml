@@ -1,0 +1,127 @@
+name: Воспроизводимость эталонов кандзи
+
+# Генераторы возможности Cargo `reference-generator` обычный CI только компилирует
+# (Clippy с `--all-features`). Здесь они исполняются: закреплённые исходники из
+# файлов атрибуции регенерируются в побайтовые копии встроенных каталогов.
+# Прогон скачивает около 19 МБ публичных закреплённых исходников, поэтому идёт
+# только при изменении того, что влияет на результат, раз в месяц и вручную.
+on:
+  pull_request:
+    paths: &inputs
+      - 'tools/asset-store/src/bin/build_kanjivg_reference.rs'
+      - 'tools/asset-store/src/bin/build_noto_font_reference.rs'
+      - 'tools/asset-store/src/bin/common/reference_output.rs'
+      - 'tools/asset-store/src/data/**'
+      - 'tools/asset-store/src/kanji_mask.rs'
+      - 'tools/asset-store/src/kanji_domain.rs'
+      - 'tools/asset-store/src/hashing.rs'
+      - 'tools/asset-store/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/scripts/check_reference_catalogs.py'
+      - '.github/workflows/reference-catalogs.yml'
+  push:
+    paths: *inputs
+  schedule:
+    - cron: '23 4 3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+
+jobs:
+  regenerate:
+    name: Эталоны KanjiVG и Noto Serif JP
+    # Те же переменные, что у задания «Код и тесты» в ci.yml: при совпадении
+    # окружения rust-cache читает его кэш зависимостей профиля `ci`, а sccache —
+    # результаты библиотек resvg предыдущих прогонов.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    # Push в рабочую ветку не дублирует прогон PR; на push — только основная ветка.
+    if: >-
+      github.event_name != 'push'
+      || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # GitHub проверяет `paths` по всему diff PR, поэтому каждый новый commit PR,
+      # однажды затронувшего Cargo.lock, повторно запускает workflow. Успех прежнего
+      # прогона переиспользуется ТОЛЬКО при неизменных входных файлах и версии
+      # workflow; `schedule` и `workflow_dispatch` всегда выполняют полную проверку.
+      # Кэш-доказательство создаётся лишь после полного успеха задания.
+      - name: Найти проверку для неизменных входных файлов
+        id: proof
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/reference-proof/verified
+          key: reference-catalogs-proof-v1-${{ runner.os }}-${{ hashFiles('tools/asset-store/src/bin/build_kanjivg_reference.rs', 'tools/asset-store/src/bin/build_noto_font_reference.rs', 'tools/asset-store/src/bin/common/reference_output.rs', 'tools/asset-store/src/data/**', 'tools/asset-store/src/kanji_mask.rs', 'tools/asset-store/src/kanji_domain.rs', 'tools/asset-store/src/hashing.rs', 'tools/asset-store/Cargo.toml', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/scripts/check_reference_catalogs.py', '.github/workflows/reference-catalogs.yml') }}
+          lookup-only: true
+
+      - name: Определить, нужна ли полная проверка
+        id: mode
+        env:
+          PROVEN: ${{ steps.proof.outputs.cache-hit == 'true' && github.event_name != 'workflow_dispatch' && github.event_name != 'schedule' }}
+        run: |
+          if [ "$PROVEN" = true ]; then
+            echo "full=false" >> "$GITHUB_OUTPUT"
+            echo "Регенерация уже прошла на идентичных входных файлах; повторный прогон не нужен." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "full=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Установить Rust из rust-toolchain.toml
+        if: steps.mode.outputs.full == 'true'
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Настроить sccache
+        if: steps.mode.outputs.full == 'true'
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Восстановить кэш Rust задания «Код и тесты»
+        if: steps.mode.outputs.full == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: unified-ci-v1
+          # Только чтение: отдельная копия ради редкого прогона заняла бы место
+          # общего лимита кэша; недостающие библиотеки resvg покрывает sccache.
+          save-if: false
+
+      - name: Включить аннотации rustc
+        if: steps.mode.outputs.full == 'true'
+        run: echo "::add-matcher::.github/rust-problem-matcher.json"
+
+      - name: Собрать генераторы эталонов
+        # Профиль `ci` — dev без отладочной информации и с `opt-level=1` для
+        # asset-store. Байты результата от профиля не зависят: это и проверяет
+        # сравнение SHA-256 ниже.
+        if: steps.mode.outputs.full == 'true'
+        run: >-
+          cargo build --locked --profile ci -p asset-store --features reference-generator
+          --bin build-kanjivg-reference --bin build-noto-font-reference
+
+      - name: Регенерировать каталоги и сравнить SHA-256
+        if: steps.mode.outputs.full == 'true'
+        run: python3 .github/scripts/check_reference_catalogs.py --profile ci
+
+      - name: Сохранить доказательство успешной проверки
+        if: steps.mode.outputs.full == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/reference-proof"
+          echo "KanjiVG и Noto Serif JP: регенерация побайтово совпала" > "$RUNNER_TEMP/reference-proof/verified"

@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 65fbb16261c3cd53332b5f82fc197e950eb14435 -->
+<!-- i18n-source-git-blob: ed29db6d5d1af7e203ea0fa420abb747d282ad1d -->
 
 `anki-repo` is a toolkit for deterministic analysis of CrowdAnki exports and strictly constrained edits to their contents in the `Anki-decks` repository. It gives agents fast, predictable access to the structure of `deck.json` without requiring them to read a multi-megabyte JSON file manually.
 
@@ -1213,7 +1213,7 @@ CI deliberately does not validate user-owned content: those areas are absent in 
 
 Ordinary toolkit tests create synthetic exports and never read `decks/**`.
 
-A dedicated MSRV job retrieves `[workspace.package] rust-version` via `cargo metadata`, verifies workspace members agree, and builds against it (`cargo +<msrv> check --workspace --all-targets --locked`). Neither CI nor this documentation duplicates the version. To reproduce locally:
+A dedicated MSRV job retrieves `[workspace.package] rust-version` via `cargo metadata`, verifies workspace members agree, and confirms that `rust-toolchain.toml` and the actual compiler match it. The workspace build on the MSRV is therefore performed by the CI Clippy run over all targets with the same compiler; locally it can be repeated separately (`cargo +<msrv> check --workspace --all-targets --locked`). Neither CI nor this documentation duplicates the version. To reproduce locally:
 
 ```bash
 MSRV=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].rust_version] | unique | .[]')
