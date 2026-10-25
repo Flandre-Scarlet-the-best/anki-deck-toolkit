@@ -1,7 +1,7 @@
 //! Загрузка одного CrowdAnki-экспорта с диска.
 //!
-//! Один invocation работает с одним каталогом экспорта. `deck.json`
-//! десериализуется целиком в память: streaming parser, кэш и индексные файлы
+//! Один запуск обрабатывает один каталог экспорта. `deck.json`
+//! десериализуется целиком в память: потоковый парсер, кэш и индексные файлы
 //! для текущего масштаба не нужны.
 
 use std::fs;
@@ -52,8 +52,9 @@ pub fn load_export(export_dir: &Path) -> Result<LoadedExport, DomainError> {
 /// Читает текст `deck.json` из каталога экспорта.
 ///
 /// Единая точка проверки каталога и чтения файла: `op::validate` разбирает
-/// содержимое сам (ошибки JSON становятся issues, а не domain error), но
-/// путь, сообщения и коды ошибок должны совпадать с [`load_export`].
+/// содержимое сам (ошибки JSON становятся замечаниями, а не доменной
+/// ошибкой), но путь, сообщения и коды ошибок должны совпадать с
+/// [`load_export`].
 ///
 /// # Errors
 ///
@@ -315,9 +316,150 @@ pub fn typed_root(value: Value, path: &Path) -> Result<DeckNode, DomainError> {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
 
     /// Небольшой документ в канонической форме этого репозитория.
     const CANONICAL: &str = "{\n    \"__type__\": \"Deck\",\n    \"name\": \"D\"\n}";
+
+    const MAX_GENERATED_STRING_CHARS: usize = 64;
+    const MAX_COLLECTION_ITEMS: usize = 8;
+    const PROPERTY_CASES: u32 = 128;
+
+    /// Генерирует случайную рекурсивную часть JSON-документа.
+    ///
+    /// `prop_recursive(4, 128, 8, ...)` ограничивает только эту часть: не более
+    /// четырёх уровней рекурсии, ориентир около 128 узлов (`desired_size` —
+    /// целевой размер, а не строгий предел) и ожидаемый размер коллекции 8.
+    /// Каждый случайный массив и объект содержит от 0 до
+    /// `MAX_COLLECTION_ITEMS` элементов. Фиксированная оболочка
+    /// [`canonical_json_value`] добавляется поверх этих пределов.
+    ///
+    /// Числа с плавающей точкой намеренно исключены, чтобы тестировать
+    /// каноническое форматирование без привязки к деталям их представления.
+    fn recursive_json_value() -> impl Strategy<Value = Value> + Clone {
+        let string = prop::collection::vec(any::<char>(), 0..=MAX_GENERATED_STRING_CHARS)
+            .prop_map(String::from_iter);
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|number| Value::Number(number.into())),
+            any::<u64>().prop_map(|number| Value::Number(number.into())),
+            string.prop_map(Value::String),
+        ];
+
+        leaf.prop_recursive(4, 128, 8, |inner| {
+            let arrays = prop::collection::vec(inner.clone(), 0..=MAX_COLLECTION_ITEMS)
+                .prop_map(Value::Array);
+            let objects = prop::collection::btree_map(
+                prop::collection::vec(any::<char>(), 0..=MAX_GENERATED_STRING_CHARS)
+                    .prop_map(String::from_iter),
+                inner,
+                0..=MAX_COLLECTION_ITEMS,
+            )
+            .prop_map(|entries| Value::Object(entries.into_iter().collect()));
+
+            prop_oneof![arrays, objects]
+        })
+    }
+
+    /// Добавляет к случайной рекурсивной части фиксированные свидетели для
+    /// границ чисел и всех контейнерных форм. Поэтому каждый прогон проверяет
+    /// синтетический объект с массивами, объектами и вложенной структурой.
+    ///
+    /// Оболочка не подчиняется пределам [`recursive_json_value`]: у корня
+    /// девять фиксированных полей, а случайная часть лежит под ключом
+    /// `level-2` внутри цепочки `nested` → `level-1` → объект, то есть на три
+    /// уровня контейнеров глубже корня. Поэтому полный документ может быть
+    /// глубже и крупнее рекурсивной части.
+    fn canonical_json_value() -> impl Strategy<Value = Value> {
+        let string = prop::collection::vec(any::<char>(), 0..=MAX_GENERATED_STRING_CHARS)
+            .prop_map(String::from_iter);
+
+        (recursive_json_value(), any::<bool>(), string).prop_map(
+            |(payload, boolean, generated_string)| {
+                let mut root = serde_json::Map::new();
+                root.insert("boolean".into(), Value::Bool(boolean));
+                root.insert("empty-array".into(), Value::Array(Vec::new()));
+                root.insert("empty-object".into(), Value::Object(serde_json::Map::new()));
+                root.insert(
+                    "integer-boundaries".into(),
+                    Value::Array(vec![
+                        Value::Number(i64::MIN.into()),
+                        Value::Number((-1_i64).into()),
+                        Value::Number(0_i64.into()),
+                        Value::Number(1_i64.into()),
+                        Value::Number(i64::MAX.into()),
+                        Value::Number(u64::MAX.into()),
+                    ]),
+                );
+                root.insert(
+                    "nonempty-array".into(),
+                    Value::Array(vec![Value::Bool(boolean)]),
+                );
+
+                let mut nonempty_object = serde_json::Map::new();
+                nonempty_object.insert("value".into(), Value::Bool(boolean));
+                root.insert("nonempty-object".into(), Value::Object(nonempty_object));
+
+                let nested_object = serde_json::Map::from_iter([("level-2".into(), payload)]);
+                let nested_array = Value::Array(vec![Value::Object(nested_object)]);
+                let mut nested_root = serde_json::Map::new();
+                nested_root.insert("level-1".into(), nested_array);
+                root.insert("nested".into(), Value::Object(nested_root));
+
+                root.insert("unicode-string".into(), Value::String(generated_string));
+                root.insert(
+                    "string-escapes".into(),
+                    Value::String("日本語 \"引用\" \\\\ / \0\u{0008}\t\n\r\u{001f}".into()),
+                );
+
+                Value::Object(root)
+            },
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: PROPERTY_CASES,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn canonical_json_semantic_roundtrip(value in canonical_json_value()) {
+            let rendered = render_canonical_bytes(&value).expect("сериализация");
+            let parsed = serde_json::from_slice::<Value>(&rendered).expect("разбор JSON");
+
+            prop_assert_eq!(parsed, value);
+        }
+
+        #[test]
+        fn canonical_json_renderer_output_is_recognized(value in canonical_json_value()) {
+            let rendered = render_canonical_bytes(&value).expect("сериализация");
+
+            prop_assert!(is_canonical_bytes(&rendered));
+        }
+
+        #[test]
+        fn canonical_json_serialization_is_byte_stable(value in canonical_json_value()) {
+            let rendered = render_canonical_bytes(&value).expect("первая сериализация");
+            let parsed = serde_json::from_slice::<Value>(&rendered).expect("разбор JSON");
+            let rerendered = render_canonical_bytes(&parsed).expect("повторная сериализация");
+
+            prop_assert_eq!(rerendered, rendered);
+        }
+
+        #[test]
+        fn canonical_json_boundaries_reject_trailing_line_feed(value in canonical_json_value()) {
+            let rendered = render_canonical_bytes(&value).expect("сериализация");
+
+            prop_assert!(!rendered.ends_with(b"\n"));
+
+            let mut with_line_feed = rendered;
+            with_line_feed.push(b'\n');
+            prop_assert!(!is_canonical_bytes(&with_line_feed));
+        }
+    }
 
     #[test]
     fn canonical_render_reproduces_repository_layout() {
@@ -362,13 +504,13 @@ mod tests {
         assert!(is_canonical_bytes(CANONICAL.as_bytes()));
 
         let value: Value = serde_json::from_str(CANONICAL).expect("JSON");
-        let compact = serde_json::to_string(&value).expect("compact");
+        let compact = serde_json::to_string(&value).expect("компактная сериализация");
 
         for variant in [
             compact,
             format!("{CANONICAL}\n"),
             CANONICAL.replace('\n', "\r\n"),
-            serde_json::to_string_pretty(&value).expect("pretty"),
+            serde_json::to_string_pretty(&value).expect("форматированная сериализация"),
         ] {
             assert!(
                 !is_canonical_bytes(variant.as_bytes()),
