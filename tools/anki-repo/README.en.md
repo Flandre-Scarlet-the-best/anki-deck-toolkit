@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: ed29db6d5d1af7e203ea0fa420abb747d282ad1d -->
+<!-- i18n-source-git-blob: 88612726216da50dfe4537eebe48750b5b0f4ea6 -->
 
 `anki-repo` is a toolkit for deterministic analysis of CrowdAnki exports and strictly constrained edits to their contents in the `Anki-decks` repository. It gives agents fast, predictable access to the structure of `deck.json` without requiring them to read a multi-megabyte JSON file manually.
 
@@ -21,11 +21,23 @@ The `inspect`, `find`, `stats`, `validate`, `qa`, `review`, `review-check`, and 
 
 Separately from these four commands, `migrate-layout --apply` migrates the directory layout: it moves export directories from the legacy structure to the flat `decks/output/` layout, removes the layout's placeholder files, and deletes byte-identical source directories. Export contents are unchanged: `deck.json`, `media/`, and identities are moved byte for byte, with SHA-256 verification of every export before and after. This is a layout migration, not an edit to the export.
 
-The toolkit does not physically delete notes: an obsolete note is marked with a tag and is removed by a person in Anki. No command creates or deletes decks, models, fields, or configurations, moves entities inside an export, or changes their identities (`guid`, `note_model_uuid`, `crowdanki_uuid`, `deck_config_uuid`). Mutating commands default to dry-run; writing requires explicit `--apply`. `create` can place only verified files authorized for the exact domain and field. `migrate-media` materializes a canonical file and removes its old counterpart only after proving the migration. The toolkit does not offer unrestricted writing to `media/`; `migrate-layout` moves the complete `media/` directory without altering its bytes.
+The toolkit does not physically delete notes: an obsolete note is marked with a tag and is removed by a person in Anki. No local export-editing command creates or deletes decks, models, fields, or configurations, moves entities inside an export, or changes their identities (`guid`, `note_model_uuid`, `crowdanki_uuid`, `deck_config_uuid`). Mutating commands default to dry-run; writing requires explicit `--apply`. `create` can place only verified files authorized for the exact domain and field. `migrate-media` materializes a canonical file and removes its old counterpart only after proving the migration. The toolkit does not offer unrestricted writing to `media/`; `migrate-layout` moves the complete `media/` directory without altering its bytes.
 
-`qa`, `review`, and `review-check` form an external card-content review pipeline: the tool deterministically identifies issues, packages compact evidence, accepts structured suggestions from an external agent, and converts them into a ready-to-use `edit` request. The tool itself **never calls an LLM API** or makes any network request: the external agent interprets content, while `anki-repo` remains the repository's deterministic boundary.
+`qa`, `review`, and `review-check` form an external card-content review pipeline: the tool deterministically identifies issues, packages compact evidence, accepts structured suggestions from an external agent, and converts them into a ready-to-use `edit` request. These commands **never call an LLM API** or make any network request: the external agent interprets content, while `anki-repo` remains the repository's deterministic boundary.
 
 The “create and verify” workflow uses `models` to obtain the actual note-model field schema and evidence about field semantics, `create` to add a note under that schema, `retire` to tag obsolete notes, and `visual-report` to produce a static offline before/after report with card previews rendered from the real model templates. For migrated references, the narrowly scoped `migrate-media` first proves the identifier-to-legacy-filename match, inventories consumers, and then updates only proven references.
+
+The separate `anki-repo anki` group manages Anki Desktop: `doctor`, `setup`,
+`patch install/status/repair/remove`, `restore`, `launch/stop/restart`, `export/import`,
+and `job`. WSL selects the installed Windows Anki; ordinary Linux selects Linux
+Anki. Ambiguous installations require explicit `--executable`/`--data-dir`.
+Diagnostics report the actual target platform, executable, version, data root,
+and profile. Add-on setup uses official packages and Anki's native interactive
+installer. Namespaced actions extend the existing AnkiConnect and invoke the
+original CrowdAnki; readiness requires real operations after loading. This is a
+separate network adapter: local export commands remain offline and `decks/input/`
+stays protected. See the [Desktop integration contract](desktop.md) for compatibility,
+backups, cancellation, and restart limits.
 
 ## Purpose
 
@@ -45,7 +57,7 @@ The “create and verify” workflow uses `models` to obtain the actual note-mod
 - **Linux only.** Verified reads depend on the Linux-only `asset-store` library, which does not build on other platforms.
 - Rust toolchain using edition 2024. The minimum supported Rust version (MSRV) is declared once, in `[workspace.package] rust-version` of the root `Cargo.toml`. Workspace members inherit it (`edition.workspace = true`, `rust-version.workspace = true`), so `tools/anki-repo/Cargo.toml` does not duplicate the version. Verified using stable `rustc`/`cargo` and the declared MSRV.
 - The root Cargo workspace (`/Cargo.toml`, containing `tools/anki-repo`) is the sole build entry point; `Cargo.lock` also resides at the repository root. Build and test from the root, not the package directory.
-- No external services or networking: export operations use local files only, and no command calls LLM APIs or any other external service. The sole system-service interaction is the `maintenance` group: following an explicit user command or consent, it manages the user timer (`systemd --user`) of the `repository-maintenance` package and stores the user's choice in a private file. It neither reads nor changes an export.
+- Local export operations use local files only. No command calls LLM APIs. The separate `anki` adapter contacts local AnkiConnect and downloads official add-ons from AnkiWeb. The system-service interaction is the `maintenance` group: following an explicit user command or consent, it manages the user timer (`systemd --user`) of the `repository-maintenance` package and stores the user's choice in a private file. It neither reads nor changes an export.
 
 ## Build and run
 
@@ -1104,6 +1116,7 @@ In JSON mode note fields are an object whose keys follow the model's `ord` order
 | `6` | `validate` found any `ERROR`, including `invalid_json`, `root_not_deck`, or `schema_invalid`; `edit` rejected an export with `ERROR` or conflicting model definitions. Duplicate GUID (`duplicate_note_guid`) is an `ERROR`, so `edit` returns 6 rather than 5: source validation precedes target resolution. `review-check` identifies `export_invalid` / `export_not_mutable` and returns 6 instead of report outcome, emitting no request. |
 | `7` | Preconditions conflict: `edit`'s `expected` or `deck.json` version changed, or `review-check` found stale proposals |
 | `8` | Failed to write or publish operation output (`write_failed`) |
+| `9` | An external program, API, or environment could not complete the operation (`external_failure`) |
 | `70` | Unexpected internal error, including edit-invariant failure or output-write failure (disk full, bad descriptor) |
 
 A reader closing a pipe (`anki-repo … | head`) is not an internal error: the command result was already computed and its own exit code is preserved.
@@ -1130,6 +1143,7 @@ Domain `error.code` values and corresponding exit codes are listed below. `valid
 | `expected_mismatch` | 7 | `edit`: current field value did not match `expected` |
 | `source_changed` | 7 | `edit`: `deck.json` changed or vanished between checking and replacement. `migrate-layout`: after-move content fingerprint differs from proven source, including cross-filesystem copies |
 | `write_failed` | 8 | Writing/publishing result, including `deck.json`, or configuring system maintenance failed |
+| `external_failure` | 9 | An external program, API, or environment could not complete the operation; `details.reason` identifies the cause |
 | `not_found` | 4 | `find` / `review --guid`: no matches |
 | `note_not_found` | 4 | `edit`: target `guid` absent; for `review-check`, proposal problem, not domain error |
 | `ambiguous` | 5 | `find --guid`/`review --guid`: ambiguous GUID; for `edit`/`review-check` this is unreachable as an *exit code* because duplicate GUID is earlier rejected as `export_invalid` (6), though `review-check` proposals may show `invalid`/`ambiguous_guid` |
@@ -1187,7 +1201,7 @@ There is one explicit exception: `create` without a supplied `guid`. Generated G
 - Field names are never hardcoded: the caller supplies `--field`, resolved against `note_models[].flds[].name`. Removed `--word` and `duplicate_primary_field` do not return.
 - `--deck` expects the exact path constructed from deck-node `name` values.
 - No semantic evaluation of Japanese content or cross-deck comparison. `qa` detects only enumerated structural/formatting issues; an external agent judges linguistic content.
-- No LLM or network calls. `qa`/`review`/`review-check` stops at the repository boundary: an external agent brings proposals, and `anki-repo` validates them and supplies an `edit` request.
+- Local export operations make no LLM or network calls. `qa`/`review`/`review-check` stops at the repository boundary: an external agent brings proposals, and `anki-repo` validates them and supplies an `edit` request.
 - Proposals can only express edits understood by `edit`: changes to existing field values of existing notes. `qa`/`review` do not propose creating, deleting, or renaming entities; `review-check` cannot accept such operations.
 - Report truncation (per-code finding limits, review pages, edit/note limits, outcomes, preview files) is always explicit: counters cover all data, and text explains omitted material in both human and JSON modes.
 - No mutating command expresses “delete”: `create` adds notes, `retire` appends a tag. A note missing from JSON is classified `removed` in `visual-report`, without requiring physical deletion.

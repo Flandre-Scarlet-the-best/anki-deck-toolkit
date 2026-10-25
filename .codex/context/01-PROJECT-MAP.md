@@ -35,6 +35,11 @@ tools/
 
 ## Владельцы
 
+- `tools/anki-repo/desktop.md` — Rust-адаптер Anki Desktop: Windows Anki под WSL,
+  Linux Anki на обычном Linux, явный выбор неоднозначной установки, AnkiConnect
+  bootstrap и оригинальные CrowdAnki import/export. Не владеет ревизиями или
+  публикацией `decks/input/`.
+
 - `decks/` — игнорируемый Git корень пользовательских данных: `decks/input/` — закрытая
   область будущего доверенного экспортера, которую агент не читает и не изменяет;
   `decks/output/` — плоский список рабочих локальных колод;

@@ -53,7 +53,7 @@ pub enum MatchArg {
 #[command(
     name = "anki-repo",
     version,
-    about = "Анализ CrowdAnki: inspect, find, stats, validate, qa, review, review-check, edit, models, create, retire, migrate-media, migrate-layout, visual-report, maintenance",
+    about = "Анализ CrowdAnki: inspect, find, stats, validate, qa, review, review-check, edit, models, create, retire, migrate-media, migrate-layout, visual-report, maintenance, anki",
     long_about = "Анализ, проверка и ограниченные изменения одного CrowdAnki-экспорта.\n\
                   inspect, find, stats, validate, qa, review, review-check, models,\n\
                   visual-report формирует отдельный отчёт.\n\
@@ -72,8 +72,9 @@ pub enum MatchArg {
                   правилами домена. migrate-media меняет deck.json, размещает проверенный\n\
                   канонический файл и удаляет legacy-файл только после доказательства\n\
                   пары identity—имя и проверки всех потребителей.\n\
-                  Схему полей показывает models. Инструменты не вызывают LLM API и\n\
-                  не ходят в сеть.",
+                  Схему полей показывает models. Ни одна команда не вызывает LLM API;\n\
+                  команды локального экспорта не ходят в сеть. Группа anki отдельно\n\
+                  управляет Desktop через локальный API AnkiConnect и AnkiWeb.",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -90,6 +91,7 @@ impl Cli {
     /// Стабильное имя выбранной команды для JSON envelope.
     pub const fn command_name(&self) -> &'static str {
         match &self.command {
+            Command::Anki { .. } => "anki",
             Command::Inspect { .. } => "inspect",
             Command::Maintenance { .. } => "maintenance",
             Command::Find { .. } => "find",
@@ -112,6 +114,11 @@ impl Cli {
 /// Поддерживаемые команды.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Диагностика и управляемая интеграция Anki Desktop (использует сеть).
+    Anki {
+        #[command(flatten)]
+        options: crate::desktop::Options,
+    },
     /// Настройка и диагностика автоматической очистки (не меняет карточки).
     Maintenance {
         #[command(subcommand)]

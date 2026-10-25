@@ -228,6 +228,9 @@ fn command_paths(command: &Command) -> Vec<(&'static str, &Path)> {
     let mut paths: Vec<(&'static str, &Path)> = Vec::new();
 
     match command {
+        Command::Anki { options } => {
+            paths.extend(options.paths());
+        }
         Command::Maintenance { workspace_root, .. } => {
             paths.extend(
                 workspace_root

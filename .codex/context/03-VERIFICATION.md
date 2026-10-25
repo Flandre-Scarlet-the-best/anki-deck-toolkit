@@ -1,5 +1,12 @@
 # Проверка изменений CrowdAnki JSON
 
+Для адаптера Desktop синтетические Rust-контракты находятся в модуле `desktop`,
+а Python-контракты payload — в `.github/scripts/test_desktop_bridge.py` и входят
+в обычный `unittest discover` CI. Они не читают пользовательские колоды и не
+подтверждают живую загрузку аддонов. Контракт диагностики и отдельной фактической
+приёмки — `tools/anki-repo/desktop.md`; процедуру живых прогонов определяет
+`anki-live-testing`.
+
 ## Автоматическая проверка toolkit'ом
 
 Toolkit `tools/anki-repo` покрывает большую часть минимума ниже и позволяет не

@@ -61,5 +61,6 @@ pub mod template;
 pub mod text;
 pub mod write;
 
+pub mod desktop;
 #[cfg(test)]
 pub(crate) mod test_support;

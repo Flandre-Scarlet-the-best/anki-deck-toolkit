@@ -78,6 +78,8 @@ pub enum ErrorCode {
     SourceChanged,
     /// Не удалось записать/опубликовать результат или настроить системное обслуживание.
     WriteFailed,
+    /// Внешняя программа, API или окружение не выполнили операцию.
+    ExternalFailure,
     /// Непредвиденный внутренний сбой.
     Internal,
 }
@@ -118,6 +120,7 @@ impl ErrorCode {
             Self::ExpectedMismatch => "expected_mismatch",
             Self::SourceChanged => "source_changed",
             Self::WriteFailed => "write_failed",
+            Self::ExternalFailure => "external_failure",
             Self::Internal => "internal_error",
         }
     }
@@ -153,6 +156,7 @@ impl ErrorCode {
             | Self::GuidConflict => 6,
             Self::ExpectedMismatch | Self::SourceChanged => 7,
             Self::WriteFailed => 8,
+            Self::ExternalFailure => 9,
             Self::Internal => 70,
         }
     }
@@ -233,6 +237,7 @@ mod tests {
         assert_eq!(ErrorCode::UnknownDeck.exit_code(), 3);
         assert_eq!(ErrorCode::NotFound.exit_code(), 4);
         assert_eq!(ErrorCode::Ambiguous.exit_code(), 5);
+        assert_eq!(ErrorCode::ExternalFailure.exit_code(), 9);
         assert_eq!(ErrorCode::Internal.exit_code(), 70);
     }
 
@@ -262,6 +267,7 @@ mod tests {
         assert_eq!(ErrorCode::ExpectedMismatch.as_str(), "expected_mismatch");
         assert_eq!(ErrorCode::SourceChanged.as_str(), "source_changed");
         assert_eq!(ErrorCode::WriteFailed.as_str(), "write_failed");
+        assert_eq!(ErrorCode::ExternalFailure.as_str(), "external_failure");
     }
 
     /// Семантика кодов завершения, которую обязан документировать `tools/anki-repo/README.md`.
@@ -329,6 +335,7 @@ mod tests {
             ErrorCode::ExpectedMismatch,
             ErrorCode::SourceChanged,
             ErrorCode::WriteFailed,
+            ErrorCode::ExternalFailure,
             ErrorCode::Internal,
         ];
         for code in codes {

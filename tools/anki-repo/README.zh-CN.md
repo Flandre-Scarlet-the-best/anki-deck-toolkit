@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: ed29db6d5d1af7e203ea0fa420abb747d282ad1d -->
+<!-- i18n-source-git-blob: 88612726216da50dfe4537eebe48750b5b0f4ea6 -->
 
 `anki-repo` 是一套用于确定性分析 CrowdAnki 导出数据、并对其内容实施严格受限修改的工具。它使智能体能够快速、可预测地了解 `deck.json` 的结构，而无需人工通读数 MB 的 JSON 文件。
 
@@ -21,11 +21,21 @@
 
 除了这四条命令，`migrate-layout --apply` 还可以迁移目录布局：将旧布局中的导出目录移动到扁平的 `decks/output/`，清理旧布局的占位文件，并删除内容逐字节相同的源目录。导出内容本身不变：`deck.json`、`media/` 和各项身份标识均逐字节迁移，每份导出在迁移前后都通过 SHA-256 证明内容一致。这是布局迁移，不是修改导出数据。
 
-工具集不提供物理删除笔记的功能：应停用的笔记只会被打标签，实际删除由使用者在 Anki 中完成。任何命令都不会创建或删除牌组、笔记类型、字段及配置，不会在导出数据内部移动实体，也不会修改身份标识（`guid`、`note_model_uuid`、`crowdanki_uuid`、`deck_config_uuid`）。修改命令默认使用 dry-run，只有显式传入 `--apply` 才能写入。`create` 只能放置被特定资源域和字段规则授权的已验证文件。`migrate-media` 仅在迁移得到证实后放置规范文件并删除对应旧文件。工具集没有任意写入 `media/` 的接口；`migrate-layout` 会整体移动 `media/`，不改变其字节。
+工具集不提供物理删除笔记的功能：应停用的笔记只会被打标签，实际删除由使用者在 Anki 中完成。任何本地导出编辑命令都不会创建或删除牌组、笔记类型、字段及配置，不会在导出数据内部移动实体，也不会修改身份标识（`guid`、`note_model_uuid`、`crowdanki_uuid`、`deck_config_uuid`）。修改命令默认使用 dry-run，只有显式传入 `--apply` 才能写入。`create` 只能放置被特定资源域和字段规则授权的已验证文件。`migrate-media` 仅在迁移得到证实后放置规范文件并删除对应旧文件。工具集没有任意写入 `media/` 的接口；`migrate-layout` 会整体移动 `media/`，不改变其字节。
 
-`qa`、`review`、`review-check` 组成外部卡片内容审阅流程：工具以确定性的方式发现问题，提供简明证据包，接收外部智能体的结构化建议，再生成可交给 `edit` 的请求。工具本身**不调用任何 LLM API**，也不进行网络请求；内容判断由外部智能体承担，`anki-repo` 负责守住仓库的确定性边界。
+`qa`、`review`、`review-check` 组成外部卡片内容审阅流程：工具以确定性的方式发现问题，提供简明证据包，接收外部智能体的结构化建议，再生成可交给 `edit` 的请求。这些命令**不调用任何 LLM API**，也不进行网络请求；内容判断由外部智能体承担，`anki-repo` 负责守住仓库的确定性边界。
 
 “创建并验证”流程中，`models` 提供实际字段结构及字段语义的证据，`create` 按该结构添加笔记，`retire` 标记过时笔记，`visual-report` 根据实际笔记类型模板生成两个导出状态之间的静态离线对比报告及卡片预览。对于需要迁移的引用，专用的 `migrate-media` 会先证明身份标识与旧文件名的匹配关系、盘点引用者，再仅修改已证实的引用。
+
+独立的 `anki-repo anki` 命令组管理 Anki Desktop：`doctor`、`setup`、
+`patch install/status/repair/remove`、`restore`、`launch/stop/restart`、`export/import`
+及 `job`。在 WSL 中选择已安装的 Windows Anki；普通 Linux 环境选择 Linux Anki。
+安装不明确时必须显式指定 `--executable`/`--data-dir`。诊断显示实际目标平台、
+可执行文件、版本、数据根目录和配置档案。插件安装使用官方软件包和 Anki 原生交互式
+安装程序。命名空间 actions 扩展现有 AnkiConnect 并调用原始 CrowdAnki；只有加载后
+执行真实操作才能确认就绪。这是单独的网络适配器：本地导出命令仍为离线操作，
+`decks/input/` 仍受保护。兼容性、备份、取消和重启限制见
+[Desktop 集成契约](desktop.md)。
 
 ## 用途
 
@@ -45,7 +55,7 @@
 - **仅支持 Linux。** 经过验证的读取逻辑依赖仅支持 Linux 的 `asset-store` 库，该库无法在其他平台编译。
 - Rust 工具链使用 2024 edition。最低支持版本（MSRV）只在根目录 `Cargo.toml` 的 `[workspace.package] rust-version` 声明一次。工作区成员继承设置（`edition.workspace = true`、`rust-version.workspace = true`），因此 `tools/anki-repo/Cargo.toml` 不重复声明版本。已使用稳定版 `rustc`/`cargo` 和声明的 MSRV 验证。
 - 唯一的构建入口是根目录 Cargo 工作区（`/Cargo.toml`，包含成员 `tools/anki-repo`）；`Cargo.lock` 也位于仓库根目录。应从根目录构建与测试，而不是从软件包子目录执行。
-- 不依赖外部服务和网络：处理导出数据仅使用本地文件，任何命令均不调用 LLM API 或其他外部服务。与系统服务的唯一交互来自 `maintenance` 命令组：用户明确执行命令或同意后，管理 `repository-maintenance` 的用户 `systemd --user` 定时器，并将偏好保存在私有文件中。它既不读取也不修改导出数据。
+- 本地导出操作不依赖外部服务和网络：处理导出数据仅使用本地文件，任何命令均不调用 LLM API。独立的 `anki` 适配器连接本机 AnkiConnect 并从 AnkiWeb 下载官方插件。系统服务交互来自 `maintenance` 命令组：用户明确执行命令或同意后，管理 `repository-maintenance` 的用户 `systemd --user` 定时器，并将偏好保存在私有文件中。它既不读取也不修改导出数据。
 
 ## 构建与运行
 
@@ -1104,6 +1114,7 @@ JSON 模式下，笔记字段以对象表示，键按类型的 `ord` 顺序排�
 | `6` | `validate` 发现至少一个 `ERROR`，包括 `invalid_json`、`root_not_deck`、`schema_invalid`；`edit` 因导出含 `ERROR` 或类型定义歧义而拒绝。重复 GUID（`duplicate_note_guid`）属于 `ERROR`，所以 `edit` 返回 6 而不是 5，因为先验证源文件，再定位目标。`review-check` 会标记 `export_invalid` / `export_not_mutable` 并返回 6，不生成请求。 |
 | `7` | 前置条件冲突：`edit` 的 `expected` 或 `deck.json` 版本已变，或 `review-check` 发现过期建议 |
 | `8` | 操作结果写入或发布失败（`write_failed`） |
+| `9` | 外部程序、API 或运行环境未能完成操作（`external_failure`） |
 | `70` | 意外的内部错误，包括编辑不变量失败或写入命令输出失败（磁盘空间不足、文件描述符异常） |
 
 读取端提前关闭管道（例如 `anki-repo … | head`）不算内部错误：命令已经计算完结果，因此保留命令自身的退出码。
@@ -1130,6 +1141,7 @@ JSON 模式下，笔记字段以对象表示，键按类型的 `ord` 顺序排�
 | `expected_mismatch` | 7 | `edit` 当前值不等于 `expected` |
 | `source_changed` | 7 | `edit` 的 `deck.json` 在检查与替换之间变化或消失；`migrate-layout` 迁移后内容指纹与源不一致，包括跨文件系统复制 |
 | `write_failed` | 8 | 无法写入/发布结果（包括 `deck.json`）或设置系统维护 |
+| `external_failure` | 9 | 外部程序、API 或运行环境未能完成操作；`details.reason` 标识具体原因 |
 | `not_found` | 4 | `find`、`review --guid` 没有匹配 |
 | `note_not_found` | 4 | `edit` 中指定的 GUID 不存在；对于 `review-check` 则只是建议问题代码，不是领域错误 |
 | `ambiguous` | 5 | `find --guid`、`review --guid` 中 GUID 不唯一。对 `edit`、`review-check` 来说，因重复 GUID 会先以 `export_invalid`（6）拒绝，这不可能成为其直接**退出码**；报告中仍可能出现 `invalid`/`ambiguous_guid` |
@@ -1187,7 +1199,7 @@ JSON 模式下，笔记字段以对象表示，键按类型的 `ord` 顺序排�
 - 工具集不硬编码特定笔记类型的字段名：调用者使用 `--field` 提供字段，并对照实际 `note_models[].flds[].name` 验证。已删除的 `--word` 与 `duplicate_primary_field` 不会恢复。
 - `--deck` 要求使用由各牌组节点 `name` 构成的准确路径。
 - 不检查日语内容的语义，不比较不同牌组。`qa` 只识别列出的结构与格式问题，语言内容由外部智能体判断。
-- 不调用 LLM 或网络。`qa`/`review`/`review-check` 在仓库边界停止：外部智能体提供建议，`anki-repo` 验证并提供可供 `edit` 使用的请求。
+- 本地导出操作不调用 LLM 或网络。`qa`/`review`/`review-check` 在仓库边界停止：外部智能体提供建议，`anki-repo` 验证并提供可供 `edit` 使用的请求。
 - 建议只允许表达 `edit` 支持的操作：修改已有笔记已有字段的值。`qa`/`review` 不提出实体创建、删除或重命名，`review-check` 也不接受这些操作。
 - 报告截断（各代码的问题上限、`review` 页大小、编辑或笔记限制、结果项与预览文件上限）始终明确标识：计数器涵盖完整数据，文字会说明人类可读模式和 JSON 模式中省略的内容。
 - 修改命令中没有“删除笔记”操作：`create` 只能添加，`retire` 只能追加标签。JSON 中消失的笔记在 `visual-report` 中被标为 `removed`，并不要求物理删除。

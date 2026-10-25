@@ -68,6 +68,18 @@ pub fn execute(cli: &Cli) -> Result<Rendered, DomainError> {
     crate::layout::guard_command(&cli.command)?;
 
     match &cli.command {
+        Command::Anki { options } => {
+            let result = crate::desktop::execute(options)?;
+            Ok(Rendered {
+                command: "anki",
+                stdout: if cli.json {
+                    json::generic_json("anki", &result)
+                } else {
+                    crate::desktop::render_text(&result)
+                },
+                exit: crate::desktop::exit_code(options, &result),
+            })
+        }
         Command::Maintenance {
             action,
             workspace_root,
