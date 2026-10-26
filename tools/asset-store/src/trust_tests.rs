@@ -154,6 +154,33 @@ fn approval_requires_current_automated_evidence_and_new_does_not_hide_its_absenc
 }
 
 #[test]
+fn current_validation_policy_rechecks_human_approved_stale_records() {
+    let fixture = Fixture::new();
+    fixture.ingest(&png(37), None);
+    let mut record = fixture.classify(SemanticStatus::Verified);
+    let expected = Classifier(SemanticStatus::Verified).identity();
+    let stale_validator = ValidatorIdentity::new("trust-fixture", "2").unwrap();
+    record.validation.as_mut().unwrap().validator = stale_validator;
+    record.human_attestation = Some(HumanAttestation {
+        identity: record.identity.clone(),
+        content_sha256: record.sha256.clone(),
+        decision: HumanDecision::Approve,
+        reason: "проверено человеком".into(),
+    });
+
+    let current_validation = crate::domain::TrustSemantics::HUMAN_WITH_CURRENT_VALIDATION;
+    assert!(!current_validation.confers_trust(&record, &expected));
+    assert!(current_validation.requires_new_validation(&record, &expected));
+    assert!(
+        !crate::domain::TrustSemantics::HUMAN_ATTESTED.requires_new_validation(&record, &expected)
+    );
+
+    record.validation.as_mut().unwrap().validator = expected.clone();
+    assert!(current_validation.confers_trust(&record, &expected));
+    assert!(!current_validation.requires_new_validation(&record, &expected));
+}
+
+#[test]
 fn malformed_approval_without_validation_is_rejected_by_manifest_and_read() {
     let fixture = Fixture::new();
     fixture.ingest(&png(36), None);

@@ -80,6 +80,7 @@ pub enum DetectedFormat {
     Bmp,
     Tiff,
     Unknown,
+    Mp3,
 }
 
 impl DetectedFormat {
@@ -97,6 +98,10 @@ impl DetectedFormat {
             Self::Bmp
         } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
             Self::Tiff
+        } else if bytes.starts_with(b"ID3")
+            || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe6 == 0xe2)
+        {
+            Self::Mp3
         } else {
             Self::Unknown
         }

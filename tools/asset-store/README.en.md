@@ -2,9 +2,15 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 1189916027fd5186a7217c11659e513d56c38014 -->
+<!-- i18n-source-git-blob: df5a5b2d7a9896b8caab98789b72fc450e6528b4 -->
 
 `asset-store` is the shared Rust library for program-managed assets, responsible for manifests, checksums, integrity, and lifecycle. The domain-specific `kanji-assets` CLI provides Yarxi entry discovery, kanji image validation, and publication of approved files to the canonical corpus. The tool does not read `decks/**/media/`, does not modify `media_files`, and does not copy images into decks.
+
+The independent `pronunciation_audio` domain and `pronunciation-assets` CLI import local
+Japanese MP3 pronunciations, retain technical validation, and require explicit human approval.
+See the full [Japanese MP3 contract](pronunciation.md) for commands and limits. The
+`.asset-store/pronunciation-audio/` corpus is separate from images; deck integration is not
+enabled yet.
 
 ## Data locations
 

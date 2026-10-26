@@ -1577,6 +1577,7 @@ fn review_format(format: DetectedFormat) -> &'static str {
         DetectedFormat::Bmp => "BMP",
         DetectedFormat::Tiff => "TIFF",
         DetectedFormat::Unknown => "неизвестный",
+        DetectedFormat::Mp3 => "MP3",
     }
 }
 

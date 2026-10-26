@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 88612726216da50dfe4537eebe48750b5b0f4ea6 -->
+<!-- i18n-source-git-blob: 0d2e43aa4d38bf51cdfbe66b9e6b117d86b57620 -->
 
 `anki-repo` 是一套用于确定性分析 CrowdAnki 导出数据、并对其内容实施严格受限修改的工具。它使智能体能够快速、可预测地了解 `deck.json` 的结构，而无需人工通读数 MB 的 JSON 文件。
 
@@ -36,6 +36,11 @@
 执行真实操作才能确认就绪。这是单独的网络适配器：本地导出命令仍为离线操作，
 `decks/input/` 仍受保护。兼容性、备份、取消和重启限制见
 [Desktop 集成契约](desktop.md)。
+
+独立的 `pronunciation_audio` 域提供本地 MP3 资源和只读
+`asset_store::pronunciation::read_trusted` API；`create` 和 `migrate-media` 目前尚不处理该域。
+它既要求 MP3 技术验证，也要求人工明确确认 surface/reading；解码不能证明发音。完整契约见
+[asset-store](../asset-store/pronunciation.md)。
 
 ## 用途
 

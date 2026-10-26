@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 88612726216da50dfe4537eebe48750b5b0f4ea6 -->
+<!-- i18n-source-git-blob: 0d2e43aa4d38bf51cdfbe66b9e6b117d86b57620 -->
 
 `anki-repo` is a toolkit for deterministic analysis of CrowdAnki exports and strictly constrained edits to their contents in the `Anki-decks` repository. It gives agents fast, predictable access to the structure of `deck.json` without requiring them to read a multi-megabyte JSON file manually.
 
@@ -38,6 +38,12 @@ original CrowdAnki; readiness requires real operations after loading. This is a
 separate network adapter: local export commands remain offline and `decks/input/`
 stays protected. See the [Desktop integration contract](desktop.md) for compatibility,
 backups, cancellation, and restart limits.
+
+The independent `pronunciation_audio` domain provides local MP3 assets and the read-only
+`asset_store::pronunciation::read_trusted` API, but `create` and `migrate-media` do not yet
+handle this domain. It requires both technical MP3 validation and explicit human approval of
+surface/reading; decoding does not prove pronunciation. The contract belongs to
+[asset-store](../asset-store/pronunciation.md).
 
 ## Purpose
 

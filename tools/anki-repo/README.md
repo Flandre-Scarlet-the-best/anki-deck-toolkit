@@ -76,6 +76,12 @@ CrowdAnki; готовность требует настоящих операци
 Полный контракт, ограничения совместимости, backup, отмена и перезапуск —
 [интеграция Desktop](desktop.md).
 
+Независимый домен `pronunciation_audio` уже предоставляет локальные MP3 и read-only
+`asset_store::pronunciation::read_trusted`, но `create` и `migrate-media` пока не обрабатывают
+аудиодомен. Он требует вместе техническую проверку MP3 и точное подтверждение surface/reading
+человеком; декодирование не доказывает чтение. Контракт принадлежит
+[asset-store](../asset-store/pronunciation.md).
+
 ## Зачем
 
 - Один вызов вместо ручного `jq`/скрипта: `inspect`, `find`, `stats`, `validate`,

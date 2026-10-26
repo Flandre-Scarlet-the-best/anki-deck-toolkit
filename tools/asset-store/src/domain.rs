@@ -11,7 +11,7 @@ use crate::model::{AssetIdentity, AssetRecord, DetectedFormat, ValidatorIdentity
 ///
 /// Этот статический список используется общей политикой, чтобы она не могла
 /// принять идентификатор, закреплённый за одной из предметных политик.
-const PUBLISHABLE_DOMAIN_NAMESPACES: &[&str] = &["kanji", "pitch_accent"];
+const PUBLISHABLE_DOMAIN_NAMESPACES: &[&str] = &["kanji", "pitch_accent", "pronunciation_audio"];
 
 /// Внутреннее расположение ресурса и имя, которое получает конечный потребитель.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +31,7 @@ pub struct TrustSemantics {
     /// Может ли явное решение человека заменить актуальное автоматическое
     /// решение ожидаемого валидатора при определении доверия потребителя.
     human_attestation_confers_trust: bool,
+    human_requires_current_validation: bool,
     /// Считает ли домен `domain_metadata` и `provenance` частью семантики
     /// ресурса: их изменение при неизменных байтах требует явного CAS.
     metadata_change_requires_explicit_cas: bool,
@@ -41,6 +42,7 @@ impl TrustSemantics {
     /// либо явным решением человека по точным текущим байтам.
     pub const HUMAN_ATTESTED: Self = Self {
         human_attestation_confers_trust: true,
+        human_requires_current_validation: false,
         metadata_change_requires_explicit_cas: false,
     };
 
@@ -49,6 +51,14 @@ impl TrustSemantics {
     /// неизменных байтах считается семантическим изменением ресурса.
     pub const AUTOMATED_VERIFIED_ONLY: Self = Self {
         human_attestation_confers_trust: false,
+        human_requires_current_validation: false,
+        metadata_change_requires_explicit_cas: true,
+    };
+
+    /// Только явное одобрение и актуальная версия технической проверки вместе.
+    pub const HUMAN_WITH_CURRENT_VALIDATION: Self = Self {
+        human_attestation_confers_trust: true,
+        human_requires_current_validation: true,
         metadata_change_requires_explicit_cas: true,
     };
 
@@ -58,7 +68,10 @@ impl TrustSemantics {
         record: &AssetRecord,
         expected_validator: &ValidatorIdentity,
     ) -> bool {
-        if self.human_attestation_confers_trust {
+        if self.human_requires_current_validation {
+            record.has_complete_human_approval()
+                && record.has_current_automated_decision(expected_validator)
+        } else if self.human_attestation_confers_trust {
             record.is_trusted_for(expected_validator)
         } else {
             record.is_trusted_for_automated_validation(expected_validator)
@@ -71,8 +84,13 @@ impl TrustSemantics {
         record: &AssetRecord,
         expected_validator: &ValidatorIdentity,
     ) -> bool {
-        let already_decided = record.has_current_automated_decision(expected_validator)
-            || (self.human_attestation_confers_trust && record.has_complete_human_approval());
+        let automated = record.has_current_automated_decision(expected_validator);
+        let already_decided = if self.human_requires_current_validation {
+            automated
+        } else {
+            automated
+                || (self.human_attestation_confers_trust && record.has_complete_human_approval())
+        };
         !already_decided
     }
 
@@ -89,6 +107,33 @@ impl TrustSemantics {
 /// и миграции старых манифестов; новые записи всегда строятся через
 /// `canonical_location`.
 pub trait AssetDomainPolicy: std::fmt::Debug + Send + Sync {
+    /// Разрешает независимые записи с одним именем потребителя. Совместная
+    /// выдача таких записей всё равно отклоняется до первого результата.
+    fn allows_consumer_name_overlap(&self) -> bool {
+        false
+    }
+
+    /// Ключ сравнения имён на границе потребления.
+    fn consumer_name_key(&self, filename: &str) -> String {
+        filename.to_owned()
+    }
+
+    /// Дополнительные инварианты доменных свидетельств.
+    fn validate_record_evidence(&self, _record: &AssetRecord) -> Result<(), AssetError> {
+        Ok(())
+    }
+
+    /// Проверяет новое предоставление доверия перед публикацией `Verified`.
+    /// Исторические записи при чтении манифеста сюда не передаются.
+    fn validate_trust_grant(&self, _record: &AssetRecord) -> Result<(), AssetError> {
+        Ok(())
+    }
+
+    /// Полное декодирование перед одобрением и при чтении одобренных байтов.
+    fn validate_media_bytes(&self, bytes: &[u8]) -> Result<(), AssetError> {
+        crate::store::validate_image_decode(bytes)
+    }
+
     /// Стабильный идентификатор домена, сохраняемый вместе с хранилищем.
     fn domain_id(&self) -> &'static str;
 
@@ -148,6 +193,12 @@ pub trait AssetDomainPolicy: std::fmt::Debug + Send + Sync {
     /// идентичность без формата. Пустой список — формат не различается.
     fn format_preference(&self) -> &'static [DetectedFormat] {
         &[]
+    }
+
+    /// Предел входа ещё до сохранения кандидата. По умолчанию прежний
+    /// импорт кандидатов сохраняет своё поведение; домен может сузить вход.
+    fn max_import_bytes(&self) -> Option<u64> {
+        None
     }
 
     /// Доменный предел размера ресурса, если он установлен.
@@ -455,6 +506,7 @@ pub fn extension_for_format(format: DetectedFormat) -> &'static str {
         DetectedFormat::Bmp => "bmp",
         DetectedFormat::Tiff => "tiff",
         DetectedFormat::Unknown => "bin",
+        DetectedFormat::Mp3 => "mp3",
     }
 }
 

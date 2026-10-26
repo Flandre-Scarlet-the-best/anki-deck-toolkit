@@ -65,6 +65,11 @@ test = false
 path = "src/bin/pitch_assets.rs"
 
 [[bin]]
+name = "pronunciation-assets"
+test = false
+path = "src/bin/pronunciation_assets.rs"
+
+[[bin]]
 name = "build-kanjivg-reference"
 path = "src/bin/build_kanjivg_reference.rs"
 required-features = ["reference-generator"]

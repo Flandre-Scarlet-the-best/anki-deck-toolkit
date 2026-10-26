@@ -153,6 +153,40 @@ jobs:
       - name: Включить аннотации rustc
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
 
+      # Статическая LGPL-сборка BtbN, указанная на ffmpeg.org/download.html.
+      # Месячный выпуск хранится два года; дату, имя и SHA-256 обновлять вместе.
+      # Хеш взят из digest GitHub Release BtbN и проверяется даже из кэша.
+      - name: Восстановить архив FFmpeg
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        timeout-minutes: 2
+        with:
+          path: ${{ runner.temp }}/ffmpeg.tar.xz
+          key: ffmpeg-linux-x64-dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e
+
+      - name: Подготовить декодер синтетических MP3
+        timeout-minutes: 3
+        shell: bash
+        env:
+          FFMPEG_RELEASE: autobuild-2026-09-30-13-08
+          FFMPEG_ARCHIVE: ffmpeg-n8.1.3-9-g29e619e767-linux64-lgpl-8.1.tar.xz
+          FFMPEG_SHA256: dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e
+        run: |
+          archive="$RUNNER_TEMP/ffmpeg.tar.xz"
+          if [ ! -f "$archive" ]; then
+            curl --fail --location --retry 2 --retry-max-time 120 --connect-timeout 10 --max-time 60 \
+              "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$FFMPEG_ARCHIVE" \
+              -o "$archive"
+          fi
+          echo "$FFMPEG_SHA256  $archive" | sha256sum --check --strict
+          decoder="$RUNNER_TEMP/ffmpeg"
+          mkdir -p "$decoder"
+          tar -xJf "$archive" -C "$decoder" --strip-components=1 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
+          echo "$decoder/bin" >> "$GITHUB_PATH"
+          "$decoder/bin/ffmpeg" -version
+          "$decoder/bin/ffprobe" -version
+          # util-linux входит в образ исполнителя; отсутствие prlimit — явный отказ.
+          prlimit --version
+
       - name: Собрать и выполнить тесты
         # Шаг собирает тесты без дополнительных возможностей Cargo. `reference-generator`
         # включает resvg только для двух служебных исполняемых файлов генератора; тесты

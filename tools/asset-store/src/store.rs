@@ -834,6 +834,31 @@ impl AssetStore {
                 .or_default()
                 .push(record);
         }
+        // Проверка всего выбора до callback: потребитель не получает частичный
+        // набор, который затем невозможно безопасно разместить в одном media/.
+        if policy.allows_consumer_name_overlap() {
+            let mut names = BTreeMap::new();
+            for (identity, _) in requests {
+                // Ошибку отдельного запроса сообщает основной проход через `visit`.
+                if policy.validate_identity(identity).is_err() {
+                    continue;
+                }
+                if let Some(records) = by_identity.get(identity) {
+                    for record in records {
+                        let key = policy.consumer_name_key(&record.consumer_filename);
+                        if names
+                            .insert(key, identity)
+                            .is_some_and(|old| old != identity)
+                        {
+                            return Err(AssetError::new(
+                                ErrorCode::IdentityConflict,
+                                "выбранные ресурсы претендуют на эквивалентное имя потребителя",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         for (index, (identity, format)) in requests.iter().enumerate() {
             let read = (|| {
                 policy.validate_identity(identity)?;
@@ -913,7 +938,8 @@ impl AssetStore {
                     ));
                 }
                 if human_approved {
-                    validate_image_decode(&bytes)?;
+                    policy.validate_record_evidence(&record)?;
+                    policy.validate_media_bytes(&bytes)?;
                 }
                 Ok(VerifiedAssetBytes { record, bytes })
             })();
@@ -1040,6 +1066,16 @@ impl AssetStore {
         }
         let validator_id = validator.identity();
         validate_validator_identity(&validator_id)?;
+        if self
+            .policy
+            .max_import_bytes()
+            .is_some_and(|maximum| request.bytes.len() as u64 > maximum)
+        {
+            return Err(AssetError::new(
+                ErrorCode::InvalidTransition,
+                "ресурс превышает предел импорта домена",
+            ));
+        }
         let staged = stage_bytes(&self.root_handle, &request.bytes)?;
         let lock = self.lock_exclusive()?;
         let (mut manifest, mut runtime_manifest) = self.load_reconciled_state(None)?;
@@ -1210,6 +1246,7 @@ impl AssetStore {
             content_sha256: staged.sha256.clone(),
             evidence: decision.evidence.clone(),
         });
+        self.policy.validate_record_evidence(&record)?;
         let previous_canonical = manifest
             .assets
             .iter()
@@ -1351,7 +1388,8 @@ impl AssetStore {
         if let Some(expected) = &request.expected_source_sha256 {
             validate_hash(expected)?;
         }
-        let staged = stage_source(&self.runtime_handle, source)?;
+        let staged =
+            stage_source_bounded(&self.runtime_handle, source, self.policy.max_import_bytes())?;
         if request
             .expected_source_sha256
             .as_ref()
@@ -1449,6 +1487,7 @@ impl AssetStore {
             human_attestation: None,
             domain_metadata: request.domain_metadata,
         };
+        self.policy.validate_record_evidence(&record)?;
         let previous_canonical = manifest
             .assets
             .iter()
@@ -1586,7 +1625,8 @@ impl AssetStore {
         mode: SelectionMode,
         validator: &V,
     ) -> Result<ValidationReport, AssetError> {
-        self.validate_selection(mode, validator, None)
+        self.validate_selection(mode, validator, None, false)
+            .map(|(report, _)| report)
     }
 
     /// Проверяет одну идентичность и хеш и сохраняет исходные свидетельства
@@ -1606,6 +1646,28 @@ impl AssetStore {
             SelectionMode::Full,
             validator,
             Some((identity, expected_sha256)),
+            false,
+        )
+        .map(|(report, _)| report)
+    }
+
+    /// Точно проверяет одну запись и возвращает её состояние из того же
+    /// эксклюзивного прохода. При блокере валидатора запись отсутствует.
+    pub(crate) fn validate_exact_with_record<V: SemanticValidator>(
+        &self,
+        identity: &AssetIdentity,
+        expected_sha256: &str,
+        validator: &V,
+    ) -> Result<(ValidationReport, Option<AssetRecord>), AssetError> {
+        identity
+            .validate()
+            .map_err(|message| AssetError::new(ErrorCode::InvalidIdentity, message))?;
+        validate_hash(expected_sha256)?;
+        self.validate_selection(
+            SelectionMode::Full,
+            validator,
+            Some((identity, expected_sha256)),
+            true,
         )
     }
 
@@ -1614,7 +1676,9 @@ impl AssetStore {
         mode: SelectionMode,
         validator: &V,
         exact: Option<(&AssetIdentity, &str)>,
-    ) -> Result<ValidationReport, AssetError> {
+        capture_exact_record: bool,
+    ) -> Result<(ValidationReport, Option<AssetRecord>), AssetError> {
+        debug_assert!(!capture_exact_record || exact.is_some());
         let validator_id = validator.identity();
         validate_validator_identity(&validator_id)?;
         let lock = self.lock_exclusive()?;
@@ -1654,6 +1718,7 @@ impl AssetStore {
         };
         let mut report = ValidationReport::new(mode, validator_id.clone());
         report.considered = selected.len();
+        let mut updated_exact_record = None;
 
         // Сначала выполняются все вызовы предметной проверки и проверяются
         // доказательства (`evidence`). До этого места манифесты и опубликованные данные не меняются.
@@ -1756,6 +1821,9 @@ impl AssetStore {
                 blocker: None,
                 blocker_message: None,
             });
+            if capture_exact_record {
+                updated_exact_record = Some(new_record);
+            }
         }
 
         report
@@ -1780,7 +1848,7 @@ impl AssetStore {
             self.policy.as_ref(),
         )?;
         lock.unlock()?;
-        Ok(report)
+        Ok((report, updated_exact_record))
     }
 
     /// Применяет явное решение человека к текущим точным байтам. Подтверждение
@@ -1869,7 +1937,8 @@ impl AssetStore {
                     "кандидат изменился при чтении",
                 ));
             }
-            validate_image_decode(&bytes)?;
+            self.policy.validate_record_evidence(&previous)?;
+            self.policy.validate_media_bytes(&bytes)?;
         }
         let mut record = previous.clone();
         record.human_attestation = Some(HumanAttestation {
@@ -1894,6 +1963,9 @@ impl AssetStore {
                     self.policy.domain_id()
                 ),
             ));
+        }
+        if record.lifecycle == LifecycleState::Verified {
+            self.policy.validate_trust_grant(&record)?;
         }
         let changed = record != previous;
         if changed {
@@ -1956,6 +2028,10 @@ impl AssetStore {
         manifest: &mut Manifest,
         runtime_manifest: &mut Manifest,
     ) -> Result<(), AssetError> {
+        self.policy.validate_record_evidence(new_record)?;
+        if new_record.lifecycle == LifecycleState::Verified {
+            self.policy.validate_trust_grant(new_record)?;
+        }
         if new_record.lifecycle == LifecycleState::Verified
             && !self.policy.allows_verified_format(new_record.format)
         {
@@ -1985,7 +2061,11 @@ impl AssetStore {
             (LifecycleState::Verified, LifecycleState::Quarantined) => {
                 let source =
                     checked_asset_file(&self.root_handle, old_record, self.policy.as_ref())?;
-                let staged = stage_source(&self.runtime_handle, source)?;
+                let staged = stage_source_bounded(
+                    &self.runtime_handle,
+                    source,
+                    self.policy.max_import_bytes(),
+                )?;
                 begin_transition(&self.root_handle, new_record, TransitionTarget::Runtime)?;
                 let previous_runtime = runtime_manifest
                     .assets
@@ -3597,7 +3677,10 @@ fn validate_manifest(
                 ));
             }
         }
-        if !consumer_names.insert(expected_location.consumer_filename.clone()) {
+        policy.validate_record_evidence(record)?;
+        if !consumer_names.insert(policy.consumer_name_key(&expected_location.consumer_filename))
+            && !policy.allows_consumer_name_overlap()
+        {
             return Err(AssetError::new(
                 ErrorCode::ManifestCorrupt,
                 "манифест содержит повторяющиеся consumer_filename",
@@ -4747,7 +4830,15 @@ fn validate_hash(hash: &str) -> Result<(), AssetError> {
     Ok(())
 }
 
-fn stage_source(root: &File, mut input: File) -> Result<StagedObject, AssetError> {
+fn stage_source(root: &File, input: File) -> Result<StagedObject, AssetError> {
+    stage_source_bounded(root, input, None)
+}
+
+fn stage_source_bounded(
+    root: &File,
+    mut input: File,
+    maximum: Option<u64>,
+) -> Result<StagedObject, AssetError> {
     if !input
         .metadata()
         .map_err(|error| AssetError::io("не удалось проверить дескриптор источника", error))?
@@ -4773,6 +4864,12 @@ fn stage_source(root: &File, mut input: File) -> Result<StagedObject, AssetError
         byte_length = byte_length.checked_add(count as u64).ok_or_else(|| {
             AssetError::new(ErrorCode::IoFailure, "размер исходного файла переполнен")
         })?;
+        if maximum.is_some_and(|max| byte_length > max) {
+            return Err(AssetError::new(
+                ErrorCode::InvalidTransition,
+                "ресурс превышает предел размера домена",
+            ));
+        }
         if signature.len() < 12 {
             let take = (12 - signature.len()).min(count);
             signature.extend_from_slice(&buffer[..take]);
@@ -5115,9 +5212,13 @@ fn ensure_unique_consumer_filename(
     record: &AssetRecord,
     policy: &dyn AssetDomainPolicy,
 ) -> Result<(), AssetError> {
-    if manifest.assets.iter().any(|asset| {
-        !same_slot(policy, asset, record) && asset.consumer_filename == record.consumer_filename
-    }) {
+    if !policy.allows_consumer_name_overlap()
+        && manifest.assets.iter().any(|asset| {
+            !same_slot(policy, asset, record)
+                && policy.consumer_name_key(&asset.consumer_filename)
+                    == policy.consumer_name_key(&record.consumer_filename)
+        })
+    {
         return Err(AssetError::new(
             ErrorCode::ManifestCorrupt,
             "манифест содержит повторяющиеся consumer_filename",
@@ -6397,7 +6498,7 @@ mod tests {
     #[test]
     fn detected_format_order_is_part_of_the_manifest_contract() {
         use DetectedFormat::*;
-        let declared = [Png, Jpeg, Gif, Webp, Bmp, Tiff, Unknown];
+        let declared = [Png, Jpeg, Gif, Webp, Bmp, Tiff, Unknown, Mp3];
         let mut sorted = declared;
         sorted.sort();
         assert_eq!(sorted, declared);

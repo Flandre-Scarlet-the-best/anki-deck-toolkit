@@ -2,9 +2,13 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 1189916027fd5186a7217c11659e513d56c38014 -->
+<!-- i18n-source-git-blob: df5a5b2d7a9896b8caab98789b72fc450e6528b4 -->
 
 `asset-store` 是用于程序管理资源的公共 Rust 库，负责清单、校验和、完整性及生命周期。领域专用 CLI `kanji-assets` 负责查找 Yarxi 条目、验证汉字图片，并把通过验证的文件发布到规范资源库。本工具不读取 `decks/**/media/`，不更改 `media_files`，也不会把图片复制到牌组中。
+
+独立的 `pronunciation_audio` 域和 `pronunciation-assets` CLI 可导入本地日语 MP3
+发音，保存技术验证结果，并要求人工明确确认。命令和限制见完整的[日语 MP3
+契约](pronunciation.md)。`.asset-store/pronunciation-audio/` 语料库独立于图像；尚未启用牌组集成。
 
 ## 数据存放位置
 
