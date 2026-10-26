@@ -83,7 +83,7 @@ class BridgeContract(unittest.TestCase):
         result = self.call('toolkitStatus', nonce='challenge')['result']
         self.assertEqual(result['nonce'], 'challenge')
         self.assertEqual(result['upstream_api_version'], 6)
-        self.assertEqual(result['patch_version'], '1.0.1')
+        self.assertEqual(result['patch_version'], '1.0.2')
         for params, reason in [({'token': 'bad'}, 'unauthorized'), ({'profile': 'Other'}, 'wrong_profile'), ({'installation': '/'}, 'wrong_installation')]:
             self.assertIn(reason, self.call('toolkitStatus', **params)['error'])
         req = {'action': 'toolkitStatus', 'params': {'token': self.secret}, 'key': 'bad'}

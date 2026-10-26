@@ -209,7 +209,7 @@ mod tests {
             config: json!({}),
             discovery: json!({"platform":"linux","processes":[]}),
             running: false,
-            process_probe: || Ok(json!({"processes":[]})),
+            process_probe: || Ok(json!({"platform":"linux","processes":[]})),
         };
         for action in ["import", "export"] {
             for state in [

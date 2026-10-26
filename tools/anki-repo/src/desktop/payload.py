@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 CONNECT = "2055492159"
 CROWD = "1788670778"
 ROOT = Path(__file__).parent

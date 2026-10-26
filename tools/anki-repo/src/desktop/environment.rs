@@ -5,8 +5,9 @@ use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -124,15 +125,258 @@ fn linux_installations(directories: impl IntoIterator<Item = PathBuf>) -> Vec<Va
     installs
 }
 
+const POWERSHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Наблюдаемые признаки окружения. Ни один из них в отдельности не доказывает
+/// платформу: маркеры WSL видны и при отключённом interop, а контейнер на ядре
+/// WSL2 видит то же `osrelease`, что и дистрибутив.
+#[derive(Debug, Clone, Copy, Default)]
+struct Signals {
+    wsl_kernel: bool,
+    /// `/.dockerenv` или `/run/.containerenv`.
+    container: bool,
+    /// `WSL_DISTRO_NAME`, `WSL_INTEROP` или `/run/WSL` штатного дистрибутива.
+    wsl_distro: bool,
+}
+
+impl Signals {
+    fn current() -> Signals {
+        let osrelease = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+        Signals {
+            wsl_kernel: is_wsl_kernel(&osrelease),
+            container: Path::new("/.dockerenv").exists()
+                || Path::new("/run/.containerenv").exists(),
+            wsl_distro: std::env::var_os("WSL_DISTRO_NAME").is_some()
+                || std::env::var_os("WSL_INTEROP").is_some()
+                || Path::new("/run/WSL").is_dir(),
+        }
+    }
+}
+
+fn is_wsl_kernel(osrelease: &str) -> bool {
+    osrelease.to_lowercase().contains("microsoft")
+}
+
+/// Результат короткого запуска `powershell.exe` из Linux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Probe {
+    Available,
+    /// Запуск невозможен: нет программы или binfmt interop отключён.
+    Unavailable(String),
+    Failed(String),
+    TimedOut,
+}
+
+impl Probe {
+    fn json(&self) -> Value {
+        match self {
+            Probe::Available => json!({"state":"available"}),
+            Probe::Unavailable(detail) => json!({"state":"unavailable","detail":detail}),
+            Probe::Failed(detail) => json!({"state":"failed","detail":detail}),
+            Probe::TimedOut => {
+                json!({"state":"timed_out","timeout_s":POWERSHELL_PROBE_TIMEOUT.as_secs()})
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Environment {
+    Linux,
+    WindowsNative,
+    /// Штатный WSL с работающим interop: целевая установка — Windows Anki.
+    WslInterop,
+    /// Изолированный Linux-контейнер на ядре WSL2 без признаков дистрибутива.
+    LinuxContainerOnWsl,
+    /// Штатный WSL, но Windows interop не ответил.
+    WslInteropUnavailable,
+    /// Ядро WSL, interop не ответил, признаки противоречивы или отсутствуют.
+    Undetermined,
+}
+
+impl Environment {
+    fn as_str(self) -> &'static str {
+        match self {
+            Environment::Linux => "linux",
+            Environment::WindowsNative => "windows",
+            Environment::WslInterop => "wsl_interop",
+            Environment::LinuxContainerOnWsl => "linux_container_on_wsl_kernel",
+            Environment::WslInteropUnavailable => "wsl_interop_unavailable",
+            Environment::Undetermined => "undetermined_wsl_kernel",
+        }
+    }
+
+    /// Linux-установку можно выбрать без явных `--executable` и `--data-dir`.
+    fn linux_selection_automatic(self) -> bool {
+        matches!(self, Environment::Linux | Environment::LinuxContainerOnWsl)
+    }
+}
+
+/// Контейнер без признаков дистрибутива не пробует interop: там его нет по
+/// построению. В остальных случаях на ядре WSL решает фактический запуск
+/// PowerShell, а его отказ никогда не превращается в обычный Linux.
+fn classify(signals: Signals, probe: impl FnOnce() -> Probe) -> (Environment, Option<Probe>) {
+    if cfg!(target_os = "windows") {
+        return (Environment::WindowsNative, None);
+    }
+    if !signals.wsl_kernel {
+        return (Environment::Linux, None);
+    }
+    if signals.container && !signals.wsl_distro {
+        return (Environment::LinuxContainerOnWsl, None);
+    }
+    let result = probe();
+    let environment = match result {
+        Probe::Available => Environment::WslInterop,
+        _ if signals.wsl_distro && !signals.container => Environment::WslInteropUnavailable,
+        _ => Environment::Undetermined,
+    };
+    (environment, Some(result))
+}
+
+fn probe_windows_powershell() -> Probe {
+    let mut command = Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    run_probe(command, POWERSHELL_PROBE_TIMEOUT)
+}
+
+/// Запуск пробы с ограниченным сроком: зависший interop не блокирует CLI.
+fn run_probe(mut command: Command, timeout: Duration) -> Probe {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => return Probe::Unavailable(e.to_string()),
+    };
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let _ = pipe.read_to_end(&mut text);
+            text
+        })
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Probe::TimedOut;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => return Probe::Failed(e.to_string()),
+        }
+    };
+    if status.success() {
+        return Probe::Available;
+    }
+    let text = stderr
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let text: String = String::from_utf8_lossy(&text)
+        .trim()
+        .chars()
+        .take(500)
+        .collect();
+    Probe::Failed(format!("{status}: {text}"))
+}
+
+fn named_anki(path: &str) -> bool {
+    Path::new(path)
+        .file_name()
+        .is_some_and(|name| name == "anki")
+}
+
+/// `anki`, `python [опции] -m aqt` или `python [опции] …/anki`.
+fn is_anki_command_line(args: &[&str]) -> bool {
+    let Some(executable) = args.first() else {
+        return false;
+    };
+    if named_anki(executable) {
+        return true;
+    }
+    let python = Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("python"));
+    python && python_runs_anki(&args[1..])
+}
+
+/// Разбор опций интерпретатора до модуля или скрипта: аргументы самого
+/// приложения (например, `anki-repo … anki`) не рассматриваются.
+fn python_runs_anki(args: &[&str]) -> bool {
+    let mut rest = args.iter().copied();
+    while let Some(arg) = rest.next() {
+        if arg == "--" {
+            return rest.next().is_some_and(named_anki);
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            // Единственная длинная опция интерпретатора со значением; остальные
+            // (`--help`, `--version`) приложение не запускают.
+            if long == "check-hash-based-pycs" {
+                rest.next();
+                continue;
+            }
+            if long.starts_with("check-hash-based-pycs=") {
+                continue;
+            }
+            return false;
+        }
+        let Some(flags) = arg.strip_prefix('-').filter(|flags| !flags.is_empty()) else {
+            return named_anki(arg);
+        };
+        for (index, flag) in flags.char_indices() {
+            let value = &flags[index + flag.len_utf8()..];
+            match flag {
+                'm' => {
+                    let module = if value.is_empty() {
+                        rest.next().unwrap_or("")
+                    } else {
+                        value
+                    };
+                    return module == "aqt";
+                }
+                'c' => return false,
+                'W' | 'X' => {
+                    if value.is_empty() {
+                        rest.next();
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// `anki --version` официальной Linux-сборки печатает также строку запуска.
+fn parse_version_output(stdout: &str) -> String {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("Anki "))
+        .unwrap_or_else(|| stdout.trim())
+        .trim()
+        .to_owned()
+}
+
 pub(crate) fn discover() -> Result<Value> {
-    let wsl = fs::read_to_string("/proc/sys/kernel/osrelease")
-        .unwrap_or_default()
-        .to_lowercase()
-        .contains("microsoft");
-    if wsl || cfg!(target_os = "windows") {
+    let (environment, probe) = classify(Signals::current(), probe_windows_powershell);
+    let interop = probe.as_ref().map_or(Value::Null, Probe::json);
+    if matches!(
+        environment,
+        Environment::WslInterop | Environment::WindowsNative
+    ) {
+        let wsl = environment == Environment::WslInterop;
         let mut discovery: Value =
             serde_json::from_str(&powershell(WINDOWS_DISCOVERY_SCRIPT)?).map_err(io_error)?;
         discovery["wsl"] = json!(wsl);
+        discovery["environment"] = json!(environment.as_str());
+        discovery["windows_interop"] = interop;
         if wsl {
             discovery["wsl_networking_mode"] = json!(wsl_networking_mode());
         }
@@ -147,23 +391,7 @@ pub(crate) fn discover() -> Result<Value> {
     let installs = linux_installations(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>(),
     );
-    let mut processes = Vec::new();
-    for entry in fs::read_dir("/proc").map_err(io_error)?.flatten() {
-        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
-            continue;
-        }
-        let cmd = fs::read(entry.path().join("cmdline")).unwrap_or_default();
-        let args = String::from_utf8_lossy(&cmd);
-        let args: Vec<_> = args.split('\0').filter(|s| !s.is_empty()).collect();
-        if args
-            .iter()
-            .take(3)
-            .any(|a| Path::new(a).file_name().is_some_and(|n| n == "anki") || *a == "aqt")
-        {
-            processes.push(json!({"pid":entry.file_name().to_string_lossy(),"command_line":args}));
-        }
-    }
-    sort_processes(&mut processes);
+    let processes = linux_processes()?;
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -171,8 +399,50 @@ pub(crate) fn discover() -> Result<Value> {
         })
         .join("Anki2");
     Ok(
-        json!({"platform":"linux","wsl":false,"installs":installs,"processes":processes,"default_data":data}),
+        json!({"platform":"linux","wsl":false,"environment":environment.as_str(),
+        "windows_interop":interop,
+        "explicit_selection_required":!environment.linux_selection_automatic(),
+        "installs":installs,"processes":processes,"default_data":data}),
     )
+}
+
+fn linux_processes() -> Result<Vec<Value>> {
+    let mut processes = Vec::new();
+    let own = std::env::current_exe().and_then(fs::canonicalize).ok();
+    for entry in fs::read_dir("/proc").map_err(io_error)?.flatten() {
+        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        // Сам CLI (`anki-repo anki …`) и его параллельные запуски — не процесс Anki.
+        let exe = fs::read_link(entry.path().join("exe")).ok();
+        if own.is_some() && exe == own {
+            continue;
+        }
+        let cmd = fs::read(entry.path().join("cmdline")).unwrap_or_default();
+        let args = String::from_utf8_lossy(&cmd);
+        let args: Vec<_> = args.split('\0').filter(|s| !s.is_empty()).collect();
+        if is_anki_command_line(&args) {
+            processes.push(json!({"pid":entry.file_name().to_string_lossy(),"command_line":args}));
+        }
+    }
+    sort_processes(&mut processes);
+    Ok(processes)
+}
+
+/// В WSL с отказавшим interop или в неопределённом окружении Linux Anki не
+/// выбирается молча: нужна явная пара `--executable` и `--data-dir`.
+fn require_valid_selection(discovery: &Value, o: &Options) -> Result<()> {
+    if discovery["explicit_selection_required"] != true
+        || (o.executable.is_some() && o.data_dir.is_some())
+    {
+        return Ok(());
+    }
+    Err(crate::error::DomainError::with_details(
+        crate::error::ErrorCode::InvalidRequest,
+        "Ядро WSL, но Windows interop не подтверждён; Windows Anki недоступна, а Linux Anki автоматически не выбирается. Восстановите interop или явно задайте --executable и --data-dir",
+        json!({"reason":"windows_interop_unavailable","environment":discovery["environment"],
+            "windows_interop":discovery["windows_interop"],"discovery":discovery}),
+    ))
 }
 
 fn sort_processes(processes: &mut [Value]) {
@@ -191,6 +461,7 @@ fn sort_processes(processes: &mut [Value]) {
 
 pub(crate) fn resolve(o: &Options) -> Result<Target> {
     let discovery = discover()?;
+    require_valid_selection(&discovery, o)?;
     let installs = discovery["installs"]
         .as_array()
         .ok_or_else(|| external_error("probe_failed", "Нет списка установок"))?;
@@ -239,10 +510,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target> {
                 "Anki --version завершился ошибкой",
             ));
         }
-        String::from_utf8_lossy(&out.stdout)
-            .trim()
-            .trim_start_matches("Anki ")
-            .into()
+        parse_version_output(&String::from_utf8_lossy(&out.stdout))
     };
     let addon = data.join("addons21").join(CONNECT);
     let mut config = if addon.join("config.json").exists() {
@@ -275,6 +543,16 @@ pub(crate) fn resolve(o: &Options) -> Result<Target> {
 
 pub(crate) fn require_stopped(t: &Target) -> Result<()> {
     let current = (t.process_probe)()?;
+    // Пустой список процессов другой платформы не доказывает остановку целевой Anki.
+    if current["platform"] != t.discovery["platform"] {
+        return Err(crate::error::DomainError::with_details(
+            crate::error::ErrorCode::InvalidRequest,
+            "Окружение изменилось после выбора установки; изменение аддонов отменено",
+            json!({"reason":"environment_changed","selected":t.discovery["platform"],
+                "current":current["platform"],"environment":current["environment"],
+                "windows_interop":current["windows_interop"]}),
+        ));
+    }
     if current["processes"]
         .as_array()
         .is_some_and(|p| p.is_empty())
@@ -330,6 +608,7 @@ pub(crate) fn doctor(t: &Target, o: &Options) -> Result<Value> {
         "launch_arguments":["-b",t.native_data],"processes":t.discovery["processes"],"running":t.running,
         "installations":t.discovery["installs"],"endpoint":endpoint,"addons":addons,"patch":patch,"live":live,"handshake":handshake,
         "target_platform":t.discovery["platform"],"cli_platform":std::env::consts::OS,
+        "environment":t.discovery["environment"],"windows_interop":t.discovery["windows_interop"],
         "limitations":["Остановленная Anki: загрузка модулей и активный профиль не подтверждаются по диску", "Готовность требует настоящих export и import в текущем процессе и профиле"]}),
     )
 }
@@ -517,9 +796,19 @@ pub(crate) fn stop(t: &Target, o: &Options, apply: bool) -> Result<Value> {
         return Ok(json!({"state":"stop_plan","ready":false}));
     }
     super::transport::patched(t, o, "toolkitShutdown", json!({"owner":owner["owner"]}))?;
+    wait_for_shutdown(t)
+}
+
+fn wait_for_shutdown(t: &Target) -> Result<Value> {
     let end = Instant::now() + Duration::from_secs(45);
     loop {
-        let d = discover()?;
+        let d = (t.process_probe)()?;
+        if d["platform"] != t.discovery["platform"] {
+            return Ok(json!({"state":"restart_required","ready":false,
+                "reason":"environment_changed","selected":t.discovery["platform"],
+                "current":d["platform"],"environment":d["environment"],
+                "windows_interop":d["windows_interop"]}));
+        }
         if d["processes"].as_array().is_some_and(|a| a.is_empty()) {
             break;
         }
@@ -606,6 +895,257 @@ mod tests {
             doctor_state(false, &json!("installed"), &json!("ankiconnect_responding")),
             "pending_restart"
         );
+    }
+
+    #[test]
+    fn linux_version_output_with_startup_line_yields_the_version() {
+        assert_eq!(
+            parse_version_output("Starting Anki 26.09.3...\nAnki 26.09.3\n"),
+            "26.09.3"
+        );
+        assert_eq!(parse_version_output("Anki 26.09.2"), "26.09.2");
+        assert_eq!(parse_version_output("26.9.2\n"), "26.9.2");
+    }
+
+    #[test]
+    fn cli_arguments_are_not_mistaken_for_anki_but_anki_forms_are() {
+        assert!(is_anki_command_line(&[
+            "/usr/local/bin/anki",
+            "-b",
+            "/data"
+        ]));
+        assert!(is_anki_command_line(&["python3", "-m", "aqt"]));
+        assert!(is_anki_command_line(&["python3", "/opt/anki"]));
+        assert!(!is_anki_command_line(&[
+            "/usr/local/bin/anki-repo",
+            "--json",
+            "anki"
+        ]));
+        assert!(!is_anki_command_line(&["/usr/bin/cat", "/home/user/anki"]));
+        assert!(!is_anki_command_line(&["python3", "-m", "other", "aqt"]));
+        assert!(!is_anki_command_line(&["/usr/bin/Xvfb", ":99"]));
+        assert!(!is_anki_command_line(&[]));
+    }
+
+    #[test]
+    fn python_interpreter_options_before_anki_are_recognised() {
+        for args in [
+            &["python3", "-u", "-m", "aqt"][..],
+            &["python3", "-I", "-m", "aqt", "-b", "/data"],
+            &["/usr/bin/python3.12", "-uB", "-maqt"],
+            &["python3", "-X", "dev", "-W", "ignore", "-m", "aqt"],
+            &["python3", "-Xutf8", "-Wdefault", "-m", "aqt"],
+            &["python3", "--check-hash-based-pycs", "never", "-m", "aqt"],
+            &["python3", "-O", "/opt/anki/bin/anki"],
+            &["python3", "-s", "--", "/usr/local/bin/anki"],
+        ] {
+            assert!(is_anki_command_line(args), "{args:?}");
+        }
+        for args in [
+            &["python3", "-c", "import aqt; aqt.run()"][..],
+            &["python3", "-uc", "-m aqt"],
+            &["python3", "-m", "aqtx"],
+            &["python3", "-m", "pip", "install", "aqt"],
+            &["python3", "-W", "aqt"],
+            &["python3", "-X", "-m", "aqt"],
+            &["python3", "script.py", "anki"],
+            &["python3", "-", "anki"],
+            &["python3", "--version", "-m", "aqt"],
+            &["python3", "-u"],
+            &["/usr/local/bin/anki-repo", "anki", "-m", "aqt"],
+        ] {
+            assert!(!is_anki_command_line(args), "{args:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_python_aqt_process_with_interpreter_options_is_found_in_proc() {
+        let Ok(python) = Command::new("python3")
+            .args(["-I", "-c", "import sys; print(sys.executable)"])
+            .output()
+        else {
+            eprintln!("python3 недоступен; проверка реального процесса пропущена");
+            return;
+        };
+        if !python.status.success() {
+            return;
+        }
+        let tmp = crate::test_support::TempDir::new("desktop-python-aqt-process");
+        fs::create_dir_all(tmp.path().join("aqt")).unwrap();
+        fs::write(
+            tmp.path().join("aqt/__main__.py"),
+            b"import time\ntime.sleep(30)\n",
+        )
+        .unwrap();
+        // Без -I: `-m` ищет модуль в текущем каталоге, как у разработческого запуска.
+        let mut child = Command::new("python3")
+            .args(["-u", "-B", "-m", "aqt"])
+            .current_dir(tmp.path())
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().to_string();
+        let found = (0..50).any(|_| {
+            let seen = linux_processes()
+                .unwrap()
+                .iter()
+                .any(|p| p["pid"] == pid.as_str());
+            if !seen {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            seen
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found, "python3 -u -B -m aqt (pid {pid}) не распознан");
+    }
+
+    fn signals(wsl_kernel: bool, container: bool, wsl_distro: bool) -> Signals {
+        Signals {
+            wsl_kernel,
+            container,
+            wsl_distro,
+        }
+    }
+
+    #[test]
+    fn environment_matrix_never_falls_back_to_linux_when_wsl_interop_fails() {
+        let failed = || Probe::Failed("exit 1".into());
+        // Обычный WSL с работающим interop.
+        assert_eq!(
+            classify(signals(true, false, true), || Probe::Available).0,
+            Environment::WslInterop
+        );
+        // Обычный WSL с отключённым или отказавшим interop.
+        for probe in [
+            Probe::Unavailable("Exec format error".into()),
+            Probe::Failed("exit 1".into()),
+            Probe::TimedOut,
+        ] {
+            let (environment, observed) = classify(signals(true, false, true), || probe.clone());
+            assert_eq!(environment, Environment::WslInteropUnavailable);
+            assert_eq!(observed, Some(probe));
+            assert!(!environment.linux_selection_automatic());
+        }
+        // E2E-контейнер на ядре WSL2: interop не пробуется, выбор Linux штатный.
+        let (environment, observed) =
+            classify(signals(true, true, false), || panic!("проба в контейнере"));
+        assert_eq!(environment, Environment::LinuxContainerOnWsl);
+        assert!(observed.is_none() && environment.linux_selection_automatic());
+        // Ядро WSL без признаков либо с противоречивыми признаками.
+        assert_eq!(
+            classify(signals(true, false, false), failed).0,
+            Environment::Undetermined
+        );
+        assert_eq!(
+            classify(signals(true, true, true), failed).0,
+            Environment::Undetermined
+        );
+        assert_eq!(
+            classify(signals(true, true, true), || Probe::Available).0,
+            Environment::WslInterop
+        );
+        // Обычный Linux не опрашивает PowerShell.
+        let (environment, observed) =
+            classify(signals(false, false, false), || panic!("проба вне WSL"));
+        assert_eq!(environment, Environment::Linux);
+        assert!(observed.is_none() && environment.linux_selection_automatic());
+    }
+
+    #[test]
+    fn single_linux_anki_in_wsl_without_interop_requires_explicit_selection() {
+        let discovery = json!({"platform":"linux","environment":"wsl_interop_unavailable",
+            "windows_interop":{"state":"failed"},"explicit_selection_required":true,
+            "installs":[{"executable":"/usr/bin/anki","version":null}]});
+        let mut o = options(Action::Setup { apply: true });
+        let error = require_valid_selection(&discovery, &o).unwrap_err();
+        assert_eq!(error.details["reason"], "windows_interop_unavailable");
+        assert_eq!(error.details["windows_interop"]["state"], "failed");
+
+        o.executable = Some("/usr/bin/anki".into());
+        assert!(require_valid_selection(&discovery, &o).is_err());
+        o.data_dir = Some("/home/user/.local/share/Anki2".into());
+        assert!(require_valid_selection(&discovery, &o).is_ok());
+
+        let container = json!({"platform":"linux","explicit_selection_required":false});
+        assert!(require_valid_selection(&container, &options(Action::Doctor)).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn powershell_probe_is_bounded_and_keeps_failure_details() {
+        let started = Instant::now();
+        let mut hanging = Command::new("sleep");
+        hanging.arg("30").stdin(Stdio::null()).stdout(Stdio::null());
+        assert_eq!(
+            run_probe(hanging, Duration::from_millis(200)),
+            Probe::TimedOut
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let missing = Command::new("/nonexistent/powershell.exe");
+        assert!(matches!(
+            run_probe(missing, Duration::from_secs(5)),
+            Probe::Unavailable(_)
+        ));
+
+        let mut failing = Command::new("sh");
+        failing
+            .args(["-c", "echo interop отключён >&2; exit 3"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let Probe::Failed(detail) = run_probe(failing, Duration::from_secs(5)) else {
+            panic!("ожидался отказ пробы");
+        };
+        assert!(detail.contains("interop отключён"));
+    }
+
+    fn running_linux_probe() -> Result<Value> {
+        Ok(
+            json!({"platform":"linux","processes":[{"pid":"42","command_line":["python3","-u","-m","aqt"]}]}),
+        )
+    }
+
+    fn linux_probe_without_processes() -> Result<Value> {
+        Ok(json!({"platform":"linux","environment":"wsl_interop_unavailable","processes":[]}))
+    }
+
+    #[test]
+    fn running_anki_or_changed_environment_blocks_addon_mutation() {
+        let tmp = crate::test_support::TempDir::new("desktop-require-stopped");
+        let mut linux = target(&tmp, false, json!({"platform":"linux"}));
+        linux.process_probe = running_linux_probe;
+        assert_eq!(
+            require_stopped(&linux).unwrap_err().details["reason"],
+            "restart_required"
+        );
+        linux.process_probe = linux_probe_without_processes;
+        assert!(require_stopped(&linux).is_ok());
+
+        // Windows Anki выбрана, затем interop отказал: пустой Linux-список не доказательство.
+        let mut windows = target(&tmp, false, json!({"platform":"windows","wsl":true}));
+        windows.process_probe = linux_probe_without_processes;
+        let error = require_stopped(&windows).unwrap_err();
+        assert_eq!(error.details["reason"], "environment_changed");
+        assert_eq!(error.details["environment"], "wsl_interop_unavailable");
+    }
+
+    #[test]
+    fn shutdown_requires_an_empty_process_list_from_the_selected_platform() {
+        let tmp = crate::test_support::TempDir::new("desktop-shutdown-environment");
+        let mut t = target(&tmp, true, json!({"platform":"windows","wsl":true}));
+        t.process_probe = linux_probe_without_processes;
+        let result = wait_for_shutdown(&t).unwrap();
+        assert_eq!(result["state"], "restart_required");
+        assert_eq!(result["reason"], "environment_changed");
+        assert_eq!(result["environment"], "wsl_interop_unavailable");
+        assert_eq!(result["selected"], "windows");
+        assert_eq!(result["current"], "linux");
+        assert_eq!(result["ready"], false);
+
+        t.discovery = json!({"platform":"linux"});
+        assert_eq!(wait_for_shutdown(&t).unwrap()["state"], "stopped");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 pub const CONNECT: &str = "2055492159";
 pub const CROWD: &str = "1788670778";
-pub const PATCH_VERSION: &str = "1.0.1";
+pub const PATCH_VERSION: &str = "1.0.2";
 pub(crate) const COMPATIBILITY: &str = include_str!("compatibility.json");
 pub(crate) type Result<T> = std::result::Result<T, DomainError>;
 

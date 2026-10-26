@@ -1,0 +1,33 @@
+[package]
+name = "anki-e2e"
+version = "0.1.0"
+# `edition` и MSRV наследуются из корневого `[workspace.package]`.
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Изолированный локальный E2E-стенд настоящей Linux Anki Desktop для anki-repo anki"
+publish = false
+
+[dependencies]
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = { version = "3.5", features = ["termination"] }
+getrandom = { version = "0.4", features = ["std"] }
+png = "0.18"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls"] }
+rustix = { version = "1.1", features = ["process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+x11rb = { version = "0.13", features = ["xtest"] }
+zbus = { version = "6.1", default-features = false, features = ["default-rt"] }
+
+[[bin]]
+name = "anki-e2e"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

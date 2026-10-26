@@ -117,6 +117,7 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 - [`anki-repo` — анализ, контроль качества, ограниченные изменения и визуальный отчёт](tools/anki-repo/README.md)
 - [`asset-store` и `kanji-assets` — жизненный цикл ресурсов и проверка](tools/asset-store/README.md)
 - [`repository-maintenance` — инвентаризация диска и безопасный GC](tools/repository-maintenance/README.md)
+- [`anki-e2e` — локальный изолированный E2E-стенд Anki Desktop в Docker](tools/anki-e2e/README.md)
 
 ## Инструменты
 
@@ -253,6 +254,7 @@ CI проверяет отслеживаемый код, документаци�
 │   ├── input/                # закрытая область будущего доверенного загрузчика
 │   └── output/               # плоский список рабочих локальных колод
 ├── tools/
+│   ├── anki-e2e/             # локальный E2E-стенд Anki Desktop
 │   ├── anki-repo/            # анализ, контроль качества, ограниченные изменения, визуальный отчёт
 │   ├── asset-store/          # библиотека ресурсов и kanji-assets
 │   └── repository-maintenance/ # инвентаризация и безопасный GC

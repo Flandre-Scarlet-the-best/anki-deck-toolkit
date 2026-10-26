@@ -6,7 +6,12 @@
 # Это не отдельный пакет Rust: корень остаётся репозиторием колод, а Cargo задаёт
 # границу для кода Rust на уровне репозитория.
 [workspace]
-members = ["tools/anki-repo", "tools/asset-store", "tools/repository-maintenance"]
+members = [
+    "tools/anki-e2e",
+    "tools/anki-repo",
+    "tools/asset-store",
+    "tools/repository-maintenance",
+]
 resolver = "3"
 
 [workspace.package]

@@ -327,7 +327,7 @@ mod tests {
             config: json!({"apiKey":"must-not-be-sent"}),
             discovery: json!({"platform":"linux","processes":[]}),
             running: false,
-            process_probe: || Ok(json!({"processes":[]})),
+            process_probe: || Ok(json!({"platform":"linux","processes":[]})),
         };
         let url = format!("http://{address}");
         let cli =
@@ -357,7 +357,7 @@ mod tests {
             config: json!({}),
             discovery: json!({}),
             running: false,
-            process_probe: || Ok(json!({"processes":[]})),
+            process_probe: || Ok(json!({"platform":"linux","processes":[]})),
         };
         for url in [
             "https://127.0.0.1:8765",
@@ -386,7 +386,7 @@ mod tests {
             config: json!({}),
             discovery: json!({"wsl":true,"wsl_networking_mode":"nat"}),
             running: false,
-            process_probe: || Ok(json!({"processes":[]})),
+            process_probe: || Ok(json!({"platform":"linux","processes":[]})),
         };
         let cli = crate::cli::Cli::try_parse_from(["anki-repo", "anki", "doctor"]).unwrap();
         let crate::cli::Command::Anki { options } = cli.command else {

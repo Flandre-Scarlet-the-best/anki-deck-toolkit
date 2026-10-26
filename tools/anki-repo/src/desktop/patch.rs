@@ -1011,7 +1011,7 @@ mod tests {
             config: json!({}),
             discovery: json!({"platform":"linux","processes":[]}),
             running: false,
-            process_probe: || Ok(json!({"processes":[]})),
+            process_probe: || Ok(json!({"platform":"linux","processes":[]})),
         }
     }
     #[test]
@@ -1094,7 +1094,7 @@ mod tests {
             "upstream_changed"
         );
         assert_eq!(fs::read(&source).unwrap(), b"foreign update");
-        t.process_probe = || Ok(json!({"processes":[{"pid":123}]}));
+        t.process_probe = || Ok(json!({"platform":"linux","processes":[{"pid":123}]}));
         assert_eq!(
             super::super::environment::require_stopped(&t)
                 .unwrap_err()
@@ -1446,10 +1446,10 @@ mod tests {
         );
         drop(lock);
         assert!(!t.state().join("patch.lock").exists());
-        t.process_probe = || Ok(json!({"processes":[{"pid":1}]}));
+        t.process_probe = || Ok(json!({"platform":"linux","processes":[{"pid":1}]}));
         assert!(lock_addons(&t).is_err());
         assert!(!t.state().join("patch.lock").exists());
-        t.process_probe = || Ok(json!({"processes":[]}));
+        t.process_probe = || Ok(json!({"platform":"linux","processes":[]}));
         assert!(lock_addons(&t).is_ok());
     }
 

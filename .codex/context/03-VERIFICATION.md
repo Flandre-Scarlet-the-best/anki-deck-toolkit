@@ -323,6 +323,16 @@ anki-repo migrate-layout --root . --apply --json     # повтор: summary.exp
   область `decks/input`. Ни одна команда её не читает и не изменяет, и флага-обхода
   нет: для работы с колодами предназначен `decks/output/`.
 
+## Локальный E2E Anki Desktop (вне CI)
+
+Живое поведение группы `anki-repo anki` на настоящей Linux Anki с AnkiConnect и
+CrowdAnki проверяет стенд `tools/anki-e2e` — только явной командой
+`cargo run -p anki-e2e -- full` (или выборкой сценариев) при доступном Docker.
+Он не входит в `cargo test --workspace`, CI, hooks и build scripts; модульные
+тесты самого runner Docker не требуют и идут в обычном workspace-наборе.
+`BLOCKED` из-за недоступного Docker или неподдержанной версии Anki не равен
+`PASS`. Контракт, параметры и отчёт — `tools/anki-e2e/README.md`.
+
 ## Проверки CI
 
 Библиотечный контракт обмена проверяется синтетическими сценариями
