@@ -1,0 +1,36 @@
+[package]
+name = "benchmark-contract"
+version = "0.1.0"
+# `edition` и MSRV наследуются из корневого `[workspace.package]`.
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Каталог сценариев бенчмаркинга и контракт результатов измерений Anki-decks: загрузка, проверка и диагностика без запуска измерений"
+publish = false
+autotests = false
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+toml = "1.0"
+
+[lib]
+name = "benchmark_contract"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "benchmark-contract"
+test = false
+path = "src/main.rs"
+
+[[test]]
+name = "contract"
+path = "tests/contract.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

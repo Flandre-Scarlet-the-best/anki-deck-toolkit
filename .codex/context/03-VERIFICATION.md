@@ -333,6 +333,16 @@ CrowdAnki проверяет стенд `tools/anki-e2e` — только явн
 `BLOCKED` из-за недоступного Docker или неподдержанной версии Anki не равен
 `PASS`. Контракт, параметры и отчёт — `tools/anki-e2e/README.md`.
 
+## Каталог бенчмарков
+
+Декларации `benchmarks/` проверяет `cargo run -p benchmark-contract -- validate`,
+документы результатов — `cargo run -p benchmark-contract -- check-result <файл>`;
+Docker, Anki и Hyperfine для этого не нужны. Тесты `benchmark-contract` входят в
+`cargo test --workspace --locked` и
+проверяют и настоящий каталог, и учебные фикстуры. Измерения они не запускают.
+Правила — `docs/performance/benchmarks.md`, коды возврата —
+`tools/benchmark-contract/README.md`.
+
 ## Проверки CI
 
 Библиотечный контракт обмена проверяется синтетическими сценариями

@@ -1,0 +1,29 @@
+# Учебный каталог для тестов benchmark-contract. Модули demo-cli и demo-e2e
+# вымышлены: их сценарии имеют status = "example" и не измеряют ничего в
+# Anki-decks. Настоящий каталог — benchmarks/ в корне репозитория.
+schema_version = 1
+repository_root = "workspace"
+
+[[profile]]
+id = "cold"
+cache = "cold"
+network = "online"
+description = "Состояние модуля сбрасывается его штатной командой перед каждым прогоном."
+
+[[profile]]
+id = "warm"
+cache = "warm"
+network = "online"
+description = "Повтор без изменений входа после прогрева."
+
+[[profile]]
+id = "offline-warm"
+cache = "warm"
+network = "offline"
+description = "Тёплое состояние без сетевых обращений измеряемой серии."
+
+[[profile]]
+id = "incremental"
+cache = "incremental"
+network = "online"
+description = "Перед каждым прогоном меняется только вход, вызывающий частичную пересборку."

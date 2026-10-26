@@ -1,0 +1,168 @@
+# Короткие команды анализа одного CrowdAnki-экспорта. Контракт команд —
+# tools/anki-repo/README.md. Экспорт передаётся параметром при запуске: каталог
+# не называет ни одной пользовательской колоды, а её путь не публикуется.
+schema_version = 1
+module = "anki-repo"
+
+[[scenario]]
+id = "anki-repo.validate"
+title = "Структурная проверка экспорта"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "`anki-repo --json validate` над одним локальным CrowdAnki-экспортом: чтение deck.json, разрешение моделей и проверка структурных инвариантов. Команда не пишет в экспорт и не ходит в сеть."
+measured = "Один запуск собранного release-бинарника anki-repo от старта процесса до выхода, включая чтение и разбор deck.json. Сборка бинарника, прогревочные запуски и вычисление идентичности экспорта в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "anki-repo", bin = "anki-repo" }
+args = ["--json", "validate", "{input.export}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "export_dir"
+description = "Каталог CrowdAnki-экспорта с deck.json. Путь не публикуется: нагрузку в результате представляет идентичность и объём входа export."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "export"
+kind = "external-path"
+role = "workload"
+identity = "content-tree-sha256"
+parameter = "export_dir"
+description = "Экспорт, на котором измеряется команда; идентичность — SHA-256 содержимого дерева экспорта."
+size = [
+    { name = "deck_json_bytes", unit = "byte", description = "Размер deck.json в байтах." },
+    { name = "notes", unit = "count", description = "Число заметок во всём дереве колод экспорта." },
+    { name = "media_files", unit = "count", description = "Число имён в media_files всего дерева колод." },
+]
+
+[scenario.runs]
+warmup = 3
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 120
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Собственных кэшей у anki-repo нет. Тёплое состояние — page cache ОС, который содержит файлы экспорта после трёх прогревочных запусков. Глобальный page cache не сбрасывается ни в одном профиле, поэтому холодного профиля у сценария нет."
+cleared = []
+retained = ["page cache ОС с файлами экспорта"]
+
+[[scenario.profile]]
+id = "offline-warm"
+cache_definition = "То же тёплое состояние, что у warm: page cache после трёх прогревочных запусков."
+cleared = []
+retained = ["page cache ОС с файлами экспорта"]
+network_definition = "Команды локального экспорта по контракту anki-repo не обращаются к сети; исполнитель запускает серию без сетевого доступа, и профиль доказывает, что результат от сети не зависит."
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+description = "Пик RSS процесса anki-repo. Для очень малого пика Hyperfine на Linux может сообщить унаследованное от себя значение."
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Устойчивее времени к шуму системы; без доступа к perf_event метрика будет unavailable."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "anki-repo.stats"
+title = "Агрегированная статистика экспорта"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "`anki-repo --json stats` над одним локальным CrowdAnki-экспортом: типизированная загрузка и агрегирование по всему дереву колод. Команда не пишет в экспорт и не ходит в сеть."
+measured = "Один запуск собранного release-бинарника anki-repo от старта процесса до выхода. Сборка бинарника, прогревочные запуски и вычисление идентичности экспорта в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "anki-repo", bin = "anki-repo" }
+args = ["--json", "stats", "{input.export}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "export_dir"
+description = "Каталог CrowdAnki-экспорта с deck.json. Путь не публикуется."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "export"
+kind = "external-path"
+role = "workload"
+identity = "content-tree-sha256"
+parameter = "export_dir"
+description = "Экспорт, на котором измеряется команда; идентичность — SHA-256 содержимого дерева экспорта."
+size = [
+    { name = "deck_json_bytes", unit = "byte", description = "Размер deck.json в байтах." },
+    { name = "notes", unit = "count", description = "Число заметок во всём дереве колод экспорта." },
+]
+
+[scenario.runs]
+warmup = 3
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 120
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Собственных кэшей у anki-repo нет. Тёплое состояние — page cache ОС после трёх прогревочных запусков; глобальный page cache не сбрасывается."
+cleared = []
+retained = ["page cache ОС с файлами экспорта"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+description = "Пик RSS процесса anki-repo. Для очень малого пика Hyperfine на Linux может сообщить унаследованное от себя значение."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]

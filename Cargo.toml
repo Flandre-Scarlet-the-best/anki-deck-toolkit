@@ -10,6 +10,7 @@ members = [
     "tools/anki-e2e",
     "tools/anki-repo",
     "tools/asset-store",
+    "tools/benchmark-contract",
     "tools/repository-maintenance",
 ]
 resolver = "3"

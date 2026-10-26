@@ -1,0 +1,318 @@
+# Сценарии E2E-стенда Anki Desktop. Контракт стенда — tools/anki-e2e/README.md,
+# журнал замеров — docs/performance/anki-e2e.md.
+schema_version = 1
+module = "anki-e2e"
+
+[[scenario]]
+id = "anki-e2e.full"
+title = "Полный набор E2E-сценариев стенда"
+revision = 1
+kind = "long-e2e"
+status = "executable"
+description = "Штатный полный прогон стенда: smoke, addons, patch, crowdanki, process, errors в одном изолированном контейнере с официальной Linux Anki Desktop."
+measured = "Весь вызов `anki-e2e full`: выбор релиза Anki (индекс GitHub, загрузка или повторная сверка архива), снимок исходников, сборка образов Anki и запуска, шесть сценариев в контейнере и проверенная уборка контейнера. Сборка исполняемого файла anki-e2e на хосте в интервал не входит."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "anki-e2e", bin = "anki-e2e" }
+args = ["full"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH", "HOME", "DOCKER_HOST"]
+
+[[scenario.input]]
+id = "toolkit"
+kind = "repo-tree"
+role = "subject"
+identity = "content-tree-sha256"
+description = "Снимок файлов рабочей копии, которые отслеживает или не игнорирует Git; хэш дерева стенд пишет в report.json."
+
+[[scenario.input]]
+id = "anki-archive"
+kind = "downloaded-artifact"
+role = "workload"
+identity = "file-sha256"
+description = "Официальный архив Linux Anki Desktop, выбранный стендом; SHA-256 и размер — из report.json."
+size = [{ name = "archive_bytes", unit = "byte", description = "Размер архива Anki в байтах." }]
+
+[scenario.runs]
+warmup = 0
+min_runs = 2
+max_runs = 3
+single_run_allowed = true
+run_timeout_seconds = 10800
+total_budget_seconds = 43200
+
+[[scenario.profile]]
+id = "cold"
+cache_definition = "Перед каждым прогоном `anki-e2e clean --images --cache`: удалены образы стенда, архивы Anki в cache/, снимки исходников в build/ и BuildKit cache mounts anki-e2e-cargo-registry и anki-e2e-cargo-target. Холодный для модуля, но не для системы."
+cleared = ["образы стенда с меткой io.github.anki-deck-toolkit.e2e=1", "кэш архивов Anki target/anki-e2e/cache", "снимки исходников target/anki-e2e/build", "BuildKit cache mounts anki-e2e-cargo-registry и anki-e2e-cargo-target"]
+retained = ["общий слоевой кэш BuildKit демона", "базовые образы ubuntu и rust", "page cache ОС", "собранный на хосте anki-e2e"]
+
+[[scenario.profile.prepare]]
+description = "Штатная очистка ресурсов стенда; общие кэши Docker не затрагиваются."
+program = { kind = "cargo-bin", package = "anki-e2e", bin = "anki-e2e" }
+args = ["clean", "--images", "--cache"]
+touches = "module-owned"
+timeout_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Образы стенда, архив выбранной версии Anki и cache mounts Cargo уже существуют после одного неизмеряемого прогона full в setup; исходники между прогонами не меняются, поэтому образ запуска не пересобирается."
+cleared = []
+retained = ["образы стенда", "архив Anki в кэше стенда", "BuildKit cache mounts Cargo", "снимок исходников"]
+
+[[scenario.profile.setup]]
+description = "Прогрев: один полный прогон, который собирает образы и заполняет кэши; в серию не входит."
+program = { kind = "cargo-bin", package = "anki-e2e", bin = "anki-e2e" }
+args = ["full"]
+touches = "module-owned"
+timeout_seconds = 10800
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Только runner на хосте и дождавшиеся им потомки (docker CLI). Процессы контейнера и шаги BuildKit сюда не входят: их потребление — метрики cgroup и хоста."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+description = "Пик RSS runner или его дождавшегося потомка, а не контейнера."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak scope контейнера сценариев; контейнер удаляется в конце, поэтому значение сэмплируется во время прогона."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "usage_usec scope контейнера сценариев."
+
+[[scenario.metric]]
+metric = "cpu_utilization_peak"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+sample_interval_seconds = 1.0
+description = "Наибольшая загрузка контейнера сценариев за секунду."
+
+[[scenario.metric]]
+metric = "cpu_utilization_peak"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 1.0
+description = "Сборка образов идёт вне cgroup прогона, поэтому её стоимость видна только по хосту целиком: верхняя оценка."
+
+[[scenario.metric]]
+metric = "memory_host_peak_increase"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 1.0
+description = "Наибольшее снижение MemAvailable за прогон: верхняя оценка памяти сборки образов."
+
+[[scenario.metric]]
+metric = "phase_duration"
+scope = "phase"
+source = "module-log"
+label = "release"
+required = false
+resolution = 1.0
+description = "Выбор релиза и получение архива по меткам runner.log."
+
+[[scenario.metric]]
+metric = "phase_duration"
+scope = "phase"
+source = "module-log"
+label = "anki-image"
+required = false
+resolution = 1.0
+description = "Сборка образа Anki по меткам runner.log."
+
+[[scenario.metric]]
+metric = "phase_duration"
+scope = "phase"
+source = "module-log"
+label = "run-image"
+required = false
+resolution = 1.0
+description = "Сборка образа запуска (cargo build в Docker) по меткам runner.log."
+
+[[scenario.metric]]
+metric = "phase_duration"
+scope = "phase"
+source = "module-log"
+label = "scenarios"
+required = false
+resolution = 1.0
+description = "Исполнение сценариев в контейнере по меткам runner.log."
+
+[[scenario.metric]]
+metric = "module_counter"
+scope = "module-report"
+source = "module-report"
+label = "commands_started"
+required = false
+description = "Сумма commands_started по сценариям report.json: число запусков anki-repo."
+
+[[scenario.metric]]
+metric = "disk_usage"
+scope = "path"
+source = "filesystem"
+label = "work-cache"
+required = false
+description = "Размер target/anki-e2e/cache после прогона."
+
+[[scenario.requires]]
+kind = "docker"
+
+[[scenario.requires]]
+kind = "network"
+purpose = "GitHub Releases API и архив Anki, AnkiWeb для сценариев аддонов, Docker Hub и зеркала Ubuntu для сборки образов"
+profiles = ["cold", "warm"]
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "docker_version", "hyperfine_version", "anki_version", "container_limits"]
+comparable = ["os", "arch", "virtualization", "logical_cpus", "docker_version", "anki_version", "container_limits"]
+
+[[scenario.environment.fact]]
+name = "anki_version"
+description = "Фактически установленная в образ версия Anki из report.json."
+
+[[scenario.environment.fact]]
+name = "container_limits"
+description = "Действующие --cpus, --memory и --pids-limit контейнера сценариев."
+
+[[scenario]]
+id = "anki-e2e.smoke"
+title = "Сценарий smoke стенда"
+revision = 1
+kind = "long-e2e"
+status = "executable"
+description = "Обнаружение Anki, первый запуск, doctor остановленной и запущенной Anki, launch и отказы stop без аддонов. Сценарий не устанавливает аддоны из AnkiWeb."
+measured = "Весь вызов `anki-e2e smoke`: выбор релиза, проверка снимка исходников и кэшированных образов, сценарий smoke в контейнере и уборка. Сборка anki-e2e на хосте в интервал не входит."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "anki-e2e", bin = "anki-e2e" }
+args = ["smoke"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH", "HOME", "DOCKER_HOST"]
+
+[[scenario.parameter]]
+name = "anki_version"
+description = "Версия Anki (--anki-version). Обязательна для офлайн-профиля: без сети последняя стабильная версия не определяется."
+record = true
+affects_comparability = false
+
+[[scenario.parameter]]
+name = "anki_sha256"
+description = "Заранее проверенный SHA-256 архива этой версии (--sha256) для офлайн-режима."
+record = true
+affects_comparability = false
+
+[[scenario.input]]
+id = "toolkit"
+kind = "repo-tree"
+role = "subject"
+identity = "content-tree-sha256"
+description = "Снимок файлов рабочей копии, которые отслеживает или не игнорирует Git; хэш дерева стенд пишет в report.json."
+
+[[scenario.input]]
+id = "anki-archive"
+kind = "downloaded-artifact"
+role = "workload"
+identity = "file-sha256"
+description = "Официальный архив Linux Anki Desktop; SHA-256 и размер — из report.json."
+size = [{ name = "archive_bytes", unit = "byte", description = "Размер архива Anki в байтах." }]
+
+[scenario.runs]
+warmup = 1
+min_runs = 2
+max_runs = 5
+single_run_allowed = true
+run_timeout_seconds = 3600
+total_budget_seconds = 21600
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Один неизмеряемый прогревочный прогон smoke собирает образы и кладёт архив в кэш стенда; затем исходники и кэши не меняются."
+cleared = []
+retained = ["образы стенда", "архив Anki в кэше стенда", "BuildKit cache mounts Cargo", "снимок исходников"]
+
+[[scenario.profile]]
+id = "offline-warm"
+cache_definition = "Архив указанной версии уже лежит в кэше стенда, а образы Anki и запуска для текущего снимка собраны заранее (например, предшествующей серией профиля warm). Прогрев выполняется тем же офлайн-вызовом; если кэш не готов, он завершается неуспехом, а не скачивает недостающее."
+cleared = []
+retained = ["образы стенда", "архив Anki в кэше стенда", "BuildKit cache mounts Cargo", "снимок исходников"]
+network_definition = "--offline исключает запрос индекса GitHub и загрузку архива: используется только кэшированный архив с заданным SHA-256. Сборка образов пропускается целиком, если образы с нужными тегами уже есть (тег образа запуска зависит от дерева исходников), поэтому docker build и реестры не вызываются. Сценарий smoke не устанавливает аддоны и не обращается к AnkiWeb; его проверка не-loopback endpoint отвергается anki-repo до соединения. Сценарии с аддонами (addons, full) офлайн-профиля не имеют. Исполнитель запускает серию с отключённой внешней сетью; сетевая ошибка — неуспех прогона, а не повод её разрешить."
+args_append = ["--offline", "--anki-version", "{param.anki_version}", "--sha256", "{param.anki_sha256}"]
+required_parameters = ["anki_version", "anki_sha256"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Только runner на хосте и дождавшиеся им потомки; процессы контейнера не входят."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak scope контейнера сценариев, сэмплируется во время прогона."
+
+[[scenario.metric]]
+metric = "phase_duration"
+scope = "phase"
+source = "module-log"
+label = "scenarios"
+required = false
+resolution = 1.0
+description = "Исполнение сценария в контейнере по меткам runner.log."
+
+[[scenario.requires]]
+kind = "docker"
+
+[[scenario.requires]]
+kind = "network"
+purpose = "GitHub Releases API и архив Anki при выборе релиза, Docker Hub и зеркала Ubuntu при сборке образов"
+profiles = ["warm"]
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "docker_version", "hyperfine_version", "anki_version", "container_limits"]
+comparable = ["os", "arch", "virtualization", "logical_cpus", "docker_version", "anki_version", "container_limits"]
+
+[[scenario.environment.fact]]
+name = "anki_version"
+description = "Фактически установленная в образ версия Anki из report.json."
+
+[[scenario.environment.fact]]
+name = "container_limits"
+description = "Действующие --cpus, --memory и --pids-limit контейнера сценариев."

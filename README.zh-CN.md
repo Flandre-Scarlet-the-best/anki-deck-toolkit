@@ -4,7 +4,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: d48dace816285a1801860daf27b6f60f1e26487a -->
+<!-- i18n-source-git-blob: 9bf6be3ec66fb215c14b3116537b0219dbb4b1f5 -->
 
 **基于 Rust 的命令行工具，用于检查、验证、定向修改和可视化对比 CrowdAnki JSON 导出数据。**
 
@@ -120,6 +120,7 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 - [`asset-store` 与 `kanji-assets` — 资源生命周期与验证](tools/asset-store/README.zh-CN.md)
 - [`repository-maintenance` — 磁盘内容盘点与安全垃圾回收](tools/repository-maintenance/README.zh-CN.md)
 - [`anki-e2e` — Docker 中隔离的本地 Anki Desktop E2E 测试台](tools/anki-e2e/README.zh-CN.md)
+- [`benchmark-contract` — 基准测试场景目录与测量结果契约](tools/benchmark-contract/README.zh-CN.md)
 
 ## 工具
 
@@ -251,9 +252,11 @@ CI 检查 Git 跟踪的代码、文档和自包含测试夹具。整个 `decks/`
 ├── decks/                    # 用户数据，整个目录均被 Git 忽略
 │   ├── input/                # 为未来可信导入器保留的封闭区域
 │   └── output/               # 本地工作牌组的扁平目录列表
+├── benchmarks/               # 基准测试场景目录
 ├── tools/
 │   ├── anki-e2e/             # 本地 Anki Desktop E2E 测试台
 │   ├── anki-repo/            # 检查、质量保证、受限修改、可视化报告
+│   ├── benchmark-contract/   # 基准目录与结果校验
 │   ├── asset-store/          # 资源库及 kanji-assets
 │   └── repository-maintenance/ # 盘点与安全垃圾回收
 ├── .asset-store/             # 可信本地资源存储，被 Git 忽略

@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "scenario": {
+    "id": "demo-e2e.suite",
+    "module": "demo-e2e",
+    "revision": 1,
+    "kind": "long-e2e"
+  },
+  "profile": {
+    "id": "cold",
+    "cache": "cold",
+    "network": "online"
+  },
+  "parameters": {
+    "release": "stable"
+  },
+  "inputs": [
+    {
+      "id": "tree",
+      "role": "subject",
+      "identity": {
+        "method": "content-tree-sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "id": "fixture-archive",
+      "role": "workload",
+      "identity": {
+        "method": "declared-version",
+        "value": "1.2.3"
+      },
+      "size": {
+        "archive_bytes": {
+          "value": 1000.0,
+          "unit": "byte"
+        }
+      }
+    }
+  ],
+  "provenance": {
+    "recorded_at": "2026-10-27T12:30:00.5Z",
+    "measurement": {
+      "name": "hyperfine",
+      "version": "2.0.0",
+      "format": "hyperfine-json-v2"
+    },
+    "code": {
+      "module_version": "0.1.0",
+      "source_tree_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "git_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dirty": false
+    }
+  },
+  "environment": {
+    "os": {
+      "status": "known",
+      "value": "linux"
+    },
+    "arch": {
+      "status": "known",
+      "value": "x86_64"
+    },
+    "virtualization": {
+      "status": "known",
+      "value": "wsl2"
+    },
+    "logical_cpus": {
+      "status": "known",
+      "value": "16"
+    },
+    "module_version": {
+      "status": "known",
+      "value": "0.1.0"
+    },
+    "runner_flavor": {
+      "status": "unavailable",
+      "reason": "учебный исполнитель не сообщил вариант"
+    }
+  },
+  "outcome": {
+    "status": "partial",
+    "reason": "memory.peak не прочитан: контейнер завершился раньше первого сэмпла"
+  },
+  "observation": "single",
+  "warmup_runs": 0,
+  "metrics": [
+    {
+      "key": "time_wall_clock@command",
+      "metric": "time_wall_clock",
+      "scope": "command",
+      "source": "hyperfine",
+      "unit": "second",
+      "availability": "measured"
+    },
+    {
+      "key": "memory_peak_cgroup@cgroup",
+      "metric": "memory_peak_cgroup",
+      "scope": "cgroup",
+      "source": "cgroup-v2",
+      "unit": "byte",
+      "availability": "failed",
+      "reason": "memory.peak не прочитан до удаления cgroup"
+    },
+    {
+      "key": "cpu_utilization_mean@host",
+      "metric": "cpu_utilization_mean",
+      "scope": "host",
+      "source": "procfs",
+      "unit": "core",
+      "availability": "measured"
+    },
+    {
+      "key": "cpu_cycles@process-tree-waited",
+      "metric": "cpu_cycles",
+      "scope": "process-tree-waited",
+      "source": "hyperfine",
+      "unit": "count",
+      "availability": "measured"
+    },
+    {
+      "key": "phase_duration@phase/build",
+      "metric": "phase_duration",
+      "scope": "phase",
+      "source": "module-log",
+      "label": "build",
+      "unit": "second",
+      "availability": "measured"
+    },
+    {
+      "key": "module_counter@module-report/checks",
+      "metric": "module_counter",
+      "scope": "module-report",
+      "source": "module-report",
+      "label": "checks",
+      "unit": "count",
+      "availability": "measured"
+    }
+  ],
+  "runs": [
+    {
+      "index": 0,
+      "status": "success",
+      "exit_code": 0,
+      "values": {
+        "time_wall_clock@command": {
+          "status": "measured",
+          "value": 406.7
+        },
+        "memory_peak_cgroup@cgroup": {
+          "status": "failed",
+          "reason": "memory.peak не прочитан до удаления cgroup"
+        },
+        "cpu_utilization_mean@host": {
+          "status": "measured",
+          "value": 2.75
+        },
+        "cpu_cycles@process-tree-waited": {
+          "status": "measured",
+          "value": 123456789.0
+        },
+        "phase_duration@phase/build": {
+          "status": "measured",
+          "value": 155.0
+        },
+        "module_counter@module-report/checks": {
+          "status": "measured",
+          "value": 129.0
+        }
+      }
+    }
+  ],
+  "aggregates": {
+    "time_wall_clock@command": {
+      "count": 1,
+      "mean": 406.7,
+      "stddev": null,
+      "median": 406.7,
+      "min": 406.7,
+      "max": 406.7
+    }
+  }
+}

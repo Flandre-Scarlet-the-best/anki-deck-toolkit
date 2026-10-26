@@ -1,0 +1,81 @@
+schema_version = 1
+module = "demo-cli"
+
+[[scenario]]
+id = "demo-cli.count-bytes"
+title = "Учебный пример: подсчёт байтов файла"
+revision = 1
+kind = "short-cli"
+status = "example"
+description = "Учебный сценарий для тестов и документации: короткая CLI-операция над файлом репозитория. Не измеряет ни один модуль Anki-decks."
+measured = "Один запуск `wc -c` над учебным файлом от старта процесса до выхода."
+platforms = ["linux", "macos"]
+
+[scenario.target]
+program = { kind = "executable", name = "wc" }
+args = ["-c", "{input.sample}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+set = { LC_ALL = "C" }
+inherit = ["PATH"]
+
+[[scenario.input]]
+id = "sample"
+kind = "repo-file"
+role = "workload"
+identity = "file-sha256"
+path = "data/sample.txt"
+description = "Учебный файл нагрузки."
+size = [{ name = "bytes", unit = "byte", description = "Размер файла в байтах." }]
+
+[scenario.runs]
+warmup = 2
+min_runs = 3
+max_runs = 20
+single_run_allowed = false
+run_timeout_seconds = 10
+total_budget_seconds = 60
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Собственных кэшей нет; page cache ОС содержит файл после двух прогревочных запусков."
+cleared = []
+retained = ["page cache ОС"]
+
+[[scenario.profile]]
+id = "offline-warm"
+cache_definition = "То же, что warm."
+cleared = []
+retained = ["page cache ОС"]
+network_definition = "wc не обращается к сети; серия запускается без сетевого доступа."
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+unit = "second"
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "cache_misses"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "На macOS Hyperfine этот счётчик не поддерживает: результат отметит его unsupported."
+
+[scenario.environment]
+record = ["os", "arch", "cpu_model", "module_version", "hyperfine_version"]
+comparable = ["os", "arch", "cpu_model"]

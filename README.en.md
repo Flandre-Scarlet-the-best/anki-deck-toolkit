@@ -4,7 +4,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: d48dace816285a1801860daf27b6f60f1e26487a -->
+<!-- i18n-source-git-blob: 9bf6be3ec66fb215c14b3116537b0219dbb4b1f5 -->
 
 **Rust CLI tools for inspecting and validating CrowdAnki JSON exports, making targeted edits, and visually comparing exports.**
 
@@ -120,6 +120,7 @@ Detailed commands and machine-readable contracts are documented in the tool-spec
 - [`asset-store` and `kanji-assets` — asset lifecycle and verification](tools/asset-store/README.en.md)
 - [`repository-maintenance` — disk inventory and safe garbage collection](tools/repository-maintenance/README.en.md)
 - [`anki-e2e` — local isolated Anki Desktop E2E stand in Docker](tools/anki-e2e/README.en.md)
+- [`benchmark-contract` — benchmark scenario catalog and measurement result contract](tools/benchmark-contract/README.en.md)
 
 ## Tools
 
@@ -251,9 +252,11 @@ This separation allows trusted assets to be checked and reused without turning a
 ├── decks/                    # user data; entirely ignored by Git
 │   ├── input/                # closed area for a future trusted importer
 │   └── output/               # flat list of working local decks
+├── benchmarks/               # benchmark scenario catalog
 ├── tools/
 │   ├── anki-e2e/             # local Anki Desktop E2E stand
 │   ├── anki-repo/            # inspection, QA, constrained edits, visual reports
+│   ├── benchmark-contract/   # benchmark catalog and result checks
 │   ├── asset-store/          # asset library and kanji-assets
 │   └── repository-maintenance/ # inventory and safe garbage collection
 ├── .asset-store/             # trusted local asset store, ignored by Git

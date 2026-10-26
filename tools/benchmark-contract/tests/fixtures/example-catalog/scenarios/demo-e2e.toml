@@ -1,0 +1,164 @@
+schema_version = 1
+module = "demo-e2e"
+
+[[scenario]]
+id = "demo-e2e.suite"
+title = "Учебный пример: длительный E2E"
+revision = 1
+kind = "long-e2e"
+status = "example"
+description = "Учебный сценарий: холодный, тёплый и инкрементальный профили длительной нагрузки. Программа demo-e2e-runner вымышлена; сценарий никогда не выбирается для измерения."
+measured = "Один вызов `demo-e2e-runner suite` целиком; подготовка, сброс и очистка не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "executable", name = "demo-e2e-runner" }
+args = ["suite", "--release", "{param.release}"]
+expect_exit_codes = [0]
+
+[[scenario.parameter]]
+name = "release"
+description = "Учебный канал релиза."
+default = "stable"
+choices = ["stable", "beta"]
+record = true
+affects_comparability = true
+
+[[scenario.input]]
+id = "tree"
+kind = "repo-tree"
+role = "subject"
+identity = "content-tree-sha256"
+description = "Учебное дерево исходников — предмет сравнения."
+
+[[scenario.input]]
+id = "fixture-archive"
+kind = "downloaded-artifact"
+role = "workload"
+identity = "declared-version"
+description = "Учебный внешний артефакт."
+size = [{ name = "archive_bytes", unit = "byte", description = "Размер артефакта." }]
+
+[scenario.runs]
+warmup = 0
+min_runs = 2
+max_runs = 3
+single_run_allowed = true
+run_timeout_seconds = 3600
+total_budget_seconds = 14400
+
+[[scenario.setup]]
+description = "Учебная подготовка: собрать runner."
+program = { kind = "executable", name = "demo-e2e-runner" }
+args = ["build"]
+touches = "module-owned"
+timeout_seconds = 600
+
+[[scenario.cleanup]]
+description = "Удалить временные данные прогонов."
+program = { kind = "executable", name = "demo-e2e-runner" }
+args = ["clean", "--runs"]
+touches = "scenario-temp"
+timeout_seconds = 60
+
+[[scenario.profile]]
+id = "cold"
+cache_definition = "Перед каждым прогоном `demo-e2e-runner reset --cache` удаляет кэш модуля."
+cleared = ["кэш модуля"]
+retained = ["общие кэши системы"]
+
+[[scenario.profile.prepare]]
+description = "Штатный сброс кэша модуля."
+program = { kind = "executable", name = "demo-e2e-runner" }
+args = ["reset", "--cache"]
+touches = "module-owned"
+timeout_seconds = 300
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Кэш заполнен неизмеряемым прогоном в setup профиля."
+cleared = []
+retained = ["кэш модуля"]
+
+[[scenario.profile.setup]]
+description = "Прогрев одним прогоном."
+program = { kind = "executable", name = "demo-e2e-runner" }
+args = ["suite", "--release", "{param.release}"]
+touches = "module-owned"
+timeout_seconds = 3600
+
+[[scenario.profile]]
+id = "incremental"
+cache_definition = "Кэш тёплый; перед прогоном меняется один входной файл."
+cleared = ["один входной файл"]
+retained = ["кэш модуля"]
+
+[[scenario.profile.prepare]]
+description = "Изменить один входной файл во временном каталоге прогона."
+program = { kind = "executable", name = "demo-e2e-runner" }
+args = ["touch-input"]
+touches = "scenario-temp"
+timeout_seconds = 60
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = true
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 1.0
+
+[[scenario.metric]]
+metric = "cpu_cycles"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "phase_duration"
+scope = "phase"
+source = "module-log"
+label = "build"
+required = false
+resolution = 1.0
+
+[[scenario.metric]]
+metric = "module_counter"
+scope = "module-report"
+source = "module-report"
+label = "checks"
+required = false
+
+[[scenario.requires]]
+kind = "linux-cgroup-v2"
+
+[[scenario.requires]]
+kind = "perf-events"
+
+[[scenario.requires]]
+kind = "executable"
+name = "demo-e2e-runner"
+
+[[scenario.requires]]
+kind = "network"
+purpose = "Учебная загрузка артефакта."
+profiles = ["cold"]
+
+[scenario.environment]
+record = ["os", "arch", "virtualization", "logical_cpus", "module_version", "runner_flavor"]
+comparable = ["os", "arch", "virtualization", "runner_flavor"]
+
+[[scenario.environment.fact]]
+name = "runner_flavor"
+description = "Учебный факт окружения модуля."

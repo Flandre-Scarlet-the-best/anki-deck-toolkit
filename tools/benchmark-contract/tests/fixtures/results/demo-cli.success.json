@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "scenario": {
+    "id": "demo-cli.count-bytes",
+    "module": "demo-cli",
+    "revision": 1,
+    "kind": "short-cli"
+  },
+  "profile": {
+    "id": "warm",
+    "cache": "warm",
+    "network": "online"
+  },
+  "inputs": [
+    {
+      "id": "sample",
+      "role": "workload",
+      "identity": {
+        "method": "file-sha256",
+        "value": "39cfd55e2dfac1abb10a02ba706d8131950347a02f6ab025d21553198e690863"
+      },
+      "size": {
+        "bytes": {
+          "value": 102.0,
+          "unit": "byte"
+        }
+      }
+    }
+  ],
+  "provenance": {
+    "recorded_at": "2026-10-27T12:00:00Z",
+    "measurement": {
+      "name": "hyperfine",
+      "version": "2.0.0",
+      "format": "hyperfine-json-v2"
+    },
+    "runner": {
+      "name": "учебный исполнитель",
+      "version": "0.0.0"
+    },
+    "code": {
+      "module_version": "0.1.0",
+      "dirty": false
+    }
+  },
+  "environment": {
+    "os": {
+      "status": "known",
+      "value": "linux"
+    },
+    "arch": {
+      "status": "known",
+      "value": "x86_64"
+    },
+    "cpu_model": {
+      "status": "known",
+      "value": "Учебный CPU"
+    },
+    "module_version": {
+      "status": "known",
+      "value": "0.1.0"
+    },
+    "hyperfine_version": {
+      "status": "known",
+      "value": "2.0.0"
+    }
+  },
+  "outcome": {
+    "status": "success"
+  },
+  "observation": "repeated",
+  "warmup_runs": 2,
+  "metrics": [
+    {
+      "key": "time_wall_clock@command",
+      "metric": "time_wall_clock",
+      "scope": "command",
+      "source": "hyperfine",
+      "unit": "second",
+      "availability": "measured"
+    },
+    {
+      "key": "memory_peak_resident@largest-process-in-tree",
+      "metric": "memory_peak_resident",
+      "scope": "largest-process-in-tree",
+      "source": "hyperfine",
+      "unit": "byte",
+      "availability": "measured"
+    },
+    {
+      "key": "instructions@process-tree-waited",
+      "metric": "instructions",
+      "scope": "process-tree-waited",
+      "source": "hyperfine",
+      "unit": "count",
+      "availability": "unavailable",
+      "reason": "perf_event_paranoid = 3: счётчики процессора недоступны без прав"
+    },
+    {
+      "key": "cache_misses@process-tree-waited",
+      "metric": "cache_misses",
+      "scope": "process-tree-waited",
+      "source": "hyperfine",
+      "unit": "count",
+      "availability": "unavailable",
+      "reason": "perf_event_paranoid = 3: счётчики процессора недоступны без прав"
+    }
+  ],
+  "runs": [
+    {
+      "index": 0,
+      "status": "success",
+      "exit_code": 0,
+      "values": {
+        "time_wall_clock@command": {
+          "status": "measured",
+          "value": 0.004
+        },
+        "memory_peak_resident@largest-process-in-tree": {
+          "status": "measured",
+          "value": 1048576.0
+        },
+        "instructions@process-tree-waited": {
+          "status": "unavailable",
+          "reason": "perf_event недоступен"
+        },
+        "cache_misses@process-tree-waited": {
+          "status": "unavailable",
+          "reason": "perf_event недоступен"
+        }
+      }
+    },
+    {
+      "index": 1,
+      "status": "success",
+      "exit_code": 0,
+      "values": {
+        "time_wall_clock@command": {
+          "status": "measured",
+          "value": 0.005
+        },
+        "memory_peak_resident@largest-process-in-tree": {
+          "status": "measured",
+          "value": 1052672.0
+        },
+        "instructions@process-tree-waited": {
+          "status": "unavailable",
+          "reason": "perf_event недоступен"
+        },
+        "cache_misses@process-tree-waited": {
+          "status": "unavailable",
+          "reason": "perf_event недоступен"
+        }
+      }
+    },
+    {
+      "index": 2,
+      "status": "success",
+      "exit_code": 0,
+      "values": {
+        "time_wall_clock@command": {
+          "status": "measured",
+          "value": 0.006
+        },
+        "memory_peak_resident@largest-process-in-tree": {
+          "status": "measured",
+          "value": 1056768.0
+        },
+        "instructions@process-tree-waited": {
+          "status": "unavailable",
+          "reason": "perf_event недоступен"
+        },
+        "cache_misses@process-tree-waited": {
+          "status": "unavailable",
+          "reason": "perf_event недоступен"
+        }
+      }
+    }
+  ],
+  "aggregates": {
+    "time_wall_clock@command": {
+      "count": 3,
+      "mean": 0.005,
+      "stddev": 0.001,
+      "median": 0.005,
+      "min": 0.004,
+      "max": 0.006
+    },
+    "memory_peak_resident@largest-process-in-tree": {
+      "count": 3,
+      "mean": 1052672.0,
+      "stddev": 4096.0,
+      "median": 1052672.0,
+      "min": 1048576.0,
+      "max": 1056768.0
+    }
+  }
+}

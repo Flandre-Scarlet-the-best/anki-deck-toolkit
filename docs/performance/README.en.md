@@ -1,7 +1,7 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 3cfade7a7f7cfa1beab0e8e725a3758240e41bba -->
+<!-- i18n-source-git-blob: 929111e47b1e5b704face5491ca638aa2778fc6a -->
 
 This directory holds the performance journals of the repository's modules:
 time per phase, CPU, memory, disk and the number of spawned processes. Each
@@ -21,6 +21,16 @@ checks: different hardware, OS or Docker give different values.
 
 A new module gets its own page `docs/performance/<module>.md` with
 translations and a row in this table.
+
+## Scenario catalog and result contract
+
+Scenarios, execution-condition profiles, the boundary of the measured work and
+metrics with their scope are declared in machine-readable form in the
+`benchmarks/` catalog, and measurement results are recorded as versioned JSON.
+How to register a scenario and read a result is described in the
+[benchmark catalog](benchmarks.en.md). The rules on this page also apply to
+catalog-driven measurements: the catalog requires the exact cache state to be
+declared for each scenario, and the log remains evidence of an environment.
 
 ## Measurement rules
 
