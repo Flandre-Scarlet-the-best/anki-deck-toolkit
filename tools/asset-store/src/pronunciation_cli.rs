@@ -1,4 +1,4 @@
-//! Локальный CLI MP3 без сетевых провайдеров и распознавания речи.
+//! CLI японских MP3: локальный импорт, Forvo Web и явное подтверждение.
 use crate::pronunciation::{self as audio, Pronunciation, PronunciationDomainPolicy, batch};
 use crate::{
     AssetError, AssetStore, ErrorCode, HumanAttestationRequest, HumanDecision, StoreOptions,
@@ -35,6 +35,13 @@ enum Decision {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Видимый Chromium с собственным постоянным профилем Forvo.
+    Forvo {
+        #[arg(long)]
+        profile: Option<PathBuf>,
+        #[command(subcommand)]
+        action: ForvoAction,
+    },
     Init,
     Inspect,
     Verify,
@@ -78,6 +85,54 @@ enum Action {
     Read {
         #[arg(long)]
         requests: PathBuf,
+    },
+    BatchStart {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+    },
+    BatchResume {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+    },
+    BatchStatus {
+        #[arg(long)]
+        batch_id: String,
+    },
+    BatchCancel {
+        #[arg(long)]
+        batch_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ForvoAction {
+    /// Войдите вручную в открывшемся окне; пароль не передаётся CLI.
+    Login {
+        #[arg(long, default_value_t = 300, value_parser=clap::value_parser!(u64).range(1..=1800))]
+        timeout_seconds: u64,
+        #[arg(long)]
+        surface: Option<String>,
+    },
+    Check,
+    Candidates {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+    },
+    Fetch {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+        #[arg(long)]
+        replace_expected_sha256: Option<String>,
     },
     BatchStart {
         #[arg(long)]
@@ -218,6 +273,21 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
             protected.insert(parent.join("decks"));
         }
     }
+    if let Action::Forvo { profile, action } = &cli.command {
+        let profile = std::path::absolute(
+            profile
+                .clone()
+                .unwrap_or_else(|| repository.join(".codex/local/forvo-profile")),
+        )
+        .map_err(|e| AssetError::io("путь профиля", e))?;
+        if protected.iter().any(|p| profile.starts_with(p)) {
+            return Err(AssetError::new(
+                ErrorCode::BoundaryViolation,
+                "профиль Forvo не может находиться внутри decks/**",
+            ));
+        }
+        return execute_forvo(&root, &profile, action, &protected);
+    }
     if let Action::Probe { file } = &cli.command {
         return Ok(
             serde_json::json!({"schema_version":1,"outcome":"ok","result":audio::probe_mp3(&read_local(file,&protected,audio::MAX_AUDIO_BYTES)?)?}),
@@ -238,6 +308,7 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     };
     let read_audio = |path: &Path| read_local(path, &protected, audio::MAX_AUDIO_BYTES);
     let result = match &cli.command {
+        Action::Forvo { .. } => unreachable!("Forvo обработан до открытия хранилища"),
         Action::Init => {
             serde_json::json!({"store_id":store.store_id(),"initialized":store.initialized_on_open()})
         }
@@ -385,7 +456,18 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
 pub fn main() -> u8 {
     let cli = Cli::parse();
     let (value, code) = match execute(&cli) {
-        Ok(value) => (value, 0),
+        Ok(value) => {
+            let code = if value["outcome"] == "paused" {
+                if value["result"]["paused"]["code"] == "interrupted" {
+                    130
+                } else {
+                    3
+                }
+            } else {
+                0
+            };
+            (value, code)
+        }
         Err(error) => (
             serde_json::json!({"schema_version":1,"outcome":"error","error":{"code":error.code.as_str(),"message":error.message,"details":error.details}}),
             error.exit_code(),
@@ -396,4 +478,76 @@ pub fn main() -> u8 {
         Output::Text => println!("{}", serde_json::to_string_pretty(&value).expect("JSON")),
     }
     code
+}
+
+fn execute_forvo(
+    root: &Path,
+    profile: &Path,
+    action: &ForvoAction,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::forvo::{self, AuthState, ForvoSession};
+    let open_store = |initialize: bool| {
+        let options = protected
+            .iter()
+            .fold(StoreOptions::new(root), |o, p| o.protect_from(p));
+        if initialize {
+            AssetStore::open_with_policy(options, PronunciationDomainPolicy)
+        } else {
+            AssetStore::open_existing_with_policy(options, PronunciationDomainPolicy)
+        }
+    };
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| AssetError::io("runtime", e))?;
+    let result=runtime.block_on(async {
+        match action {
+            ForvoAction::BatchStatus{batch_id}=>Ok(serde_json::json!(forvo::batch::status(&open_store(false)?,batch_id)?)),
+            ForvoAction::BatchCancel{batch_id}=>Ok(serde_json::json!(forvo::batch::cancel(&open_store(false)?,batch_id)?)),
+            ForvoAction::BatchStart{batch_id,plan,max_items}=>{
+                let plan=serde_json::from_slice(&read_local(plan,protected,1024*1024)?).map_err(|_|AssetError::new(ErrorCode::InvalidIdentity,"неверный строгий JSON-план Forvo"))?;
+                let store=open_store(true)?;
+                forvo::batch::start(&store,batch_id,plan)?;
+                Ok(serde_json::json!(forvo::batch::resume(&store,batch_id,profile,*max_items).await?))
+            }
+            ForvoAction::BatchResume{batch_id,max_items}=>Ok(serde_json::json!(forvo::batch::resume(&open_store(false)?,batch_id,profile,*max_items).await?)),
+            _=>{
+                // Проверяем входные пары до запуска браузера.
+                let request=match action {ForvoAction::Candidates{surface,reading}|ForvoAction::Fetch{surface,reading,..}=>Some(Pronunciation::new(surface,reading)?),_=>None};
+                let store=if matches!(action,ForvoAction::Fetch{..}) {Some(open_store(true)?)} else {None};
+                let mut session=ForvoSession::launch(profile).await?;
+                let result=tokio::select! {
+                    result=async {
+                        match action {
+                            ForvoAction::Login{timeout_seconds,surface}=>{
+                                eprintln!("Войдите вручную в открытом окне Forvo; пароль не передаётся CLI.");
+                                let surface=surface.as_deref().map(|s|Pronunciation::new(s,s).map(|r|r.surface)).transpose()?;
+                                let state=session.check_at(true,std::time::Duration::from_secs(*timeout_seconds),surface.as_deref()).await?;
+                                if state!=AuthState::Authenticated {return Err(forvo::auth_error(state));}
+                                Ok(serde_json::json!({"auth_state":state}))
+                            }
+                            ForvoAction::Check=>{
+                                let state=session.check(false,std::time::Duration::from_secs(12)).await?;
+                                if state!=AuthState::Authenticated {return Err(forvo::auth_error(state));}
+                                Ok(serde_json::json!({"auth_state":state}))
+                            }
+                            ForvoAction::Candidates{..}=>Ok(serde_json::json!({"ranking_policy":forvo::RANKING,"candidates":session.candidates(request.as_ref().expect("request")).await?})),
+                            ForvoAction::Fetch{replace_expected_sha256,..}=>{
+                                let request=request.as_ref().expect("request");
+                                let acquisition=forvo::acquire(&mut session,request).await?;
+                                let asset=forvo::import_acquisition(store.as_ref().expect("store"),request,&acquisition,replace_expected_sha256.clone())?;
+                                Ok(serde_json::json!({"asset":asset,"acquisition":acquisition.evidence}))
+                            }
+                            _=>unreachable!(),
+                        }
+                    }=>result,
+                    _=tokio::signal::ctrl_c()=>Err(AssetError::new(ErrorCode::Interrupted,"Forvo прерван пользователем")),
+                };
+                session.close().await?;
+                result
+            }
+        }
+    })?;
+    let paused = result.get("paused").is_some_and(|v| !v.is_null());
+    Ok(
+        serde_json::json!({"schema_version":1,"outcome":if paused {"paused"} else {"ok"},"result":result}),
+    )
 }

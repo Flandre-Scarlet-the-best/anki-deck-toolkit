@@ -1,8 +1,9 @@
 # Японские MP3: `pronunciation-assets`
 
 Домен `pronunciation_audio` хранит независимые произношения в
-`.asset-store/pronunciation-audio/`. Это локальный импорт оригинальных MP3,
-техническая проверка и явное решение человека. Сетевого провайдера и ASR нет.
+`.asset-store/pronunciation-audio/`. Локальный импорт оригинальных MP3 и
+[авторизованный Forvo Web Provider](forvo.md) используют одну техническую проверку
+и явное решение человека. ASR и DSP не требуются.
 `asset-store` не открывает `decks/**`, не меняет `deck.json`, `media_files`
 и не материализует файлы в колоды. Обработчика аудио в `anki-repo create` пока нет.
 

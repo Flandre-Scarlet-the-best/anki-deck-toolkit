@@ -160,9 +160,34 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
     }
     fn validate_record_evidence(&self, record: &AssetRecord) -> Result<(), AssetError> {
         let request = Pronunciation::from_identity(&record.identity)?;
-        if record.domain_metadata != Some(serde_json::to_value(&request).expect("JSON")) {
+        let metadata = record
+            .domain_metadata
+            .as_ref()
+            .ok_or_else(|| invalid("нет метаданных произношения"))?;
+        if metadata != &serde_json::json!(request) {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct WebMetadata {
+                surface: String,
+                reading: String,
+                forvo: crate::forvo::ForvoEvidence,
+            }
+            let parsed: WebMetadata = serde_json::from_value(metadata.clone())
+                .map_err(|_| invalid("неподдерживаемые метаданные произношения"))?;
+            if parsed.surface != request.surface
+                || parsed.reading != request.reading
+                || record.provenance.source_kind != "forvo_web"
+                || record.provenance.source_name
+                    != format!("forvo-ja-{}.mp3", parsed.forvo.selected_record_id)
+            {
+                return Err(invalid(
+                    "метаданные не совпадают с идентичностью/происхождением",
+                ));
+            }
+            parsed.forvo.validate(&request, &record.sha256)?;
+        } else if record.provenance.source_kind == "forvo_web" {
             return Err(invalid(
-                "метаданные не совпадают с surface/reading идентичности",
+                "Forvo требует полного происхождения для конкретного SHA",
             ));
         }
         // Структура свидетельства принадлежит конкретной версии валидатора.
@@ -288,6 +313,35 @@ pub fn import_bytes(
     source_name: &str,
     replace_expected: Option<String>,
 ) -> Result<AssetRecord, AssetError> {
+    import_source(store, request, bytes, source_name, replace_expected, None)
+}
+
+pub(crate) fn import_forvo_bytes(
+    store: &AssetStore,
+    request: &Pronunciation,
+    bytes: &[u8],
+    evidence: &crate::forvo::ForvoEvidence,
+    replace_expected: Option<String>,
+) -> Result<AssetRecord, AssetError> {
+    evidence.validate(request, &sha256_hex(bytes))?;
+    import_source(
+        store,
+        request,
+        bytes,
+        &format!("forvo-ja-{}.mp3", evidence.selected_record_id),
+        replace_expected,
+        Some(evidence),
+    )
+}
+
+fn import_source(
+    store: &AssetStore,
+    request: &Pronunciation,
+    bytes: &[u8],
+    source_name: &str,
+    replace_expected: Option<String>,
+    forvo: Option<&crate::forvo::ForvoEvidence>,
+) -> Result<AssetRecord, AssetError> {
     PronunciationDomainPolicy.validate_identity(&request.identity())?;
     if source_name.is_empty()
         || source_name.contains(['/', '\\'])
@@ -300,19 +354,41 @@ pub fn import_bytes(
         .map_err(|e| AssetError::io("временный MP3", e))?;
     let snapshot = workspace.path().join("candidate.mp3");
     std::fs::write(&snapshot, bytes).map_err(|e| AssetError::io("снимок MP3", e))?;
-    let outcome = store.ingest_with_provenance(
+    let ingest = if forvo.is_some() && replace_expected.is_some() {
+        AssetStore::ingest_with_metadata_cas
+    } else {
+        AssetStore::ingest_with_provenance
+    };
+    let outcome = ingest(
+        store,
         IngestRequest {
             identity: request.identity(),
             source_path: snapshot,
             expected_source_sha256: Some(sha256_hex(bytes)),
-            domain_metadata: Some(serde_json::json!(request)),
+            domain_metadata: Some(match forvo {
+                Some(evidence) => {
+                    serde_json::json!({"surface":request.surface,"reading":request.reading,"forvo":evidence})
+                }
+                None => serde_json::json!(request),
+            }),
             replace_expected_sha256: replace_expected,
         },
         Provenance {
-            source_kind: "local_import".into(),
+            source_kind: if forvo.is_some() {
+                "forvo_web"
+            } else {
+                "local_import"
+            }
+            .into(),
             source_name: source_name.into(),
         },
     )?;
+    if forvo.is_some() && outcome.asset.provenance.source_kind != "forvo_web" {
+        return Err(AssetError::new(
+            ErrorCode::IdentityConflict,
+            "Те же байты уже хранятся с иным происхождением; ресурс сохранён без изменений",
+        ));
+    }
     if !outcome.changed
         && outcome
             .asset

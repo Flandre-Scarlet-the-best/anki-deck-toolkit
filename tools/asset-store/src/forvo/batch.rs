@@ -1,0 +1,287 @@
+//! Forvo-пакет сохраняет полученные байты до импорта, используя единственный SafeBatchRuntime.
+use super::{
+    Acquisition, ForvoEvidence, ForvoSession, acquire, import_acquisition, pauses_batch,
+    provider_code,
+};
+use crate::{
+    AssetError, AssetStore, ErrorCode,
+    batch_runtime::{RuntimeBatchState, RuntimeBlobRef, SafeBatchRuntime},
+    pronunciation::{MAX_AUDIO_BYTES, Pronunciation, batch::MAX_BATCH_ITEMS},
+};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchPlan {
+    pub schema_version: u32,
+    pub items: Vec<FetchItem>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchItem {
+    pub surface: String,
+    pub reading: String,
+    pub replace_expected_sha256: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Failure {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<CandidateReport>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateReport {
+    pub candidates: Vec<super::Candidate>,
+    pub attempts: Vec<super::Attempt>,
+}
+
+impl From<AssetError> for Failure {
+    fn from(e: AssetError) -> Self {
+        let report = match (
+            serde_json::from_value(e.details["candidates"].clone()),
+            serde_json::from_value(e.details["attempts"].clone()),
+        ) {
+            (Ok(candidates), Ok(attempts)) => Some(CandidateReport {
+                candidates,
+                attempts,
+            }),
+            _ => None,
+        };
+        Self {
+            code: provider_code(&e).into(),
+            message: e.message,
+            report,
+        }
+    }
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredAcquisition {
+    pub blob: RuntimeBlobRef,
+    pub evidence: ForvoEvidence,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Item {
+    pub request: Pronunciation,
+    pub replace_expected_sha256: Option<String>,
+    pub acquisition: Option<StoredAcquisition>,
+    pub outcome: Option<Failure>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForvoBatch {
+    pub schema_version: u32,
+    pub provider: String,
+    pub batch_id: String,
+    pub revision: u64,
+    pub cancelled: bool,
+    pub paused: Option<Failure>,
+    pub items: Vec<Item>,
+}
+fn invalid() -> AssetError {
+    AssetError::new(
+        ErrorCode::ManifestCorrupt,
+        "некорректное состояние Forvo-пакета",
+    )
+}
+fn valid_sha(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+impl RuntimeBatchState for ForvoBatch {
+    fn batch_id(&self) -> &str {
+        &self.batch_id
+    }
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+    fn maximum_blob_bytes(&self) -> u64 {
+        MAX_AUDIO_BYTES
+    }
+    fn referenced_blobs(&self) -> Vec<RuntimeBlobRef> {
+        self.items
+            .iter()
+            .filter_map(|i| i.acquisition.as_ref().map(|a| a.blob.clone()))
+            .collect()
+    }
+    fn validate(&self) -> Result<(), AssetError> {
+        if self.schema_version != 1
+            || self.provider != "forvo_web"
+            || self.items.is_empty()
+            || self.items.len() > MAX_BATCH_ITEMS
+            || self.revision > i64::MAX as u64
+        {
+            return Err(invalid());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for item in &self.items {
+            if Pronunciation::from_identity(&item.request.identity())? != item.request
+                || !seen.insert(item.request.identity())
+                || item
+                    .replace_expected_sha256
+                    .as_deref()
+                    .is_some_and(|s| !valid_sha(s))
+            {
+                return Err(invalid());
+            }
+            if let Some(acquisition) = &item.acquisition {
+                acquisition
+                    .evidence
+                    .validate(&item.request, &acquisition.blob.sha256)?;
+            }
+            if let Some(outcome) = &item.outcome
+                && (outcome.code.is_empty()
+                    || outcome.code.len() > 80
+                    || outcome.message.is_empty()
+                    || outcome.message.len() > 2048
+                    || outcome.code == "imported" && item.acquisition.is_none())
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+}
+pub fn start(store: &AssetStore, id: &str, plan: FetchPlan) -> Result<ForvoBatch, AssetError> {
+    if plan.schema_version != 1 || plan.items.is_empty() || plan.items.len() > MAX_BATCH_ITEMS {
+        return Err(invalid());
+    }
+    let items = plan
+        .items
+        .into_iter()
+        .map(|i| {
+            Ok(Item {
+                request: Pronunciation::new(&i.surface, &i.reading)?,
+                replace_expected_sha256: i.replace_expected_sha256,
+                acquisition: None,
+                outcome: None,
+            })
+        })
+        .collect::<Result<Vec<_>, AssetError>>()?;
+    let batch = ForvoBatch {
+        schema_version: 1,
+        provider: "forvo_web".into(),
+        batch_id: id.into(),
+        revision: 0,
+        cancelled: false,
+        paused: None,
+        items,
+    };
+    batch.validate()?;
+    let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
+    if runtime.load::<ForvoBatch>()?.is_some() {
+        return Err(AssetError::new(
+            ErrorCode::IdentityConflict,
+            "пакет существует; используйте forvo batch-resume",
+        ));
+    }
+    runtime.save(&batch)?;
+    Ok(batch)
+}
+fn load(runtime: &mut SafeBatchRuntime) -> Result<ForvoBatch, AssetError> {
+    runtime.load()?.ok_or_else(invalid)
+}
+pub fn status(store: &AssetStore, id: &str) -> Result<ForvoBatch, AssetError> {
+    load(&mut SafeBatchRuntime::open(store.root(), id)?)
+}
+pub fn cancel(store: &AssetStore, id: &str) -> Result<ForvoBatch, AssetError> {
+    let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
+    let mut batch = load(&mut runtime)?;
+    if !batch.cancelled || batch.paused.is_some() {
+        batch.cancelled = true;
+        batch.paused = None;
+        batch.revision += 1;
+        runtime.save(&batch)?;
+    }
+    Ok(batch)
+}
+async fn cancellation(store: &AssetStore, id: &str) -> Result<(), AssetError> {
+    let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
+    loop {
+        if load(&mut runtime)?.cancelled {
+            return Ok(());
+        }
+        runtime.release_lock()?;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        runtime.reacquire_lock()?;
+    }
+}
+
+pub async fn resume(
+    store: &AssetStore,
+    id: &str,
+    profile: &Path,
+    max_items: usize,
+) -> Result<ForvoBatch, AssetError> {
+    let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
+    let _lease = runtime.execution_lease()?;
+    let mut batch = load(&mut runtime)?;
+    if batch.cancelled {
+        return Err(AssetError::new(
+            ErrorCode::InvalidTransition,
+            "пакет отменён",
+        ));
+    }
+    if batch.paused.is_some() && batch.items.iter().all(|item| item.outcome.is_some()) {
+        batch.paused = None;
+        batch.revision += 1;
+        runtime.save(&batch)?;
+    }
+    let mut session = None;
+    let result=async {
+        let mut done=0;
+        while let Some(index)=batch.items.iter().position(|i|i.outcome.is_none()) {
+            if done>=max_items||batch.cancelled{break;}
+            if batch.items[index].acquisition.is_none(){
+                runtime.release_lock()?;
+                let launched=if session.is_none() {
+                    match ForvoSession::launch(profile).await {Ok(s)=>{session=Some(s);Ok(())},Err(e)=>Err(e)}
+                } else {Ok(())};
+                let acquisition=match launched {
+                    Err(e)=>Err(e),
+                    Ok(())=>tokio::select! {
+                    r=acquire(session.as_mut().expect("session"),&batch.items[index].request)=>r,
+                    _=tokio::signal::ctrl_c()=>Err(AssetError::new(ErrorCode::Interrupted,"Forvo-пакет прерван; продолжите через batch-resume")),
+                    r=cancellation(store,id)=>{r?;Err(AssetError::new(ErrorCode::Interrupted,"Forvo-пакет отменён"))},
+                    }
+                };
+                runtime.reacquire_lock()?;
+                batch=load(&mut runtime)?;
+                if batch.cancelled{break;}
+                match acquisition {
+                    Ok(acquisition)=>{
+                        let blob=runtime.persist_blob_with_limit(&acquisition.bytes,"mp3",MAX_AUDIO_BYTES)?;
+                        batch.items[index].acquisition=Some(StoredAcquisition{blob,evidence:acquisition.evidence});
+                        batch.paused=None;batch.revision+=1;runtime.save(&batch)?;
+                    }
+                    Err(e) if pauses_batch(&e)||e.code==ErrorCode::Interrupted=>{
+                        batch.paused=Some(e.into());batch.revision+=1;runtime.save(&batch)?;break;
+                    }
+                    Err(e)=>{
+                        batch.items[index].outcome=Some(e.into());batch.paused=None;batch.revision+=1;runtime.save(&batch)?;done+=1;continue;
+                    }
+                }
+            }
+            let item=&batch.items[index];
+            let saved=item.acquisition.as_ref().expect("checkpoint");
+            let result=runtime.read_blob(&saved.blob).and_then(|bytes|import_acquisition(store,&item.request,&Acquisition{bytes,evidence:saved.evidence.clone()},item.replace_expected_sha256.clone()));
+            batch.items[index].outcome=Some(match result {
+                Ok(_)=>Failure{code:"imported".into(),message:"Оригинальный MP3 сохранён; техническая проверка не даёт фонетического доверия".into(),report:None},
+                Err(e)=>e.into(),
+            });
+            batch.paused=None;batch.revision+=1;runtime.save(&batch)?;done+=1;
+        }
+        Ok::<_,AssetError>(())
+    }.await;
+    if let Some(session) = session {
+        session.close().await?;
+    }
+    result?;
+    Ok(batch)
+}
