@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: 52ab2ff04123dc77e20696bd0673f887159e5939 -->
+<!-- i18n-source-git-blob: 14410ad053bbd6f07ed56a04e631326901f1858b -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -10,9 +10,10 @@ collected. The result contract is versioned JSON in which a runner records
 measurements. Both contracts are checked by `benchmark-contract`
 ([CLI and exit codes](../../tools/benchmark-contract/README.en.md)).
 
-The catalog and its checks run and measure nothing. A Rust runner with
-Hyperfine 2.0, cgroup metric collection, run history and thresholds are separate
-components that use this contract instead of inventing their own. Module logs
+The catalog and its checks run and measure nothing. Series are executed by
+[`benchmark-runner`](../../tools/benchmark-runner/README.en.md): Hyperfine 2.0
+and Linux system metrics. It uses this contract instead of inventing its own;
+the repository has no run history or thresholds. Module logs
 (`docs/performance/<module>.md`) remain evidence of specific environments.
 
 ## Where things live
@@ -22,6 +23,7 @@ components that use this contract instead of inventing their own. Module logs
 | `benchmarks/catalog.toml` | schema version, repository root and the shared profile vocabulary |
 | `benchmarks/scenarios/<module>.toml` | scenario declarations of one module; the file name equals the module name |
 | `tools/benchmark-contract/` | typed models, loading, validation, Hyperfine import, CLI |
+| `tools/benchmark-runner/` | series runner: Hyperfine 2.0, cgroup v2, `/proc`, module report |
 | `tools/benchmark-contract/tests/fixtures/` | example catalog and results for tests (`status = "example"`) |
 
 Discovery is fixed: the loader reads `catalog.toml` and every `*.toml` in
@@ -134,6 +136,8 @@ comparable = ["os", "arch", "cpu_model"]
 | `metric` | yes | requested metrics; `time_wall_clock` with scope `command` is mandatory |
 | `environment` | yes | facts that are recorded (`record`) and compared (`comparable`), plus the module's own facts (`fact`) |
 | `requires` | no | `executable`, `docker`, `linux-cgroup-v2`, `perf-events`, `network` (with profiles) |
+| `module_report` | no | the module's machine-readable report: `runs_dir` (from the repository root), file name `report`, `description`. Needed for the `module-report` source and `report` fields |
+| `container` | no | the Docker container whose cgroup is measured: `label` (`key=value`), `owner_pid_label` — the label holding the creator's PID, `description`. Requires `docker` in `requires` |
 
 `program` is either `{ kind = "cargo-bin", package, bin, cargo_profile }`
 (`release` by default; the package and binary are checked against the Cargo
@@ -170,14 +174,16 @@ Order for one "scenario × profile" series:
 4. Measured runs: `prepare` → **target** → `conclude`. Only the target is measured.
 5. Scenario `cleanup` — always, including after a failure or interruption.
 
-The steps map to Hyperfine 2.0 `--setup`, `--prepare`, `--conclude` and
-`--cleanup`, which it runs through a shell: the runner quotes argv itself. A
-`setup` failure yields outcome `failure` with no runs; a `prepare` failure, a
+The runner executes the steps itself from argv, without a shell; Hyperfine 2.0
+measures only the target, with a separate invocation per run. A `setup` failure yields outcome `failure` with no runs; a `prepare` failure, a
 timeout or an unexpected exit code of the target stops the series, and the
 outcome becomes `partial` if a successful run happened before, otherwise
 `failure`. Each step is bounded by `timeout_seconds`, a run by
-`run_timeout_seconds`, the whole series by `total_budget_seconds`; an exhausted
-budget stops the series.
+`run_timeout_seconds`, the whole series from the start of `setup` to the last
+`conclude` by `total_budget_seconds`; an exhausted budget stops the series.
+Building `cargo-bin` and `cleanup` are outside the budget: the runner bounds
+the build, and `cleanup` runs even after the budget is exhausted, bounded by
+the `timeout_seconds` of its steps.
 
 A step's `touches` states what it affects: `read-only`, `scenario-temp` (the
 scenario's own temporary data) or `module-owned` (module state that the module
@@ -231,6 +237,24 @@ identity is expected. Role `workload` is the load: it must declare size
 characteristics (`byte` or `count`), and results with a different workload
 identity or size are not comparable.
 
+The declaration states explicitly where identity and size come from:
+
+- `measure` of a size characteristic: `file-bytes` with a `path` inside the
+  input and unit `byte`, `tree-bytes` (`byte`), `tree-files` (`count`), `probe`
+  with a `pointer` into the input probe's JSON output, `report` with a
+  `pointer` into the module report;
+- an input `probe` is a `read-only` step that prints JSON about the input (for
+  example, `anki-repo --json stats`); it runs during preparation and is not
+  measured;
+- `report_identity` is a JSON Pointer to a `downloaded-artifact` identity in
+  the module report: the runner does not download an artifact that the module
+  downloads itself.
+
+An input with no way to compute its identity or size produces the warning
+`unresolvable_input`. In a result such an input may be missing only in a series
+without successful runs (`unsupported`, a `setup` failure): a successful run
+must record every input.
+
 ## Metrics: scope, source, unit
 
 Base units: `second`, `byte`, `count`, `core` (average busy cores: CPU seconds
@@ -249,10 +273,17 @@ per second). The contract has no other units. The metric key in a result is
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | CPU counters; need `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | a phase inside the target from the module log; needs a label and `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | a counter from the module's machine report; needs a label |
-| `disk_usage` | byte | `path` / `filesystem` | size of a named resource; needs a label |
+| `disk_usage` | byte | `path` / `filesystem` | apparent size of a named resource, as `du -sb`; needs a label |
 
 A combination outside the registry is the error `metric_scope_source`, not a new
 metric. The full registry with platforms is `benchmark-contract vocabulary`.
+
+A metric with the `module-report` source sets `pointer`, a JSON Pointer into the
+module report in which a `*` segment selects every element of an array or object
+and the values are summed; `disk_usage` sets `path` from the repository root. A
+module fact in `fact` may set `report`, a list of pointers into the report;
+different values between runs make the fact unknown. These fields are forbidden
+for other metrics (`unexpected_field`).
 
 Peak RSS of a process, cgroup memory peak, CPU time and observed load are
 different quantities; none substitutes another. Hyperfine only sees the target
@@ -410,21 +441,25 @@ fixtures.
   version N to N + 1. It is implemented together with version N + 1; there is no
   general migration framework in advance.
 - History storage keeps results with their `schema_version` and does not rewrite them.
+- Optional fields that an old tool rejects as unknown rather than silently
+  ignoring (`module_report`, `container`, `measure`, `probe`,
+  `report_identity`, `path`, `pointer`, a fact's `report`) do not increase the
+  version.
 - A scenario revision and the schema version are independent: a new revision
   does not change the schema, and a new schema does not change scenario revisions.
 
-## How later components use the contract
+## How the runner uses the contract
 
-The runner loads the catalog through the library, selects a scenario and a
-profile, runs `preflight`, builds the `cargo-bin`, substitutes parameters and
-inputs, computes input identity and size, runs Hyperfine 2.0 with the lifecycle
-steps and `--export-json`, imports the export, adds metrics from other sources
-(cgroup, module log and report), fills in environment and provenance, validates
-the result and stores it. History and comparisons use `compare`, and thresholds
-use only comparable results.
+`benchmark-runner` loads the catalog through the library, selects a scenario
+and a profile, checks environment readiness with probe runs, builds the
+`cargo-bin`, substitutes parameters and inputs, computes input identity and
+size, executes the lifecycle steps, measures the target with Hyperfine 2.0 and
+`--export-json`, imports the export through this library, adds metrics from
+other sources (cgroup, `/proc`, module report, filesystem), fills in
+environment and provenance, validates the result with `check-result` against
+the catalog and only then stores it. Comparisons use `compare`.
 
 ## Boundaries
 
-There is no runner here, no Hyperfine execution, no cgroup management, no
-CPU/RAM/I/O collection, no history storage, no regression computation and no CI
-thresholds. Numbers from module logs do not become thresholds.
+There is no history storage, no regression computation and no CI thresholds
+here. Numbers from module logs do not become thresholds.

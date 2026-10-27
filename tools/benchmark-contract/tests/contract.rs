@@ -829,7 +829,7 @@ fn references_to_inputs_parameters_and_paths_must_resolve() {
 #[test]
 fn workload_inputs_require_size_and_private_paths() {
     let scratch = Scratch::new();
-    scratch.edit(CLI, "size = [{ name = \"bytes\", unit = \"byte\", description = \"Размер файла в байтах.\" }]\n", "");
+    scratch.edit(CLI, "size = [{ name = \"bytes\", unit = \"byte\", description = \"Размер файла в байтах.\", measure = { kind = \"tree-bytes\" } }]\n", "");
     rejected(
         &scratch,
         "missing_size",
@@ -2201,4 +2201,202 @@ fn cli_reports_invalid_catalogs_and_results_with_exit_code_one() {
         );
         assert!(stderr.contains("catalog.toml"), "{stderr}");
     }
+}
+
+#[test]
+fn measurement_sources_must_name_their_origin() {
+    // Счётчик отчёта модуля без указателя.
+    let scratch = Scratch::new();
+    scratch.edit(E2E, "pointer = \"/checks/*/count\"\n", "");
+    rejected(
+        &scratch,
+        "missing_field",
+        Some("demo-e2e.suite"),
+        Some("metric[5].pointer"),
+    );
+
+    // Значение из отчёта без объявленного module_report.
+    let scratch = Scratch::new();
+    scratch.edit(
+        E2E,
+        "[scenario.module_report]\nruns_dir = \"runs\"\nreport = \"report.json\"\ndescription = \"Учебный отчёт: каждый вызов создаёт runs/<id>/report.json.\"\n",
+        "",
+    );
+    rejected(
+        &scratch,
+        "missing_module_report",
+        Some("demo-e2e.suite"),
+        Some("metric[5].pointer"),
+    );
+    assert_error(
+        &scratch.load().diagnostics,
+        "missing_module_report",
+        Some("demo-e2e.suite"),
+        Some("input[1].report_identity"),
+    );
+
+    // Указатель вне синтаксиса JSON Pointer.
+    let scratch = Scratch::new();
+    scratch.edit(
+        E2E,
+        "pointer = \"/checks/*/count\"",
+        "pointer = \"checks.count\"",
+    );
+    rejected(
+        &scratch,
+        "invalid_pointer",
+        Some("demo-e2e.suite"),
+        Some("metric[5].pointer"),
+    );
+
+    // Значение пробы без пробы входа.
+    let scratch = Scratch::new();
+    scratch.edit(
+        CLI,
+        "measure = { kind = \"tree-bytes\" }",
+        "measure = { kind = \"probe\", pointer = \"/bytes\" }",
+    );
+    rejected(
+        &scratch,
+        "missing_field",
+        Some("demo-cli.count-bytes"),
+        Some("input[0].size[0].measure"),
+    );
+
+    // file-bytes ищет файл внутри каталога: у входа-файла его нет.
+    let scratch = Scratch::new();
+    scratch.edit(
+        CLI,
+        "measure = { kind = \"tree-bytes\" }",
+        "measure = { kind = \"file-bytes\", path = \"sample.txt\" }",
+    );
+    rejected(
+        &scratch,
+        "contradictory_input",
+        Some("demo-cli.count-bytes"),
+        Some("input[0].size[0].measure"),
+    );
+
+    // Способ объёма определяет единицу.
+    let scratch = Scratch::new();
+    scratch.edit(
+        CLI,
+        "measure = { kind = \"tree-bytes\" }",
+        "measure = { kind = \"tree-files\" }",
+    );
+    rejected(
+        &scratch,
+        "unit_mismatch",
+        Some("demo-cli.count-bytes"),
+        Some("input[0].size[0].unit"),
+    );
+
+    // Проба входа только читает.
+    let scratch = Scratch::new();
+    scratch.edit(
+        CLI,
+        "measure = { kind = \"tree-bytes\" }",
+        "measure = { kind = \"probe\", pointer = \"/bytes\" }",
+    );
+    let text = fs::read_to_string(scratch.path(CLI)).unwrap();
+    let probe = "\n[scenario.input.probe]\ndescription = \"Проба.\"\nprogram = { kind = \"executable\", name = \"demo-cli\" }\nargs = [\"--size\", \"{input.sample}\"]\ntouches = \"module-owned\"\ntimeout_seconds = 10\n";
+    let marker = "\n[scenario.runs]";
+    scratch.write(CLI, &text.replacen(marker, &format!("{probe}{marker}"), 1));
+    rejected(
+        &scratch,
+        "probe_not_read_only",
+        Some("demo-cli.count-bytes"),
+        Some("input[0].probe.touches"),
+    );
+
+    // disk_usage обязан назвать путь, а путь не выходит за корень.
+    let disk = "\n[[scenario.metric]]\nmetric = \"disk_usage\"\nscope = \"path\"\nsource = \"filesystem\"\nlabel = \"cache\"\nrequired = false\n";
+    let scratch = Scratch::new();
+    let text = fs::read_to_string(scratch.path(E2E)).unwrap();
+    let marker = "\n[scenario.module_report]";
+    scratch.write(E2E, &text.replacen(marker, &format!("{disk}{marker}"), 1));
+    rejected(
+        &scratch,
+        "missing_field",
+        Some("demo-e2e.suite"),
+        Some("metric[6].path"),
+    );
+    let scratch = Scratch::new();
+    scratch.write(
+        E2E,
+        &text.replacen(marker, &format!("{disk}path = \"../outside\"\n{marker}"), 1),
+    );
+    rejected(
+        &scratch,
+        "invalid_path",
+        Some("demo-e2e.suite"),
+        Some("metric[6].path"),
+    );
+
+    // Контейнер нагрузки требует Docker и метку вида ключ=значение.
+    let scratch = Scratch::new();
+    let text = fs::read_to_string(scratch.path(E2E)).unwrap();
+    scratch.write(
+        E2E,
+        &text.replacen(
+            marker,
+            &format!("\n[scenario.container]\nlabel = \"demo\"\nowner_pid_label = \"demo.pid\"\ndescription = \"Учебный контейнер.\"\n{marker}"),
+            1,
+        ),
+    );
+    let loaded = scratch.load();
+    assert_error(
+        &loaded.diagnostics,
+        "invalid_container",
+        Some("demo-e2e.suite"),
+        Some("container.label"),
+    );
+    assert_error(
+        &loaded.diagnostics,
+        "missing_requirement",
+        Some("demo-e2e.suite"),
+        Some("container"),
+    );
+}
+
+#[test]
+fn inputs_may_stay_unresolved_only_without_successful_runs() {
+    let catalog = load_example();
+    // Прогон прервался до того, как отчёт сообщил идентичность артефакта.
+    let mut value = e2e_result();
+    value["inputs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|input| input["id"] != "fixture-archive");
+    value["outcome"] =
+        json!({"status": "failure", "reason": "прогон прерван до загрузки артефакта"});
+    value["runs"][0]["status"] = json!("interrupted");
+    value["runs"][0]["reason"] = json!("прерван сигналом");
+    value.as_object_mut().unwrap().remove("aggregates");
+    let keys: Vec<String> = value["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["key"].as_str().unwrap().to_owned())
+        .collect();
+    for (index, key) in keys.iter().enumerate() {
+        value["runs"][0]["values"][key] = json!({"status": "failed", "reason": "прогон прерван"});
+        value["metrics"][index]["availability"] = json!("failed");
+        value["metrics"][index]["reason"] = json!("прогон прерван");
+    }
+    let checked = check_value(&value, Some(&catalog));
+    assert!(checked.result.is_some(), "{:#?}", checked.diagnostics);
+
+    // Успешный прогон без идентичности нагрузки сопоставлять не с чем.
+    let mut value = e2e_result();
+    value["inputs"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|input| input["id"] != "fixture-archive");
+    result_rejected(
+        &value,
+        Some(&catalog),
+        "missing_input",
+        "inputs.fixture-archive",
+    );
 }

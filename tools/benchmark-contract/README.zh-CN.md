@@ -1,7 +1,7 @@
 # 测量契约：`benchmark-contract`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: ad8d1bb5639b14d90f91a894cc4f6790f0a4b770 -->
+<!-- i18n-source-git-blob: e0cc2da115c7dc0ff2f8642854707a83b8636ef8 -->
 
 `benchmark-contract` 是一个库和 CLI：加载基准场景目录 `benchmarks/`，校验声明和测量
 结果，导入 Hyperfine 2.0 导出，并回答两个结果是否可比较。字段、配置、指标的含义以及
@@ -9,7 +9,8 @@
 [测量方法](../../docs/performance/README.zh-CN.md)。
 
 该工具不运行也不测量任何东西：它读取目录 TOML、Cargo 清单和结果 JSON。它不写文件、
-不访问网络，也不触碰卡组、媒体、Anki 配置文件、`decks/**` 和 `.asset-store/`。
+不访问网络，也不触碰卡组、媒体、Anki 配置文件、`decks/**` 和 `.asset-store/`。按目录
+运行系列由 [`benchmark-runner`](../benchmark-runner/README.zh-CN.md) 完成，它使用本库。
 
 ## 命令
 

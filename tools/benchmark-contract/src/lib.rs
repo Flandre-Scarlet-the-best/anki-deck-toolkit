@@ -11,6 +11,7 @@ pub mod comparability;
 pub mod diagnostic;
 pub mod hyperfine;
 pub mod placeholder;
+pub mod pointer;
 pub mod preflight;
 pub mod result;
 pub mod scenario;

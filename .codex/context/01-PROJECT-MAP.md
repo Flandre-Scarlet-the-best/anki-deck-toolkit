@@ -35,6 +35,7 @@ tools/
 ├── anki-e2e/                # локальный opt-in E2E-стенд Anki Desktop в Docker (вне CI)
 ├── anki-repo/               # набор инструментов анализа и точечной правки CrowdAnki-экспорта
 ├── benchmark-contract/      # загрузка и проверка каталога бенчмарков и результатов измерений
+├── benchmark-runner/        # исполнитель серий бенчмарков: Hyperfine 2.0 и системные метрики Linux
 └── asset-store/             # библиотека ресурсов, CLI kanji-assets и pitch-assets
 ```
 
@@ -62,6 +63,9 @@ tools/
   контракт результатов; правила — `docs/performance/benchmarks.md`, CLI —
   `tools/benchmark-contract/README.md`. Новый модуль подключается файлом
   `benchmarks/scenarios/<модуль>.toml`.
+- `tools/benchmark-runner/` — исполнитель серий по каталогу: Hyperfine 2.0,
+  cgroup v2, `/proc`, отчёт модуля. Схемы каталога и результата не владеет,
+  а использует `benchmark-contract`. Контракт — `tools/benchmark-runner/README.md`.
 - `docs/performance/` — методика замеров производительности и потребления ресурсов
   (`README.md`) и журналы по модулям (`<модуль>.md`) с переводами EN и zh-CN.
   Значения журнала — свидетельства конкретного окружения, а не контракт и не порог CI.

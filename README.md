@@ -119,6 +119,7 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 - [`repository-maintenance` — инвентаризация диска и безопасный GC](tools/repository-maintenance/README.md)
 - [`anki-e2e` — локальный изолированный E2E-стенд Anki Desktop в Docker](tools/anki-e2e/README.md)
 - [`benchmark-contract` — каталог сценариев бенчмаркинга и контракт результатов измерений](tools/benchmark-contract/README.md)
+- [`benchmark-runner` — исполнитель серий бенчмарков: Hyperfine 2.0 и метрики Linux](tools/benchmark-runner/README.md)
 
 ## Инструменты
 
@@ -259,6 +260,7 @@ CI проверяет отслеживаемый код, документаци�
 │   ├── anki-e2e/             # локальный E2E-стенд Anki Desktop
 │   ├── anki-repo/            # анализ, контроль качества, ограниченные изменения, визуальный отчёт
 │   ├── benchmark-contract/   # каталог бенчмарков и проверка результатов
+│   ├── benchmark-runner/     # исполнитель серий бенчмарков
 │   ├── asset-store/          # библиотека ресурсов и kanji-assets
 │   └── repository-maintenance/ # инвентаризация и безопасный GC
 ├── .asset-store/             # локальное доверенное хранилище ресурсов, игнорируется Git

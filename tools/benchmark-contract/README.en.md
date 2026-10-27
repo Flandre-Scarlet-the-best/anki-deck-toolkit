@@ -1,7 +1,7 @@
 # Measurement contract: `benchmark-contract`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: ad8d1bb5639b14d90f91a894cc4f6790f0a4b770 -->
+<!-- i18n-source-git-blob: e0cc2da115c7dc0ff2f8642854707a83b8636ef8 -->
 
 `benchmark-contract` is a library and CLI that load the `benchmarks/`
 benchmark scenario catalog, validate declarations and measurement results,
@@ -12,7 +12,9 @@ general measurement rules are in the [methodology](../../docs/performance/README
 
 The tool runs and measures nothing: it reads the catalog TOML, Cargo manifests
 and result JSON. It writes no files, uses no network and does not touch decks,
-media, Anki profiles, `decks/**` or `.asset-store/`.
+media, Anki profiles, `decks/**` or `.asset-store/`. Catalog series are
+executed by [`benchmark-runner`](../benchmark-runner/README.en.md), which uses
+this library.
 
 ## Commands
 

@@ -232,6 +232,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "benchmark-runner"
+version = "0.1.0"
+dependencies = [
+ "benchmark-contract",
+ "clap",
+ "ctrlc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

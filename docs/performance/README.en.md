@@ -1,7 +1,7 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 929111e47b1e5b704face5491ca638aa2778fc6a -->
+<!-- i18n-source-git-blob: 4e9e2474c00c1fd1a02949c4844d7e8f5b0da142 -->
 
 This directory holds the performance journals of the repository's modules:
 time per phase, CPU, memory, disk and the number of spawned processes. Each
@@ -18,6 +18,7 @@ checks: different hardware, OS or Docker give different values.
 | Module | Journal | Latest entry |
 |---|---|---|
 | `anki-e2e` | [anki-e2e.en.md](anki-e2e.en.md) | 2026-10-26 |
+| `benchmark-runner` | [benchmark-runner.en.md](benchmark-runner.en.md) | 2026-10-26 |
 
 A new module gets its own page `docs/performance/<module>.md` with
 translations and a row in this table.
@@ -28,7 +29,8 @@ Scenarios, execution-condition profiles, the boundary of the measured work and
 metrics with their scope are declared in machine-readable form in the
 `benchmarks/` catalog, and measurement results are recorded as versioned JSON.
 How to register a scenario and read a result is described in the
-[benchmark catalog](benchmarks.en.md). The rules on this page also apply to
+[benchmark catalog](benchmarks.en.md); series are executed by
+[`benchmark-runner`](../../tools/benchmark-runner/README.en.md). The rules on this page also apply to
 catalog-driven measurements: the catalog requires the exact cache state to be
 declared for each scenario, and the log remains evidence of an environment.
 

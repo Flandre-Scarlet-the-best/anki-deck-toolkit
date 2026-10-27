@@ -27,7 +27,7 @@ role = "workload"
 identity = "file-sha256"
 path = "data/sample.txt"
 description = "Учебный файл нагрузки."
-size = [{ name = "bytes", unit = "byte", description = "Размер файла в байтах." }]
+size = [{ name = "bytes", unit = "byte", description = "Размер файла в байтах.", measure = { kind = "tree-bytes" } }]
 
 [scenario.runs]
 warmup = 2

@@ -1,15 +1,16 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 52ab2ff04123dc77e20696bd0673f887159e5939 -->
+<!-- i18n-source-git-blob: 14410ad053bbd6f07ed56a04e631326901f1858b -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
 执行器在其中记录测量值。两个契约都由 `benchmark-contract` 校验
 （[CLI 与退出码](../../tools/benchmark-contract/README.zh-CN.md)）。
 
-目录及其校验既不运行也不测量任何东西。基于 Hyperfine 2.0 的 Rust 执行器、cgroup 指标
-采集、运行历史和阈值都是独立组件，它们使用本契约，而不是另起一套。模块日志
+目录及其校验既不运行也不测量任何东西。系列由
+[`benchmark-runner`](../../tools/benchmark-runner/README.zh-CN.md) 执行：Hyperfine 2.0
+与 Linux 系统指标。它使用本契约，而不是另起一套；仓库中没有运行历史和阈值。模块日志
 （`docs/performance/<模块>.md`）仍然是特定环境的证据。
 
 ## 文件位置
@@ -19,6 +20,7 @@
 | `benchmarks/catalog.toml` | 模式版本、仓库根目录和共享的配置词汇 |
 | `benchmarks/scenarios/<模块>.toml` | 一个模块的场景声明；文件名等于模块名 |
 | `tools/benchmark-contract/` | 类型化模型、加载、校验、Hyperfine 导入、CLI |
+| `tools/benchmark-runner/` | 系列执行器：Hyperfine 2.0、cgroup v2、`/proc`、模块报告 |
 | `tools/benchmark-contract/tests/fixtures/` | 测试用的示例目录与结果（`status = "example"`） |
 
 发现规则是固定的：加载器读取 `catalog.toml` 以及 `scenarios/` 中所有 `*.toml`，不进入
@@ -130,6 +132,8 @@ comparable = ["os", "arch", "cpu_model"]
 | `metric` | 是 | 请求的指标；scope 为 `command` 的 `time_wall_clock` 为必需 |
 | `environment` | 是 | 要记录（`record`）和比较（`comparable`）的事实，以及模块自己的事实（`fact`） |
 | `requires` | 否 | `executable`、`docker`、`linux-cgroup-v2`、`perf-events`、`network`（附配置） |
+| `module_report` | 否 | 模块的机器可读报告：`runs_dir`（相对仓库根）、文件名 `report`、`description`。`module-report` 来源和 `report` 字段需要它 |
+| `container` | 否 | 要测量其 cgroup 的 Docker 容器：`label`（`键=值`）、`owner_pid_label` —— 记录创建者 PID 的标签、`description`。要求 `requires` 中有 `docker` |
 
 `program` 要么是 `{ kind = "cargo-bin", package, bin, cargo_profile }`（默认
 `release`；包和可执行文件会与 Cargo 工作区清单核对），要么是来自 `PATH` 的
@@ -160,11 +164,14 @@ comparable = ["os", "arch", "cpu_model"]
 4. 测量运行：`prepare` → **目标** → `conclude`。只测量目标。
 5. 场景的 `cleanup` —— 总是执行，包括失败和中断之后。
 
-这些步骤对应 Hyperfine 2.0 的 `--setup`、`--prepare`、`--conclude` 和 `--cleanup`，
-Hyperfine 通过 shell 执行它们：执行器需自行转义 argv。`setup` 失败得到结果
+步骤由执行器自己按 argv 执行，不经过 shell；Hyperfine 2.0 只测量目标，每次运行单独调用一次。
+`setup` 失败得到结果
 `failure` 且没有运行；`prepare` 失败、超时或目标的意外退出码会停止系列，若此前有成功
 运行则结果为 `partial`，否则为 `failure`。每个步骤受 `timeout_seconds` 限制，每次运行受
-`run_timeout_seconds` 限制，整个系列受 `total_budget_seconds` 限制；预算耗尽即停止系列。
+`run_timeout_seconds` 限制，从 `setup` 开始到最后一个 `conclude` 的整个系列受
+`total_budget_seconds` 限制；预算耗尽即停止系列。构建 `cargo-bin` 和 `cleanup` 不计入
+预算：构建由执行器限制，`cleanup` 即使在预算耗尽后也会执行，受其各步骤的
+`timeout_seconds` 限制。
 
 步骤的 `touches` 说明它影响什么：`read-only`、`scenario-temp`（场景自己的临时数据）或
 `module-owned`（模块用自身命令清理的模块状态）。没有“全部”这一取值：清空全局页缓存、
@@ -208,6 +215,19 @@ Hyperfine 通过 shell 执行它们：执行器需自行转义 argv。`setup` �
 角色 `subject` 是比较对象（例如代码）：标识不同是预期的。角色 `workload` 是负载：必须
 声明规模特征（`byte` 或 `count`），负载标识或规模不同的结果不可比较。
 
+标识和规模的来源由声明明确给出：
+
+- 规模特征的 `measure`：`file-bytes` 带输入内的 `path`，单位 `byte`；`tree-bytes`
+  （`byte`）；`tree-files`（`count`）；`probe` 带指向输入探测 JSON 输出的 `pointer`；
+  `report` 带指向模块报告的 `pointer`；
+- 输入的 `probe` 是一个 `read-only` 步骤，打印关于输入的 JSON（例如
+  `anki-repo --json stats`）；它在准备阶段执行，不计入测量；
+- `report_identity` 是模块报告中 `downloaded-artifact` 标识的 JSON Pointer：模块自行
+  下载的制品，执行器不会下载。
+
+无法计算标识或规模的输入会产生警告 `unresolvable_input`。在结果中，这样的输入只允许在
+没有成功运行的系列中缺失（`unsupported`、`setup` 失败）：成功的运行必须记录所有输入。
+
 ## 指标：scope、来源、单位
 
 基本单位：`second`、`byte`、`count`、`core`（平均占用核数：每秒的 CPU 秒）。契约中没有
@@ -225,10 +245,15 @@ Hyperfine 通过 shell 执行它们：执行器需自行转义 argv。`setup` �
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | CPU 计数器；需要 `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | 依据模块日志得到的目标内部阶段；需要标签和 `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | 模块机器报告中的计数器；需要标签 |
-| `disk_usage` | byte | `path` / `filesystem` | 指定资源的大小；需要标签 |
+| `disk_usage` | byte | `path` / `filesystem` | 指定资源的表观大小，同 `du -sb`；需要标签 |
 
 注册表之外的组合是错误 `metric_scope_source`，而不是新指标。带平台信息的完整注册表见
 `benchmark-contract vocabulary`。
+
+来源为 `module-report` 的指标设置 `pointer`，即模块报告中的 JSON Pointer，其中 `*` 段
+选择数组或对象的所有元素，并对值求和；`disk_usage` 设置相对仓库根的 `path`。`fact` 中的
+模块事实可以设置 `report`，即报告中的指针列表；各次运行之间值不同时，该事实为未知。其他
+指标禁止使用这些字段（`unexpected_field`）。
 
 进程的峰值 RSS、cgroup 内存峰值、CPU 时间和观测负载是不同的量，互不替代。Hyperfine
 只看到目标进程和被等待的子进程：Docker 容器内的进程和 BuildKit 步骤不计入其
@@ -357,16 +382,18 @@ cargo run -p benchmark-contract -- --json vocabulary
 - 版本之间的迁移是从版本 N 到 N + 1 的有文档的确定性转换，与版本 N + 1 一起实现；
   不预先构建通用迁移框架。
 - 历史存储按其 `schema_version` 保存结果，不会改写。
+- 旧工具会作为未知字段拒绝、而不是悄悄忽略的可选字段（`module_report`、`container`、
+  `measure`、`probe`、`report_identity`、`path`、`pointer`、事实的 `report`）不提升版本。
 - 场景修订与模式版本相互独立：新修订不改变模式，新模式也不改变场景修订。
 
-## 后续组件如何使用契约
+## 执行器如何使用契约
 
-执行器通过库加载目录，选择场景和配置，运行 `preflight`，构建 `cargo-bin`，替换参数和
-输入，计算输入的标识和规模，使用生命周期步骤和 `--export-json` 运行 Hyperfine 2.0，
-导入导出结果，加入其他来源的指标（cgroup、模块日志和报告），填写环境与 provenance，
-校验结果并保存。历史和比较使用 `compare`，阈值只使用可比较的结果。
+`benchmark-runner` 通过库加载目录，选择场景和配置，用探测运行检查环境就绪情况，构建
+`cargo-bin`，替换参数和输入，计算输入的标识和规模，执行生命周期步骤，用 Hyperfine 2.0
+和 `--export-json` 测量目标，通过本库导入导出结果，加入其他来源的指标（cgroup、`/proc`、
+模块报告、文件系统），填写环境与 provenance，用 `check-result` 对照目录校验结果，然后才
+保存。比较使用 `compare`。
 
 ## 边界
 
-这里没有执行器、没有运行 Hyperfine、没有 cgroup 管理、没有 CPU/RAM/I/O 采集、没有历史
-存储、没有回归计算，也没有 CI 阈值。模块日志中的数字不会成为阈值。
+这里没有历史存储、没有回归计算，也没有 CI 阈值。模块日志中的数字不会成为阈值。

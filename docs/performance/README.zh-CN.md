@@ -1,7 +1,7 @@
 # 性能与资源消耗
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 929111e47b1e5b704face5491ca638aa2778fc6a -->
+<!-- i18n-source-git-blob: 4e9e2474c00c1fd1a02949c4844d7e8f5b0da142 -->
 
 此目录保存仓库各模块的性能日志：各阶段耗时、CPU、内存、磁盘以及启动的进程数。
 每个模块有自己的页面，包含该模块特有的测量方法和记录日志。本页规定进行和记录
@@ -15,6 +15,7 @@
 | 模块 | 日志 | 最新记录 |
 |---|---|---|
 | `anki-e2e` | [anki-e2e.zh-CN.md](anki-e2e.zh-CN.md) | 2026-10-26 |
+| `benchmark-runner` | [benchmark-runner.zh-CN.md](benchmark-runner.zh-CN.md) | 2026-10-26 |
 
 新模块需要单独的页面 `docs/performance/<模块>.md`（含翻译），并在此表中增加一行。
 
@@ -22,7 +23,8 @@
 
 场景、执行条件配置、被测工作的边界以及带覆盖范围的指标，以机器可读的形式声明在
 `benchmarks/` 目录中；测量结果以带版本的 JSON 记录。如何注册场景以及如何解读
-结果，见[基准目录](benchmarks.zh-CN.md)。本页规则同样适用于按目录进行的测量：
+结果，见[基准目录](benchmarks.zh-CN.md)；系列由
+[`benchmark-runner`](../../tools/benchmark-runner/README.zh-CN.md) 执行。本页规则同样适用于按目录进行的测量：
 目录要求每个场景声明确切的缓存状态，而日志仍然是环境的证据。
 
 ## 测量规则
