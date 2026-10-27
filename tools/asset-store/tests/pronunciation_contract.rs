@@ -73,6 +73,206 @@ fn import(store: &AssetStore, request: &Pronunciation) -> AssetRecord {
     import_bytes(store, request, audio(), "pronunciation_ja_こいつ.mp3", None).unwrap()
 }
 
+fn web_acquisition(bytes: &[u8], request: &Pronunciation) -> asset_store::forvo::Acquisition {
+    use asset_store::forvo::*;
+    Acquisition {
+        bytes: bytes.to_vec(),
+        evidence: ForvoEvidence {
+            schema_version: 1,
+            page_url: word_url(&request.surface),
+            downloaded_sha256: sha256_hex(bytes),
+            selected_record_id: "101".into(),
+            ranking_policy: RANKING.into(),
+            candidates: vec![Candidate {
+                record_id: "101".into(),
+                username: Some("fixture-speaker".into()),
+                votes: Some(-1),
+                gender: Some(Gender::Female),
+                country: Some("Japan".into()),
+                download_available: true,
+            }],
+            attempts: vec![Attempt {
+                record_id: "101".into(),
+                code: "downloaded".into(),
+            }],
+        },
+    }
+}
+
+#[test]
+fn forvo_provenance_uses_the_existing_uncertain_and_trusted_boundary() {
+    use asset_store::forvo::*;
+    let workspace = TempWorkspace::create("forvo-store-contract").unwrap();
+    let store = store(&workspace.path().join("audio"));
+    let request = request();
+    let acquisition = web_acquisition(audio(), &request);
+    let record = import_acquisition(&store, &request, &acquisition, None).unwrap();
+    assert_eq!(record.provenance.source_kind, "forvo_web");
+    assert_eq!(record.consumer_filename, "こいつ.mp3");
+    assert_eq!(record.lifecycle, LifecycleState::Quarantined);
+    assert_eq!(
+        record.validation.as_ref().unwrap().status,
+        SemanticStatus::Uncertain
+    );
+    assert_eq!(
+        record.domain_metadata.as_ref().unwrap()["forvo"]["downloaded_sha256"],
+        sha256_hex(audio())
+    );
+    assert!(read_trusted(store.root(), std::slice::from_ref(&request)).is_err());
+    attest(&store, &request, &record.sha256, HumanDecision::Approve).unwrap();
+    assert!(read_trusted(store.root(), std::slice::from_ref(&request)).is_ok());
+    let other = web_acquisition(other_audio(), &request);
+    assert_eq!(
+        import_acquisition(&store, &request, &other, None)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdentityConflict
+    );
+    assert_eq!(
+        import_acquisition(&store, &request, &other, Some("0".repeat(64)))
+            .unwrap_err()
+            .code,
+        ErrorCode::IdentityConflict
+    );
+    assert!(read_trusted(store.root(), std::slice::from_ref(&request)).is_ok());
+    let changed = import_acquisition(&store, &request, &other, Some(record.sha256)).unwrap();
+    assert_eq!(changed.lifecycle, LifecycleState::Quarantined);
+    assert!(read_trusted(store.root(), &[request]).is_err());
+    store.verify_integrity().unwrap();
+}
+
+#[test]
+fn same_sha_local_source_requires_metadata_cas_to_become_forvo_and_revokes_trust() {
+    use asset_store::forvo::*;
+    let workspace = TempWorkspace::create("forvo-metadata-cas").unwrap();
+    let store = store(&workspace.path().join("audio"));
+    let request = request();
+    let local = import(&store, &request);
+    attest(&store, &request, &local.sha256, HumanDecision::Approve).unwrap();
+    let acquisition = web_acquisition(audio(), &request);
+    assert_eq!(
+        import_acquisition(&store, &request, &acquisition, None)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdentityConflict
+    );
+    assert_eq!(
+        read_trusted(store.root(), std::slice::from_ref(&request)).unwrap()[0]
+            .record
+            .provenance
+            .source_kind,
+        "local_import"
+    );
+    let web = import_acquisition(&store, &request, &acquisition, Some(local.sha256)).unwrap();
+    assert_eq!(web.provenance.source_kind, "forvo_web");
+    assert!(web.human_attestation.is_none());
+    assert_eq!(web.lifecycle, LifecycleState::Quarantined);
+    let mut bad = web.clone();
+    bad.domain_metadata.as_mut().unwrap()["forvo"]["page_url"] =
+        serde_json::json!("https://forvo.com/?token=secret");
+    assert!(
+        PronunciationDomainPolicy
+            .validate_record_evidence(&bad)
+            .is_err()
+    );
+    bad = web;
+    bad.domain_metadata.as_mut().unwrap()["unexpected"] = serde_json::json!(true);
+    assert!(
+        PronunciationDomainPolicy
+            .validate_record_evidence(&bad)
+            .is_err()
+    );
+    store.verify_integrity().unwrap();
+}
+
+#[test]
+fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
+    use asset_store::batch_runtime::SafeBatchRuntime;
+    use asset_store::forvo::{self, batch as web_batch};
+    let workspace = TempWorkspace::create("forvo-batch-resume").unwrap();
+    let store = store(&workspace.path().join("audio"));
+    let request = request();
+    let plan = web_batch::FetchPlan {
+        schema_version: 1,
+        items: vec![web_batch::FetchItem {
+            surface: request.surface.clone(),
+            reading: request.reading.clone(),
+            replace_expected_sha256: None,
+        }],
+    };
+    web_batch::start(&store, "web-resume", plan).unwrap();
+    let acquisition = web_acquisition(audio(), &request);
+    {
+        let mut runtime = SafeBatchRuntime::open(store.root(), "web-resume").unwrap();
+        let mut batch: web_batch::ForvoBatch = runtime.load().unwrap().unwrap();
+        let blob = runtime.persist_blob(audio(), "mp3").unwrap();
+        batch.items[0].acquisition = Some(web_batch::StoredAcquisition {
+            blob,
+            evidence: acquisition.evidence.clone(),
+        });
+        batch.revision += 1;
+        runtime.save(&batch).unwrap();
+    }
+    // Смерть после импорта до outcome: возобновление повторяет ровно те же байты.
+    forvo::import_acquisition(&store, &request, &acquisition, None).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let batch = runtime
+        .block_on(web_batch::resume(
+            &store,
+            "web-resume",
+            Path::new("/does-not-exist/no-browser-profile"),
+            1,
+        ))
+        .unwrap();
+    assert_eq!(batch.items[0].outcome.as_ref().unwrap().code, "imported");
+    // Восстановление прежнего состояния: завершённый пакет не должен оставаться paused.
+    {
+        let mut runtime = SafeBatchRuntime::open(store.root(), "web-resume").unwrap();
+        let mut batch: web_batch::ForvoBatch = runtime.load().unwrap().unwrap();
+        batch.paused = Some(web_batch::Failure {
+            code: "dom_changed".into(),
+            message: "прежний блокер".into(),
+            report: None,
+        });
+        batch.revision += 1;
+        runtime.save(&batch).unwrap();
+    }
+    let batch = runtime
+        .block_on(web_batch::resume(
+            &store,
+            "web-resume",
+            Path::new("/does-not-exist/no-browser-profile"),
+            1,
+        ))
+        .unwrap();
+    assert!(batch.paused.is_none());
+    let revision = batch.revision;
+    assert_eq!(
+        runtime
+            .block_on(web_batch::resume(
+                &store,
+                "web-resume",
+                Path::new("/does-not-exist/no-browser-profile"),
+                1
+            ))
+            .unwrap()
+            .revision,
+        revision
+    );
+    assert!(web_batch::cancel(&store, "web-resume").unwrap().cancelled);
+    assert!(
+        runtime
+            .block_on(web_batch::resume(
+                &store,
+                "web-resume",
+                Path::new("/does-not-exist/no-browser-profile"),
+                1
+            ))
+            .is_err()
+    );
+    store.verify_integrity().unwrap();
+}
+
 #[test]
 fn japanese_identity_nfc_only_and_safe_filename() {
     let decomposed = Pronunciation::new("か\u{3099}", "か\u{3099}").unwrap();
@@ -688,6 +888,105 @@ fn cli(ws: &TempWorkspace, args: &[&str]) -> Output {
 fn json(output: &Output) -> serde_json::Value {
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+}
+#[test]
+fn forvo_cli_without_gui_reports_a_blocker_before_creating_profile_or_store() {
+    let workspace = TempWorkspace::create("forvo-no-gui").unwrap();
+    let profile = workspace.path().join("profile");
+    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+        .arg("--repository-root")
+        .arg(workspace.path())
+        .arg("forvo")
+        .arg("--profile")
+        .arg(&profile)
+        .arg("check")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(json(&output)["error"]["details"]["code"], "gui_unavailable");
+    assert!(!profile.exists());
+    assert!(!workspace.path().join(".asset-store").exists());
+}
+#[test]
+fn forvo_cli_strict_plan_status_and_cancel_do_not_require_browser() {
+    let workspace = TempWorkspace::create("forvo-plan-cli").unwrap();
+    let plan = workspace.path().join("plan.json");
+    fs::write(
+        &plan,
+        r#"{"schema_version":1,"items":[{"surface":"元気","reading":"げんき"}]}"#,
+    )
+    .unwrap();
+    let output = cli(
+        &workspace,
+        &[
+            "forvo",
+            "batch-start",
+            "--batch-id",
+            "offline-web",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--max-items",
+            "0",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        cli(
+            &workspace,
+            &["forvo", "batch-status", "--batch-id", "offline-web"]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(
+        json(&cli(
+            &workspace,
+            &["forvo", "batch-cancel", "--batch-id", "offline-web"]
+        ))["result"]["cancelled"],
+        true
+    );
+    fs::write(&plan,r#"{"schema_version":1,"schema_version":1,"items":[{"surface":"元気","reading":"げんき"}]}"#).unwrap();
+    assert!(
+        !cli(
+            &workspace,
+            &[
+                "forvo",
+                "batch-start",
+                "--batch-id",
+                "duplicate",
+                "--plan",
+                plan.to_str().unwrap(),
+                "--max-items",
+                "0"
+            ]
+        )
+        .status
+        .success()
+    );
+    fs::write(&plan,r#"{"schema_version":1,"items":[{"surface":"元気","reading":"げんき","password":"forbidden"}]}"#).unwrap();
+    assert!(
+        !cli(
+            &workspace,
+            &[
+                "forvo",
+                "batch-start",
+                "--batch-id",
+                "unknown-field",
+                "--plan",
+                plan.to_str().unwrap(),
+                "--max-items",
+                "0"
+            ]
+        )
+        .status
+        .success()
+    );
 }
 #[test]
 fn cli_real_local_import_attest_read_and_resume() {
