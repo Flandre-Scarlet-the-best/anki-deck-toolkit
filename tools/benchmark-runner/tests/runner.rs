@@ -1568,8 +1568,10 @@ report = ["/artifact/size"]
     }
 }
 
+/// Git тестового репозитория — тем же помощником, что и исполнитель: без
+/// унаследованных переменных, иначе из Git-хука команды ушли бы в чужой репозиторий.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = benchmark_runner::inputs::git(dir)
         .args([
             "-c",
             "user.name=benchmark-runner-test",
@@ -1579,7 +1581,6 @@ fn git(dir: &Path, args: &[&str]) -> String {
             "commit.gpgsign=false",
         ])
         .args(args)
-        .current_dir(dir)
         .output()
         .unwrap();
     assert!(
@@ -1679,6 +1680,39 @@ timeout_seconds = 10
     assert_eq!(code.git_commit.as_deref(), Some(head.as_str()));
     assert_eq!(code.dirty, Some(false));
     let tree = code.source_tree_sha256.clone().expect("source_tree_sha256");
+    assert_eq!(result.inputs[0].identity.value, tree);
+
+    // Унаследованные переменные Git (запуск из хука другого репозитория) не
+    // подменяют происхождение: коммит, признак изменений и дерево — те же.
+    let foreign = fixture.root.join("foreign");
+    fs::create_dir_all(&foreign).unwrap();
+    git(&foreign, &["init", "-q"]);
+    fs::write(foreign.join("other.txt"), "other\n").unwrap();
+    git(&foreign, &["add", "."]);
+    git(&foreign, &["commit", "-qm", "foreign"]);
+    assert_ne!(git(&foreign, &["rev-parse", "HEAD"]), head);
+    let artifacts = fixture.artifacts();
+    let output = fixture
+        .command(&[
+            "run",
+            "fixture.stable",
+            "--profile",
+            "warm",
+            "--artifacts-dir",
+            artifacts.to_str().unwrap(),
+        ])
+        .env("GIT_DIR", foreign.join(".git"))
+        .env("GIT_WORK_TREE", &foreign)
+        .env("GIT_INDEX_FILE", foreign.join(".git/index"))
+        .output()
+        .unwrap();
+    let hooked = Run::from(output, &fixture);
+    assert_eq!(hooked.code, 0, "{}\n{}", hooked.summary, hooked.stderr);
+    let result = hooked.result();
+    let code = &result.provenance.code;
+    assert_eq!(code.git_commit.as_deref(), Some(head.as_str()));
+    assert_eq!(code.dirty, Some(false));
+    assert_eq!(code.source_tree_sha256.as_deref(), Some(tree.as_str()));
     assert_eq!(result.inputs[0].identity.value, tree);
 
     // Правка во время серии: provenance остаётся снимком до измерений,

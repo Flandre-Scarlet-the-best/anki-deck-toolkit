@@ -8,6 +8,9 @@ license.workspace = true
 description = "Исполнитель бенчмарков Anki-decks: запуск сценариев каталога benchmarks/ через Hyperfine 2.0 и сбор системных метрик Linux по контракту benchmark-contract"
 publish = false
 autotests = false
+# Пакет собирает и синтетическую нагрузку `benchmark-workload` для тестов;
+# `cargo run -p benchmark-runner` запускает сам исполнитель.
+default-run = "benchmark-runner"
 
 [dependencies]
 benchmark-contract = { path = "../benchmark-contract" }

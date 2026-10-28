@@ -150,6 +150,86 @@ pub fn refuse_inside_git(path: &Path, what: &str) -> Result<(), String> {
     }
 }
 
+/// Путь с разрешёнными символическими ссылками для сравнения двух каталогов.
+/// В отличие от [`resolved`], не допускает висячей ссылки: она есть на диске,
+/// но не разрешается, и запись через неё ушла бы туда, куда она указывает.
+fn strictly_resolved(path: &Path) -> Result<PathBuf, String> {
+    let path = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut probe = path.clone();
+    while probe.symlink_metadata().is_err() {
+        match probe.parent() {
+            Some(parent) => probe = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    let rest = path.strip_prefix(&probe).unwrap_or(Path::new(""));
+    if rest
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(format!(
+            "путь {} содержит «..» после несуществующего каталога: укажите путь без переходов вверх",
+            path.display()
+        ));
+    }
+    let base = probe.canonicalize().map_err(|e| {
+        format!(
+            "путь {} не разрешается ({e}): возможно, он ведёт через висячую символическую ссылку",
+            path.display()
+        )
+    })?;
+    Ok(base.join(rest))
+}
+
+/// Один и тот же существующий объект файловой системы. На файловых системах
+/// без учёта регистра (`/mnt/c` в WSL, NTFS, APFS) пути `store` и `STORE`
+/// ведут в один каталог, а разрешение ссылок их написание не выравнивает.
+#[cfg(unix)]
+fn same_object(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (a.metadata(), b.metadata()) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_object(_: &Path, _: &Path) -> bool {
+    false
+}
+
+/// `inner` — `outer` или лежит внутри него: по компонентам или по тому же
+/// объекту файловой системы у одного из существующих предков `inner`.
+fn within(inner: &Path, outer: &Path) -> bool {
+    inner.starts_with(outer) || inner.ancestors().any(|a| same_object(a, outer))
+}
+
+/// Каталог резервной копии не должен пересекаться с хранилищем: копия внутри
+/// архива попала бы в его обход, а хранилище внутри копии — в её состав.
+/// Пути сравниваются после разрешения символических ссылок, по компонентам и
+/// по идентичности существующих каталогов.
+pub fn refuse_overlap(store: &Path, other: &Path, what: &str) -> Result<(), String> {
+    let store_resolved = strictly_resolved(store)?;
+    let other_resolved = strictly_resolved(other)?;
+    let relation =
+        if other_resolved == store_resolved || same_object(&other_resolved, &store_resolved) {
+            "совпадает с хранилищем"
+        } else if within(&other_resolved, &store_resolved) {
+            "лежит внутри хранилища"
+        } else if within(&store_resolved, &other_resolved) {
+            "содержит хранилище"
+        } else {
+            return Ok(());
+        };
+    Err(format!(
+        "{what} {} {relation} {} (после разрешения ссылок: {} и {}): выберите каталог вне хранилища, не содержащий его",
+        other.display(),
+        store.display(),
+        other_resolved.display(),
+        store_resolved.display()
+    ))
+}
+
 /// История — локальные данные пользователя: внутри рабочей копии Git или
 /// репозитория каталога сценариев она попала бы в `git status` и могла бы
 /// быть случайно опубликована.

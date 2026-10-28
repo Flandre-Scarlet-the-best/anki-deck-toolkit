@@ -317,8 +317,9 @@ fn conclusion(item: &Item<'_>, rows: &[MetricRow]) -> String {
                 parts.push(format!("`{}` — {text}", row.key));
             }
             format!(
-                "{partial}{}. Оценка по разбросу повторов не является проверкой статистической значимости.",
-                parts.join("; ")
+                "{partial}{}. Оценка по разбросу повторов не является проверкой статистической значимости. Разность относится к состояниям кода базы и результата: {}.",
+                parts.join("; "),
+                analysis::IMPLEMENTATION_CAVEAT
             )
         }
     }

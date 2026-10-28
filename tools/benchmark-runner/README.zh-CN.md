@@ -1,7 +1,7 @@
 # 基准执行器：`benchmark-runner`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: d9bd1bdf62f2ed29c1cc247e16135416f2e3efca -->
+<!-- i18n-source-git-blob: df674dc00203e7451f1a7e5bfb6e01f61eeec110 -->
 
 `benchmark-runner` 是一个 Linux CLI：按 ID 和配置运行 `benchmarks/` 目录中的场景，用
 Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、模块的机器可读报告、
@@ -202,7 +202,9 @@ systemd scope 会立即被删除。对这类场景，Hyperfine 的 CPU 时间只
 结果包含场景 ID 和修订、配置、记录的参数、输入的标识和规模、环境事实和 provenance：
 提交、工作副本是否有改动、`source_tree_sha256` 以及执行器和 Hyperfine 的版本。提交、改动
 标志和 `source_tree_sha256` 是测量前确认的快照——程序由它构建、`repo-tree` 标识由它计算
-——而不是系列结束后的状态。清理之后会再次比对快照：如果提交或已跟踪、未被忽略的文件发生
+——而不是系列结束后的状态。获取快照时调用 Git 前会移除继承的、把 Git 绑定到其他仓库的变量
+（`git rev-parse --local-env-vars`：`GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE` 等），因此从 Git 钩子
+启动也不会用别的仓库的提交或索引替换来源信息。清理之后会再次比对快照：如果提交或已跟踪、未被忽略的文件发生
 了变化，结论就不是 `success`（`partial` 或更差）并附原因。被 Git 忽略的文件（例如
 `target/`）不参与比对，因此场景的临时数据在 `cleanup` 之后不应留在未被忽略的路径中。绝对路径、
 `record = false` 的参数、机密和目标的原始输出从不进入结果；包含此类数据的原因会被替换为

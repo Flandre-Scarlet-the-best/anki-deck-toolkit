@@ -27,6 +27,52 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BIN: &str = env!("CARGO_BIN_EXE_benchmark-history");
 
+/// Команда без унаследованных переменных, привязывающих Git к репозиторию:
+/// иначе, например из Git-хука, она ушла бы из временного репозитория в чужой.
+fn isolated(program: &str) -> Command {
+    let mut command = Command::new(program);
+    for name in analysis::GIT_LOCAL_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
+/// Список снимаемых переменных сверяется с установленным Git независимо от
+/// [`isolated`], который берёт тот же список: новая репозиторно-локальная
+/// переменная Git иначе осталась бы незамеченной. Лишние имена допустимы —
+/// их знает более новый Git, чем установленный.
+#[test]
+fn git_local_env_covers_installed_git() {
+    let output = isolated("git")
+        .args(["rev-parse", "--local-env-vars"])
+        .current_dir(std::env::temp_dir())
+        .output();
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        other => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "в CI нужен Git: без него список GIT_LOCAL_ENV не сверяется ({other:?})"
+            );
+            eprintln!(
+                "ПРОПУСК: Git недоступен, GIT_LOCAL_ENV не сверен с git rev-parse --local-env-vars"
+            );
+            return;
+        }
+    };
+    let installed = String::from_utf8(output.stdout).unwrap();
+    let missing: Vec<&str> = installed
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !analysis::GIT_LOCAL_ENV.contains(name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "установленный Git сообщает репозиторно-локальные переменные, которых нет в analysis::GIT_LOCAL_ENV: {}; добавьте их, иначе унаследованные из Git-хука значения уведут сверку изменений в чужой репозиторий",
+        missing.join(", ")
+    );
+}
+
 const CATALOG: &str = r#"schema_version = 1
 repository_root = "../workspace"
 
@@ -156,7 +202,7 @@ impl Fixture {
     }
 
     fn cli(&self, args: &[&str]) -> (i32, String, String) {
-        let output = Command::new(BIN)
+        let output = isolated(BIN)
             .arg("--catalog")
             .arg(self.catalog_dir())
             .args(args)
@@ -722,6 +768,200 @@ fn backup_restores_into_another_store() {
     assert_eq!(restored.problems.len(), 1);
 }
 
+/// Все пути дерева с размерами: по ним видно, что отказ ничего не записал.
+fn listing(root: &Path) -> Vec<(PathBuf, u64)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let meta = entry.path().symlink_metadata().unwrap();
+            if meta.is_dir() {
+                stack.push(entry.path());
+            }
+            out.push((
+                entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                if meta.is_file() { meta.len() } else { 0 },
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Переменная с каталогом на файловой системе без учёта регистра (например,
+/// `/mnt/c/...` в WSL) для проверки пересечения путей. Без неё проверяется
+/// системный временный каталог; на файловой системе с учётом регистра
+/// проверка пропускается с сообщением.
+const CASE_INSENSITIVE_DIR_ENV: &str = "BENCHMARK_HISTORY_TEST_CASE_INSENSITIVE_DIR";
+
+#[test]
+fn backup_refuses_overlap_spelled_in_another_case() {
+    let f = fixture();
+    let base = std::env::var_os(CASE_INSENSITIVE_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("bh-case-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("Probe")).unwrap();
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(base.clone());
+    if !base.join("probe").exists() {
+        eprintln!(
+            "ПРОПУСК: {} учитывает регистр; задайте {CASE_INSENSITIVE_DIR_ENV} с каталогом без учёта регистра",
+            base.display()
+        );
+        return;
+    }
+    let root = base.join("store");
+    let mut store = Store::open(&root).unwrap_or_else(|e| panic!("{e}"));
+    f.import(&mut store, &result(&Spec::default()));
+    let before = listing(&root);
+    let other_case = base.join("STORE");
+    for (destination, expected) in [
+        (other_case.join("results/backup"), "лежит внутри хранилища"),
+        (other_case.clone(), "совпадает с хранилищем"),
+    ] {
+        match store.backup(&destination) {
+            Err(Error::Usage(message)) => {
+                assert!(message.contains(expected), "{destination:?}: {message}")
+            }
+            other => panic!("{destination:?}: ожидался отказ, получено {other:?}"),
+        }
+    }
+    match store.restore(&other_case.join("results")) {
+        Err(Error::Usage(message)) => {
+            assert!(message.contains("лежит внутри хранилища"), "{message}")
+        }
+        other => panic!("restore изнутри хранилища: ожидался отказ, получено {other:?}"),
+    }
+    assert_eq!(listing(&root), before, "отказы ничего не записали");
+}
+
+#[test]
+fn backup_refuses_destinations_overlapping_the_store() {
+    let f = fixture();
+    let mut store = f.open();
+    f.import(&mut store, &result(&Spec::default()));
+    f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-02T10:00:00Z",
+            commit: 'b',
+            ..Spec::default()
+        }),
+    );
+    let before = listing(&f.store());
+    let refused =
+        |store: &Store, destination: &Path, expected: &str| match store.backup(destination) {
+            Err(Error::Usage(message)) => {
+                assert!(message.contains(expected), "{destination:?}: {message}")
+            }
+            other => panic!("{destination:?}: ожидался отказ, получено {other:?}"),
+        };
+    // Новый пустой каталог внутри архива отвергается, хотя он и не в Git.
+    refused(
+        &store,
+        &f.store().join("results/backup"),
+        "лежит внутри хранилища",
+    );
+    refused(&store, &f.store(), "совпадает с хранилищем");
+    // Предок хранилища отвергается по взаимному расположению, а не только как непустой.
+    refused(&store, &f.root, "содержит хранилище");
+    #[cfg(unix)]
+    {
+        // Ссылка вне хранилища, ведущая внутрь него, и путь через неё.
+        std::os::unix::fs::symlink(f.store().join("results"), f.root.join("into-store")).unwrap();
+        refused(&store, &f.root.join("into-store"), "лежит внутри хранилища");
+        refused(
+            &store,
+            &f.root.join("into-store/new/backup"),
+            "лежит внутри хранилища",
+        );
+        // Ссылка на хранилище целиком, указанная как место назначения.
+        std::os::unix::fs::symlink(f.store(), f.root.join("store-link")).unwrap();
+        refused(&store, &f.root.join("store-link"), "совпадает с хранилищем");
+        // Висячая ссылка: запись через неё ушла бы по её цели.
+        std::os::unix::fs::symlink(f.store().join("missing"), f.root.join("dangling")).unwrap();
+        refused(
+            &store,
+            &f.root.join("dangling"),
+            "висячую символическую ссылку",
+        );
+        // Восстановление из каталога внутри хранилища тоже отвергается.
+        assert!(matches!(
+            store.restore(&f.root.join("into-store")),
+            Err(Error::Usage(m)) if m.contains("лежит внутри хранилища")
+        ));
+    }
+    assert_eq!(
+        listing(&f.store()),
+        before,
+        "отказ ничего не записал в хранилище"
+    );
+    let verification = store.verify().unwrap();
+    assert!(
+        verification.problems.is_empty() && verification.index_problems.is_empty(),
+        "{verification:?}"
+    );
+    // Внешний пустой каталог по-прежнему принимается, а копия восстанавливается.
+    let outside = f.root.join("outside-backup");
+    fs::create_dir_all(&outside).unwrap();
+    assert_eq!(store.backup(&outside).unwrap(), 2);
+    assert_eq!(listing(&f.store()), before, "копия не тронула архив");
+    let mut other = Store::open(&f.root.join("other")).unwrap();
+    let restored = other.restore(&outside).unwrap();
+    assert!(
+        restored.complete && restored.added.len() == 2,
+        "{restored:?}"
+    );
+    drop(store);
+    let (code, out, err) = f.cli(&["verify"]);
+    assert_eq!(code, 0, "{out}{err}");
+}
+
+/// Синтетические коммиты в Git не существуют: состав изменений неизвестен.
+fn no_git(_: &str, _: &str) -> Result<Vec<String>, String> {
+    Err("коммитов нет в репозитории".into())
+}
+
+/// Число изменённых Markdown-файлов выводится формой, верной для любого числа.
+#[test]
+fn documentation_only_reason_reads_correctly_for_any_count() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let base = result(&Spec::default());
+    let target = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        ..Spec::default()
+    });
+    for n in [1, 2, 4, 5] {
+        let docs = move |_: &str, _: &str| -> Result<Vec<String>, String> {
+            Ok((0..n).map(|i| format!("docs/{i}.md")).collect())
+        };
+        let list = analysis::candidates(
+            scenario,
+            "target",
+            &target,
+            &[("base".to_owned(), base.clone())],
+            &docs,
+        );
+        let expected = format!("изменена только документация (файлов Markdown: {n})");
+        assert!(
+            list[0].reasons.iter().any(|r| r.contains(&expected)),
+            "{n}: {:?}",
+            list[0].reasons
+        );
+    }
+}
+
 fn pool(store: &Store, ids: &[String]) -> Vec<(String, BenchmarkResult)> {
     ids.iter()
         .map(|id| (id.clone(), store.load(id).unwrap().1))
@@ -815,6 +1055,7 @@ fn baseline_follows_explicit_rules() {
         &target,
         &result(&target_spec),
         &pool(&store, &all),
+        &no_git,
     );
     let find = |id: &str| list.iter().find(|c| c.id == id).unwrap();
     assert!(find(&partial).reasons.iter().any(|r| r.contains("partial")));
@@ -846,7 +1087,7 @@ fn baseline_follows_explicit_rules() {
     assert_eq!(analysis::choose(&list, Some("aaaa")).unwrap().id, old);
     assert!(analysis::choose(&list, Some("cccc")).is_none());
     // Первое измерение: кандидатов нет.
-    let empty = analysis::candidates(scenario, &old, &result(&Spec::default()), &[]);
+    let empty = analysis::candidates(scenario, &old, &result(&Spec::default()), &[], &no_git);
     assert!(analysis::choose(&empty, None).is_none());
 }
 
@@ -1141,9 +1382,22 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
     let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
     fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
     fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
-    let options = Options::default();
 
     let first = result(&Spec::default());
+    let newer = result(&Spec {
+        recorded_at: "2026-10-05T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.05, 0.05],
+        memory: Some(vec![1.0, 1.0]),
+        ..Spec::default()
+    });
+    // Локальная история с результатами снимков: доказательство тождества нагрузки.
+    let options = Options {
+        history: [&first, &newer]
+            .map(|r| snapshot::Recorded::of(scenario, r))
+            .to_vec(),
+        ..Options::default()
+    };
     let plan = snapshot::plan(&ru, scenario, &first, &options).unwrap();
     assert_eq!(plan.action, snapshot::Action::Added);
     snapshot::apply(&plan).unwrap();
@@ -1177,9 +1431,17 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
             .contains("最近一次确认的测量：")
     );
 
-    // Повтор того же результата ничего не меняет.
+    // Повтор того же результата ничего не меняет, но сам результат своего
+    // происхождения не доказывает: без другого результата истории с тем же
+    // блоком нужен --replace-workload.
+    let refused = snapshot::plan(&ru, scenario, &first, &options).unwrap_err();
+    assert!(refused.contains("сам публикуемый результат"), "{refused}");
+    let repeat = Options {
+        replace_workload: true,
+        ..options.clone()
+    };
     assert_eq!(
-        snapshot::plan(&ru, scenario, &first, &options)
+        snapshot::plan(&ru, scenario, &first, &repeat)
             .unwrap()
             .action,
         snapshot::Action::Unchanged
@@ -1188,7 +1450,7 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
     let lf = fs::read_to_string(&ru).unwrap();
     fs::write(&ru, lf.replace('\n', "\r\n")).unwrap();
     assert_eq!(
-        snapshot::plan(&ru, scenario, &first, &options)
+        snapshot::plan(&ru, scenario, &first, &repeat)
             .unwrap()
             .action,
         snapshot::Action::Unchanged
@@ -1202,15 +1464,9 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
     fs::write(&ru, lf).unwrap();
 
     // Новый результат того же окружения заменяет блок той же пары.
-    let newer = result(&Spec {
-        recorded_at: "2026-10-05T10:00:00Z",
-        commit: 'b',
-        wall: vec![0.05, 0.05],
-        memory: Some(vec![1.0, 1.0]),
-        ..Spec::default()
-    });
     let plan = snapshot::plan(&ru, scenario, &newer, &options).unwrap();
     assert_eq!(plan.action, snapshot::Action::Replaced);
+    assert_eq!(plan.workload, snapshot::WorkloadBasis::ProvenByHistory);
     snapshot::apply(&plan).unwrap();
     let text = fs::read_to_string(&ru).unwrap();
     assert_eq!(text.matches("benchmark-snapshot: {").count(), 1);
@@ -1237,7 +1493,7 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
     assert!(refused.contains("другом эталонном окружении"), "{refused}");
     let replace = Options {
         replace_environment: true,
-        ..Options::default()
+        ..options.clone()
     };
     assert_eq!(
         snapshot::plan(&ru, scenario, &elsewhere, &replace)
@@ -1264,7 +1520,7 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
             .action,
         snapshot::Action::Replaced
     );
-    // Маркер, записанный до появления объёма нагрузки, читается и не сверяется.
+    // Маркер без записанной нагрузки читается, но не сверяется.
     let pages: Vec<PathBuf> = ["fixture.md", "fixture.en.md", "fixture.zh-CN.md"]
         .iter()
         .map(|name| docs.join(name))
@@ -1291,12 +1547,13 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
             .join("\n");
         fs::write(path, legacy).unwrap();
     }
-    // Маркер прежнего формата читается, но неизвестная нагрузка совпадающей не
-    // считается: и другая, и та же нагрузка требуют явного подтверждения.
+    // Неизвестная нагрузка совпадающей не считается: и другая, и та же
+    // нагрузка требуют явного подтверждения.
     for candidate in [&larger, &newer_same_workload(&newer)] {
         let refused = snapshot::plan(&ru, scenario, candidate, &options).unwrap_err();
         assert!(
-            refused.contains("маркер прежнего формата") && refused.contains("--replace-workload"),
+            refused.contains("эталонная нагрузка не записана")
+                && refused.contains("--replace-workload"),
             "{refused}"
         );
     }
@@ -1487,7 +1744,7 @@ fn cli_end_to_end_with_isolated_store() {
     assert_eq!(code, 4, "{err}");
 
     // Хранилище внутри рабочей копии репозитория отвергается.
-    let output = Command::new(BIN)
+    let output = isolated(BIN)
         .arg("--catalog")
         .arg(f.catalog_dir())
         .args([
@@ -1583,6 +1840,7 @@ fn baseline_requires_proven_different_code() {
         &target_id,
         &result(&target_spec),
         &pool(&store, &ids),
+        &no_git,
     );
     let find = |id: &str| list.iter().find(|c| c.id == id).unwrap();
     let says = |id: &str, text: &str| find(id).reasons.iter().any(|r| r.contains(text));
@@ -1627,11 +1885,231 @@ fn baseline_requires_proven_different_code() {
     assert!(err.contains("совпадает с проверяемым"), "{err}");
 }
 
+/// Коммит синтетического репозитория; `None`, если Git недоступен.
+fn commit_all(repo: &Path, message: &str) -> Option<String> {
+    let git = |args: &[&str]| {
+        isolated("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    git(&["add", "-A"])?;
+    git(&["commit", "-q", "-m", message])?;
+    git(&["rev-parse", "HEAD"]).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+
+#[test]
+fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
+    let f = fixture();
+    let repo = f.root.join("workspace");
+    let initialized = isolated("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .is_ok_and(|s| s.success());
+    // Как python3 и Hyperfine: локально без Git проверка пропускается с
+    // сообщением, в CI его отсутствие — ошибка.
+    if !initialized {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "в CI нужен Git: без него состав изменений не проверяется"
+        );
+        eprintln!("ПРОПУСК: Git недоступен, проверка состава изменений не выполнена");
+        return;
+    }
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(repo.join("README.md"), "# Модуль\n").unwrap();
+    let Some(original) = commit_all(&repo, "исходная реализация") else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "в CI нужен рабочий git commit: без него состав изменений не проверяется"
+        );
+        eprintln!("ПРОПУСК: git commit недоступен, проверка состава изменений не выполнена");
+        return;
+    };
+    fs::write(repo.join("README.md"), "# Модуль\n\nОписание.\n").unwrap();
+    fs::write(repo.join("docs/guide.md"), "Руководство.\n").unwrap();
+    let docs_only = commit_all(&repo, "только документация").unwrap();
+    fs::write(repo.join("src/main.rs"), "fn main() { let _ = 1; }\n").unwrap();
+    let optimized = commit_all(&repo, "оптимизация").unwrap();
+
+    let at = |commit: &str, tree: char, recorded_at: &'static str| {
+        let mut r = result(&Spec {
+            recorded_at,
+            commit: tree,
+            ..Spec::default()
+        });
+        r.provenance.code.git_commit = Some(commit.to_owned());
+        r
+    };
+    let mut store = f.open();
+    let before = f.import(&mut store, &at(&original, 'a', "2026-10-01T10:00:00Z"));
+    let after_docs_result = at(&docs_only, 'b', "2026-10-02T10:00:00Z");
+    let after_docs = f.import(&mut store, &after_docs_result);
+    let after_code_result = at(&optimized, 'c', "2026-10-03T10:00:00Z");
+    let after_code = f.import(&mut store, &after_code_result);
+    // Коммит, которого нет в этом клоне: происхождение неизвестно. В хранилище
+    // не принимается, чтобы не стать базой в проверках CLI ниже.
+    let foreign = "foreign".to_owned();
+    let foreign_result = at(&"9".repeat(40), '9', "2026-10-01T12:00:00Z");
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let git = |a: &str, b: &str| -> Result<Vec<String>, String> {
+        let out = isolated("git")
+            .args(["diff", "--name-only", "-z", "--no-renames", a, b])
+            .current_dir(&repo)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        Ok(out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect())
+    };
+
+    // Изменена только документация: разные деревья, но не состояние «до».
+    let list = analysis::candidates(
+        scenario,
+        &after_docs,
+        &after_docs_result,
+        &pool(&store, std::slice::from_ref(&before)),
+        &git,
+    );
+    assert!(!list[0].eligible, "{:?}", list[0]);
+    assert_eq!(
+        list[0].code,
+        analysis::CodeChange::DocumentationOnly { changed: 2 }
+    );
+    assert!(
+        list[0]
+            .reasons
+            .iter()
+            .any(|r| r.contains("только документация")),
+        "{:?}",
+        list[0]
+    );
+    // Настоящее изменение кода: база выбирается, но с оговоркой о составе.
+    let list = analysis::candidates(
+        scenario,
+        &after_code,
+        &after_code_result,
+        &[
+            pool(&store, &[before.clone(), after_docs.clone()]),
+            vec![(foreign.clone(), foreign_result)],
+        ]
+        .concat(),
+        &git,
+    );
+    let find = |id: &str| list.iter().find(|c| c.id == id).unwrap();
+    assert_eq!(
+        find(&after_docs).code,
+        analysis::CodeChange::Files {
+            changed: 1,
+            documentation: 0
+        }
+    );
+    assert!(find(&after_docs).eligible && find(&before).eligible);
+    assert!(
+        find(&after_docs)
+            .notes
+            .iter()
+            .any(|n| n.contains("записанные данные не доказывают"))
+    );
+    // Неизвестный коммит: различие только состояния репозитория, с оговоркой.
+    assert!(matches!(
+        find(&foreign).code,
+        analysis::CodeChange::Unverified { .. }
+    ));
+    assert!(
+        find(&foreign)
+            .notes
+            .iter()
+            .any(|n| n.contains("состав изменений не проверен")),
+        "{:?}",
+        find(&foreign)
+    );
+    assert_eq!(analysis::choose(&list, None).unwrap().id, after_docs);
+    drop(store);
+
+    // CLI сверяет коммиты по Git репозитория каталога.
+    let (code, out, _) = f.cli(&["baseline", &after_docs[..12]]);
+    assert_eq!(code, 1, "{out}");
+    // Унаследованный GIT_DIR (запуск из Git-хука) не уводит сверку в чужой
+    // репозиторий.
+    let inherited = isolated(BIN)
+        .arg("--catalog")
+        .arg(f.catalog_dir())
+        .args(["baseline", &after_docs[..12]])
+        .env("BENCHMARK_HISTORY_DIR", f.store())
+        .env_remove("XDG_DATA_HOME")
+        .env("GIT_DIR", f.root.join("elsewhere.git"))
+        .env("GIT_OBJECT_DIRECTORY", f.root.join("elsewhere.git/objects"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&inherited.stdout), out);
+    assert!(
+        out.contains(
+            "не подходит: между коммитами изменена только документация (файлов Markdown: 2)"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("пригодной базы нет") && out.contains("оговорка:"),
+        "{out}"
+    );
+    let (code, out, _) = f.cli(&["--json", "baseline", &after_code[..12]]);
+    assert_eq!(code, 0, "{out}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["chosen"], after_docs.as_str());
+    let chosen = json["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == after_docs.as_str())
+        .unwrap();
+    assert_eq!(chosen["code"]["kind"], "files", "{out}");
+    // Отчёт без явной базы не находит её и вывода об изменении не делает.
+    let (code, out, _) = f.cli(&["report", &after_docs[..12]]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("База: не найдена") && out.contains("только документация"),
+        "{out}"
+    );
+    assert!(!out.contains("улучшение сверх разброса"), "{out}");
+    // Осознанная явная база остаётся возможной, ограничение видно в отчёте,
+    // а сопоставимость по-прежнему решает контракт.
+    let (code, out, _) = f.cli(&["report", &after_docs[..12], "--baseline", &before[..12]]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("указана явно")
+            && out.contains("не соответствует правилу автоматического выбора — между коммитами изменена только документация")
+            && out.contains("сопоставимы по контракту `benchmark-contract`")
+            && out.contains(analysis::IMPLEMENTATION_CAVEAT),
+        "{out}"
+    );
+    let (code, out, _) = f.cli(&["compare", &before[..12], &after_docs[..12]]);
+    assert_eq!(code, 0, "{out}");
+}
+
 /// Каталог, отмеченный как рабочая копия Git: настоящий `git init`, если Git
 /// доступен, иначе каталог `.git` — проверка опирается только на него.
 fn git_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
-    let initialized = Command::new("git")
+    let initialized = isolated("git")
         .args(["init", "-q"])
         .current_dir(path)
         .status()
@@ -1650,7 +2128,7 @@ fn store_inside_git_is_refused_from_any_directory() {
     let outside = f.root.join("outside");
     fs::create_dir_all(&outside).unwrap();
     let run = |args: &[&str], env: Option<&Path>| {
-        let mut command = Command::new(BIN);
+        let mut command = isolated(BIN);
         command
             .args(args)
             .current_dir(&outside)
@@ -1703,7 +2181,7 @@ fn store_inside_git_is_refused_from_any_directory() {
         !repo.join("sub/new").exists(),
         "после отказа ничего не создано"
     );
-    let untracked = Command::new("git")
+    let untracked = isolated("git")
         .args(["status", "--porcelain", "--untracked-files=all"])
         .current_dir(&repo)
         .output();
@@ -1801,7 +2279,7 @@ fn restore_checks_backup_inventory() {
     assert_eq!(restored.missing, vec![b.clone()]);
     drop(third);
     let cli = |source: &Path, store: &str| {
-        let output = Command::new(BIN)
+        let output = isolated(BIN)
             .args(["restore", source.to_str().unwrap()])
             .env("BENCHMARK_HISTORY_DIR", f.root.join(store))
             .output()
@@ -1958,6 +2436,7 @@ fn index_projection_is_checked_and_rebuilt_from_archive() {
         &target,
         &result(&target_spec),
         &pool(&store, &ids),
+        &no_git,
     );
     assert_eq!(analysis::choose(&list, None).unwrap().id, base);
     assert!(store.verify().unwrap().index_problems.is_empty());
@@ -2042,8 +2521,11 @@ fn snapshot_reference_hardware_is_separate_from_comparability() {
     let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
     fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
     fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
-    let options = Options::default();
     let first = result(&Spec::default());
+    let options = Options {
+        history: vec![snapshot::Recorded::of(&scenario, &first)],
+        ..Options::default()
+    };
     snapshot::apply(&snapshot::plan(&ru, &scenario, &first, &options).unwrap()).unwrap();
     let published = fs::read_to_string(&ru).unwrap();
     assert!(
@@ -2127,11 +2609,508 @@ fn snapshot_reference_hardware_is_separate_from_comparability() {
     );
     let replace = Options {
         replace_environment: true,
-        ..Options::default()
+        ..options.clone()
     };
     let plan = snapshot::plan(&ru, &scenario, &cases[0].1, &replace).unwrap();
     snapshot::apply(&plan).unwrap();
     assert!(fs::read_to_string(&ru).unwrap().contains("Other CPU"));
+}
+
+#[test]
+fn snapshot_requires_proven_workload_identity_not_equal_size() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let docs = f.root.join("workspace/docs");
+    let ru = docs.join("fixture.md");
+    fs::write(&ru, PAGE_RU).unwrap();
+    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
+    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
+    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
+    let pages: Vec<PathBuf> = ["fixture.md", "fixture.en.md", "fixture.zh-CN.md"]
+        .iter()
+        .map(|name| docs.join(name))
+        .collect();
+    let read_all = || -> Vec<String> {
+        pages
+            .iter()
+            .map(|path| fs::read_to_string(path).unwrap())
+            .collect()
+    };
+
+    let first = result(&Spec::default());
+    let history = vec![snapshot::Recorded::of(scenario, &first)];
+    let with_history = Options {
+        history: history.clone(),
+        ..Options::default()
+    };
+    let plan = snapshot::plan(&ru, scenario, &first, &with_history).unwrap();
+    assert_eq!(plan.workload, snapshot::WorkloadBasis::New);
+    snapshot::apply(&plan).unwrap();
+    let published = read_all();
+
+    let later = |data: char| {
+        result(&Spec {
+            recorded_at: "2026-10-04T10:00:00Z",
+            commit: 'b',
+            data,
+            ..Spec::default()
+        })
+    };
+    // Тот же объём (4 байта), но другое содержимое: идентичность входа другая.
+    let changed = later('e');
+    assert_eq!(
+        snapshot::reference_workload(&changed),
+        snapshot::reference_workload(&first)
+    );
+    let refused = snapshot::plan(&ru, scenario, &changed, &with_history).unwrap_err();
+    assert!(
+        refused.contains("с другим содержимым")
+            && refused.contains("data")
+            && refused.contains("--replace-workload"),
+        "{refused}"
+    );
+    assert!(
+        !refused.contains(&"d".repeat(64)) && !refused.contains(&"e".repeat(64)),
+        "сообщение не раскрывает идентичности: {refused}"
+    );
+    // Та же нагрузка, но результата прежнего снимка в истории нет (другая
+    // машина, очищенная история): одинаковый объём тождества не доказывает.
+    let same = later('d');
+    let refused = snapshot::plan(&ru, scenario, &same, &Options::default()).unwrap_err();
+    assert!(
+        refused.contains("в локальной истории нет") && refused.contains("--replace-workload"),
+        "{refused}"
+    );
+    // Тот же момент записи у результата с другой нагрузкой не доказательство.
+    let mut impostor = first.clone();
+    impostor.inputs[1].identity.value = "f".repeat(64);
+    let mixed = Options {
+        history: vec![
+            snapshot::Recorded::of(scenario, &first),
+            snapshot::Recorded::of(scenario, &impostor),
+        ],
+        ..Options::default()
+    };
+    assert!(snapshot::plan(&ru, scenario, &same, &mixed).is_err());
+    // Тот же момент и нагрузка, но другое эталонное окружение: этот результат
+    // не мог дать прежний снимок и тождества не доказывает.
+    let mut elsewhere = first.clone();
+    elsewhere.environment.insert(
+        snapshot::REFERENCE_FACTS[0].as_str().to_owned(),
+        Fact::Known {
+            value: "elsewhere".into(),
+        },
+    );
+    let foreign = Options {
+        history: vec![snapshot::Recorded::of(scenario, &elsewhere)],
+        ..Options::default()
+    };
+    let refused = snapshot::plan(&ru, scenario, &same, &foreign).unwrap_err();
+    assert!(refused.contains("в локальной истории нет"), "{refused}");
+    assert_eq!(read_all(), published, "отказы ничего не записали");
+    // Подлинно та же нагрузка: доказательство из локальной истории.
+    let plan = snapshot::plan(&ru, scenario, &same, &with_history).unwrap();
+    assert_eq!(
+        (plan.action, plan.workload),
+        (
+            snapshot::Action::Replaced,
+            snapshot::WorkloadBasis::ProvenByHistory
+        )
+    );
+    // Явное подтверждение смены: видно в плане и обновляет все три языка.
+    let confirmed = Options {
+        replace_workload: true,
+        ..with_history.clone()
+    };
+    // Блока нет только на последней странице: её добавление не скрывает
+    // замену и её основание на остальных.
+    fs::write(&pages[2], page("zh", &sha)).unwrap();
+    let plan = snapshot::plan(&ru, scenario, &changed, &confirmed).unwrap();
+    assert_eq!(
+        (plan.action, plan.workload),
+        (
+            snapshot::Action::Replaced,
+            snapshot::WorkloadBasis::ConfirmedReplacement
+        )
+    );
+    fs::write(&pages[2], &published[2]).unwrap();
+    let plan = snapshot::plan(&ru, scenario, &changed, &confirmed).unwrap();
+    assert_eq!(plan.workload, snapshot::WorkloadBasis::ConfirmedReplacement);
+    snapshot::apply(&plan).unwrap();
+    let updated = read_all();
+    let ru_sha = snapshot::git_blob_sha(updated[0].as_bytes());
+    for (n, text) in updated.iter().enumerate() {
+        assert!(text.contains("2026-10-04"), "{n}: {text}");
+        assert_eq!(text.matches("benchmark-snapshot: {").count(), 1);
+        for forbidden in [
+            "d".repeat(64),
+            "e".repeat(64),
+            "b".repeat(40),
+            "b".repeat(64),
+        ] {
+            assert!(!text.contains(&forbidden), "{n}: в странице {forbidden}");
+        }
+        if n > 0 {
+            assert!(text.contains(&ru_sha), "{n}: отметка перевода обновлена");
+        }
+    }
+    // CLI: доказательство берётся из локальной истории пользователя.
+    for (path, text) in pages.iter().zip(&published) {
+        fs::write(path, text).unwrap();
+    }
+    let mut store = f.open();
+    let first_id = f.import(&mut store, &first);
+    let same_id = f.import(&mut store, &same);
+    let changed_id = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-04T11:00:00Z",
+            commit: 'b',
+            data: 'e',
+            ..Spec::default()
+        }),
+    );
+    drop(store);
+    assert_ne!(first_id, same_id);
+    let page_arg = ru.to_str().unwrap();
+    let (code, out, err) = f.cli(&["snapshot", &same_id[..12], "--page", page_arg]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("нагрузка: тождество нагрузки доказано"),
+        "{out}"
+    );
+    let (code, out, err) = f.cli(&["snapshot", &changed_id[..12], "--page", page_arg]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("с другим содержимым"), "{err}");
+    let (code, out, err) = f.cli(&[
+        "--json",
+        "snapshot",
+        &changed_id[..12],
+        "--page",
+        page_arg,
+        "--replace-workload",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["plan"]["workload"], "confirmed-replacement", "{out}");
+    assert_eq!(read_all(), published, "без --apply ничего не записано");
+}
+
+/// Страницы снимка модуля `stem` на трёх языках с якорем: RU, EN, zh-CN.
+fn snapshot_pages(f: &Fixture, stem: &str) -> Vec<PathBuf> {
+    let docs = f.root.join("workspace/docs");
+    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
+    let pages: Vec<PathBuf> = ["md", "en.md", "zh-CN.md"]
+        .iter()
+        .map(|ext| docs.join(format!("{stem}.{ext}")))
+        .collect();
+    fs::write(&pages[0], PAGE_RU).unwrap();
+    fs::write(&pages[1], page("en", &sha)).unwrap();
+    fs::write(&pages[2], page("zh", &sha)).unwrap();
+    pages
+}
+
+#[test]
+fn snapshot_never_takes_the_published_result_as_proof_of_the_previous_one() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let pages = snapshot_pages(&f, "fixture");
+    let ru = &pages[0];
+    let read_all = || -> Vec<String> {
+        pages
+            .iter()
+            .map(|path| fs::read_to_string(path).unwrap())
+            .collect()
+    };
+    let forbidden = [
+        "d".repeat(64),
+        "e".repeat(64),
+        "b".repeat(40),
+        "c".repeat(40),
+    ];
+    let leaks = |text: &str| forbidden.iter().any(|f| text.contains(f.as_str()));
+
+    let first = result(&Spec::default());
+    let plan = snapshot::plan(ru, scenario, &first, &Options::default()).unwrap();
+    snapshot::apply(&plan).unwrap();
+    let published = read_all();
+
+    // Результат прежнего снимка из истории удалён; новый записан в ту же
+    // секунду, в том же окружении и на нагрузке того же объёма, но с другим
+    // содержимым. Сам он происхождение прежнего снимка не доказывает.
+    let successor = result(&Spec {
+        commit: 'b',
+        data: 'e',
+        wall: vec![0.05, 0.05],
+        ..Spec::default()
+    });
+    assert_eq!(
+        successor.provenance.recorded_at,
+        first.provenance.recorded_at
+    );
+    assert_eq!(
+        snapshot::reference_workload(&successor),
+        snapshot::reference_workload(&first)
+    );
+    let only_new = Options {
+        history: vec![snapshot::Recorded::of(scenario, &successor)],
+        ..Options::default()
+    };
+    let refused = snapshot::plan(ru, scenario, &successor, &only_new).unwrap_err();
+    assert!(
+        refused.contains("в локальной истории нет") && refused.contains("--replace-workload"),
+        "{refused}"
+    );
+    assert!(!leaks(&refused), "{refused}");
+
+    // Тот же видимый блок, другая нагрузка: совпадение текста не обходит
+    // проверку тождества — ни при прежнем результате в истории, ни без него.
+    let mut twin = first.clone();
+    twin.inputs[1].identity.value = "e".repeat(64);
+    twin.provenance.code.git_commit = Some("b".repeat(40));
+    let with_origin = Options {
+        history: vec![
+            snapshot::Recorded::of(scenario, &first),
+            snapshot::Recorded::of(scenario, &twin),
+        ],
+        ..Options::default()
+    };
+    let refused = snapshot::plan(ru, scenario, &twin, &with_origin).unwrap_err();
+    assert!(
+        refused.contains("с другим содержимым") && refused.contains("--replace-workload"),
+        "{refused}"
+    );
+    assert!(!leaks(&refused), "{refused}");
+    let without_origin = Options {
+        history: vec![snapshot::Recorded::of(scenario, &twin)],
+        ..Options::default()
+    };
+    let refused = snapshot::plan(ru, scenario, &twin, &without_origin).unwrap_err();
+    assert!(refused.contains("сам публикуемый результат"), "{refused}");
+
+    // Повтор уже опубликованного результата: маркер не хранит идентичностей,
+    // и без другого результата истории происхождение блока не доказано.
+    let refused = snapshot::plan(
+        ru,
+        scenario,
+        &first,
+        &Options {
+            history: vec![snapshot::Recorded::of(scenario, &first)],
+            ..Options::default()
+        },
+    )
+    .unwrap_err();
+    assert!(refused.contains("сам публикуемый результат"), "{refused}");
+    let confirmed = snapshot::plan(
+        ru,
+        scenario,
+        &first,
+        &Options {
+            replace_workload: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (confirmed.action, confirmed.workload),
+        (
+            snapshot::Action::Unchanged,
+            snapshot::WorkloadBasis::ConfirmedReplacement
+        )
+    );
+    // Другой результат истории с тем же блоком и той же нагрузкой — доказательство.
+    let mut remeasured = first.clone();
+    remeasured.provenance.code.git_commit = Some("c".repeat(40));
+    let proven = snapshot::plan(
+        ru,
+        scenario,
+        &remeasured,
+        &Options {
+            history: vec![
+                snapshot::Recorded::of(scenario, &first),
+                snapshot::Recorded::of(scenario, &remeasured),
+            ],
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (proven.action, proven.workload),
+        (
+            snapshot::Action::Unchanged,
+            snapshot::WorkloadBasis::ProvenByHistory
+        )
+    );
+    // Блок, не совпадающий ни с одним результатом истории (изменён вручную
+    // или сгенерирован другой версией), происхождения не доказывает.
+    let edited: Vec<String> = published
+        .iter()
+        .map(|text| text.replace("hyperfine 2.0.0", "hyperfine 2.0.1"))
+        .collect();
+    for (path, text) in pages.iter().zip(&edited) {
+        fs::write(path, text).unwrap();
+    }
+    let later = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        ..Spec::default()
+    });
+    let refused = snapshot::plan(
+        ru,
+        scenario,
+        &later,
+        &Options {
+            history: vec![
+                snapshot::Recorded::of(scenario, &first),
+                snapshot::Recorded::of(scenario, &later),
+            ],
+            ..Options::default()
+        },
+    )
+    .unwrap_err();
+    assert!(refused.contains("блок на странице"), "{refused}");
+    for (path, text) in pages.iter().zip(&published) {
+        fs::write(path, text).unwrap();
+    }
+    assert_eq!(read_all(), published, "отказы ничего не записали");
+
+    // CLI: в локальной истории только публикуемый результат.
+    let mut store = f.open();
+    let id = f.import(&mut store, &successor);
+    drop(store);
+    let page_arg = ru.to_str().unwrap();
+    let (code, out, err) = f.cli(&["snapshot", &id[..12], "--page", page_arg, "--apply"]);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.contains("в локальной истории нет"), "{err}");
+    assert!(!leaks(&err), "{err}");
+    assert_eq!(read_all(), published, "отказ ничего не записал");
+    let (code, out, err) = f.cli(&[
+        "--json",
+        "snapshot",
+        &id[..12],
+        "--page",
+        page_arg,
+        "--replace-workload",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["plan"]["workload"], "confirmed-replacement", "{out}");
+    for text in read_all() {
+        assert!(!leaks(&text));
+    }
+}
+
+/// Синтетический модуль со сценарием без входов роли `workload`.
+const BARE_SCENARIO: &str = r#"schema_version = 1
+module = "bare"
+
+[[scenario]]
+id = "bare.cli"
+title = "Синтетический сценарий без нагрузки"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Синтетические результаты без входов нагрузки."
+measured = "Один запуск."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "executable", name = "true" }
+expect_exit_codes = [0]
+
+[[scenario.input]]
+id = "toolkit"
+kind = "repo-tree"
+role = "subject"
+identity = "content-tree-sha256"
+description = "Измеряемый код."
+
+[scenario.runs]
+warmup = 1
+min_runs = 2
+max_runs = 20
+single_run_allowed = false
+run_timeout_seconds = 30
+total_budget_seconds = 300
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Кэшей нет."
+cleared = []
+retained = []
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[scenario.environment]
+record = ["os", "arch", "module_version", "cpu_model", "virtualization", "logical_cpus", "memory_total_bytes"]
+comparable = ["os", "arch", "cpu_model", "virtualization"]
+"#;
+
+#[test]
+fn snapshot_of_a_scenario_without_workload_needs_no_identity_proof() {
+    let f = fixture();
+    fs::write(f.catalog_dir().join("scenarios/bare.toml"), BARE_SCENARIO).unwrap();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("bare.cli").unwrap().scenario;
+    let bare = |spec: &Spec| {
+        let mut r = result(spec);
+        r.scenario.id = "bare.cli".into();
+        r.scenario.module = "bare".into();
+        r.inputs.retain(|i| i.role != InputRole::Workload);
+        assert_valid(&f, &r);
+        r
+    };
+    let pages = snapshot_pages(&f, "bare");
+    let ru = &pages[0];
+    let first = bare(&Spec::default());
+    let plan = snapshot::plan(ru, scenario, &first, &Options::default()).unwrap();
+    assert_eq!(plan.workload, snapshot::WorkloadBasis::New);
+    snapshot::apply(&plan).unwrap();
+    assert!(
+        fs::read_to_string(ru)
+            .unwrap()
+            .contains("Сценарий не объявляет входов.")
+    );
+    // Повтор: доказывать нечего, история не нужна.
+    let plan = snapshot::plan(ru, scenario, &first, &Options::default()).unwrap();
+    assert_eq!(
+        (plan.action, plan.workload),
+        (
+            snapshot::Action::Unchanged,
+            snapshot::WorkloadBasis::NoWorkload
+        )
+    );
+    let later = bare(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.05, 0.05],
+        ..Spec::default()
+    });
+    let plan = snapshot::plan(ru, scenario, &later, &Options::default()).unwrap();
+    assert_eq!(
+        (plan.action, plan.workload),
+        (
+            snapshot::Action::Replaced,
+            snapshot::WorkloadBasis::NoWorkload
+        )
+    );
+    snapshot::apply(&plan).unwrap();
+    for path in &pages {
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("2026-10-02"), "{}", path.display());
+        assert!(!text.contains(&"b".repeat(40)) && !text.contains(&"b".repeat(64)));
+    }
 }
 
 #[test]

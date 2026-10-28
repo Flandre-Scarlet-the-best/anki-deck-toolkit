@@ -1,7 +1,7 @@
 # Local benchmark history: `benchmark-history`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 7f51d4f3f6b7f31c70ee545381e2f53f08521f53 -->
+<!-- i18n-source-git-blob: 32ba15d7b9913f691601ed7f338f8505e2055a9d -->
 
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
@@ -136,6 +136,16 @@ local copy of a record with the verified copy from the backup (`replaced`) and
 moves the old file to `corrupt/` without deleting it. Repeating `restore` is
 idempotent.
 
+The `backup` directory and the `restore` source must not overlap the store: a
+path equal to it, inside it (for example `<store>/results/backup`) or containing
+it is refused with code `2` before anything is written. Paths are compared by
+components after resolving symbolic links, including a not-yet-existing tail of
+the path, and by the identity of existing directories: on a case-insensitive file
+system (`/mnt/c` in WSL) `STORE/results` is the same directory as
+`store/results`. A dangling link is refused, because writing through it would go
+to its target. The archive, the index and the destination stay unchanged on
+refusal.
+
 ## Automatic archiving from `benchmark-runner`
 
 After writing an accepted result, `benchmark-runner run` hands it to the history
@@ -155,18 +165,37 @@ is an expected difference; a different `workload` input makes the results
 incomparable.
 
 Automatic baseline rule: **the latest successful result of the same scenario
-and profile, recorded before the checked one, of provably different source code
-and comparable under the contract**. Different source code is proven by
-different `source_tree_sha256` values or, if the tree is not recorded in both
-results, by different commits both measured without working-copy changes (with
-a caveat in the report). Missing information does not count as a difference.
+and profile, recorded before the checked one, of a provably different code
+state, unless only documentation changed between the commits, and comparable
+under the contract**. A different state is proven by different
+`source_tree_sha256` values or, if the tree is not recorded in both results, by
+different commits both measured without working-copy changes (with a caveat in
+the report). Missing information does not count as a difference.
+
+`source_tree_sha256` and the commit describe the whole repository, not the
+built program: the result carries no identity of the executable artifact. So
+for a pair of commits of clean working copies the history checks the set of
+changes with the Git of the catalog repository (`git diff --name-only`),
+without using the network. Every candidate gets a `code` field:
+
+| `code.kind` | Meaning | Automatic baseline |
+|---|---|---|
+| `documentation-only` | only Markdown files changed, or nothing: the same implementation, a repeated measurement | no |
+| `files` | other files changed too; whether the measured implementation is affected is not proven by the data | yes, with a caveat |
+| `unverified` | the commit is not in the clone, Git is unavailable or a working copy with changes was measured | yes, with a caveat |
+| `not-proven` | a different state is not proven | no |
+
 `baseline` shows every candidate and the reason it is rejected:
 `partial`/`failure`/`unsupported`, recorded later, the same
 `source_tree_sha256` or the same commit without changes (a repeat, not a
-"before"), a difference in code not proven, comparability blockers. A specific
-baseline can be given explicitly (`report --baseline ID`); deviations from the
+"before"), a difference in code not proven, only documentation changed,
+comparability blockers — and a general caveat: a different repository state
+does not prove that the measured implementation was replaced. The same caveat
+is part of the "Вывод" line of the PR section. A specific baseline can be given
+explicitly (`report --baseline ID`), also outside the rule; deviations from the
 rule are listed in the report, and a baseline equal to the checked result is
-refused both there and in `compare`.
+refused both there and in `compare`. Comparability is still decided only by
+`benchmark-contract`.
 
 - The delta is computed on means of successful runs; the relative delta only
   for a non-zero base, in one unit and one scope.
@@ -214,17 +243,42 @@ nothing:
   `arch`, `virtualization`, `cpu_model`, `logical_cpus`, `memory_total_bytes`)
   or a comparability fact of the scenario is unknown;
 - the page holds a snapshot from another reference environment
-  (`--replace-environment` confirms the change of reference), on a workload of
-  another size (`--replace-workload` confirms it) or a newer measurement.
+  (`--replace-environment` confirms the change of reference), on a workload
+  whose identity with the new one is not proven (`--replace-workload` confirms
+  it) or a newer measurement.
+
+An equal workload size does not prove an identical input: two different exports
+can match in bytes and number of notes. Input identities are not stored on the
+page, so the proof is the result of the previous snapshot in the local
+history: another result of the same pair that produces exactly the block on the
+page (the marker with recording time, reference environment and workload size,
+versions, metrics), with the same identities of the `workload` inputs. The
+result being published is never such proof, even if it is in the history:
+otherwise a new result of the same size recorded within the same second would
+confirm the previous snapshot by itself. If such a result exists and the
+identities match, the snapshot is replaced without a flag. `--replace-workload`
+is required if the identities differ; several history results with different
+workloads produce the block on the page; the result is not in the history
+(another machine, a cleared history); the block matches no result (edited by
+hand or produced by another version of the generator); or the marker has no
+recorded workload. Matching block text does not bypass the check: a repeated
+`snapshot` of an already published result without another history result
+producing the same block is refused, and with `--replace-workload` it reports
+that the snapshot is already up to date and writes nothing. The refusal names
+only input IDs, never identities. The plan action (`plan.action`: `added`,
+`replaced`, `unchanged`) and its basis (`--json`: `plan.workload`; text: the
+`нагрузка:` line) — `new`, `no-workload`, `proven-by-history` or
+`confirmed-replacement`; state the basis in the PR together with the flags
+used.
 
 The reference environment of a snapshot is wider than the comparability
 condition: hardware and platform facts are always part of it, even if the
 scenario does not compare them, so a measurement on another CPU, with another
 amount of memory or after switching from WSL2 to Linux without virtualization
 never silently replaces the public reference, while comparison of results does
-not become stricter. A fact absent from the previous marker and an old-format
-marker without a recorded workload do not count as matching: the corresponding
-flag confirms the replacement.
+not become stricter. A fact absent from the previous marker and a marker
+without a recorded workload do not count as matching: the corresponding flag
+confirms the replacement.
 
 The three pages are written consistently: no page changes until temporary
 copies of all three are prepared; then they are replaced one by one by rename
@@ -244,7 +298,7 @@ translation was confirmed for the previous Russian text.
 |---|---|
 | `0` | success |
 | `1` | negative answer: incomparable, no usable baseline, `verify` or `reindex` found problems, snapshot refused |
-| `2` | wrong arguments, unknown or ambiguous ID, store or backup inside a Git working copy, baseline equal to the checked result |
+| `2` | wrong arguments, unknown or ambiguous ID, store or backup inside a Git working copy, backup overlapping the store, baseline equal to the checked result |
 | `3` | store, index or catalog unavailable |
 | `4` | document rejected by the contract and not accepted; backup transferred incompletely |
 | `5` | archive copy written, index not updated: run `reindex` |
@@ -264,10 +318,20 @@ temporary directory: idempotent acceptance and original bytes; refusal of
 invalid, sensitive and unknown documents; deleted, damaged, outdated and too-new
 index, an index without a required table and with a tampered row; interrupted
 write and stray files; damaged archive copy; moving through `backup`/`restore`
-into another store and an incomplete or modified copy; a store inside a Git
-working copy when run from an outside directory; baseline rules and proof of
-different code, units, zero base and spread; the PR section in every branch,
-validated by the real `.github/scripts/check_pr_body.py`; documentation
-snapshot with separate reference hardware, an old-format marker and a failed
-write of one of the three pages; and the whole CLI.
+into another store and an incomplete or modified copy; a backup inside the
+store, through a symbolic link, through a dangling link, through a path in
+another case on a case-insensitive file system (the directory is set by
+`BENCHMARK_HISTORY_TEST_CASE_INSENSITIVE_DIR`, otherwise the system temporary
+directory is checked, and a case-sensitive one skips the check with a message)
+and into an ancestor directory without changing the archive; a store inside a Git working copy when
+run from an outside directory; baseline rules and proof of different code, a
+documentation-only change versus a code change in a real Git repository, an
+unknown commit and an explicit baseline; units, zero base and spread; the PR
+section in every branch, validated by the real
+`.github/scripts/check_pr_body.py`; documentation snapshot with separate
+reference hardware, a marker without a recorded workload, workload identity at
+an equal size, refusal to take the result being published as proof of the
+previous snapshot, a matching block with a different workload, a scenario
+without a workload and a failed write of one of the three pages; and the whole
+CLI.
 The tests read neither `decks/**` nor the user's data directory.
