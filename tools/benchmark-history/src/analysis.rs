@@ -252,6 +252,39 @@ fn assess(
     }
 }
 
+/// Что известно о различии кода кандидата и проверяемого результата.
+///
+/// `source_tree_sha256` и коммит описывают состояние всего репозитория, а не
+/// измеряемый исполняемый артефакт: результат не содержит идентичности
+/// собранной программы. Поэтому даже доказанное различие состояний не
+/// доказывает, что изменилась сама измеряемая реализация.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CodeChange {
+    /// Отличие не доказано: тот же код или его состояние не записано.
+    NotProven,
+    /// Между коммитами изменена только документация (Markdown) или ничего:
+    /// та же реализация, состоянием «до» оптимизации это не является.
+    DocumentationOnly { changed: usize },
+    /// Между коммитами изменены и другие файлы; относятся ли они к
+    /// измеряемому артефакту, записанные данные не доказывают.
+    Files {
+        changed: usize,
+        documentation: usize,
+    },
+    /// Состояния различаются, но состав изменений не проверен.
+    Unverified { reason: String },
+}
+
+/// Изменённые пути между двумя коммитами (относительно корня репозитория).
+pub type Changes<'a> = &'a dyn Fn(&str, &str) -> Result<Vec<String>, String>;
+
+/// Документация, которая не входит в сборку модулей: Markdown.
+pub fn is_documentation(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md"))
+}
+
 /// Кандидат в базу и почему он подходит или нет.
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
@@ -260,6 +293,7 @@ pub struct Candidate {
     pub git_commit: Option<String>,
     pub dirty: Option<bool>,
     pub outcome: OutcomeStatus,
+    pub code: CodeChange,
     pub eligible: bool,
     /// Почему запись не может быть базой.
     pub reasons: Vec<String>,
@@ -268,7 +302,10 @@ pub struct Candidate {
 }
 
 /// Правило автоматического выбора базы — повторяется в отчётах.
-pub const BASELINE_RULE: &str = "самый поздний успешный результат того же сценария и профиля, записанный раньше проверяемого, с доказанно другим исходным кодом (разные source_tree_sha256 либо разные коммиты чистых рабочих копий) и сопоставимый по контракту benchmark-contract";
+pub const BASELINE_RULE: &str = "самый поздний успешный результат того же сценария и профиля, записанный раньше проверяемого, с доказанно другим состоянием кода (разные source_tree_sha256 либо разные коммиты чистых рабочих копий), если между коммитами изменена не только документация, и сопоставимый по контракту benchmark-contract";
+
+/// Оговорка к любой базе: различие состояний не равно замене реализации.
+pub const IMPLEMENTATION_CAVEAT: &str = "результаты не записывают идентичность собранной программы, поэтому различие состояний репозитория не доказывает замену измеряемой реализации";
 
 /// Оценить каждого кандидата относительно проверяемого результата.
 pub fn candidates(
@@ -276,6 +313,7 @@ pub fn candidates(
     target_id: &str,
     target: &BenchmarkResult,
     pool: &[(String, BenchmarkResult)],
+    changes: Changes<'_>,
 ) -> Vec<Candidate> {
     let target_key = crate::index::time_key(&target.provenance.recorded_at);
     let mut list: Vec<Candidate> = pool
@@ -294,11 +332,35 @@ pub fn candidates(
             if crate::index::time_key(&r.provenance.recorded_at) >= target_key {
                 reasons.push("записан не раньше проверяемого результата".into());
             }
-            match code_difference(&r.provenance.code, &target.provenance.code) {
-                Ok(Some(note)) => notes.push(note),
-                Ok(None) => {}
-                Err(reason) => reasons.push(reason),
-            }
+            let code = match code_difference(&r.provenance.code, &target.provenance.code) {
+                Ok(note) => {
+                    notes.extend(note);
+                    let code = change_of(&r.provenance.code, &target.provenance.code, changes);
+                    match &code {
+                        CodeChange::DocumentationOnly { changed: 0 } => reasons.push(
+                            "между коммитами нет изменённых файлов: тот же код, это повтор измерения, а не состояние «до»".into(),
+                        ),
+                        CodeChange::DocumentationOnly { changed } => reasons.push(format!(
+                            "между коммитами изменена только документация ({changed} файлов Markdown): реализация та же, это повтор измерения, а не состояние «до»; осознанное сравнение — только явной базой"
+                        )),
+                        CodeChange::Files {
+                            changed,
+                            documentation,
+                        } => notes.push(format!(
+                            "между коммитами изменено файлов: {changed}, из них документации: {documentation}; затронута ли измеряемая реализация, записанные данные не доказывают"
+                        )),
+                        CodeChange::Unverified { reason } => notes.push(format!(
+                            "состав изменений не проверен ({reason}): различие установлено только для состояния репозитория"
+                        )),
+                        CodeChange::NotProven => {}
+                    }
+                    code
+                }
+                Err(reason) => {
+                    reasons.push(reason);
+                    CodeChange::NotProven
+                }
+            };
             let verdict = comparability::compare(scenario, r, target);
             reasons.extend(
                 verdict
@@ -321,6 +383,7 @@ pub fn candidates(
                 git_commit: r.provenance.code.git_commit.clone(),
                 dirty: r.provenance.code.dirty,
                 outcome: r.outcome.status,
+                code,
                 eligible: reasons.is_empty(),
                 reasons,
                 notes,
@@ -359,6 +422,39 @@ fn code_difference(base: &CodeState, target: &CodeState) -> Result<Option<String
             "source_tree_sha256 записан не в обоих результатах: отличие кода доказано только разными коммитами".into(),
         )),
         _ => Err("отличие исходного кода не доказано: source_tree_sha256 записан не в обоих результатах, а коммиты не записаны или измерены не в чистой рабочей копии".into()),
+    }
+}
+
+/// Состав изменений между доказанно разными состояниями. Сверяется только
+/// пара коммитов чистых рабочих копий: незафиксированные изменения Git
+/// перечислить уже не может.
+fn change_of(base: &CodeState, target: &CodeState, changes: Changes<'_>) -> CodeChange {
+    let clean = base.dirty == Some(false) && target.dirty == Some(false);
+    let (Some(a), Some(b), true) = (&base.git_commit, &target.git_commit, clean) else {
+        return CodeChange::Unverified {
+            reason: "коммиты не записаны или измерена рабочая копия с изменениями".into(),
+        };
+    };
+    if a == b {
+        return CodeChange::Unverified {
+            reason: "коммит тот же, а дерево различается".into(),
+        };
+    }
+    match changes(a, b) {
+        Ok(paths) => {
+            let documentation = paths.iter().filter(|p| is_documentation(p)).count();
+            if documentation == paths.len() {
+                CodeChange::DocumentationOnly {
+                    changed: documentation,
+                }
+            } else {
+                CodeChange::Files {
+                    changed: paths.len(),
+                    documentation,
+                }
+            }
+        }
+        Err(reason) => CodeChange::Unverified { reason },
     }
 }
 

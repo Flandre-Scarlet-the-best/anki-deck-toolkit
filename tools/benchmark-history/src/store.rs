@@ -393,6 +393,8 @@ impl Store {
     pub fn backup(&self, destination: &Path) -> Result<usize, Error> {
         crate::location::refuse_inside_git(destination, "каталог резервной копии")
             .map_err(Error::Usage)?;
+        crate::location::refuse_overlap(&self.root, destination, "каталог резервной копии")
+            .map_err(Error::Usage)?;
         if destination.exists()
             && fs::read_dir(destination)
                 .map_err(|e| Error::Usage(format!("{}: {e}", destination.display())))?
@@ -492,6 +494,8 @@ impl Store {
     /// копии, повреждённая или не перечисленная в инвентаре, — проблема, и
     /// перенос не считается полным. Исправные записи принимаются в любом случае.
     pub fn restore(&mut self, source: &Path) -> Result<Restored, Error> {
+        crate::location::refuse_overlap(&self.root, source, "резервная копия")
+            .map_err(Error::Usage)?;
         let manifest = Self::manifest(source)?;
         let (entries, strays) = archive::scan(source)
             .map_err(|e| Error::Usage(format!("{}: {e}", source.display())))?;

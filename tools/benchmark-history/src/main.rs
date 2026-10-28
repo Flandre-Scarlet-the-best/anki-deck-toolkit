@@ -481,18 +481,20 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
             let id = store.resolve(id).map_err(failure)?;
             let (_, target) = store.load(&id).map_err(failure)?;
             let scenario = declaration(&catalog, &target)?;
-            let list = candidates(&store, scenario, &id, &target)?;
+            let list = candidates(&store, &catalog, scenario, &id, &target)?;
             let chosen = analysis::choose(&list, commit.as_deref());
             if cli.json {
                 print_json(&json!({
                     "ok": chosen.is_some(),
                     "target": id,
                     "rule": analysis::BASELINE_RULE,
+                    "caveat": analysis::IMPLEMENTATION_CAVEAT,
                     "chosen": chosen.map(|c| &c.id),
                     "candidates": list,
                 }));
             } else {
                 println!("правило: {}", analysis::BASELINE_RULE);
+                println!("оговорка: {}", analysis::IMPLEMENTATION_CAVEAT);
                 if list.is_empty() {
                     println!(
                         "других результатов {} · {} в истории нет",
@@ -621,7 +623,7 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
             let mut plans = Vec::new();
             for (n, (id, target)) in targets.iter().enumerate() {
                 let scenario = declaration(&catalog, target)?;
-                let pool = candidates(&store, scenario, id, target)?;
+                let pool = candidates(&store, &catalog, scenario, id, target)?;
                 let measured = matches!(
                     target.outcome.status,
                     OutcomeStatus::Success | OutcomeStatus::Partial
@@ -737,10 +739,22 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
                     "страница снимка должна лежать в репозитории каталога".into(),
                 ));
             }
+            // Тождество нагрузки прежнего снимка доказывается результатами
+            // той же пары в локальной истории: на странице идентичностей нет.
+            let mut history = Vec::new();
+            for other in store
+                .index()
+                .series(&result.scenario.id, &result.profile.id)
+                .map_err(|e| (Exit::Error, e.to_string()))?
+            {
+                let (_, recorded) = store.load(&other).map_err(failure)?;
+                history.push(snapshot::Recorded::of(&recorded));
+            }
             let options = snapshot::Options {
                 replace_environment: *replace_environment,
                 replace_workload: *replace_workload,
                 allow_dirty: *allow_dirty,
+                history,
             };
             let plan = snapshot::plan(&absolute, scenario, &result, &options)
                 .map_err(|e| (Exit::Negative, e))?;
@@ -758,6 +772,7 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
                     snapshot::Action::Unchanged => "снимок уже актуален",
                 };
                 println!("{action}: {} · {}", result.scenario.id, result.profile.id);
+                println!("нагрузка: {}", plan.workload.describe());
                 for p in &plan.pages {
                     println!("  {}", p.path.display());
                 }
@@ -984,8 +999,38 @@ fn declaration<'c>(
         .ok_or_else(|| (Exit::Usage, format!("сценарий {} не найден в каталоге: сопоставимость оценивается только по декларации", result.scenario.id)))
 }
 
+/// Изменённые пути между двумя коммитами по локальному Git репозитория
+/// каталога. Коммита может не быть в этом клоне: тогда состав изменений
+/// неизвестен, и выбор базы это оговаривает.
+fn git_changes(repository: &Path, a: &str, b: &str) -> Result<Vec<String>, String> {
+    for commit in [a, b] {
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!("«{commit}» не идентификатор коммита"));
+        }
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["diff", "--name-only", "-z", "--no-renames", a, b, "--"])
+        .output()
+        .map_err(|e| format!("Git не запущен: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git diff в репозитории каталога не выполнен: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect())
+}
+
 fn candidates(
     store: &Store,
+    catalog: &Catalog,
     scenario: &benchmark_contract::scenario::Scenario,
     id: &str,
     target: &BenchmarkResult,
@@ -999,7 +1044,14 @@ fn candidates(
         let (_, result) = store.load(&other).map_err(failure)?;
         pool.push((other, result));
     }
-    Ok(analysis::candidates(scenario, id, target, &pool))
+    let repository = &catalog.repository_root;
+    Ok(analysis::candidates(
+        scenario,
+        id,
+        target,
+        &pool,
+        &|a, b| git_changes(repository, a, b),
+    ))
 }
 
 fn missing_reasons(list: &[Candidate], commit: Option<&str>) -> Vec<String> {

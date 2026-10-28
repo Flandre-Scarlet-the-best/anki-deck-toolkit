@@ -1,7 +1,7 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 8bf2be7410e4433a6df169889830affe63cdc5a9 -->
+<!-- i18n-source-git-blob: ed22df35b27de7b06bf87bbf49953f22329c8562 -->
 
 This directory holds the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
@@ -85,6 +85,13 @@ declared for each scenario, and a snapshot remains evidence of an environment.
    measurement, or a property of the environment as a property of the code. An
    optimisation without a measurement that showed the problem is not published
    as an improvement.
+
+How an agent works on an optimisation or a suspected regression — hypothesis,
+a baseline of the previous implementation before the change, a comparable
+series after it, analysis and report — is described in the
+[`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md)
+skill. It builds on these rules and on the regular `benchmark-runner` and
+`benchmark-history` without replacing them.
 
 ## Metric sources and accuracy
 

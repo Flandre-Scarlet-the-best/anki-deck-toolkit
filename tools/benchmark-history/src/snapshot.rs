@@ -4,14 +4,15 @@
 //! явно названном эталонном окружении. Блок генерируется из выбранного
 //! проверенного результата на трёх языках документации одновременно и
 //! заменяет только блок той же пары. Другое окружение или оборудование,
-//! другой или неизвестный объём нагрузки, неполная серия, изменённая рабочая
-//! копия или более старый результат прежний снимок молча не заменяют. В
-//! постоянной документации нет коммитов, идентификаторов записей,
-//! идентичностей входов и путей.
+//! другой или неизвестный объём нагрузки, недоказанное тождество нагрузки,
+//! неполная серия, изменённая рабочая копия или более старый результат
+//! прежний снимок молча не заменяют. В постоянной документации нет коммитов,
+//! идентификаторов записей, идентичностей входов и путей: тождество нагрузки
+//! доказывается сверкой с результатом прежнего снимка в локальной истории.
 
 use crate::format;
 use benchmark_contract::result::{
-    Aggregate, Availability, BenchmarkResult, Fact, OutcomeStatus, Quantity, RunStatus,
+    Aggregate, Availability, BenchmarkResult, Fact, Identity, OutcomeStatus, Quantity, RunStatus,
 };
 use benchmark_contract::scenario::{InputRole, Scenario};
 use benchmark_contract::vocabulary::BuiltinFact;
@@ -169,20 +170,93 @@ pub fn reference_workload(
         .collect()
 }
 
+/// Идентичности входов роли `workload`. В документацию не попадают: ими
+/// тождество нагрузки сверяется только с локальной историей.
+pub fn workload_identities(result: &BenchmarkResult) -> BTreeMap<String, Identity> {
+    result
+        .inputs
+        .iter()
+        .filter(|input| input.role == InputRole::Workload)
+        .map(|input| (input.id.clone(), input.identity.clone()))
+        .collect()
+}
+
+/// Результат локальной истории, который мог дать прежний снимок: пара,
+/// момент записи и идентичности нагрузки.
+#[derive(Debug, Clone)]
+pub struct Recorded {
+    pub scenario: String,
+    pub profile: String,
+    pub recorded_at: String,
+    pub workload: BTreeMap<String, BTreeMap<String, Quantity>>,
+    pub identities: BTreeMap<String, Identity>,
+}
+
+impl Recorded {
+    pub fn of(result: &BenchmarkResult) -> Recorded {
+        Recorded {
+            scenario: result.scenario.id.clone(),
+            profile: result.profile.id.clone(),
+            recorded_at: result.provenance.recorded_at.clone(),
+            workload: reference_workload(result),
+            identities: workload_identities(result),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Разрешить заменить снимок, сделанный в другом окружении.
     pub replace_environment: bool,
-    /// Разрешить заменить снимок, сделанный на нагрузке другого объёма.
+    /// Разрешить заменить снимок, тождество нагрузки которого с новой не
+    /// доказано: другой объём, другое содержимое или прежний результат неизвестен.
     pub replace_workload: bool,
     /// Разрешить результат рабочей копии с изменениями (это видно в блоке).
     pub allow_dirty: bool,
+    /// Результаты локальной истории той же пары: доказательство тождества
+    /// нагрузки прежнего снимка. Пустой список — доказательства нет.
+    pub history: Vec<Recorded>,
+}
+
+/// Чем подтверждена эталонная нагрузка обновлённого снимка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkloadBasis {
+    /// Снимка этой пары на странице не было.
+    New,
+    /// Блок уже содержит этот результат.
+    Unchanged,
+    /// Сценарий не объявляет входов роли `workload`.
+    NoWorkload,
+    /// Результат прежнего снимка найден в локальной истории, и идентичности
+    /// его нагрузки совпадают с новой.
+    ProvenByHistory,
+    /// Тождество не доказано или нагрузка другая; замену явно подтвердил
+    /// `--replace-workload`.
+    ConfirmedReplacement,
+}
+
+impl WorkloadBasis {
+    pub fn describe(self) -> &'static str {
+        match self {
+            WorkloadBasis::New => "снимка этой пары не было, сравнивать нагрузку не с чем",
+            WorkloadBasis::Unchanged => "блок уже содержит этот результат",
+            WorkloadBasis::NoWorkload => "сценарий не объявляет входов нагрузки",
+            WorkloadBasis::ProvenByHistory => {
+                "тождество нагрузки доказано: идентичности входов совпали с результатом прежнего снимка в локальной истории"
+            }
+            WorkloadBasis::ConfirmedReplacement => {
+                "тождество нагрузки не доказано; смену эталонной нагрузки явно подтвердил --replace-workload"
+            }
+        }
+    }
 }
 
 /// Что изменится на страницах.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub action: Action,
+    pub workload: WorkloadBasis,
     pub pages: Vec<PageChange>,
 }
 
@@ -237,17 +311,20 @@ pub fn plan(
         environment: reference_environment(scenario, result)?,
         workload: Some(reference_workload(result)),
     };
+    let identities = workload_identities(result);
     let mut pages = Vec::new();
     let mut action = Action::Unchanged;
+    let mut workload = WorkloadBasis::Unchanged;
     for lang in Lang::ALL {
         let path = lang.page(page);
         let before = fs::read_to_string(&path)
             .map_err(|e| format!("{}: страница не читается: {e}", path.display()))?;
         let block = render(lang, &meta, scenario, result);
-        let (after, this) = place(&before, &meta, &block, options)
+        let (after, this, basis) = place(&before, &meta, &identities, &block, options)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         if this != Action::Unchanged {
             action = this;
+            workload = basis;
         }
         pages.push(PageChange {
             path,
@@ -256,21 +333,26 @@ pub fn plan(
             block,
         });
     }
-    Ok(Plan { action, pages })
+    Ok(Plan {
+        action,
+        workload,
+        pages,
+    })
 }
 
 fn place(
     text: &str,
     meta: &Meta,
+    identities: &BTreeMap<String, Identity>,
     block: &str,
     options: &Options,
-) -> Result<(String, Action), String> {
+) -> Result<(String, Action, WorkloadBasis), String> {
     let existing = blocks(text)?;
     let lines: Vec<&str> = text.split('\n').collect();
     let same = existing
         .iter()
         .find(|b| b.meta.scenario == meta.scenario && b.meta.profile == meta.profile);
-    let (start, end, action) = match same {
+    let (start, end, action, basis) = match same {
         Some(old) => {
             if old.meta.environment != meta.environment && !options.replace_environment {
                 let unknown: Vec<&str> = meta
@@ -295,18 +377,6 @@ fn place(
                     describe(&meta.environment)
                 ));
             }
-            if old.meta.workload != meta.workload && !options.replace_workload {
-                return Err(match old.meta.workload {
-                    None => format!(
-                        "в маркере снимка {} · {} эталонная нагрузка не записана (маркер прежнего формата): совпадение с новой нагрузкой не доказано — подтвердите замену флагом --replace-workload",
-                        meta.scenario, meta.profile
-                    ),
-                    Some(_) => format!(
-                        "снимок {} · {} получен на нагрузке другого объёма; новая нагрузка его молча не заменяет — подтвердите смену эталона флагом --replace-workload",
-                        meta.scenario, meta.profile
-                    ),
-                });
-            }
             let old_key = crate::index::time_key(&old.meta.recorded_at);
             let new_key = crate::index::time_key(&meta.recorded_at);
             if old_key > new_key {
@@ -321,9 +391,10 @@ fn place(
                 .collect::<Vec<_>>()
                 .join("\n");
             if current == block.trim_end_matches('\n') {
-                return Ok((text.to_owned(), Action::Unchanged));
+                return Ok((text.to_owned(), Action::Unchanged, WorkloadBasis::Unchanged));
             }
-            (old.start, old.end + 1, Action::Replaced)
+            let basis = workload_basis(&old.meta, meta, identities, options)?;
+            (old.start, old.end + 1, Action::Replaced, basis)
         }
         None => {
             let anchor = lines
@@ -332,7 +403,7 @@ fn place(
                 .ok_or_else(|| {
                     format!("на странице нет снимка этой пары и строки {ANCHOR}, перед которой добавляются новые снимки")
                 })?;
-            (anchor, anchor, Action::Added)
+            (anchor, anchor, Action::Added, WorkloadBasis::New)
         }
     };
     let mut out: Vec<String> = lines[..start].iter().map(|s| (*s).to_owned()).collect();
@@ -348,7 +419,82 @@ fn place(
         out.push(eol.to_owned());
     }
     out.extend(lines[end..].iter().map(|s| (*s).to_owned()));
-    Ok((out.join("\n"), action))
+    Ok((out.join("\n"), action, basis))
+}
+
+/// Тождество нагрузки прежнего снимка и нового результата. Совпадение объёма
+/// его не доказывает: два разных входа могут иметь одинаковые размеры. Сами
+/// идентичности на странице не хранятся, поэтому доказательство — результат
+/// прежнего снимка в локальной истории с теми же идентичностями нагрузки.
+/// Без него замена требует явного `--replace-workload`.
+fn workload_basis(
+    old: &Meta,
+    new: &Meta,
+    identities: &BTreeMap<String, Identity>,
+    options: &Options,
+) -> Result<WorkloadBasis, String> {
+    let pair = format!("{} · {}", new.scenario, new.profile);
+    let confirm =
+        "подтвердите смену или неподтверждённость эталонной нагрузки флагом --replace-workload";
+    let Some(old_workload) = &old.workload else {
+        return if options.replace_workload {
+            Ok(WorkloadBasis::ConfirmedReplacement)
+        } else {
+            Err(format!(
+                "в маркере снимка {pair} эталонная нагрузка не записана (маркер прежнего формата): совпадение с новой нагрузкой не доказано — {confirm}"
+            ))
+        };
+    };
+    if Some(old_workload) != new.workload.as_ref() {
+        return if options.replace_workload {
+            Ok(WorkloadBasis::ConfirmedReplacement)
+        } else {
+            Err(format!(
+                "снимок {pair} получен на нагрузке другого объёма; новая нагрузка его молча не заменяет — {confirm}"
+            ))
+        };
+    }
+    if old_workload.is_empty() && identities.is_empty() {
+        return Ok(WorkloadBasis::NoWorkload);
+    }
+    let key = crate::index::time_key(&old.recorded_at);
+    let previous: Vec<&Recorded> = options
+        .history
+        .iter()
+        .filter(|r| {
+            r.scenario == old.scenario
+                && r.profile == old.profile
+                && crate::index::time_key(&r.recorded_at) == key
+                && &r.workload == old_workload
+        })
+        .collect();
+    let differing: BTreeSet<&str> = previous
+        .iter()
+        .flat_map(|r| {
+            identities
+                .keys()
+                .chain(r.identities.keys())
+                .filter(|id| r.identities.get(*id) != identities.get(*id))
+                .map(String::as_str)
+        })
+        .collect();
+    if !previous.is_empty() && differing.is_empty() {
+        return Ok(WorkloadBasis::ProvenByHistory);
+    }
+    if options.replace_workload {
+        return Ok(WorkloadBasis::ConfirmedReplacement);
+    }
+    Err(if previous.is_empty() {
+        format!(
+            "снимок {pair} получен на нагрузке того же объёма, но объём не доказывает тождество входа, а результата прежнего снимка ({}) в локальной истории нет — тождество нагрузки не доказано; восстановите историю этого результата или {confirm}",
+            old.recorded_at
+        )
+    } else {
+        format!(
+            "снимок {pair} получен на нагрузке того же объёма, но с другим содержимым: идентичности входов {} отличаются от результата прежнего снимка в локальной истории — {confirm}",
+            differing.into_iter().collect::<Vec<_>>().join(", ")
+        )
+    })
 }
 
 fn describe(environment: &BTreeMap<String, String>) -> String {

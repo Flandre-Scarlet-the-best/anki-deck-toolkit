@@ -1,7 +1,7 @@
 # 性能与资源消耗
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 8bf2be7410e4433a6df169889830affe63cdc5a9 -->
+<!-- i18n-source-git-blob: ed22df35b27de7b06bf87bbf49953f22329c8562 -->
 
 此目录保存仓库各模块性能与资源消耗的**最近确认指标**：时间、CPU、内存、磁盘。每个模块有
 自己的页面，包含测量方法、指标定义，以及在明确命名的参考环境中按场景和配置划分的快照。
@@ -63,6 +63,10 @@
    耗时而关闭检查、缓存或清理。
 7. **诚实。** 说明哪些没有测量。不要把估算当作测量，也不要把环境的属性当作代码的属性。
    没有测量证明存在问题的优化，不作为改进发布。
+
+智能体处理优化或疑似回归的流程——假设、变更前旧实现的基线、变更后可比的系列、分析和报告——见
+skill [`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md)。
+它以这些规则以及常规的 `benchmark-runner` 和 `benchmark-history` 为基础，而不取代它们。
 
 ## 指标来源与精度
 
