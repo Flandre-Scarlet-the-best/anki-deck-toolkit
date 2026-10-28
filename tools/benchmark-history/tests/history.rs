@@ -1813,7 +1813,7 @@ fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
     let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
     let git = |a: &str, b: &str| -> Result<Vec<String>, String> {
         let out = Command::new("git")
-            .args(["diff", "--name-only", "-z", a, b])
+            .args(["diff", "--name-only", "-z", "--no-renames", a, b])
             .current_dir(&repo)
             .output()
             .map_err(|e| e.to_string())?;
