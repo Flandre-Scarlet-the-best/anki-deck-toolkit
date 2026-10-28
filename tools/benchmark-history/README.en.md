@@ -1,7 +1,7 @@
 # Local benchmark history: `benchmark-history`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: e26534765a83273272776746e0903bb5626eaceb -->
+<!-- i18n-source-git-blob: 32ba15d7b9913f691601ed7f338f8505e2055a9d -->
 
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
@@ -140,8 +140,11 @@ The `backup` directory and the `restore` source must not overlap the store: a
 path equal to it, inside it (for example `<store>/results/backup`) or containing
 it is refused with code `2` before anything is written. Paths are compared by
 components after resolving symbolic links, including a not-yet-existing tail of
-the path; a dangling link is refused, because writing through it would go to its
-target. The archive, the index and the destination stay unchanged on refusal.
+the path, and by the identity of existing directories: on a case-insensitive file
+system (`/mnt/c` in WSL) `STORE/results` is the same directory as
+`store/results`. A dangling link is refused, because writing through it would go
+to its target. The archive, the index and the destination stay unchanged on
+refusal.
 
 ## Automatic archiving from `benchmark-runner`
 
@@ -246,25 +249,36 @@ nothing:
 
 An equal workload size does not prove an identical input: two different exports
 can match in bytes and number of notes. Input identities are not stored on the
-page, so the proof is the result of the previous snapshot in the local history
-(the same pair, recording time and reference environment as in the marker) with
-the same identities of the `workload` inputs. If such a result exists and the identities match, the
-snapshot is replaced without a flag. If the identities differ, the result is not
-in the history (another machine, a cleared history) or the marker has the old
-format without a recorded workload, `--replace-workload` is required. The
-refusal names only input IDs, never identities. The plan (`--json`:
-`plan.workload`; text: the `нагрузка:` line) shows the basis: `new`,
-`unchanged`, `no-workload`, `proven-by-history` or `confirmed-replacement`;
-state it in the PR together with the flags used.
+page, so the proof is the result of the previous snapshot in the local
+history: another result of the same pair that produces exactly the block on the
+page (the marker with recording time, reference environment and workload size,
+versions, metrics), with the same identities of the `workload` inputs. The
+result being published is never such proof, even if it is in the history:
+otherwise a new result of the same size recorded within the same second would
+confirm the previous snapshot by itself. If such a result exists and the
+identities match, the snapshot is replaced without a flag. `--replace-workload`
+is required if the identities differ; several history results with different
+workloads produce the block on the page; the result is not in the history
+(another machine, a cleared history); the block matches no result (edited by
+hand or produced by another version of the generator); or the marker has no
+recorded workload. Matching block text does not bypass the check: a repeated
+`snapshot` of an already published result without another history result
+producing the same block is refused, and with `--replace-workload` it reports
+that the snapshot is already up to date and writes nothing. The refusal names
+only input IDs, never identities. The plan action (`plan.action`: `added`,
+`replaced`, `unchanged`) and its basis (`--json`: `plan.workload`; text: the
+`нагрузка:` line) — `new`, `no-workload`, `proven-by-history` or
+`confirmed-replacement`; state the basis in the PR together with the flags
+used.
 
 The reference environment of a snapshot is wider than the comparability
 condition: hardware and platform facts are always part of it, even if the
 scenario does not compare them, so a measurement on another CPU, with another
 amount of memory or after switching from WSL2 to Linux without virtualization
 never silently replaces the public reference, while comparison of results does
-not become stricter. A fact absent from the previous marker and an old-format
-marker without a recorded workload do not count as matching: the corresponding
-flag confirms the replacement.
+not become stricter. A fact absent from the previous marker and a marker
+without a recorded workload do not count as matching: the corresponding flag
+confirms the replacement.
 
 The three pages are written consistently: no page changes until temporary
 copies of all three are prepared; then they are replaced one by one by rename
@@ -305,13 +319,19 @@ invalid, sensitive and unknown documents; deleted, damaged, outdated and too-new
 index, an index without a required table and with a tampered row; interrupted
 write and stray files; damaged archive copy; moving through `backup`/`restore`
 into another store and an incomplete or modified copy; a backup inside the
-store, through a symbolic link, through a dangling link and into an ancestor
-directory without changing the archive; a store inside a Git working copy when
+store, through a symbolic link, through a dangling link, through a path in
+another case on a case-insensitive file system (the directory is set by
+`BENCHMARK_HISTORY_TEST_CASE_INSENSITIVE_DIR`, otherwise the system temporary
+directory is checked, and a case-sensitive one skips the check with a message)
+and into an ancestor directory without changing the archive; a store inside a Git working copy when
 run from an outside directory; baseline rules and proof of different code, a
 documentation-only change versus a code change in a real Git repository, an
 unknown commit and an explicit baseline; units, zero base and spread; the PR
 section in every branch, validated by the real
 `.github/scripts/check_pr_body.py`; documentation snapshot with separate
-reference hardware, an old-format marker, workload identity at an equal size
-and a failed write of one of the three pages; and the whole CLI.
+reference hardware, a marker without a recorded workload, workload identity at
+an equal size, refusal to take the result being published as proof of the
+previous snapshot, a matching block with a different workload, a scenario
+without a workload and a failed write of one of the three pages; and the whole
+CLI.
 The tests read neither `decks/**` nor the user's data directory.

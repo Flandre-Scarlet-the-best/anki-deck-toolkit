@@ -8,7 +8,8 @@
 //! неполная серия, изменённая рабочая копия или более старый результат
 //! прежний снимок молча не заменяют. В постоянной документации нет коммитов,
 //! идентификаторов записей, идентичностей входов и путей: тождество нагрузки
-//! доказывается сверкой с результатом прежнего снимка в локальной истории.
+//! доказывается сверкой с результатом прежнего снимка в локальной истории —
+//! другим результатом, а не публикуемым, который даёт в точности тот же блок.
 
 use crate::format;
 use benchmark_contract::result::{
@@ -18,6 +19,7 @@ use benchmark_contract::scenario::{InputRole, Scenario};
 use benchmark_contract::vocabulary::BuiltinFact;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs;
@@ -63,8 +65,8 @@ pub struct Meta {
     /// сопоставимости сценария.
     pub environment: BTreeMap<String, String>,
     /// Объём входов роли `workload` по ID входа: эталонная нагрузка снимка.
-    /// В маркерах, записанных до появления поля, отсутствует: такая нагрузка
-    /// неизвестна, и её смену подтверждает только `--replace-workload`.
+    /// Маркер без этого поля читается, но нагрузка такого снимка неизвестна,
+    /// и её смену подтверждает только `--replace-workload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<BTreeMap<String, BTreeMap<String, Quantity>>>,
 }
@@ -181,28 +183,57 @@ pub fn workload_identities(result: &BenchmarkResult) -> BTreeMap<String, Identit
         .collect()
 }
 
-/// Результат локальной истории, который мог дать прежний снимок: пара,
-/// момент записи, эталонное окружение и идентичности нагрузки.
+/// Машинная часть маркера, которую результат даёт снимку.
+fn meta_of(scenario: &Scenario, result: &BenchmarkResult) -> Result<Meta, String> {
+    Ok(Meta {
+        scenario: result.scenario.id.clone(),
+        profile: result.profile.id.clone(),
+        recorded_at: result.provenance.recorded_at.clone(),
+        environment: reference_environment(scenario, result)?,
+        workload: Some(reference_workload(result)),
+    })
+}
+
+/// Отпечаток содержимого результата: по нему публикуемый результат
+/// исключается из доказательства происхождения прежнего снимка.
+fn fingerprint(result: &BenchmarkResult) -> String {
+    let bytes = serde_json::to_vec(result).expect("JSON");
+    crate::archive::hex(&Sha256::digest(&bytes))
+}
+
+/// Результат локальной истории, который мог дать прежний снимок: блоки,
+/// которые он даёт на трёх языках, и идентичности его нагрузки.
 #[derive(Debug, Clone)]
 pub struct Recorded {
-    pub scenario: String,
-    pub profile: String,
-    pub recorded_at: String,
-    /// `None`, если эталонное окружение результата не определено: такой
-    /// результат не может быть источником опубликованного снимка.
-    pub environment: Option<BTreeMap<String, String>>,
-    pub workload: BTreeMap<String, BTreeMap<String, Quantity>>,
-    pub identities: BTreeMap<String, Identity>,
+    fingerprint: String,
+    /// Маркер результата; `None`, если эталонное окружение не определено:
+    /// такой результат не может быть источником опубликованного снимка.
+    meta: Option<Meta>,
+    /// Блоки в порядке [`Lang::ALL`] без завершающего перевода строки.
+    blocks: Vec<String>,
+    identities: BTreeMap<String, Identity>,
 }
 
 impl Recorded {
     pub fn of(scenario: &Scenario, result: &BenchmarkResult) -> Recorded {
+        let meta = meta_of(scenario, result).ok();
+        let blocks = meta
+            .as_ref()
+            .map(|meta| {
+                Lang::ALL
+                    .iter()
+                    .map(|lang| {
+                        render(*lang, meta, result)
+                            .trim_end_matches('\n')
+                            .to_owned()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Recorded {
-            scenario: result.scenario.id.clone(),
-            profile: result.profile.id.clone(),
-            recorded_at: result.provenance.recorded_at.clone(),
-            environment: reference_environment(scenario, result).ok(),
-            workload: reference_workload(result),
+            fingerprint: fingerprint(result),
+            meta,
+            blocks,
             identities: workload_identities(result),
         }
     }
@@ -218,7 +249,8 @@ pub struct Options {
     /// Разрешить результат рабочей копии с изменениями (это видно в блоке).
     pub allow_dirty: bool,
     /// Результаты локальной истории той же пары: доказательство тождества
-    /// нагрузки прежнего снимка. Пустой список — доказательства нет.
+    /// нагрузки прежнего снимка. Пустой список — доказательства нет. Сам
+    /// публикуемый результат, если он здесь есть, доказательством не считается.
     pub history: Vec<Recorded>,
 }
 
@@ -228,12 +260,11 @@ pub struct Options {
 pub enum WorkloadBasis {
     /// Снимка этой пары на странице не было.
     New,
-    /// Блок уже содержит этот результат.
-    Unchanged,
     /// Сценарий не объявляет входов роли `workload`.
     NoWorkload,
-    /// Результат прежнего снимка найден в локальной истории, и идентичности
-    /// его нагрузки совпадают с новой.
+    /// В локальной истории есть другой результат, дающий в точности блок
+    /// прежнего снимка, и идентичности нагрузки всех таких результатов
+    /// совпадают с новой.
     ProvenByHistory,
     /// Тождество не доказано или нагрузка другая; замену явно подтвердил
     /// `--replace-workload`.
@@ -245,21 +276,19 @@ impl WorkloadBasis {
     /// явное подтверждение важнее доказательства, замена — добавления.
     fn weight(self) -> u8 {
         match self {
-            WorkloadBasis::Unchanged => 0,
-            WorkloadBasis::New => 1,
-            WorkloadBasis::NoWorkload => 2,
-            WorkloadBasis::ProvenByHistory => 3,
-            WorkloadBasis::ConfirmedReplacement => 4,
+            WorkloadBasis::New => 0,
+            WorkloadBasis::NoWorkload => 1,
+            WorkloadBasis::ProvenByHistory => 2,
+            WorkloadBasis::ConfirmedReplacement => 3,
         }
     }
 
     pub fn describe(self) -> &'static str {
         match self {
             WorkloadBasis::New => "снимка этой пары не было, сравнивать нагрузку не с чем",
-            WorkloadBasis::Unchanged => "блок уже содержит этот результат",
             WorkloadBasis::NoWorkload => "сценарий не объявляет входов нагрузки",
             WorkloadBasis::ProvenByHistory => {
-                "тождество нагрузки доказано: идентичности входов совпали с результатом прежнего снимка в локальной истории"
+                "тождество нагрузки доказано: другой результат локальной истории даёт в точности блок прежнего снимка, и идентичности входов совпали"
             }
             WorkloadBasis::ConfirmedReplacement => {
                 "тождество нагрузки не доказано; смену эталонной нагрузки явно подтвердил --replace-workload"
@@ -320,31 +349,29 @@ pub fn plan(
             "результат измерен в рабочей копии с изменениями или без записанного состояния: публикуйте измерение закоммиченного кода либо явно укажите --allow-dirty".into(),
         );
     }
-    let meta = Meta {
-        scenario: result.scenario.id.clone(),
-        profile: result.profile.id.clone(),
-        recorded_at: result.provenance.recorded_at.clone(),
-        environment: reference_environment(scenario, result)?,
-        workload: Some(reference_workload(result)),
+    let meta = meta_of(scenario, result)?;
+    let new = Published {
+        meta: &meta,
+        identities: workload_identities(result),
+        fingerprint: fingerprint(result),
     };
-    let identities = workload_identities(result);
     let mut pages = Vec::new();
     let mut action = Action::Unchanged;
-    let mut workload = WorkloadBasis::Unchanged;
-    for lang in Lang::ALL {
+    let mut workload: Option<WorkloadBasis> = None;
+    for (n, lang) in Lang::ALL.into_iter().enumerate() {
         let path = lang.page(page);
         let before = fs::read_to_string(&path)
             .map_err(|e| format!("{}: страница не читается: {e}", path.display()))?;
-        let block = render(lang, &meta, scenario, result);
-        let (after, this, basis) = place(&before, &meta, &identities, &block, options)
+        let block = render(lang, &meta, result);
+        let (after, this, basis) = place(&before, n, &new, &block, options)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         // Замена на одной из страниц важнее добавления на другой, а самое
         // слабое основание замены не скрывается более сильным.
         if this == Action::Replaced || action == Action::Unchanged {
             action = this;
         }
-        if basis.weight() > workload.weight() {
-            workload = basis;
+        if workload.is_none_or(|w| basis.weight() > w.weight()) {
+            workload = Some(basis);
         }
         pages.push(PageChange {
             path,
@@ -355,18 +382,26 @@ pub fn plan(
     }
     Ok(Plan {
         action,
-        workload,
+        workload: workload.expect("три страницы"),
         pages,
     })
 }
 
+/// Публикуемый результат: его маркер, идентичности нагрузки и отпечаток.
+struct Published<'a> {
+    meta: &'a Meta,
+    identities: BTreeMap<String, Identity>,
+    fingerprint: String,
+}
+
 fn place(
     text: &str,
-    meta: &Meta,
-    identities: &BTreeMap<String, Identity>,
+    lang: usize,
+    new: &Published,
     block: &str,
     options: &Options,
 ) -> Result<(String, Action, WorkloadBasis), String> {
+    let meta = new.meta;
     let existing = blocks(text)?;
     let lines: Vec<&str> = text.split('\n').collect();
     let same = existing
@@ -410,10 +445,12 @@ fn place(
                 .map(|l| l.trim_end_matches('\r'))
                 .collect::<Vec<_>>()
                 .join("\n");
+            // Совпавший текст блока тождества нагрузки не доказывает: её
+            // идентичностей в блоке нет, поэтому проверка та же, что при замене.
+            let basis = workload_basis(&old.meta, &current, lang, new, options)?;
             if current == block.trim_end_matches('\n') {
-                return Ok((text.to_owned(), Action::Unchanged, WorkloadBasis::Unchanged));
+                return Ok((text.to_owned(), Action::Unchanged, basis));
             }
-            let basis = workload_basis(&old.meta, meta, identities, options)?;
             (old.start, old.end + 1, Action::Replaced, basis)
         }
         None => {
@@ -445,77 +482,103 @@ fn place(
 /// Тождество нагрузки прежнего снимка и нового результата. Совпадение объёма
 /// его не доказывает: два разных входа могут иметь одинаковые размеры. Сами
 /// идентичности на странице не хранятся, поэтому доказательство — результат
-/// прежнего снимка в локальной истории с теми же идентичностями нагрузки.
-/// Без него замена требует явного `--replace-workload`.
+/// локальной истории, который даёт в точности блок прежнего снимка (маркер,
+/// момент записи, окружение, метрики), и идентичности его нагрузки. Публикуемый
+/// результат такого доказательства не даёт: иначе новый результат того же
+/// объёма, записанный в ту же секунду, подтвердил бы сам себя. Несколько
+/// источников с разной нагрузкой — происхождение неоднозначно. Без
+/// доказательства замена требует явного `--replace-workload`.
 fn workload_basis(
     old: &Meta,
-    new: &Meta,
-    identities: &BTreeMap<String, Identity>,
+    current: &str,
+    lang: usize,
+    new: &Published,
     options: &Options,
 ) -> Result<WorkloadBasis, String> {
-    let pair = format!("{} · {}", new.scenario, new.profile);
+    let pair = format!("{} · {}", new.meta.scenario, new.meta.profile);
     let confirm =
         "подтвердите смену или неподтверждённость эталонной нагрузки флагом --replace-workload";
-    let Some(old_workload) = &old.workload else {
-        return if options.replace_workload {
+    let refuse = |reason: String| {
+        if options.replace_workload {
             Ok(WorkloadBasis::ConfirmedReplacement)
         } else {
-            Err(format!(
-                "в маркере снимка {pair} эталонная нагрузка не записана (маркер прежнего формата): совпадение с новой нагрузкой не доказано — {confirm}"
-            ))
-        };
+            Err(reason)
+        }
     };
-    if Some(old_workload) != new.workload.as_ref() {
-        return if options.replace_workload {
-            Ok(WorkloadBasis::ConfirmedReplacement)
-        } else {
-            Err(format!(
-                "снимок {pair} получен на нагрузке другого объёма; новая нагрузка его молча не заменяет — {confirm}"
-            ))
-        };
+    let Some(old_workload) = &old.workload else {
+        return refuse(format!(
+            "в маркере снимка {pair} эталонная нагрузка не записана: совпадение с новой нагрузкой не доказано — {confirm}"
+        ));
+    };
+    if Some(old_workload) != new.meta.workload.as_ref() {
+        return refuse(format!(
+            "снимок {pair} получен на нагрузке другого объёма; новая нагрузка его молча не заменяет — {confirm}"
+        ));
     }
-    if old_workload.is_empty() && identities.is_empty() {
+    if old_workload.is_empty() && new.identities.is_empty() {
         return Ok(WorkloadBasis::NoWorkload);
     }
-    let key = crate::index::time_key(&old.recorded_at);
-    let previous: Vec<&Recorded> = options
+    let marked: Vec<&Recorded> = options
         .history
         .iter()
-        .filter(|r| {
-            r.scenario == old.scenario
-                && r.profile == old.profile
-                && crate::index::time_key(&r.recorded_at) == key
-                && r.environment.as_ref() == Some(&old.environment)
-                && &r.workload == old_workload
-        })
+        .filter(|r| r.meta.as_ref() == Some(old))
         .collect();
-    let differing: BTreeSet<&str> = previous
+    let gives_block = |r: &&&Recorded| r.blocks.get(lang).map(String::as_str) == Some(current);
+    let itself = marked
         .iter()
-        .flat_map(|r| {
-            identities
-                .keys()
-                .chain(r.identities.keys())
-                .filter(|id| r.identities.get(*id) != identities.get(*id))
-                .map(String::as_str)
-        })
+        .any(|r| r.fingerprint == new.fingerprint && gives_block(&r));
+    let others: Vec<&&Recorded> = marked
+        .iter()
+        .filter(|r| r.fingerprint != new.fingerprint)
         .collect();
-    if !previous.is_empty() && differing.is_empty() {
+    let sources: Vec<&&Recorded> = others.iter().copied().filter(gives_block).collect();
+    if sources.is_empty() {
+        return refuse(if itself {
+            format!(
+                "блок снимка {pair} даёт сам публикуемый результат, а другого результата с этим блоком в локальной истории нет: маркер не хранит идентичностей входов, поэтому публикуемый результат не доказывает происхождения прежнего снимка (повторный запуск той же публикации страницы не меняет) — {confirm}"
+            )
+        } else if !others.is_empty() {
+            format!(
+                "в локальной истории есть результат с данными маркера снимка {pair} ({}), но блок на странице с ним не совпадает (изменён вручную или сгенерирован другой версией генератора): происхождение прежнего снимка не доказано — {confirm}",
+                old.recorded_at
+            )
+        } else {
+            format!(
+                "снимок {pair} получен на нагрузке того же объёма, но объём не доказывает тождество входа, а результата прежнего снимка ({}) в локальной истории нет — тождество нагрузки не доказано; восстановите историю этого результата или {confirm}",
+                old.recorded_at
+            )
+        });
+    }
+    let ambiguous: BTreeSet<&str> = sources
+        .iter()
+        .flat_map(|r| differing(&r.identities, &sources[0].identities))
+        .collect();
+    if !ambiguous.is_empty() {
+        return refuse(format!(
+            "блок снимка {pair} дают несколько результатов локальной истории с разной нагрузкой (входы {}): происхождение прежнего снимка неоднозначно — {confirm}",
+            ambiguous.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let changed = differing(&sources[0].identities, &new.identities);
+    if changed.is_empty() {
         return Ok(WorkloadBasis::ProvenByHistory);
     }
-    if options.replace_workload {
-        return Ok(WorkloadBasis::ConfirmedReplacement);
-    }
-    Err(if previous.is_empty() {
-        format!(
-            "снимок {pair} получен на нагрузке того же объёма, но объём не доказывает тождество входа, а результата прежнего снимка ({}) в локальной истории нет — тождество нагрузки не доказано; восстановите историю этого результата или {confirm}",
-            old.recorded_at
-        )
-    } else {
-        format!(
-            "снимок {pair} получен на нагрузке того же объёма, но с другим содержимым: идентичности входов {} отличаются от результата прежнего снимка в локальной истории — {confirm}",
-            differing.into_iter().collect::<Vec<_>>().join(", ")
-        )
-    })
+    refuse(format!(
+        "снимок {pair} получен на нагрузке того же объёма, но с другим содержимым: идентичности входов {} отличаются от результата прежнего снимка в локальной истории — {confirm}",
+        changed.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// ID входов, идентичности которых различаются.
+fn differing<'a>(
+    a: &'a BTreeMap<String, Identity>,
+    b: &'a BTreeMap<String, Identity>,
+) -> BTreeSet<&'a str> {
+    a.keys()
+        .chain(b.keys())
+        .filter(|id| a.get(*id) != b.get(*id))
+        .map(String::as_str)
+        .collect()
 }
 
 fn describe(environment: &BTreeMap<String, String>) -> String {
@@ -774,7 +837,7 @@ fn marker(meta: &Meta) -> String {
 }
 
 /// Блок снимка на одном языке.
-pub fn render(lang: Lang, meta: &Meta, scenario: &Scenario, result: &BenchmarkResult) -> String {
+pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
     let l = labels(lang);
     let show = |value: f64, unit| format::quantity_in(value, unit, l.cores);
     let mut out = String::new();
@@ -803,7 +866,7 @@ pub fn render(lang: Lang, meta: &Meta, scenario: &Scenario, result: &BenchmarkRe
     }
     facts.push(format!(
         "r{} · {} · {}",
-        scenario.revision, result.profile.cache, result.profile.network
+        result.scenario.revision, result.profile.cache, result.profile.network
     ));
     facts.push((l.outcome)(ok, result.runs.len(), result.warmup_runs));
     if result.provenance.code.dirty != Some(false) {
