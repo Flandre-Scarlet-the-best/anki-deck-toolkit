@@ -182,22 +182,26 @@ pub fn workload_identities(result: &BenchmarkResult) -> BTreeMap<String, Identit
 }
 
 /// Результат локальной истории, который мог дать прежний снимок: пара,
-/// момент записи и идентичности нагрузки.
+/// момент записи, эталонное окружение и идентичности нагрузки.
 #[derive(Debug, Clone)]
 pub struct Recorded {
     pub scenario: String,
     pub profile: String,
     pub recorded_at: String,
+    /// `None`, если эталонное окружение результата не определено: такой
+    /// результат не может быть источником опубликованного снимка.
+    pub environment: Option<BTreeMap<String, String>>,
     pub workload: BTreeMap<String, BTreeMap<String, Quantity>>,
     pub identities: BTreeMap<String, Identity>,
 }
 
 impl Recorded {
-    pub fn of(result: &BenchmarkResult) -> Recorded {
+    pub fn of(scenario: &Scenario, result: &BenchmarkResult) -> Recorded {
         Recorded {
             scenario: result.scenario.id.clone(),
             profile: result.profile.id.clone(),
             recorded_at: result.provenance.recorded_at.clone(),
+            environment: reference_environment(scenario, result).ok(),
             workload: reference_workload(result),
             identities: workload_identities(result),
         }
@@ -237,6 +241,18 @@ pub enum WorkloadBasis {
 }
 
 impl WorkloadBasis {
+    /// Порядок, в котором основание представляет план нескольких страниц:
+    /// явное подтверждение важнее доказательства, замена — добавления.
+    fn weight(self) -> u8 {
+        match self {
+            WorkloadBasis::Unchanged => 0,
+            WorkloadBasis::New => 1,
+            WorkloadBasis::NoWorkload => 2,
+            WorkloadBasis::ProvenByHistory => 3,
+            WorkloadBasis::ConfirmedReplacement => 4,
+        }
+    }
+
     pub fn describe(self) -> &'static str {
         match self {
             WorkloadBasis::New => "снимка этой пары не было, сравнивать нагрузку не с чем",
@@ -322,8 +338,12 @@ pub fn plan(
         let block = render(lang, &meta, scenario, result);
         let (after, this, basis) = place(&before, &meta, &identities, &block, options)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        if this != Action::Unchanged {
+        // Замена на одной из страниц важнее добавления на другой, а самое
+        // слабое основание замены не скрывается более сильным.
+        if this == Action::Replaced || action == Action::Unchanged {
             action = this;
+        }
+        if basis.weight() > workload.weight() {
             workload = basis;
         }
         pages.push(PageChange {
@@ -465,6 +485,7 @@ fn workload_basis(
             r.scenario == old.scenario
                 && r.profile == old.profile
                 && crate::index::time_key(&r.recorded_at) == key
+                && r.environment.as_ref() == Some(&old.environment)
                 && &r.workload == old_workload
         })
         .collect();

@@ -1,7 +1,7 @@
 # Local benchmark history: `benchmark-history`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 20d275e5ba31a1f67c3ca14c5fc36fb424e56037 -->
+<!-- i18n-source-git-blob: e26534765a83273272776746e0903bb5626eaceb -->
 
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
@@ -247,8 +247,8 @@ nothing:
 An equal workload size does not prove an identical input: two different exports
 can match in bytes and number of notes. Input identities are not stored on the
 page, so the proof is the result of the previous snapshot in the local history
-(the same pair and recording time as in the marker) with the same identities of
-the `workload` inputs. If such a result exists and the identities match, the
+(the same pair, recording time and reference environment as in the marker) with
+the same identities of the `workload` inputs. If such a result exists and the identities match, the
 snapshot is replaced without a flag. If the identities differ, the result is not
 in the history (another machine, a cleared history) or the marker has the old
 format without a recorded workload, `--replace-workload` is required. The

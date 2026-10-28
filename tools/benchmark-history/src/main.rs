@@ -748,7 +748,7 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
                 .map_err(|e| (Exit::Error, e.to_string()))?
             {
                 let (_, recorded) = store.load(&other).map_err(failure)?;
-                history.push(snapshot::Recorded::of(&recorded));
+                history.push(snapshot::Recorded::of(scenario, &recorded));
             }
             let options = snapshot::Options {
                 replace_environment: *replace_environment,
@@ -1008,7 +1008,12 @@ fn git_changes(repository: &Path, a: &str, b: &str) -> Result<Vec<String>, Strin
             return Err(format!("«{commit}» не идентификатор коммита"));
         }
     }
+    // Унаследованные GIT_* (например, из Git-хука) перенаправили бы diff
+    // мимо репозитория каталога.
     let output = std::process::Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .arg("-C")
         .arg(repository)
         .args(["diff", "--name-only", "-z", "--no-renames", a, b, "--"])

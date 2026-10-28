@@ -1274,7 +1274,9 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
     });
     // Локальная история с результатами снимков: доказательство тождества нагрузки.
     let options = Options {
-        history: [&first, &newer].map(snapshot::Recorded::of).to_vec(),
+        history: [&first, &newer]
+            .map(|r| snapshot::Recorded::of(scenario, r))
+            .to_vec(),
         ..Options::default()
     };
     let plan = snapshot::plan(&ru, scenario, &first, &options).unwrap();
@@ -1908,6 +1910,18 @@ fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
     // CLI сверяет коммиты по Git репозитория каталога.
     let (code, out, _) = f.cli(&["baseline", &after_docs[..12]]);
     assert_eq!(code, 1, "{out}");
+    // Унаследованный GIT_DIR (запуск из Git-хука) не уводит сверку в чужой
+    // репозиторий.
+    let inherited = isolated(BIN)
+        .arg("--catalog")
+        .arg(f.catalog_dir())
+        .args(["baseline", &after_docs[..12]])
+        .env("BENCHMARK_HISTORY_DIR", f.store())
+        .env_remove("XDG_DATA_HOME")
+        .env("GIT_DIR", f.root.join("elsewhere.git"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&inherited.stdout), out);
     assert!(
         out.contains(
             "не подходит: между коммитами изменена только документация (2 файлов Markdown)"
@@ -2370,7 +2384,7 @@ fn snapshot_reference_hardware_is_separate_from_comparability() {
     fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
     let first = result(&Spec::default());
     let options = Options {
-        history: vec![snapshot::Recorded::of(&first)],
+        history: vec![snapshot::Recorded::of(&scenario, &first)],
         ..Options::default()
     };
     snapshot::apply(&snapshot::plan(&ru, &scenario, &first, &options).unwrap()).unwrap();
@@ -2486,7 +2500,7 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
     };
 
     let first = result(&Spec::default());
-    let history = vec![snapshot::Recorded::of(&first)];
+    let history = vec![snapshot::Recorded::of(scenario, &first)];
     let with_history = Options {
         history: history.clone(),
         ..Options::default()
@@ -2534,12 +2548,27 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
     impostor.inputs[1].identity.value = "f".repeat(64);
     let mixed = Options {
         history: vec![
-            snapshot::Recorded::of(&first),
-            snapshot::Recorded::of(&impostor),
+            snapshot::Recorded::of(scenario, &first),
+            snapshot::Recorded::of(scenario, &impostor),
         ],
         ..Options::default()
     };
     assert!(snapshot::plan(&ru, scenario, &same, &mixed).is_err());
+    // Тот же момент и нагрузка, но другое эталонное окружение: этот результат
+    // не мог дать прежний снимок и тождества не доказывает.
+    let mut elsewhere = first.clone();
+    elsewhere.environment.insert(
+        snapshot::REFERENCE_FACTS[0].as_str().to_owned(),
+        Fact::Known {
+            value: "elsewhere".into(),
+        },
+    );
+    let foreign = Options {
+        history: vec![snapshot::Recorded::of(scenario, &elsewhere)],
+        ..Options::default()
+    };
+    let refused = snapshot::plan(&ru, scenario, &same, &foreign).unwrap_err();
+    assert!(refused.contains("в локальной истории нет"), "{refused}");
     assert_eq!(read_all(), published, "отказы ничего не записали");
     // Подлинно та же нагрузка: доказательство из локальной истории.
     let plan = snapshot::plan(&ru, scenario, &same, &with_history).unwrap();
@@ -2555,6 +2584,18 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
         replace_workload: true,
         ..with_history.clone()
     };
+    // Блока нет только на последней странице: её добавление не скрывает
+    // замену и её основание на остальных.
+    fs::write(&pages[2], page("zh", &sha)).unwrap();
+    let plan = snapshot::plan(&ru, scenario, &changed, &confirmed).unwrap();
+    assert_eq!(
+        (plan.action, plan.workload),
+        (
+            snapshot::Action::Replaced,
+            snapshot::WorkloadBasis::ConfirmedReplacement
+        )
+    );
+    fs::write(&pages[2], &published[2]).unwrap();
     let plan = snapshot::plan(&ru, scenario, &changed, &confirmed).unwrap();
     assert_eq!(plan.workload, snapshot::WorkloadBasis::ConfirmedReplacement);
     snapshot::apply(&plan).unwrap();
