@@ -39,6 +39,19 @@
       "rangeStrategy": "replace",
       "allowedVersions": "/^\\d+\\.\\d+\\.\\d+$/",
       "automerge": false
+    },
+    {
+      "description": "Node.js проверки конфигурации Renovate ограничен полем engines закреплённого в workflow пакета renovate; major Node поднимается вручную вместе с этим пакетом",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/renovate-config.yml"
+      ],
+      "matchDepNames": [
+        "node"
+      ],
+      "allowedVersions": "<25"
     }
   ],
   "customManagers": [
