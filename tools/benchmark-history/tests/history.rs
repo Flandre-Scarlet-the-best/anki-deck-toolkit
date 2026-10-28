@@ -27,6 +27,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BIN: &str = env!("CARGO_BIN_EXE_benchmark-history");
 
+/// Переменные Git, которые перенаправили бы команду из временного репозитория
+/// в чужой (например, при запуске тестов из Git-хука).
+const GIT_ENV: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
+
+/// Команда без унаследованных переменных Git.
+fn isolated(program: &str) -> Command {
+    let mut command = Command::new(program);
+    for name in GIT_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 const CATALOG: &str = r#"schema_version = 1
 repository_root = "../workspace"
 
@@ -156,7 +169,7 @@ impl Fixture {
     }
 
     fn cli(&self, args: &[&str]) -> (i32, String, String) {
-        let output = Command::new(BIN)
+        let output = isolated(BIN)
             .arg("--catalog")
             .arg(self.catalog_dir())
             .args(args)
@@ -1601,7 +1614,7 @@ fn cli_end_to_end_with_isolated_store() {
     assert_eq!(code, 4, "{err}");
 
     // Хранилище внутри рабочей копии репозитория отвергается.
-    let output = Command::new(BIN)
+    let output = isolated(BIN)
         .arg("--catalog")
         .arg(f.catalog_dir())
         .args([
@@ -1745,7 +1758,7 @@ fn baseline_requires_proven_different_code() {
 /// Коммит синтетического репозитория; `None`, если Git недоступен.
 fn commit_all(repo: &Path, message: &str) -> Option<String> {
     let git = |args: &[&str]| {
-        Command::new("git")
+        isolated("git")
             .args([
                 "-c",
                 "user.name=fixture",
@@ -1768,7 +1781,7 @@ fn commit_all(repo: &Path, message: &str) -> Option<String> {
 fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
     let f = fixture();
     let repo = f.root.join("workspace");
-    let initialized = Command::new("git")
+    let initialized = isolated("git")
         .args(["init", "-q"])
         .current_dir(&repo)
         .status()
@@ -1812,7 +1825,7 @@ fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
     let catalog = f.catalog();
     let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
     let git = |a: &str, b: &str| -> Result<Vec<String>, String> {
-        let out = Command::new("git")
+        let out = isolated("git")
             .args(["diff", "--name-only", "-z", "--no-renames", a, b])
             .current_dir(&repo)
             .output()
@@ -1943,7 +1956,7 @@ fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
 /// доступен, иначе каталог `.git` — проверка опирается только на него.
 fn git_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
-    let initialized = Command::new("git")
+    let initialized = isolated("git")
         .args(["init", "-q"])
         .current_dir(path)
         .status()
@@ -1962,7 +1975,7 @@ fn store_inside_git_is_refused_from_any_directory() {
     let outside = f.root.join("outside");
     fs::create_dir_all(&outside).unwrap();
     let run = |args: &[&str], env: Option<&Path>| {
-        let mut command = Command::new(BIN);
+        let mut command = isolated(BIN);
         command
             .args(args)
             .current_dir(&outside)
@@ -2015,7 +2028,7 @@ fn store_inside_git_is_refused_from_any_directory() {
         !repo.join("sub/new").exists(),
         "после отказа ничего не создано"
     );
-    let untracked = Command::new("git")
+    let untracked = isolated("git")
         .args(["status", "--porcelain", "--untracked-files=all"])
         .current_dir(&repo)
         .output();
@@ -2113,7 +2126,7 @@ fn restore_checks_backup_inventory() {
     assert_eq!(restored.missing, vec![b.clone()]);
     drop(third);
     let cli = |source: &Path, store: &str| {
-        let output = Command::new(BIN)
+        let output = isolated(BIN)
             .args(["restore", source.to_str().unwrap()])
             .env("BENCHMARK_HISTORY_DIR", f.root.join(store))
             .output()
