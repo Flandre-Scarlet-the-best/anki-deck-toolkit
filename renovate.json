@@ -3,11 +3,13 @@
   "description": [
     "Постоянная политика dependency maintenance: поддерживать зависимости и GitHub Actions актуальными без автоматического merge.",
     "Использовать рекомендации Renovate для pin digest, config migrations, abandoned dependency detection и регулярного обслуживания lock-файлов.",
-    "Обычные обновления, включая major, проходят через ограниченный PR/CI budget; security updates получают отдельный быстрый канал.",
+    "Все обычные обновления, включая major и Rust toolchain, собираются в один групповой PR; Renovate не группирует с ним только lock file maintenance и replacement-обновления.",
+    "Security updates идут отдельным быстрым каналом со своим лимитом.",
     "Версии Rust workspace MSRV и rustup обновляются вместе через официальный Rust datasource, только по завершённым stable-релизам."
   ],
   "extends": [
-    "config:best-practices"
+    "config:best-practices",
+    "group:all"
   ],
   "dependencyDashboard": true,
   "dependencyDashboardApproval": false,
@@ -15,7 +17,6 @@
   "prConcurrentLimit": 4,
   "prHourlyLimit": 2,
   "commitHourlyLimit": 2,
-  "separateMultipleMajor": false,
   "vulnerabilityAlerts": {
     "enabled": true,
     "dependencyDashboardApproval": false,
@@ -35,7 +36,6 @@
       "matchPackageNames": [
         "rust"
       ],
-      "groupName": "Rust stable toolchain",
       "rangeStrategy": "replace",
       "allowedVersions": "/^\\d+\\.\\d+\\.\\d+$/",
       "automerge": false
