@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 02b76c7d33d06fe4ef785b341221fe9a881b2f18 -->
+<!-- i18n-source-git-blob: dd5dc88e75c8122f15b9edd5496a554b1ff704b3 -->
 
 `anki-e2e` 是 `anki-repo anki` 命令组（[契约](../anki-repo/desktop.md)）的常设本地
 E2E 测试台。主机上的 Rust runner 构建包含**官方 Linux Anki Desktop** 的可复现
@@ -194,7 +194,7 @@ aarch64，可访问 GitHub、AnkiWeb、Docker Hub 和 Ubuntu 镜像源，默认�
 ## 性能
 
 测试台各阶段的耗时、CPU、内存和磁盘占用及其测量方法记录在
-[性能日志](../../docs/performance/anki-e2e.zh-CN.md)中；通用测量规则见
+[性能页面](../../docs/performance/anki-e2e.zh-CN.md)中；通用测量规则见
 [方法说明](../../docs/performance/README.zh-CN.md)。
 
 ## 边界

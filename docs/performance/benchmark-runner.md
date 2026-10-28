@@ -2,7 +2,8 @@
 
 **Русский** · [English](benchmark-runner.en.md) · [简体中文](benchmark-runner.zh-CN.md)
 
-Журнал измерений самого исполнителя бенчмарков
+Измерения самого исполнителя бенчмарков: последний подтверждённый снимок и
+прежнее ручное наблюдение
 ([интерфейс и семантика](../../tools/benchmark-runner/README.md)): насколько
 опрос `/proc` и cgroup и перенос в собственную cgroup влияют на время цели и
 что именно попадает в значения группы. Общие правила замера — в
@@ -34,7 +35,20 @@ cargo run --release -p benchmark-runner -- --catalog /path/to/overhead/catalog r
 cargo run --release -p benchmark-runner -- --catalog /path/to/overhead/catalog run overhead.cgroup --profile warm --runs 30
 ```
 
-## Журнал
+## Снимки
+
+Блоки ниже генерирует `benchmark-history snapshot` из проверенных результатов
+`benchmark-runner` в эталонном окружении; если блоков нет, подтверждённого снимка
+ещё не было.
+
+<!-- benchmark-snapshot:anchor -->
+
+## Ручное наблюдение без первичных JSON
+
+Наблюдение ниже записано вручную до появления локальной истории. Первичных
+JSON-результатов у него нет: это не подтверждённый снимок, его значения не
+сравниваются с результатами `benchmark-history` и не служат базой. Оно сохраняет
+контекст до первого подтверждённого снимка тех же условий.
 
 ### 2026-10-26 · benchmark-runner 0.1.0 · Hyperfine 2.0.0 · серии `--busy-ms 50`
 

@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 02b76c7d33d06fe4ef785b341221fe9a881b2f18 -->
+<!-- i18n-source-git-blob: dd5dc88e75c8122f15b9edd5496a554b1ff704b3 -->
 
 `anki-e2e` is a permanent local E2E stand for the `anki-repo anki` group
 ([contract](../anki-repo/desktop.md)). A Rust runner on the host builds a
@@ -248,7 +248,7 @@ The first run builds the images; later runs use the cache.
 ## Performance
 
 Phase timings, CPU, memory and disk of the stand, together with the measurement
-method, are kept in the [performance journal](../../docs/performance/anki-e2e.en.md);
+method, are on the [performance page](../../docs/performance/anki-e2e.en.md);
 the general measurement rules are in the [methodology](../../docs/performance/README.en.md).
 
 ## Boundaries

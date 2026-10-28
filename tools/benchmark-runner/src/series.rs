@@ -50,6 +50,10 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Сколько сохранение в историю ждёт хранилище, занятое другой командой:
+/// побочный шаг не задерживает итог серии и блокировку модуля надолго.
+pub const HISTORY_LOCK_WAIT: Duration = Duration::from_secs(10);
+
 /// Стабильные коды завершения `run`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -69,8 +73,54 @@ pub enum Exit {
 pub struct Request {
     pub sampling: bool,
     pub output: Option<PathBuf>,
+    /// Корень локальной истории или причина, по которой она не ведётся.
+    pub history: Result<PathBuf, HistoryOff>,
     pub artifacts_root: PathBuf,
     pub build_timeout: Duration,
+}
+
+/// Почему принятый результат не сохраняется в локальную историю.
+#[derive(Debug, Clone)]
+pub enum HistoryOff {
+    /// Пользователь отключил историю (`--no-history`).
+    Disabled,
+    /// Расположение хранилища не определено или недопустимо.
+    Unavailable(String),
+}
+
+/// Что стало с результатом в локальной истории `benchmark-history`.
+#[derive(Debug, Clone, Serialize)]
+pub struct History {
+    pub status: HistoryStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HistoryStatus {
+    /// Результат принят историей впервые.
+    Archived,
+    /// Такой результат в истории уже был.
+    AlreadyArchived,
+    /// История отключена `--no-history`.
+    Disabled,
+    /// Результат записан, но в историю не сохранён: см. `reason`.
+    Failed,
+    /// Принятого результата нет — сохранять нечего.
+    NotRecorded,
+}
+
+impl History {
+    fn not_recorded() -> History {
+        History {
+            status: HistoryStatus::NotRecorded,
+            id: None,
+            reason: None,
+        }
+    }
 }
 
 /// Машинная сводка серии для агентов.
@@ -88,6 +138,8 @@ pub struct Summary {
     pub runs: usize,
     pub successful_runs: usize,
     pub cleanup: CleanupState,
+    /// Сохранение принятого результата в локальную историю.
+    pub history: History,
     pub warnings: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -208,6 +260,7 @@ pub fn execute(
                 ok: true,
                 reason: None,
             },
+            history: History::not_recorded(),
             warnings: Vec::new(),
             diagnostics: Vec::new(),
         });
@@ -1033,7 +1086,6 @@ impl Series<'_> {
                 status = RunStatus::Failure;
                 reason = Some(problem);
             }
-            state.reports.push(value.clone());
         } else if status == RunStatus::Success
             && let Some(input) = self.report_input()
         {
@@ -1106,6 +1158,11 @@ impl Series<'_> {
         if status == RunStatus::Success {
             reason = None;
         }
+        state.reports.push(RunReport {
+            index: index as u32,
+            success: status == RunStatus::Success,
+            report: report_values.cloned(),
+        });
         RunRecord {
             index: index as u32,
             status,
@@ -1415,6 +1472,7 @@ impl Series<'_> {
             runs: result.runs.len(),
             successful_runs: successes,
             cleanup,
+            history: History::not_recorded(),
             warnings: self.warnings.clone(),
             diagnostics: checked.diagnostics.clone(),
         };
@@ -1471,6 +1529,15 @@ impl Series<'_> {
         summary.exit_code = summary.exit as i32;
         summary.ok = summary.exit == Exit::Success;
         summary.result = Some(path.clone());
+        summary.history = self.archive(&text, &path);
+        if summary.history.status == HistoryStatus::Failed {
+            // Измерение принято и записано; несохранённая история не делает его
+            // недействительным, но и не выдаётся за успешное сохранение.
+            summary.warnings.push(format!(
+                "результат не сохранён в локальную историю: {}",
+                summary.history.reason.as_deref().unwrap_or_default()
+            ));
+        }
         self.log.line(&format!(
             "итог {:?}: {}; результат {}",
             result.outcome.status,
@@ -1483,6 +1550,74 @@ impl Series<'_> {
         ));
         self.write_summary(&summary);
         Ok(summary)
+    }
+
+    /// Сохранить принятый результат в локальную историю тем же контрактом и
+    /// каталогом, которым он только что проверен.
+    fn archive(&self, text: &str, path: &Path) -> History {
+        let root = match &self.request.history {
+            Ok(root) => root,
+            Err(HistoryOff::Disabled) => {
+                return History {
+                    status: HistoryStatus::Disabled,
+                    id: None,
+                    reason: None,
+                };
+            }
+            Err(HistoryOff::Unavailable(reason)) => {
+                self.log
+                    .line(&format!("история: результат не сохранён — {reason}"));
+                return History {
+                    status: HistoryStatus::Failed,
+                    id: None,
+                    reason: Some(reason.clone()),
+                };
+            }
+        };
+        let imported = benchmark_history::store::Store::open_waiting(root, HISTORY_LOCK_WAIT)
+            .and_then(|mut store| {
+                store.import(
+                    text,
+                    &path.display().to_string(),
+                    Some(self.selection.catalog),
+                )
+            });
+        match imported {
+            Ok(imported) => {
+                self.log.line(&format!(
+                    "история: {} {}",
+                    if imported.created {
+                        "сохранён"
+                    } else {
+                        "уже был"
+                    },
+                    imported.id
+                ));
+                History {
+                    status: if imported.created {
+                        HistoryStatus::Archived
+                    } else {
+                        HistoryStatus::AlreadyArchived
+                    },
+                    id: Some(imported.id),
+                    reason: None,
+                }
+            }
+            Err(error) => {
+                let id = match &error {
+                    benchmark_history::store::Error::Index { id, .. } => Some(id.clone()),
+                    _ => None,
+                };
+                let reason = error.to_string();
+                self.log
+                    .line(&format!("история: результат не сохранён — {reason}"));
+                History {
+                    status: HistoryStatus::Failed,
+                    id,
+                    reason: Some(reason),
+                }
+            }
+        }
     }
 
     fn write_summary(&self, summary: &Summary) {
@@ -1686,39 +1821,68 @@ impl Series<'_> {
     }
 
     fn report_fact(&self, state: &State, fact: &benchmark_contract::scenario::CustomFact) -> Fact {
-        if fact.report.is_empty() {
-            return unavailable("модуль не объявил источник факта");
-        }
-        let mut seen: Option<String> = None;
-        let mut problem = None;
-        for report in &state.reports {
-            let value = if fact.report.len() == 1 {
-                report_text(report, &fact.report[0])
-            } else {
-                fact.report
-                    .iter()
-                    .map(|text| {
-                        let name = text.rsplit('/').next().unwrap_or(text);
-                        report_text(report, text).map(|v| format!("{name}={v}"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|parts| parts.join(","))
-            };
-            match (value, &seen) {
-                (Ok(value), None) => seen = Some(value),
-                (Ok(value), Some(first)) if &value != first => {
+        series_fact(&fact.report, &state.reports)
+    }
+}
+
+/// Отчёт модуля одного измеряемого прогона и итог этого прогона.
+#[derive(Debug, Clone)]
+struct RunReport {
+    index: u32,
+    success: bool,
+    report: Option<serde_json::Value>,
+}
+
+/// Факт серии из отчётов модуля. Факт описывает всю серию, поэтому его
+/// подтверждает только согласие отчётов *каждого* успешного прогона: одно
+/// найденное значение не доказывает факт для прогона без отчёта или без поля.
+/// Неуспешные прогоны в измерения не входят и факт не подтверждают.
+fn series_fact(pointers: &[String], runs: &[RunReport]) -> Fact {
+    if pointers.is_empty() {
+        return unavailable("модуль не объявил источник факта");
+    }
+    let mut agreed: Option<String> = None;
+    for run in runs.iter().filter(|r| r.success) {
+        let number = run.index + 1;
+        let Some(report) = &run.report else {
+            return unavailable(format!(
+                "успешный прогон {number} не оставил отчёта модуля: факт не подтверждён для всей серии"
+            ));
+        };
+        match fact_value(pointers, report) {
+            Err(reason) => {
+                return unavailable(format!(
+                    "в отчёте модуля прогона {number} нет значения: {reason}"
+                ));
+            }
+            Ok(value) => match &agreed {
+                Some(first) if first != &value => {
                     return unavailable("значение различается между прогонами серии");
                 }
-                (Ok(_), Some(_)) => {}
-                (Err(reason), _) => problem = Some(reason),
-            }
-        }
-        match (seen, problem) {
-            (Some(value), _) => known(value),
-            (None, Some(reason)) => unavailable(format!("в отчёте модуля нет значения: {reason}")),
-            (None, None) => unavailable("ни один прогон не оставил отчёта модуля"),
+                Some(_) => {}
+                None => agreed = Some(value),
+            },
         }
     }
+    match agreed {
+        Some(value) => known(value),
+        None => unavailable("ни один успешный прогон не подтвердил факт отчётом модуля"),
+    }
+}
+
+/// Значение факта в одном отчёте: одно — как есть, несколько — `<имя>=<значение>`.
+fn fact_value(pointers: &[String], report: &serde_json::Value) -> Result<String, String> {
+    if let [single] = pointers {
+        return report_text(report, single);
+    }
+    pointers
+        .iter()
+        .map(|text| {
+            let name = text.rsplit('/').next().unwrap_or(text);
+            report_text(report, text).map(|v| format!("{name}={v}"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|parts| parts.join(","))
 }
 
 #[derive(Default)]
@@ -1730,7 +1894,7 @@ struct State {
     stop: Option<Stop>,
     outcome: Option<(OutcomeStatus, String)>,
     missing: BTreeMap<String, Missing>,
-    reports: Vec<serde_json::Value>,
+    reports: Vec<RunReport>,
     measurement: Option<Tool>,
     code: CodeSnapshot,
     drift: Option<String>,
@@ -2253,4 +2417,252 @@ fn samples_json(samples: &Samples) -> String {
         "group_problem": samples.group_problem,
     }))
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(index: u32, success: bool, report: Option<serde_json::Value>) -> RunReport {
+        RunReport {
+            index,
+            success,
+            report,
+        }
+    }
+
+    fn pointers(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn reason(fact: Fact) -> String {
+        match fact {
+            Fact::Unavailable { reason } => reason,
+            Fact::Known { value } => panic!("ожидался unavailable, получен known {value}"),
+        }
+    }
+
+    #[test]
+    fn identical_complete_reports_confirm_fact() {
+        let report = json!({"tool": {"version": "1.2.3"}});
+        let runs = [
+            run(0, true, Some(report.clone())),
+            run(1, true, Some(report)),
+        ];
+        assert_eq!(
+            series_fact(&pointers(&["/tool/version"]), &runs),
+            known("1.2.3")
+        );
+    }
+
+    #[test]
+    fn fact_missing_in_later_report_is_not_confirmed() {
+        let runs = [
+            run(0, true, Some(json!({"tool": {"version": "1.2.3"}}))),
+            run(1, true, Some(json!({"tool": {}}))),
+        ];
+        let reason = reason(series_fact(&pointers(&["/tool/version"]), &runs));
+        assert!(reason.contains("/tool/version"), "{reason}");
+    }
+
+    #[test]
+    fn fact_missing_in_earlier_report_is_not_confirmed() {
+        let runs = [
+            run(0, true, Some(json!({"tool": {}}))),
+            run(1, true, Some(json!({"tool": {"version": "1.2.3"}}))),
+        ];
+        let reason = reason(series_fact(&pointers(&["/tool/version"]), &runs));
+        assert!(reason.contains("прогона 1"), "{reason}");
+    }
+
+    #[test]
+    fn differing_values_are_not_confirmed() {
+        let runs = [
+            run(0, true, Some(json!({"tool": {"version": "1.2.3"}}))),
+            run(1, true, Some(json!({"tool": {"version": "1.2.4"}}))),
+        ];
+        let reason = reason(series_fact(&pointers(&["/tool/version"]), &runs));
+        assert!(reason.contains("различается"), "{reason}");
+    }
+
+    #[test]
+    fn several_pointers_require_every_part_in_every_report() {
+        let both = pointers(&["/tool/name", "/tool/version"]);
+        let full = json!({"tool": {"name": "x", "version": "1"}});
+        let runs = [
+            run(0, true, Some(full.clone())),
+            run(1, true, Some(full.clone())),
+        ];
+        assert_eq!(series_fact(&both, &runs), known("name=x,version=1"));
+        let runs = [
+            run(0, true, Some(full)),
+            run(1, true, Some(json!({"tool": {"name": "x"}}))),
+        ];
+        let reason = reason(series_fact(&both, &runs));
+        assert!(reason.contains("/tool/version"), "{reason}");
+    }
+
+    #[test]
+    fn successful_run_without_report_leaves_fact_unconfirmed() {
+        let runs = [
+            run(0, true, Some(json!({"tool": {"version": "1.2.3"}}))),
+            run(1, true, None),
+        ];
+        let reason = reason(series_fact(&pointers(&["/tool/version"]), &runs));
+        assert!(reason.contains("прогон 2"), "{reason}");
+    }
+
+    #[test]
+    fn failed_runs_neither_confirm_nor_refute_fact() {
+        let report = json!({"tool": {"version": "1.2.3"}});
+        // Неуспешный прогон не входит в измерения серии: его отчёт не
+        // подтверждает факт и его отсутствие факт не опровергает.
+        let runs = [
+            run(0, true, Some(report.clone())),
+            run(1, false, None),
+            run(2, false, Some(json!({"tool": {"version": "9"}}))),
+        ];
+        assert_eq!(
+            series_fact(&pointers(&["/tool/version"]), &runs),
+            known("1.2.3")
+        );
+        // Отчёт только неуспешного прогона не подтверждает факт серии.
+        let runs = [run(0, false, Some(report))];
+        reason(series_fact(&pointers(&["/tool/version"]), &runs));
+        reason(series_fact(&pointers(&["/tool/version"]), &[]));
+    }
+
+    #[test]
+    fn missing_fact_blocks_comparability() {
+        use benchmark_contract::comparability;
+        use benchmark_contract::scenario::Scenario;
+        let runs = [
+            run(0, true, Some(json!({"tool": {"version": "1.2.3"}}))),
+            run(1, true, None),
+        ];
+        let fact = series_fact(&pointers(&["/tool/version"]), &runs);
+        let declaration = r#"
+id = "fixture.fact"
+title = "Факт"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Факт из отчёта."
+measured = "Запуск."
+platforms = ["linux"]
+
+[target]
+program = { kind = "executable", name = "true" }
+expect_exit_codes = [0]
+
+[runs]
+warmup = 0
+min_runs = 2
+max_runs = 2
+single_run_allowed = false
+run_timeout_seconds = 10
+total_budget_seconds = 60
+
+[[profile]]
+id = "warm"
+cache_definition = "Кэшей нет."
+cleared = []
+retained = []
+
+[[metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[environment]
+record = ["os", "arch", "module_version", "tool_version"]
+comparable = ["os", "arch", "tool_version"]
+
+[[environment.fact]]
+name = "tool_version"
+description = "Версия из отчёта."
+report = ["/tool/version"]
+"#;
+        let scenario: Scenario = toml::from_str(declaration).expect("декларация разбирается");
+        let result = |fact: Fact| -> BenchmarkResult {
+            let mut environment = BTreeMap::new();
+            environment.insert("os".to_owned(), known("linux"));
+            environment.insert("arch".to_owned(), known("x86_64"));
+            environment.insert("module_version".to_owned(), known("0.1.0"));
+            environment.insert("tool_version".to_owned(), fact);
+            let key = "time_wall_clock@command".to_owned();
+            BenchmarkResult {
+                schema_version: RESULT_SCHEMA_VERSION,
+                scenario: ScenarioRef {
+                    id: "fixture.fact".into(),
+                    module: "fixture".into(),
+                    revision: 1,
+                    kind: WorkloadKind::ShortCli,
+                },
+                profile: ProfileRef {
+                    id: "warm".into(),
+                    cache: benchmark_contract::vocabulary::CacheState::Warm,
+                    network: benchmark_contract::vocabulary::Network::Online,
+                },
+                parameters: BTreeMap::new(),
+                inputs: Vec::new(),
+                provenance: Provenance {
+                    recorded_at: "2026-10-28T00:00:00Z".into(),
+                    measurement: Tool {
+                        name: "hyperfine".into(),
+                        version: "2.0.0".into(),
+                        format: None,
+                    },
+                    runner: None,
+                    code: CodeState {
+                        module_version: "0.1.0".into(),
+                        source_tree_sha256: None,
+                        git_commit: None,
+                        dirty: None,
+                    },
+                },
+                environment,
+                outcome: Outcome {
+                    status: OutcomeStatus::Success,
+                    reason: None,
+                },
+                observation: Observation::Repeated,
+                warmup_runs: 0,
+                metrics: vec![MetricRecord {
+                    key: key.clone(),
+                    metric: MetricId::TimeWallClock,
+                    scope: Scope::Command,
+                    source: benchmark_contract::vocabulary::Source::Hyperfine,
+                    label: None,
+                    unit: benchmark_contract::vocabulary::Unit::Second,
+                    availability: Availability::Measured,
+                    reason: None,
+                }],
+                runs: (0..2)
+                    .map(|index| RunRecord {
+                        index,
+                        status: RunStatus::Success,
+                        exit_code: Some(0),
+                        reason: None,
+                        values: BTreeMap::from([(
+                            key.clone(),
+                            MetricValue::Measured { value: 0.01 },
+                        )]),
+                    })
+                    .collect(),
+                aggregates: BTreeMap::new(),
+            }
+        };
+        let confirmed = result(known("1.2.3"));
+        let verdict = comparability::compare(&scenario, &confirmed, &result(fact));
+        assert!(!verdict.comparable);
+        assert!(
+            verdict.blockers.iter().any(|b| b.contains("tool_version")),
+            "{:?}",
+            verdict.blockers
+        );
+        assert!(comparability::compare(&scenario, &confirmed, &confirmed.clone()).comparable);
+    }
 }

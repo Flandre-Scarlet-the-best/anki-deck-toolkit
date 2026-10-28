@@ -1,27 +1,46 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 4e9e2474c00c1fd1a02949c4844d7e8f5b0da142 -->
+<!-- i18n-source-git-blob: 8bf2be7410e4433a6df169889830affe63cdc5a9 -->
 
-This directory holds the performance journals of the repository's modules:
-time per phase, CPU, memory, disk and the number of spawned processes. Each
-module has its own page with a module-specific method and a journal of
-entries. This page sets the common rules for taking and recording such
-measurements.
+This directory holds the **last confirmed figures** for the performance and
+resource usage of the repository's modules: time, CPU, memory, disk. Each
+module has its own page with its method, metric definitions and snapshots per
+scenario and profile in an explicitly named reference environment. This page
+sets the common rules for taking, storing and publishing measurements.
 
-A journal is evidence of actual behaviour in a specific environment, not a
-contract and not a CI threshold. Its numbers are not pinned in code, tests or
-checks: different hardware, OS or Docker give different values.
+A snapshot is evidence of actual behaviour in a specific environment, not a
+contract, not a speed norm for other systems and not a CI threshold. Its numbers
+are not pinned in code, tests or checks: different hardware, OS or Docker give
+different values.
 
-## Module journals
+## Where the history lives
 
-| Module | Journal | Latest entry |
+| What | Where | Who sees it |
 |---|---|---|
-| `anki-e2e` | [anki-e2e.en.md](anki-e2e.en.md) | 2026-10-26 |
-| `benchmark-runner` | [benchmark-runner.en.md](benchmark-runner.en.md) | 2026-10-26 |
+| The full history of every measurement | the local [`benchmark-history`](../../tools/benchmark-history/README.en.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
+| The public historical record | the `## Производительность` (performance) section of the PR description: real results, baseline, comparability, conditions and conclusions | everyone, through the PR history |
+| The current snapshot | the pages of this directory: the last confirmed measurement of each scenario × profile pair | everyone |
+
+The pages do not accumulate entries from every PR: a new confirmed measurement
+replaces the snapshot of the same pair, while earlier values remain in the Git
+history and in PR descriptions. The public reference is the project owner's
+measurements in the environment described in the snapshot. Other users have
+their own local results; they never edit the public pages automatically, and a
+snapshot from another environment does not replace the reference one without
+explicit confirmation.
+
+## Module pages
+
+| Module | Page | Snapshots from JSON results |
+|---|---|---|
+| `anki-repo` | [anki-repo.en.md](anki-repo.en.md) | `anki-repo.validate` · `warm` |
+| `anki-e2e` | [anki-e2e.en.md](anki-e2e.en.md) | none yet; a manual observation without original JSON |
+| `benchmark-runner` | [benchmark-runner.en.md](benchmark-runner.en.md) | none yet; a manual observation without original JSON |
 
 A new module gets its own page `docs/performance/<module>.md` with
-translations and a row in this table.
+translations, a `<!-- benchmark-snapshot:anchor -->` line where snapshots go and
+a row in this table.
 
 ## Scenario catalog and result contract
 
@@ -32,7 +51,7 @@ How to register a scenario and read a result is described in the
 [benchmark catalog](benchmarks.en.md); series are executed by
 [`benchmark-runner`](../../tools/benchmark-runner/README.en.md). The rules on this page also apply to
 catalog-driven measurements: the catalog requires the exact cache state to be
-declared for each scenario, and the log remains evidence of an environment.
+declared for each scenario, and a snapshot remains evidence of an environment.
 
 ## Measurement rules
 
@@ -64,8 +83,8 @@ declared for each scenario, and the log remains evidence of an environment.
    a better time is not allowed.
 7. **Honesty.** State what was not measured. Do not present an estimate as a
    measurement, or a property of the environment as a property of the code. An
-   optimisation without a measurement that showed the problem is not recorded in
-   the journal as an improvement.
+   optimisation without a measurement that showed the problem is not published
+   as an improvement.
 
 ## Metric sources and accuracy
 
@@ -80,29 +99,32 @@ declared for each scenario, and the log remains evidence of an environment.
 | Host load and memory | `/proc/stat`, `MemAvailable` in `/proc/meminfo` | the whole system: an upper bound when the process has no cgroup of its own |
 | Disk | `du -sb`, `docker image ls`, `docker system df -v` | sizes of images with shared layers are not summed |
 
-## How to write an entry
+## How to update a snapshot
 
-An entry is identified by the UTC date, the module version from `Cargo.toml`,
-the versions of significant external dependencies and a description of the
-environment. Commit SHAs, PR numbers, absolute local paths and author names are
-not written into permanent documentation (a rule of
-[`AGENTS.md`](../../AGENTS.md)). The exact source state a measurement was taken
-on is given in the description of the PR that adds the entry.
+1. Run a catalog scenario with the regular `benchmark-runner run`; the accepted
+   result goes into the local history by itself.
+2. Find the result (`benchmark-history list`) and check its outcome, runs,
+   environment and unavailable metrics (`benchmark-history show`).
+3. Preview the page change without writing:
+   `benchmark-history snapshot <ID> --page docs/performance/<module>.md`, then
+   write it with `--apply`. The tool updates the pair's block in all three
+   languages at once and refuses if the series is incomplete, the working copy
+   has changes, the environment differs from the reference one or the page holds
+   a newer measurement.
+4. Paste the `benchmark-history report` section for the same result into the PR
+   description: the exact code state and record IDs are given there.
 
-Entries in a module journal go from newest to oldest and are not rewritten. If
-an entry turns out to be wrong, it is marked and the corrected one is added
-next to it.
+Permanent documentation contains no commit SHAs, PR numbers, absolute local
+paths, input identities or author names (a rule of
+[`AGENTS.md`](../../AGENTS.md)); those details belong in the PR description and
+in the local history. Snapshots inside `benchmark-snapshot` markers are not
+edited by hand.
 
-Entry template:
-
-```markdown
-### <UTC date> · <module> <version> · <key dependency and version> · <command>
-
-- Environment: …
-- Cache states: …
-- Time per phase: a table per run
-- Resources: a "metric — value — source" table
-- Disk: …
-- Conclusions: what was confirmed, what needs attention
-- Not measured: …
-```
+Manual observations recorded before the history existed stay on the module
+pages, explicitly marked as having no original JSON results: they must not be
+presented as a confirmed snapshot and must not be reconstructed as results after
+the fact. They are replaced by the first confirmed snapshot of the same pair, or
+by a new section with a manual observation if the scenario is not in the catalog.
+`snapshot --apply` adds the snapshot before the anchor and leaves sections
+without markers untouched, so the outdated manual observation is removed by hand
+in the same change as the first snapshot.

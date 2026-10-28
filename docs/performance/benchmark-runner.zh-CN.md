@@ -1,9 +1,9 @@
 # 性能：`benchmark-runner`
 
 [Русский](benchmark-runner.md) · [English](benchmark-runner.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 9f56b6a90e46a60c11e6306d6adf7b1da5e126d3 -->
+<!-- i18n-source-git-blob: bf095966dec3207a44a0339065e0156b617d2fcf -->
 
-基准执行器自身的测量日志（[接口与语义](../../tools/benchmark-runner/README.zh-CN.md)）：
+基准执行器自身的测量：最近确认的快照和此前的手动观测（[接口与语义](../../tools/benchmark-runner/README.zh-CN.md)）：
 轮询 `/proc` 和 cgroup 以及移入自有 cgroup 对目标时间影响多大，以及组的数值究竟包含什么。
 通用测量规则见[测量方法](README.zh-CN.md)。
 
@@ -29,7 +29,18 @@ cargo run --release -p benchmark-runner -- --catalog /path/to/overhead/catalog r
 cargo run --release -p benchmark-runner -- --catalog /path/to/overhead/catalog run overhead.cgroup --profile warm --runs 30
 ```
 
-## 日志
+## 快照
+
+下面的块由 `benchmark-history snapshot` 根据参考环境中经过验证的
+`benchmark-runner` 结果生成；如果没有块，说明尚无确认的快照。
+
+<!-- benchmark-snapshot:anchor -->
+
+## 无原始 JSON 的手动观测
+
+下面的观测是在本地历史出现之前手动记录的。它没有原始 JSON 结果：不是已确认的快照，其数值
+不与 `benchmark-history` 的结果比较，也不作为基线。它在出现相同条件的首个确认快照之前保留
+背景信息。
 
 ### 2026-10-26 · benchmark-runner 0.1.0 · Hyperfine 2.0.0 · `--busy-ms 50` 系列
 

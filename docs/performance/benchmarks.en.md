@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: 14410ad053bbd6f07ed56a04e631326901f1858b -->
+<!-- i18n-source-git-blob: da52bba6cdf2d0237e9c3f82136695004f9db5a2 -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -12,8 +12,10 @@ measurements. Both contracts are checked by `benchmark-contract`
 
 The catalog and its checks run and measure nothing. Series are executed by
 [`benchmark-runner`](../../tools/benchmark-runner/README.en.md): Hyperfine 2.0
-and Linux system metrics. It uses this contract instead of inventing its own;
-the repository has no run history or thresholds. Module logs
+and Linux system metrics. It uses this contract instead of inventing its own.
+The local result history, baseline selection and reports are kept by
+[`benchmark-history`](../../tools/benchmark-history/README.en.md); the repository
+holds no run history and no thresholds. Module snapshots
 (`docs/performance/<module>.md`) remain evidence of specific environments.
 
 ## Where things live
@@ -381,7 +383,7 @@ aggregates and rejects a mismatch and an aggregate without primary values.
 
 `provenance` keeps technical identifiers (commit SHA, tree hash) in the result
 record itself. They are not copied into permanent documentation, including
-module logs — that is a rule of [`AGENTS.md`](../../AGENTS.md).
+module pages — that is a rule of [`AGENTS.md`](../../AGENTS.md).
 
 A published result contains no paths inside home directories, tokens, private
 keys, credentials or email addresses: validation inspects every string and key
@@ -462,4 +464,6 @@ the catalog and only then stores it. Comparisons use `compare`.
 ## Boundaries
 
 There is no history storage, no regression computation and no CI thresholds
-here. Numbers from module logs do not become thresholds.
+here: history and reports live in
+[`benchmark-history`](../../tools/benchmark-history/README.en.md), without
+thresholds. Numbers from module snapshots do not become thresholds.

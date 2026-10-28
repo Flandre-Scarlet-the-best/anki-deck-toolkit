@@ -13,11 +13,13 @@
 каталогу](../../docs/performance/benchmarks.md); схемами каталога и результата
 владеет [`benchmark-contract`](../benchmark-contract/README.md); общие правила
 замеров — [методика](../../docs/performance/README.md); измерения самого
-исполнителя — [журнал](../../docs/performance/benchmark-runner.md).
+исполнителя — [страница производительности](../../docs/performance/benchmark-runner.md);
+локальная история результатов — [`benchmark-history`](../benchmark-history/README.md).
 
 Исполнитель не меняет пользовательские экспорты и профили Anki, не читает
 `decks/input/`, не вызывает `sudo`, не чистит кэши Docker (`docker system prune`
-и подобное), не отправляет данные в сеть сам и не хранит историю прогонов.
+и подобное) и не отправляет данные в сеть сам. Принятый результат он передаёт в
+локальную историю пользователя (см. ниже), но сам её не ведёт.
 Пути к пользовательским данным он получает только параметрами запуска.
 
 ## Команды
@@ -47,6 +49,7 @@ cargo run -p benchmark-runner -- --json run anki-e2e.smoke --profile warm --runs
 | `--output FILE` | файл результата (только `run`); существующий файл не перезаписывается |
 | `--artifacts-dir DIR` | корень артефактов (только `run`); по умолчанию `target/benchmark-runner` репозитория |
 | `--build-timeout S` | предел сборки каждого `cargo-bin`, секунд (только `run`), по умолчанию 3600 |
+| `--no-history` | не сохранять принятый результат в локальную историю (только `run`) |
 
 Глобальные параметры: `--catalog DIR` — каталог с `catalog.toml` (по умолчанию
 `benchmarks/` ближайшего родителя текущего каталога); `--json` — машинный JSON
@@ -68,8 +71,20 @@ cargo run -p benchmark-runner -- --json run anki-e2e.smoke --profile warm --runs
 
 С `--json` команда `run` печатает сводку: `ok`, `exit_code`, `exit`,
 `scenario`, `profile`, `outcome`, `reason`, `result`, `artifacts`, `runs`,
-`successful_runs`, `cleanup`, `warnings`, `diagnostics`. Та же сводка лежит в
-`summary.json` каталога артефактов.
+`successful_runs`, `cleanup`, `history`, `warnings`, `diagnostics`. Та же сводка
+лежит в `summary.json` каталога артефактов.
+
+## Локальная история
+
+После записи принятого результата `run` передаёт его в локальную историю
+[`benchmark-history`](../benchmark-history/README.md) тем же контрактом и
+каталогом, без повторного измерения: `BENCHMARK_HISTORY_DIR`, иначе каталог
+данных XDG пользователя. Хранилище внутри рабочей копии отвергается. Поле
+`history` сводки: `status` — `archived`, `already-archived`, `disabled`
+(`--no-history`), `failed` (с `reason`) или `not-recorded` (принятого результата
+нет), и `id` записи. Хранилище, занятое другой командой `benchmark-history`, исполнитель ждёт не дольше 10 секунд, после чего сохранение — `failed`. Отказ истории не удаляет результат и не меняет код
+возврата серии, но печатается предупреждением и попадает в `warnings`; результат
+можно сохранить позже командой `benchmark-history import`.
 
 ## Установка Hyperfine 2.0
 
@@ -217,7 +232,7 @@ scope systemd удаляется сразу после его выхода. Вр
 
 Опрос `/proc` и cgroup идёт только во время измеряемого прогона, раз в
 `sample_interval`. Измерения влияния на время цели —
-[журнал исполнителя](../../docs/performance/benchmark-runner.md);
+[страница исполнителя](../../docs/performance/benchmark-runner.md);
 `--no-sampling` полностью отключает опрос.
 
 ## Что публикуется
@@ -274,6 +289,8 @@ Desktop. Нужны `systemd --user` для собственной cgroup, Docke
 собственную cgroup, отчёт модуля каждого прогона, снимок provenance и его
 дрейф в рабочей копии Git, окружение Docker цели с подставным `docker`, отказ
 для Hyperfine 1.x, запрет перезаписи, параллельные серии с разными каталогами
-артефактов и отсутствие приватных путей в результате. Без Hyperfine 2.x они пропускаются
+артефактов, отсутствие приватных путей в результате, факты отчёта модуля
+только при согласии всех успешных прогонов и сохранение в локальную историю,
+включая её отключение и отказ. Без Hyperfine 2.x они пропускаются
 локально и падают в CI. `decks/**` тесты не читают. Набор входит в
 `cargo test --workspace --locked`.

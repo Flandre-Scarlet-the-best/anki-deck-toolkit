@@ -1,7 +1,7 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 14410ad053bbd6f07ed56a04e631326901f1858b -->
+<!-- i18n-source-git-blob: da52bba6cdf2d0237e9c3f82136695004f9db5a2 -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
@@ -10,8 +10,9 @@
 
 目录及其校验既不运行也不测量任何东西。系列由
 [`benchmark-runner`](../../tools/benchmark-runner/README.zh-CN.md) 执行：Hyperfine 2.0
-与 Linux 系统指标。它使用本契约，而不是另起一套；仓库中没有运行历史和阈值。模块日志
-（`docs/performance/<模块>.md`）仍然是特定环境的证据。
+与 Linux 系统指标。它使用本契约，而不是另起一套。本地结果历史、基线选择和报告由
+[`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 负责；仓库中没有运行历史
+和阈值。模块快照（`docs/performance/<模块>.md`）仍然是特定环境的证据。
 
 ## 文件位置
 
@@ -333,7 +334,7 @@ comparable = ["os", "arch", "cpu_model"]
 （n − 1），单个值时为 `null`。校验会重新计算聚合值，并拒绝不一致以及没有原始值的聚合。
 
 `provenance` 在结果记录本身中保存技术标识（提交 SHA、树哈希）。它们不会写入永久文档，
-包括模块日志 —— 这是 [`AGENTS.md`](../../AGENTS.md) 的规则。
+包括模块页面 —— 这是 [`AGENTS.md`](../../AGENTS.md) 的规则。
 
 发布的结果不包含主目录内的路径、令牌、私钥、凭据和电子邮件地址：校验会检查文档的所有
 字符串和键。`record = false` 的参数值不会进入结果，进程的环境变量也不会。
@@ -396,4 +397,6 @@ cargo run -p benchmark-contract -- --json vocabulary
 
 ## 边界
 
-这里没有历史存储、没有回归计算，也没有 CI 阈值。模块日志中的数字不会成为阈值。
+这里没有历史存储、没有回归计算，也没有 CI 阈值：历史和报告在
+[`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 中，且没有阈值。模块快照中的
+数字不会成为阈值。

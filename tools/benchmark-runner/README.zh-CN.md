@@ -1,7 +1,7 @@
 # 基准执行器：`benchmark-runner`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: f637b73c5ef27db6ea77424220cc65d233c3c039 -->
+<!-- i18n-source-git-blob: d9bd1bdf62f2ed29c1cc247e16135416f2e3efca -->
 
 `benchmark-runner` 是一个 Linux CLI：按 ID 和配置运行 `benchmarks/` 目录中的场景，用
 Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、模块的机器可读报告、
@@ -11,10 +11,12 @@ Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、�
 场景字段、配置和指标的含义见[目录指南](../../docs/performance/benchmarks.zh-CN.md)；
 目录和结果的模式归 [`benchmark-contract`](../benchmark-contract/README.zh-CN.md) 所有；
 通用测量规则见[测量方法](../../docs/performance/README.zh-CN.md)；执行器自身的测量见其
-[日志](../../docs/performance/benchmark-runner.zh-CN.md)。
+[性能页面](../../docs/performance/benchmark-runner.zh-CN.md)；本地结果历史见
+[`benchmark-history`](../benchmark-history/README.zh-CN.md)。
 
 执行器不修改用户导出和 Anki 配置文件，不读取 `decks/input/`，不调用 `sudo`，不清理
-Docker 缓存（`docker system prune` 之类），自身不向网络发送数据，也不保存运行历史。
+Docker 缓存（`docker system prune` 之类），自身不向网络发送数据。它把已接收的结果交给
+用户的本地历史（见下文），但自己不维护该历史。
 用户数据的路径只通过运行参数传入。
 
 ## 命令
@@ -44,6 +46,7 @@ cargo run -p benchmark-runner -- --json run anki-e2e.smoke --profile warm --runs
 | `--output FILE` | 结果文件（仅 `run`）；已存在的文件从不覆盖 |
 | `--artifacts-dir DIR` | 产物根目录（仅 `run`）；默认是仓库的 `target/benchmark-runner` |
 | `--build-timeout S` | 每个 `cargo-bin` 的构建上限，单位秒（仅 `run`），默认 3600 |
+| `--no-history` | 不将已接收的结果保存到本地历史（仅 `run`） |
 
 全局参数：`--catalog DIR` —— 包含 `catalog.toml` 的目录（默认是当前目录最近父级中的
 `benchmarks/`）；`--json` —— 在 stdout 输出机器可读 JSON。系列进度始终写到 stderr 和
@@ -65,7 +68,17 @@ cargo run -p benchmark-runner -- --json run anki-e2e.smoke --profile warm --runs
 
 带 `--json` 时，`run` 打印摘要：`ok`、`exit_code`、`exit`、`scenario`、`profile`、
 `outcome`、`reason`、`result`、`artifacts`、`runs`、`successful_runs`、`cleanup`、
-`warnings`、`diagnostics`。同样的摘要保存在产物目录的 `summary.json` 中。
+`history`、`warnings`、`diagnostics`。同样的摘要保存在产物目录的 `summary.json` 中。
+
+## 本地历史
+
+写出已接收的结果后，`run` 用同一契约和目录将其交给本地
+[`benchmark-history`](../benchmark-history/README.zh-CN.md) 历史，无需重新测量：
+`BENCHMARK_HISTORY_DIR`，否则为用户的 XDG 数据目录。位于工作副本内的存储会被拒绝。摘要的
+`history` 字段：`status` —— `archived`、`already-archived`、`disabled`（`--no-history`）、
+`failed`（带 `reason`）或 `not-recorded`（没有已接收的结果），以及记录 `id`。若存储被另一个 `benchmark-history` 命令占用，执行器最多等待 10 秒，之后保存为 `failed`。历史失败不会删除
+结果，也不改变系列的退出码，但会以警告输出并加入 `warnings`；之后可以用
+`benchmark-history import` 保存结果。
 
 ## 安装 Hyperfine 2.0
 
@@ -181,7 +194,7 @@ systemd scope 会立即被删除。对这类场景，Hyperfine 的 CPU 时间只
 ### 采样器的影响
 
 只在测量运行期间按 `sample_interval` 轮询 `/proc` 和 cgroup。对目标时间影响的测量见
-[执行器日志](../../docs/performance/benchmark-runner.zh-CN.md)；`--no-sampling` 完全
+[执行器页面](../../docs/performance/benchmark-runner.zh-CN.md)；`--no-sampling` 完全
 关闭轮询。
 
 ## 发布的内容
@@ -228,5 +241,6 @@ Docker，离线配置需要 util-linux 中的 `unshare`。
 负载运行真实的 Hyperfine：内存和 CPU、生命周期顺序、每个步骤的失败和步骤的残留进程、超时
 和 SIGINT 且无孤儿进程、离线、自有 cgroup、每次运行的模块报告、provenance 快照及其在 Git
 工作副本中的漂移、使用替身 `docker` 的目标 Docker 环境、对 Hyperfine 1.x 的拒绝、禁止覆盖、
-使用不同产物目录的并发系列以及结果中没有私有路径。没有 Hyperfine 2.x 时，它们在本地被跳过，在 CI 中失败。测试不读取
+使用不同产物目录的并发系列、结果中没有私有路径、只有所有成功运行一致时才确认的模块报告事实，
+以及保存到本地历史（包括禁用和失败）。没有 Hyperfine 2.x 时，它们在本地被跳过，在 CI 中失败。测试不读取
 `decks/**`。该测试集属于 `cargo test --workspace --locked`。

@@ -5,7 +5,7 @@ use benchmark_contract::diagnostic::Severity;
 use benchmark_contract::vocabulary::ScenarioStatus;
 use benchmark_runner::plan::{self, Selection};
 use benchmark_runner::readiness::{self, Collector, OwnCgroup, SCOPE_ENV};
-use benchmark_runner::series::{self, Exit, Request};
+use benchmark_runner::series::{self, Exit, HistoryOff, HistoryStatus, Request};
 use benchmark_runner::{cgroup, offline, procs};
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -69,6 +69,9 @@ enum Command {
         /// Предел сборки каждого cargo-bin, секунд.
         #[arg(long, default_value_t = 3600)]
         build_timeout: u64,
+        /// Не сохранять принятый результат в локальную историю benchmark-history.
+        #[arg(long)]
+        no_history: bool,
     },
     #[command(name = "__enter-cgroup", hide = true)]
     EnterCgroup {
@@ -257,6 +260,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
             output,
             artifacts_dir,
             build_timeout,
+            no_history,
         } => {
             let catalog = load(cli)?;
             let selection = select(&catalog, target)?;
@@ -291,9 +295,28 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
             if needs_own {
                 eprintln!("benchmark-runner: прогоны измеряются в собственных подгруппах cgroup");
             }
+            let history = if *no_history {
+                Err(HistoryOff::Disabled)
+            } else {
+                benchmark_history::location::resolve(None)
+                    .and_then(|found| {
+                        benchmark_history::location::refuse_inside_repository(
+                            &found.root,
+                            selection.repository_root(),
+                        )
+                        .map(|()| found.root)
+                    })
+                    .map_err(HistoryOff::Unavailable)
+            };
+            if let Err(HistoryOff::Unavailable(reason)) = &history {
+                eprintln!(
+                    "benchmark-runner: предупреждение: результат не попадёт в локальную историю: {reason}"
+                );
+            }
             let request = Request {
                 sampling: !target.no_sampling,
                 output: output.clone(),
+                history,
                 artifacts_root: artifacts_dir
                     .clone()
                     .unwrap_or_else(|| selection.repository_root().join("target/benchmark-runner")),
@@ -326,6 +349,17 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
                 );
                 if let Some(dir) = &summary.artifacts {
                     println!("артефакты: {}", dir.display());
+                }
+                match summary.history.status {
+                    HistoryStatus::Archived | HistoryStatus::AlreadyArchived => println!(
+                        "история: {}",
+                        summary.history.id.as_deref().unwrap_or_default()
+                    ),
+                    HistoryStatus::Failed => eprintln!(
+                        "benchmark-runner: история: результат НЕ сохранён — {}",
+                        summary.history.reason.as_deref().unwrap_or_default()
+                    ),
+                    HistoryStatus::Disabled | HistoryStatus::NotRecorded => {}
                 }
             }
             Ok(ExitCode::from(summary.exit_code as u8))

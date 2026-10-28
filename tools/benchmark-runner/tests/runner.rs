@@ -177,6 +177,8 @@ impl Fixture {
             .arg("--json")
             .args(args)
             .env("PATH", path)
+            // Локальная история теста — во временном каталоге, а не в данных пользователя.
+            .env("BENCHMARK_HISTORY_DIR", self.root.join("history"))
             .env_remove("BENCHMARK_RUNNER_DELEGATED_SCOPE");
         command
     }
@@ -1169,6 +1171,86 @@ fn accepted_result_survives_failed_output_write() {
 }
 
 #[test]
+fn accepted_result_is_archived_in_local_history() {
+    if !hyperfine_ready() {
+        return;
+    }
+    let body = scenario(
+        "history",
+        r#""--busy-ms", "1""#,
+        RUNS,
+        &format!("{WARM}{WALL}"),
+    );
+    let fixture = fixture(&body);
+    let run = fixture.run("fixture.history", "warm", &[]);
+    assert_eq!(run.code, 0, "{}\n{}", run.summary, run.stderr);
+    assert_eq!(
+        run.summary["history"]["status"], "archived",
+        "{}",
+        run.summary
+    );
+    let id = run.summary["history"]["id"].as_str().unwrap();
+    let archived = fixture
+        .root
+        .join("history/results")
+        .join(&id[..2])
+        .join(format!("{id}.json"));
+    let original = fs::read_to_string(run.summary["result"].as_str().unwrap()).unwrap();
+    assert_eq!(fs::read_to_string(&archived).unwrap(), original);
+
+    let disabled = fixture.run("fixture.history", "warm", &["--no-history"]);
+    assert_eq!(disabled.code, 0);
+    assert_eq!(disabled.summary["history"]["status"], "disabled");
+
+    // Недоступное хранилище не стирает измерение и не выдаётся за сохранение.
+    let blocker = fixture.root.join("not-a-dir");
+    fs::write(&blocker, "").unwrap();
+    let artifacts = fixture.artifacts();
+    let output = fixture
+        .command(&[
+            "run",
+            "fixture.history",
+            "--profile",
+            "warm",
+            "--artifacts-dir",
+            artifacts.to_str().unwrap(),
+        ])
+        .env("BENCHMARK_HISTORY_DIR", &blocker)
+        .output()
+        .unwrap();
+    let failed = Run::from(output, &fixture);
+    assert_eq!(failed.code, 0, "{}\n{}", failed.summary, failed.stderr);
+    assert_eq!(failed.summary["history"]["status"], "failed");
+    assert!(failed.summary["history"]["reason"].as_str().is_some());
+    assert!(
+        failed.summary["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or_default().contains("локальную историю"))
+    );
+    assert!(Path::new(failed.summary["result"].as_str().unwrap()).is_file());
+
+    // Хранилище внутри рабочей копии отвергается до записи.
+    let inside = fixture.workspace().join("history");
+    let output = fixture
+        .command(&[
+            "run",
+            "fixture.history",
+            "--profile",
+            "warm",
+            "--artifacts-dir",
+            artifacts.to_str().unwrap(),
+        ])
+        .env("BENCHMARK_HISTORY_DIR", &inside)
+        .output()
+        .unwrap();
+    let refused = Run::from(output, &fixture);
+    assert_eq!(refused.summary["history"]["status"], "failed");
+    assert!(!inside.exists());
+}
+
+#[test]
 fn existing_result_is_never_overwritten_and_runs_are_bounded() {
     let body = scenario(
         "bounds",
@@ -1412,11 +1494,28 @@ fn every_run_must_prove_its_input_with_its_own_report() {
         body.push_str(&report_scenario(id, true, Some(args)));
     }
     body.push_str(&report_scenario("valid", true, None));
-    body.push_str(&report_scenario(
-        "optional",
-        false,
-        Some(r#""--write-bytes", "report-optional.json", "0""#),
-    ));
+    // Факт серии из отчёта: второй успешный прогон отчёта не оставил, поэтому
+    // значение первого не подтверждает факт для всей серии.
+    body.push_str(
+        &report_scenario(
+            "optional",
+            false,
+            Some(r#""--write-bytes", "report-optional.json", "0""#),
+        )
+        .replace(
+            ENVIRONMENT,
+            r#"
+[scenario.environment]
+record = ["os", "arch", "module_version", "artifact_size"]
+comparable = ["os", "arch", "artifact_size"]
+
+[[scenario.environment.fact]]
+name = "artifact_size"
+description = "Размер артефакта из отчёта."
+report = ["/artifact/size"]
+"#,
+        ),
+    );
     let fixture = fixture(&body);
     fs::create_dir_all(fixture.workspace().join("runs")).unwrap();
     for id in ["missing", "corrupt", "nosize", "valid", "optional"] {
@@ -1461,6 +1560,12 @@ fn every_run_must_prove_its_input_with_its_own_report() {
         .find(|m| m.key == "module_counter@module-report/items")
         .unwrap();
     assert_eq!(counter.availability, result::Availability::Partial);
+    match &result.environment["artifact_size"] {
+        benchmark_contract::result::Fact::Unavailable { reason } => {
+            assert!(reason.contains("прогон 2"), "{reason}")
+        }
+        other => panic!("факт без отчёта второго прогона подтверждён: {other:?}"),
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {

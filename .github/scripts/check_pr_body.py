@@ -12,6 +12,7 @@ REQUIRED = (
     "Область изменений",
     "Реализация",
     "Проверки",
+    "Производительность",
     "CI",
     "Готовность",
     "Ограничения",
@@ -23,6 +24,29 @@ FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 # Закрывающая граница не допускает info string: ```` ```python ```` — это строка
 # содержимого блока, а не его конец.
 FENCE_CLOSE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+
+PERFORMANCE = "Производительность"
+STATUSES = ("измерено", "не применимо", "не измерено")
+# Строка «Поле: значение», в том числе пунктом списка и с полужирным именем.
+FIELD = re.compile(r"^\s*(?:[-*+]\s+)?(?:\*\*)?(?P<name>[^:|*\n]+?)(?:\*\*)?:(?:\*\*)?(?P<value>.*)$")
+PLACEHOLDERS = {
+    "", "-", "—", "–", "n/a", "na", "none", "нет", "todo", "tbd", "...", "…",
+    "не применимо", "заполнить", "уточнить", "см. ниже", "см. выше", "?",
+}
+# Поля отчёта `benchmark-history report` для каждого измеренного сценария.
+MEASURED_FIELDS = (
+    "Сценарий", "Измеренный код", "Нагрузка", "Окружение", "Прогоны",
+    "База", "Сопоставимость", "Вывод", "Ограничения", "Источники",
+)
+NO_EVIDENCE = ("Доказательство производительности", "отсутствует")
+PERFORMANCE_HINT = (
+    "добавьте после ## Проверки раздел ## Производительность: отчёт `benchmark-history report` "
+    "из проверенных результатов, «Статус: не применимо» с конкретной причиной или "
+    "«Статус: не измерено» с причиной, диагностикой и строкой "
+    "«Доказательство производительности: отсутствует»"
+)
+
+
 # GitHub скрывает HTML-комментарии, поэтому заголовки внутри них не являются
 # видимыми разделами body. Внутри код-блока `<!--` — литерал, а не комментарий.
 
@@ -98,6 +122,128 @@ def sections(body: str) -> list[tuple[str, str]]:
     return found
 
 
+def fields(content: str) -> dict[str, list[str]]:
+    """Значения строк «Имя: значение» вне таблиц по имени поля."""
+    found: dict[str, list[str]] = {}
+    for line in content.split("\n"):
+        if line.lstrip().startswith("|"):
+            continue
+        match = FIELD.match(line)
+        if match:
+            value = match.group("value").strip().strip("*").strip()
+            found.setdefault(match.group("name").strip(), []).append(value)
+    return found
+
+
+def placeholder(value: str) -> bool:
+    text = value.strip().strip("`*_ ").casefold()
+    return text in PLACEHOLDERS or re.fullmatch(r"<[^<>]*>", text) is not None
+
+
+def substantive(values: list[str], minimum: int) -> bool:
+    """Есть хотя бы одно конкретное пояснение, а не шаблонная заглушка."""
+    return any(not placeholder(v) and len(v.strip()) >= minimum and len(v.split()) >= 3 for v in values)
+
+
+# Колонки значений проверяемого результата в таблицах `benchmark-history report`:
+# с базой — «После: …», без базы — «Значение: …», «Медиана», «Мин–макс».
+# Название метрики, scope/источник, состояние «до», разности, оценка и
+# пояснения измерением не являются.
+MEASUREMENT_COLUMNS = ("После:", "Значение:", "Медиана", "Мин–макс")
+# Измеренное значение начинается с числа: «54.41 ms ± 1.26 ms (n=10)», «20 000».
+MEASURED_VALUE = re.compile(r"^[-−+]?\d")
+
+
+def table_cells(row: str) -> list[str]:
+    """Ячейки строки таблицы Markdown: делит только неэкранированная «|»."""
+    return [c.strip() for c in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+
+
+def metric_table(content: str) -> bool:
+    """Есть таблица с заголовком «Метрика» и хотя бы одним измеренным значением.
+
+    Значение засчитывается только в колонке значения проверяемого результата
+    (`MEASUREMENT_COLUMNS`) и только если оно начинается с числа: цифры в
+    названии метрики, scope, версии инструмента, оценке или пояснении вроде
+    «n=0: данных нет» строку из прочерков измерением не делают.
+    """
+    lines = [line.strip() for line in content.split("\n")]
+    for n, row in enumerate(lines):
+        cells = table_cells(row) if row.startswith("|") else []
+        if cells and cells[0] == "Метрика" and n + 1 < len(lines) and lines[n + 1].startswith("|") and set(lines[n + 1]) <= set("|-: "):
+            measured = [i for i, c in enumerate(cells) if c.startswith(MEASUREMENT_COLUMNS)]
+            # Только строки этой же таблицы: она кончается первой строкой без «|».
+            for data in lines[n + 2:]:
+                if not data.startswith("|"):
+                    break
+                values = table_cells(data)
+                if any(i < len(values) and not placeholder(values[i]) and MEASURED_VALUE.match(values[i]) for i in measured):
+                    return True
+    return False
+
+
+def scenario_blocks(content: str) -> list[tuple[str, str]]:
+    """Блоки `### …` отдельных сценариев раздела производительности по порядку."""
+    blocks: list[tuple[str, list[str]]] = []
+    for line in content.split("\n"):
+        if line.startswith("### "):
+            blocks.append((line[4:].strip(), []))
+        elif blocks:
+            blocks[-1][1].append(line)
+    return [(heading, "\n".join(lines)) for heading, lines in blocks]
+
+
+def validate_performance(content: str) -> list[str]:
+    """Структура решения о производительности; подлинность цифр проверяет рецензент."""
+    prefix = "## Производительность: "
+    found = fields(content)
+    statuses = [v.strip("`").casefold() for v in found.get("Статус", [])]
+    if len(statuses) != 1 or statuses[0] not in STATUSES:
+        return [prefix + "нужна ровно одна строка «Статус: измерено», «Статус: не применимо» или «Статус: не измерено»"]
+    status = statuses[0]
+    errors: list[str] = []
+    if status == "не применимо":
+        if not substantive(found.get("Причина", []), 40):
+            errors.append(prefix + "«не применимо» требует конкретной причины в строке «Причина:» (не короче 40 символов, не шаблон)")
+    elif status == "не измерено":
+        if not substantive(found.get("Причина", []), 20):
+            errors.append(prefix + "«не измерено» требует блокирующей причины в строке «Причина:»")
+        if not substantive(found.get("Диагностика", []), 20):
+            errors.append(prefix + "«не измерено» требует проверенной диагностики в строке «Диагностика:»")
+        if NO_EVIDENCE[1] not in [v.casefold() for v in found.get(NO_EVIDENCE[0], [])]:
+            errors.append(prefix + "«не измерено» требует строки «Доказательство производительности: отсутствует»")
+    else:
+        # Поля одного сценария не закрывают требования другого: каждый
+        # измеренный блок `### …` проверяется отдельно; отчёт без подзаголовков —
+        # один блок.
+        blocks = scenario_blocks(content)
+        measured = [(h, b) for h, b in blocks if not h.endswith("— не измерено")] if blocks else [("", content)]
+        # Неизмеренный сценарий рядом с измеренными несёт те же строки, что и
+        # статус «не измерено»; длина причины не требуется — её пишет исполнитель.
+        for heading, block in blocks:
+            if not heading.endswith("— не измерено"):
+                continue
+            block_fields = fields(block)
+            for name in ("Причина", "Диагностика"):
+                values = block_fields.get(name, [])
+                if not values or all(placeholder(v) for v in values):
+                    errors.append(prefix + f"неизмеренный сценарий требует строки «{name}:» ({heading})")
+            if NO_EVIDENCE[1] not in [v.casefold() for v in block_fields.get(NO_EVIDENCE[0], [])]:
+                errors.append(prefix + f"неизмеренный сценарий требует строки «Доказательство производительности: отсутствует» ({heading})")
+        if not measured:
+            errors.append(prefix + "«измерено» требует хотя бы одного измеренного сценария")
+        for heading, block in measured:
+            where = f" ({heading})" if heading else ""
+            block_fields = fields(block)
+            for name in MEASURED_FIELDS:
+                values = block_fields.get(name, [])
+                if not values or all(placeholder(v) for v in values):
+                    errors.append(prefix + f"для измерения нужна строка «{name}:» с фактическими сведениями{where}")
+            if not metric_table(block):
+                errors.append(prefix + f"для измерения нужна таблица с заголовком «| Метрика |» и строкой значений{where}")
+    return errors
+
+
 def validate(body: str) -> list[str]:
     """Return deterministic errors; empty list means structurally valid."""
     blocks = sections(body)
@@ -105,7 +251,9 @@ def validate(body: str) -> list[str]:
     errors: list[str] = []
     for name in REQUIRED:
         count = names.count(name)
-        if count == 0:
+        if count == 0 and name == PERFORMANCE:
+            errors.append(f"Отсутствует обязательный заголовок: ## {name} — {PERFORMANCE_HINT}")
+        elif count == 0:
             errors.append(f"Отсутствует обязательный заголовок: ## {name}")
         elif count > 1:
             errors.append(f"Заголовок повторяется: ## {name}")
@@ -118,6 +266,8 @@ def validate(body: str) -> list[str]:
             errors.append(f"Пустой обязательный раздел: ## {name}")
         if name in REQUIRED and content.strip().casefold() in {"todo", "tbd", "заполнить", "уточнить"}:
             errors.append(f"Раздел содержит только заглушку: ## {name}")
+        elif name == PERFORMANCE and content.strip() and names.count(PERFORMANCE) == 1:
+            errors.extend(validate_performance(content))
     if "CodeRabbit review и disposition" in names:
         if names.count("CodeRabbit review и disposition") > 1:
             errors.append("Раздел CodeRabbit повторяется")

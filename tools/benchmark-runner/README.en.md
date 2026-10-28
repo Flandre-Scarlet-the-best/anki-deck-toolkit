@@ -1,7 +1,7 @@
 # Benchmark runner: `benchmark-runner`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: f637b73c5ef27db6ea77424220cc65d233c3c039 -->
+<!-- i18n-source-git-blob: d9bd1bdf62f2ed29c1cc247e16135416f2e3efca -->
 
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
@@ -14,12 +14,14 @@ The meaning of scenario fields, profiles and metrics is in the [catalog
 guide](../../docs/performance/benchmarks.en.md); the catalog and result
 schemas are owned by [`benchmark-contract`](../benchmark-contract/README.en.md);
 general measurement rules are in the [methodology](../../docs/performance/README.en.md);
-measurements of the runner itself are in its [log](../../docs/performance/benchmark-runner.en.md).
+measurements of the runner itself are on its [performance page](../../docs/performance/benchmark-runner.en.md);
+the local result history is [`benchmark-history`](../benchmark-history/README.en.md).
 
 The runner does not change user exports or Anki profiles, does not read
 `decks/input/`, does not call `sudo`, does not prune Docker caches
-(`docker system prune` and the like), sends no data to the network itself and
-keeps no run history. It receives paths to user data only as run parameters.
+(`docker system prune` and the like) and sends no data to the network itself.
+It hands an accepted result to the user's local history (see below) but does
+not keep that history itself. It receives paths to user data only as run parameters.
 
 ## Commands
 
@@ -48,6 +50,7 @@ Options of `check` and `run`:
 | `--output FILE` | result file (`run` only); an existing file is never overwritten |
 | `--artifacts-dir DIR` | artifacts root (`run` only); `target/benchmark-runner` of the repository by default |
 | `--build-timeout S` | limit for building each `cargo-bin`, in seconds (`run` only), 3600 by default |
+| `--no-history` | do not store the accepted result in the local history (`run` only) |
 
 Global options: `--catalog DIR` — the directory with `catalog.toml` (by default
 `benchmarks/` of the nearest parent of the current directory); `--json` —
@@ -70,8 +73,21 @@ machine-readable JSON on stdout. Series progress always goes to stderr and to
 
 With `--json`, `run` prints a summary: `ok`, `exit_code`, `exit`, `scenario`,
 `profile`, `outcome`, `reason`, `result`, `artifacts`, `runs`,
-`successful_runs`, `cleanup`, `warnings`, `diagnostics`. The same summary is
-stored as `summary.json` in the artifacts directory.
+`successful_runs`, `cleanup`, `history`, `warnings`, `diagnostics`. The same
+summary is stored as `summary.json` in the artifacts directory.
+
+## Local history
+
+After writing an accepted result, `run` hands it to the local
+[`benchmark-history`](../benchmark-history/README.en.md) history with the same
+contract and catalog, without measuring again: `BENCHMARK_HISTORY_DIR`, otherwise
+the user's XDG data directory. A store inside the working copy is refused. The
+`history` field of the summary: `status` — `archived`, `already-archived`,
+`disabled` (`--no-history`), `failed` (with `reason`) or `not-recorded` (no
+accepted result), and the record `id`. The runner waits at most 10 seconds for a store held by another `benchmark-history` command; after that the save is `failed`. A history failure does not delete the
+result and does not change the series exit code, but it is printed as a warning
+and added to `warnings`; the result can be stored later with
+`benchmark-history import`.
 
 ## Installing Hyperfine 2.0
 
@@ -228,7 +244,7 @@ namespaces the outcome is also `unsupported`.
 
 `/proc` and cgroup are polled only during a measured run, once per
 `sample_interval`. Measurements of the impact on target time are in the
-[runner log](../../docs/performance/benchmark-runner.en.md); `--no-sampling`
+[runner page](../../docs/performance/benchmark-runner.en.md); `--no-sampling`
 turns polling off completely.
 
 ## What is published
@@ -285,6 +301,8 @@ processes of steps, timeout and SIGINT without orphan processes, offline, own
 cgroup, the module report of every run, the provenance snapshot and its drift
 in a Git working copy, the target's Docker environment with a stub `docker`,
 refusal for Hyperfine 1.x, no overwriting, concurrent series with different
-artifacts directories and no private paths in the result. Without Hyperfine 2.x they are skipped locally and fail in CI. The
+artifacts directories, no private paths in the result, module report facts only
+when all successful runs agree, and storing in the local history, including
+disabling it and its failure. Without Hyperfine 2.x they are skipped locally and fail in CI. The
 tests do not read `decks/**`. The suite is part of
 `cargo test --workspace --locked`.

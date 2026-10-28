@@ -1,0 +1,2233 @@
+//! Проверки локальной истории на синтетическом каталоге и синтетических
+//! результатах: архив, индекс, восстановление, перенос, выбор базы,
+//! сравнение, отчёт для PR и снимок документации. Пользовательские данные,
+//! `decks/**` и настоящий каталог данных пользователя не используются: каждое
+//! хранилище — свой временный каталог.
+
+use benchmark_contract::catalog::{self, Catalog};
+use benchmark_contract::result::{
+    Availability, BenchmarkResult, CodeState, Fact, Identity, InputRecord, MetricRecord,
+    MetricValue, Observation, Outcome, OutcomeStatus, ProfileRef, Provenance, Quantity, RunRecord,
+    RunStatus, ScenarioRef, Tool,
+};
+use benchmark_contract::scenario::{IdentityMethod, InputRole};
+use benchmark_contract::vocabulary::{
+    CacheState, MetricId, Network, Scope, Source, Unit, WorkloadKind,
+};
+use benchmark_history::analysis::{self, Assessment};
+use benchmark_history::report::{self, Base, Item};
+use benchmark_history::snapshot::{self, Options};
+use benchmark_history::store::{Error, Store};
+use benchmark_history::{archive, index, location};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const BIN: &str = env!("CARGO_BIN_EXE_benchmark-history");
+
+const CATALOG: &str = r#"schema_version = 1
+repository_root = "../workspace"
+
+[[profile]]
+id = "warm"
+cache = "warm"
+network = "online"
+description = "Повторный прогон после прогрева."
+"#;
+
+const SCENARIO: &str = r#"schema_version = 1
+module = "fixture"
+
+[[scenario]]
+id = "fixture.cli"
+title = "Синтетический сценарий истории"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Синтетические результаты для проверки истории."
+measured = "Один запуск."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "executable", name = "true" }
+expect_exit_codes = [0]
+
+[[scenario.input]]
+id = "toolkit"
+kind = "repo-tree"
+role = "subject"
+identity = "content-tree-sha256"
+description = "Измеряемый код."
+
+[[scenario.input]]
+id = "data"
+kind = "repo-file"
+role = "workload"
+identity = "file-sha256"
+path = "data.bin"
+description = "Нагрузка."
+size = [{ name = "bytes", unit = "byte", description = "Размер.", measure = { kind = "tree-bytes" } }]
+
+[scenario.runs]
+warmup = 1
+min_runs = 2
+max_runs = 20
+single_run_allowed = false
+run_timeout_seconds = 30
+total_budget_seconds = 300
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Кэшей нет."
+cleared = []
+retained = []
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[scenario.environment]
+record = ["os", "arch", "module_version", "cpu_model", "virtualization", "logical_cpus", "memory_total_bytes"]
+comparable = ["os", "arch", "cpu_model", "virtualization"]
+"#;
+
+struct Fixture {
+    root: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn fixture() -> Fixture {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "benchmark-history-test-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("catalog/scenarios")).unwrap();
+    fs::create_dir_all(root.join("workspace/docs")).unwrap();
+    fs::write(root.join("workspace/data.bin"), b"data").unwrap();
+    fs::write(root.join("catalog/catalog.toml"), CATALOG).unwrap();
+    fs::write(root.join("catalog/scenarios/fixture.toml"), SCENARIO).unwrap();
+    let fixture = Fixture { root };
+    let loaded = catalog::load(&fixture.catalog_dir());
+    assert!(loaded.catalog.is_some(), "{:#?}", loaded.diagnostics);
+    fixture
+}
+
+impl Fixture {
+    fn catalog_dir(&self) -> PathBuf {
+        self.root.join("catalog")
+    }
+
+    fn catalog(&self) -> Catalog {
+        catalog::load(&self.catalog_dir()).catalog.unwrap()
+    }
+
+    fn store(&self) -> PathBuf {
+        self.root.join("store")
+    }
+
+    fn open(&self) -> Store {
+        Store::open(&self.store()).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn import(&self, store: &mut Store, result: &BenchmarkResult) -> String {
+        let text = serde_json::to_string_pretty(result).unwrap();
+        store
+            .import(&text, "result.json", Some(&self.catalog()))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .id
+    }
+
+    fn cli(&self, args: &[&str]) -> (i32, String, String) {
+        let output = Command::new(BIN)
+            .arg("--catalog")
+            .arg(self.catalog_dir())
+            .args(args)
+            .env("BENCHMARK_HISTORY_DIR", self.store())
+            .env_remove("XDG_DATA_HOME")
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+}
+
+/// Параметры синтетического результата.
+#[derive(Clone)]
+struct Spec {
+    recorded_at: &'static str,
+    commit: char,
+    dirty: bool,
+    wall: Vec<f64>,
+    memory: Option<Vec<f64>>,
+    failed_runs: usize,
+    outcome: OutcomeStatus,
+    cpu: &'static str,
+    data: char,
+    /// Объём памяти: аппаратный факт вне условия сопоставимости.
+    ram: Option<&'static str>,
+    virtualization: &'static str,
+    /// Записан ли `source_tree_sha256`.
+    tree: bool,
+    /// Записан ли признак изменений рабочей копии.
+    state: bool,
+}
+
+impl Default for Spec {
+    fn default() -> Spec {
+        Spec {
+            recorded_at: "2026-10-01T10:00:00Z",
+            commit: 'a',
+            dirty: false,
+            wall: vec![0.100, 0.102, 0.098],
+            memory: Some(vec![10_000_000.0, 10_000_000.0, 10_000_000.0]),
+            failed_runs: 0,
+            outcome: OutcomeStatus::Success,
+            cpu: "Test CPU",
+            data: 'd',
+            ram: Some("17179869184"),
+            virtualization: "none",
+            tree: true,
+            state: true,
+        }
+    }
+}
+
+const WALL: &str = "time_wall_clock@command";
+const MEMORY: &str = "memory_peak_resident@largest-process-in-tree";
+
+fn result(spec: &Spec) -> BenchmarkResult {
+    let fact = |v: &str| Fact::Known { value: v.into() };
+    let environment = BTreeMap::from([
+        ("os".to_owned(), fact("linux")),
+        ("arch".to_owned(), fact("x86_64")),
+        ("module_version".to_owned(), fact("0.1.0")),
+        ("cpu_model".to_owned(), fact(spec.cpu)),
+        ("virtualization".to_owned(), fact(spec.virtualization)),
+        ("logical_cpus".to_owned(), fact("16")),
+        (
+            "memory_total_bytes".to_owned(),
+            match spec.ram {
+                Some(value) => fact(value),
+                None => Fact::Unavailable {
+                    reason: "/proc/meminfo не читается".into(),
+                },
+            },
+        ),
+    ]);
+    let mut runs: Vec<RunRecord> = spec
+        .wall
+        .iter()
+        .enumerate()
+        .map(|(i, wall)| {
+            let memory = match &spec.memory {
+                Some(values) => MetricValue::Measured { value: values[i] },
+                None => MetricValue::Unavailable {
+                    reason: "нет доступа к счётчику".into(),
+                },
+            };
+            RunRecord {
+                index: i as u32,
+                status: RunStatus::Success,
+                exit_code: Some(0),
+                reason: None,
+                values: BTreeMap::from([
+                    (WALL.to_owned(), MetricValue::Measured { value: *wall }),
+                    (MEMORY.to_owned(), memory),
+                ]),
+            }
+        })
+        .collect();
+    for _ in 0..spec.failed_runs {
+        let index = runs.len() as u32;
+        runs.push(RunRecord {
+            index,
+            status: RunStatus::Failure,
+            exit_code: Some(1),
+            reason: Some("цель завершилась с кодом 1".into()),
+            values: BTreeMap::from([
+                (
+                    WALL.to_owned(),
+                    MetricValue::Failed {
+                        reason: "прогон не удался".into(),
+                    },
+                ),
+                (
+                    MEMORY.to_owned(),
+                    MetricValue::Failed {
+                        reason: "прогон не удался".into(),
+                    },
+                ),
+            ]),
+        });
+    }
+    let unsupported = spec.outcome == OutcomeStatus::Unsupported;
+    if unsupported {
+        runs.clear();
+    }
+    let availability = |key: &str, measured_all: bool| {
+        let any = runs
+            .iter()
+            .any(|r| r.values.get(key).and_then(MetricValue::measured).is_some());
+        match (unsupported, any, measured_all && spec.failed_runs == 0) {
+            (true, _, _) => Availability::Unsupported,
+            (_, true, true) => Availability::Measured,
+            (_, true, false) => Availability::Partial,
+            (_, false, _) if key == WALL => Availability::Failed,
+            _ => Availability::Unavailable,
+        }
+    };
+    let wall_availability = availability(WALL, true);
+    let memory_availability = availability(MEMORY, spec.memory.is_some());
+    let reason = |a: Availability| {
+        (a != Availability::Measured).then(|| "значения есть не во всех прогонах".to_owned())
+    };
+    let mut result = BenchmarkResult {
+        schema_version: 1,
+        scenario: ScenarioRef {
+            id: "fixture.cli".into(),
+            module: "fixture".into(),
+            revision: 1,
+            kind: WorkloadKind::ShortCli,
+        },
+        profile: ProfileRef {
+            id: "warm".into(),
+            cache: CacheState::Warm,
+            network: Network::Online,
+        },
+        parameters: BTreeMap::new(),
+        inputs: vec![
+            InputRecord {
+                id: "toolkit".into(),
+                role: InputRole::Subject,
+                identity: Identity {
+                    method: IdentityMethod::ContentTreeSha256,
+                    value: spec.commit.to_string().repeat(64),
+                },
+                size: BTreeMap::new(),
+            },
+            InputRecord {
+                id: "data".into(),
+                role: InputRole::Workload,
+                identity: Identity {
+                    method: IdentityMethod::FileSha256,
+                    value: spec.data.to_string().repeat(64),
+                },
+                size: BTreeMap::from([(
+                    "bytes".to_owned(),
+                    Quantity {
+                        value: 4.0,
+                        unit: Unit::Byte,
+                    },
+                )]),
+            },
+        ],
+        provenance: Provenance {
+            recorded_at: spec.recorded_at.into(),
+            measurement: Tool {
+                name: "hyperfine".into(),
+                version: "2.0.0".into(),
+                format: Some("hyperfine-json-v2".into()),
+            },
+            runner: Some(Tool {
+                name: "benchmark-runner".into(),
+                version: "0.1.0".into(),
+                format: None,
+            }),
+            code: CodeState {
+                module_version: "0.1.0".into(),
+                source_tree_sha256: spec.tree.then(|| spec.commit.to_string().repeat(64)),
+                git_commit: Some(spec.commit.to_string().repeat(40)),
+                dirty: spec.state.then_some(spec.dirty),
+            },
+        },
+        environment,
+        outcome: Outcome {
+            status: spec.outcome,
+            reason: match spec.outcome {
+                OutcomeStatus::Success => None,
+                OutcomeStatus::Unsupported => Some("Hyperfine 2.x не найден в PATH".into()),
+                _ => Some("прогон не удался".into()),
+            },
+        },
+        observation: match runs.len() {
+            0 => Observation::None,
+            1 => Observation::Single,
+            _ => Observation::Repeated,
+        },
+        warmup_runs: 1,
+        metrics: vec![
+            MetricRecord {
+                key: WALL.into(),
+                metric: MetricId::TimeWallClock,
+                scope: Scope::Command,
+                source: Source::Hyperfine,
+                label: None,
+                unit: Unit::Second,
+                availability: wall_availability,
+                reason: reason(wall_availability),
+            },
+            MetricRecord {
+                key: MEMORY.into(),
+                metric: MetricId::MemoryPeakResident,
+                scope: Scope::LargestProcessInTree,
+                source: Source::Hyperfine,
+                label: None,
+                unit: Unit::Byte,
+                availability: memory_availability,
+                reason: reason(memory_availability),
+            },
+        ],
+        runs,
+        aggregates: BTreeMap::new(),
+    };
+    result.recompute_aggregates();
+    result
+}
+
+fn assert_valid(fixture: &Fixture, r: &BenchmarkResult) {
+    let text = serde_json::to_string(r).unwrap();
+    let checked = benchmark_contract::result::check(&text, "x", Some(&fixture.catalog()));
+    assert!(checked.result.is_some(), "{:#?}", checked.diagnostics);
+}
+
+#[test]
+fn synthetic_results_satisfy_the_contract() {
+    let f = fixture();
+    for spec in [
+        Spec::default(),
+        Spec {
+            memory: None,
+            ..Spec::default()
+        },
+        Spec {
+            failed_runs: 1,
+            outcome: OutcomeStatus::Partial,
+            ..Spec::default()
+        },
+        Spec {
+            wall: vec![],
+            memory: Some(vec![]),
+            outcome: OutcomeStatus::Unsupported,
+            ..Spec::default()
+        },
+    ] {
+        assert_valid(&f, &result(&spec));
+    }
+}
+
+#[test]
+fn import_is_idempotent_and_keeps_original_bytes() {
+    let f = fixture();
+    let mut store = f.open();
+    let r = result(&Spec::default());
+    let pretty = serde_json::to_string_pretty(&r).unwrap();
+    let compact = serde_json::to_string(&r).unwrap();
+    let first = store.import(&pretty, "a.json", Some(&f.catalog())).unwrap();
+    assert!(first.created);
+    let again = store
+        .import(&compact, "b.json", Some(&f.catalog()))
+        .unwrap();
+    assert_eq!(
+        again.id, first.id,
+        "форматирование не создаёт второй записи"
+    );
+    assert!(!again.created);
+    assert_eq!(store.index().count().unwrap(), 1);
+    let stored = fs::read_to_string(f.store().join(archive::relative_path(&first.id))).unwrap();
+    assert_eq!(stored, pretty, "архив хранит исходные байты");
+
+    // Граница идентичности, описанная в README: пробелы и порядок ключей не
+    // важны, написание числа — важно (нормализация сменила бы ID записей).
+    let id = |text: &str| archive::content_id(text).unwrap();
+    assert_eq!(
+        id(r#"{"b": 1.0, "a": [1, 2]}"#),
+        id(r#"{"a":[1,2],"b":1.0}"#)
+    );
+    assert_eq!(id(r#"{"a": 1.0}"#), id(r#"{"a": 1.00}"#));
+    assert_ne!(id(r#"{"a": 1}"#), id(r#"{"a": 1.0}"#));
+}
+
+#[test]
+fn invalid_documents_are_rejected_without_trace() {
+    let f = fixture();
+    let mut store = f.open();
+    let mut r = serde_json::to_value(result(&Spec::default())).unwrap();
+    r["schema_version"] = 2.into();
+    let rejected = store.import(&r.to_string(), "new.json", Some(&f.catalog()));
+    assert!(matches!(rejected, Err(Error::Rejected(_))));
+    let mut r = serde_json::to_value(result(&Spec::default())).unwrap();
+    r["outcome"]["reason"] = "ошибка в /home/user/private/deck.json".into();
+    r["outcome"]["status"] = "partial".into();
+    assert!(matches!(
+        store.import(&r.to_string(), "private.json", Some(&f.catalog())),
+        Err(Error::Rejected(_))
+    ));
+    assert!(matches!(
+        store.import("{not json", "broken.json", Some(&f.catalog())),
+        Err(Error::Rejected(_))
+    ));
+    let mut unknown = result(&Spec::default());
+    unknown.scenario.id = "fixture.other".into();
+    assert!(matches!(
+        store.import(
+            &serde_json::to_string(&unknown).unwrap(),
+            "u.json",
+            Some(&f.catalog())
+        ),
+        Err(Error::Rejected(_))
+    ));
+    assert_eq!(store.index().count().unwrap(), 0);
+    let (entries, _) = archive::scan(&f.store()).unwrap();
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn index_is_rebuilt_from_archive() {
+    let f = fixture();
+    let ids = {
+        let mut store = f.open();
+        vec![
+            f.import(&mut store, &result(&Spec::default())),
+            f.import(
+                &mut store,
+                &result(&Spec {
+                    recorded_at: "2026-10-02T10:00:00Z",
+                    commit: 'b',
+                    ..Spec::default()
+                }),
+            ),
+        ]
+    };
+    // Удалённый индекс.
+    fs::remove_file(f.store().join("index.sqlite")).unwrap();
+    let store = f.open();
+    assert_eq!(store.index().count().unwrap(), 2);
+    assert_eq!(store.opened_sync().indexed.len(), 2);
+    drop(store);
+
+    // Повреждённый индекс сохраняется для разбора и строится заново.
+    fs::write(f.store().join("index.sqlite"), b"definitely not sqlite").unwrap();
+    let store = f.open();
+    assert_eq!(store.index().count().unwrap(), 2);
+    assert!(f.store().join("index.sqlite.corrupt").is_file());
+    assert!(
+        store
+            .opened_sync()
+            .notes
+            .iter()
+            .any(|n| n.contains("повреждён"))
+    );
+    drop(store);
+
+    // Старая схема: индекс перестраивается из архива.
+    {
+        let conn = rusqlite_connection(&f.store().join("index.sqlite"));
+        conn.execute_batch("DROP TABLE metrics; CREATE TABLE legacy (x); PRAGMA user_version = 0;")
+            .unwrap();
+    }
+    let store = f.open();
+    assert_eq!(store.index().count().unwrap(), 2);
+    drop(store);
+    // Неизвестная дочерняя таблица со ссылками на results не мешает пересборке
+    // и не выдаётся за повреждение индекса.
+    {
+        let conn = rusqlite_connection(&f.store().join("index.sqlite"));
+        conn.execute_batch(
+            "CREATE TABLE legacy_child (result_id TEXT NOT NULL REFERENCES results(id));
+             INSERT INTO legacy_child SELECT id FROM results;
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+    }
+    fs::remove_file(f.store().join("index.sqlite.corrupt")).unwrap();
+    let store = f.open();
+    assert_eq!(store.index().count().unwrap(), 2);
+    assert!(
+        !f.store().join("index.sqlite.corrupt").exists(),
+        "{:?}",
+        store.opened_sync().notes
+    );
+    drop(store);
+    {
+        let conn = rusqlite_connection(&f.store().join("index.sqlite"));
+        conn.execute_batch("PRAGMA user_version = 0;").unwrap();
+    }
+    let store = f.open();
+    assert!(
+        store
+            .opened_sync()
+            .notes
+            .iter()
+            .any(|n| n.contains("устарела")),
+        "{:?}",
+        store.opened_sync().notes
+    );
+    assert_eq!(store.index().count().unwrap(), 2);
+    drop(store);
+
+    // Схема новее поддерживаемой: отказ, пересборка — явным reindex.
+    {
+        let conn = rusqlite_connection(&f.store().join("index.sqlite"));
+        conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+    }
+    let refused = Store::open(&f.store());
+    assert!(
+        matches!(&refused, Err(Error::Store(m)) if m.contains("более новой")),
+        "{:?}",
+        refused.err()
+    );
+    let (store, sync) = Store::rebuild(&f.store()).unwrap();
+    assert!(sync.problems.is_empty());
+    let mut rebuilt: Vec<String> = store.index().ids().unwrap().into_iter().collect();
+    rebuilt.sort();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(rebuilt, expected);
+}
+
+fn rusqlite_connection(path: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(path).unwrap()
+}
+
+#[test]
+fn interrupted_write_is_recovered_on_next_open() {
+    let f = fixture();
+    drop(f.open());
+    // Прерывание после записи архивной копии, до строки индекса.
+    let r = result(&Spec::default());
+    let text = serde_json::to_string_pretty(&r).unwrap();
+    let id = archive::content_id(&text).unwrap();
+    let path = f.store().join(archive::relative_path(&id));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, &text).unwrap();
+    // Незавершённая временная копия и посторонний файл.
+    fs::create_dir_all(f.store().join("tmp")).unwrap();
+    fs::write(f.store().join("tmp/x.json.1.2.tmp"), "{").unwrap();
+    fs::write(f.store().join("results/notes.txt"), "x").unwrap();
+    let store = f.open();
+    assert_eq!(store.opened_sync().indexed, vec![id.clone()]);
+    assert_eq!(store.opened_sync().problems.len(), 1);
+    drop(store);
+    // Удалённая вручную архивная копия убирается из индекса.
+    fs::remove_file(&path).unwrap();
+    let store = f.open();
+    assert_eq!(store.opened_sync().dropped, vec![id]);
+    assert_eq!(store.index().count().unwrap(), 0);
+}
+
+#[test]
+fn busy_store_is_awaited_only_within_the_limit() {
+    let f = fixture();
+    let held = f.open();
+    let started = std::time::Instant::now();
+    let refused = Store::open_waiting(&f.store(), std::time::Duration::from_millis(300));
+    assert!(started.elapsed() >= std::time::Duration::from_millis(300));
+    match refused {
+        Err(Error::Store(reason)) => assert!(reason.contains("занято"), "{reason}"),
+        Err(e) => panic!("неожиданная ошибка: {e}"),
+        Ok(_) => panic!("блокировка занята, открытие должно отказать"),
+    }
+    drop(held);
+    Store::open_waiting(&f.store(), std::time::Duration::from_millis(300))
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn corrupted_archive_copy_is_detected_and_never_overwritten() {
+    let f = fixture();
+    let mut store = f.open();
+    let r = result(&Spec::default());
+    let text = serde_json::to_string_pretty(&r).unwrap();
+    let id = f.import(&mut store, &r);
+    let path = f.store().join(archive::relative_path(&id));
+    let damaged = text.replace("0.102", "0.103");
+    fs::write(&path, &damaged).unwrap();
+    let report = store.verify().unwrap();
+    assert_eq!(report.problems.len(), 1);
+    assert_eq!(report.problems[0].item, id);
+    assert!(matches!(store.load(&id), Err(Error::Store(_))));
+    // Повторный приём того же документа не перезаписывает повреждённую копию.
+    let again = store.import(&text, "again.json", Some(&f.catalog()));
+    assert!(
+        matches!(&again, Err(Error::Store(m)) if m.contains("повреждена")),
+        "{:?}",
+        again.err()
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), damaged);
+    drop(store);
+    let (_, sync) = Store::rebuild(&f.store()).unwrap();
+    assert_eq!(sync.problems.len(), 1);
+}
+
+#[test]
+fn backup_restores_into_another_store() {
+    let f = fixture();
+    let mut store = f.open();
+    let a = f.import(&mut store, &result(&Spec::default()));
+    let b = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-02T10:00:00Z",
+            commit: 'b',
+            ..Spec::default()
+        }),
+    );
+    let backup = f.root.join("backup");
+    assert_eq!(store.backup(&backup).unwrap(), 2);
+    assert!(
+        matches!(store.backup(&backup), Err(Error::Usage(_))),
+        "непустой каталог не перезаписывается"
+    );
+    // Другое хранилище — как на другой машине: каталог при восстановлении не нужен.
+    let mut other = Store::open(&f.root.join("other")).unwrap();
+    let restored = other.restore(&backup).unwrap();
+    assert_eq!(restored.added.len(), 2);
+    let again = other.restore(&backup).unwrap();
+    assert_eq!((again.added.len(), again.present.len()), (0, 2));
+    let mut ids: Vec<String> = other.index().ids().unwrap().into_iter().collect();
+    ids.sort();
+    let mut expected = vec![a.clone(), b];
+    expected.sort();
+    assert_eq!(ids, expected);
+    // Изменённая запись резервной копии не принимается.
+    let tampered = backup.join(archive::relative_path(&a));
+    let text = fs::read_to_string(&tampered)
+        .unwrap()
+        .replace("0.098", "0.001");
+    fs::write(&tampered, text).unwrap();
+    let mut third = Store::open(&f.root.join("third")).unwrap();
+    let restored = third.restore(&backup).unwrap();
+    assert_eq!(restored.added.len(), 1);
+    assert_eq!(restored.problems.len(), 1);
+}
+
+fn pool(store: &Store, ids: &[String]) -> Vec<(String, BenchmarkResult)> {
+    ids.iter()
+        .map(|id| (id.clone(), store.load(id).unwrap().1))
+        .collect()
+}
+
+#[test]
+fn baseline_follows_explicit_rules() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let mut store = f.open();
+    let old = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-01T10:00:00Z",
+            commit: 'a',
+            ..Spec::default()
+        }),
+    );
+    let newer = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-02T10:00:00Z",
+            commit: 'b',
+            ..Spec::default()
+        }),
+    );
+    let partial = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-03T10:00:00Z",
+            commit: 'c',
+            failed_runs: 1,
+            outcome: OutcomeStatus::Partial,
+            ..Spec::default()
+        }),
+    );
+    let other_cpu = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-04T10:00:00Z",
+            commit: 'c',
+            cpu: "Other CPU",
+            ..Spec::default()
+        }),
+    );
+    let other_data = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-04T11:00:00Z",
+            commit: 'c',
+            data: 'e',
+            ..Spec::default()
+        }),
+    );
+    let repeat = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-05T10:00:00Z",
+            commit: 'f',
+            wall: vec![0.2, 0.2, 0.2],
+            ..Spec::default()
+        }),
+    );
+    let target_spec = Spec {
+        recorded_at: "2026-10-06T10:00:00Z",
+        commit: 'f',
+        ..Spec::default()
+    };
+    let target = f.import(&mut store, &result(&target_spec));
+    let later = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-07T10:00:00Z",
+            commit: '9',
+            ..Spec::default()
+        }),
+    );
+    let all = [
+        old.clone(),
+        newer.clone(),
+        partial.clone(),
+        other_cpu.clone(),
+        other_data.clone(),
+        repeat.clone(),
+        later.clone(),
+    ];
+    let list = analysis::candidates(
+        scenario,
+        &target,
+        &result(&target_spec),
+        &pool(&store, &all),
+    );
+    let find = |id: &str| list.iter().find(|c| c.id == id).unwrap();
+    assert!(find(&partial).reasons.iter().any(|r| r.contains("partial")));
+    assert!(
+        find(&other_cpu)
+            .reasons
+            .iter()
+            .any(|r| r.contains("cpu_model"))
+    );
+    assert!(
+        find(&other_data)
+            .reasons
+            .iter()
+            .any(|r| r.contains("нагрузка data"))
+    );
+    assert!(
+        find(&repeat)
+            .reasons
+            .iter()
+            .any(|r| r.contains("тот же исходный код"))
+    );
+    assert!(find(&later).reasons.iter().any(|r| r.contains("не раньше")));
+    assert!(find(&old).eligible && find(&newer).eligible);
+    assert_eq!(
+        analysis::choose(&list, None).unwrap().id,
+        newer,
+        "самая поздняя пригодная"
+    );
+    assert_eq!(analysis::choose(&list, Some("aaaa")).unwrap().id, old);
+    assert!(analysis::choose(&list, Some("cccc")).is_none());
+    // Первое измерение: кандидатов нет.
+    let empty = analysis::candidates(scenario, &old, &result(&Spec::default()), &[]);
+    assert!(analysis::choose(&empty, None).is_none());
+}
+
+#[test]
+fn comparison_respects_units_zero_base_and_spread() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let base = result(&Spec {
+        commit: 'a',
+        memory: Some(vec![0.0, 0.0, 0.0]),
+        ..Spec::default()
+    });
+    let faster = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.080, 0.081, 0.079],
+        memory: Some(vec![5.0, 5.0, 5.0]),
+        ..Spec::default()
+    });
+    let c = analysis::compare(scenario, &base, &faster);
+    assert!(c.verdict.comparable, "{:?}", c.verdict.blockers);
+    let wall = c.rows.iter().find(|r| r.key == WALL).unwrap();
+    let delta = wall.delta.as_ref().unwrap();
+    assert!((delta.absolute + 0.02).abs() < 1e-9);
+    assert!((delta.relative.unwrap() + 0.2).abs() < 1e-9);
+    assert_eq!(
+        wall.assessment,
+        Assessment::BeyondSpread { better: Some(true) }
+    );
+    let memory = c.rows.iter().find(|r| r.key == MEMORY).unwrap();
+    assert!(
+        memory.delta.as_ref().unwrap().relative.is_none(),
+        "нулевая база не даёт процента"
+    );
+    assert_eq!(
+        memory.assessment,
+        Assessment::BeyondSpread {
+            better: Some(false)
+        }
+    );
+
+    let noisy = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.090, 0.110, 0.101],
+        ..Spec::default()
+    });
+    let c = analysis::compare(scenario, &result(&Spec::default()), &noisy);
+    assert_eq!(
+        c.rows.iter().find(|r| r.key == WALL).unwrap().assessment,
+        Assessment::WithinSpread
+    );
+
+    let single = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.05],
+        memory: Some(vec![1.0]),
+        ..Spec::default()
+    });
+    let c = analysis::compare(scenario, &result(&Spec::default()), &single);
+    assert!(c.verdict.comparable && !c.verdict.statistically_supported);
+    assert_eq!(
+        c.rows.iter().find(|r| r.key == WALL).unwrap().assessment,
+        Assessment::InsufficientRepeats
+    );
+
+    let unavailable = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        memory: None,
+        ..Spec::default()
+    });
+    let c = analysis::compare(scenario, &result(&Spec::default()), &unavailable);
+    let memory = c.rows.iter().find(|r| r.key == MEMORY).unwrap();
+    assert!(memory.delta.is_none());
+    assert!(matches!(memory.assessment, Assessment::NotCompared { .. }));
+
+    let other = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        cpu: "Other",
+        ..Spec::default()
+    });
+    let c = analysis::compare(scenario, &result(&Spec::default()), &other);
+    assert!(!c.verdict.comparable);
+    assert!(c.rows.iter().all(|r| r.delta.is_none()));
+}
+
+/// Тело PR с разделом производительности проходит проверку репозитория.
+fn check_pr_body(section: &str) -> (bool, String) {
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/check_pr_body.py");
+    let body = ["Цель", "Область изменений", "Реализация", "Проверки"]
+        .iter()
+        .map(|h| format!("## {h}\nФактическое содержание раздела {h}.\n"))
+        .chain(std::iter::once(section.to_owned()))
+        .chain(
+            ["CI", "Готовность", "Ограничения"]
+                .iter()
+                .map(|h| format!("## {h}\nФактическое содержание раздела {h}.\n")),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    static BODY: AtomicUsize = AtomicUsize::new(0);
+    let file = std::env::temp_dir().join(format!(
+        "bh-body-{}-{}.md",
+        std::process::id(),
+        BODY.fetch_add(1, Ordering::SeqCst)
+    ));
+    fs::write(&file, &body).unwrap();
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg("--body-file")
+        .arg(&file)
+        .output();
+    let _ = fs::remove_file(&file);
+    // Как Hyperfine у benchmark-runner: локально без python3 проверка
+    // пропускается с сообщением, в CI его отсутствие — ошибка.
+    let output = match output {
+        Ok(output) => output,
+        Err(e) => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "в CI нужен python3 для check_pr_body.py: {e}"
+            );
+            eprintln!("ПРОПУСК: python3 недоступен ({e}), проверка PR body не выполнена");
+            return (true, String::new());
+        }
+    };
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn pr_reports_cover_first_comparable_missing_incomparable_and_unmeasured() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let base = result(&Spec::default());
+    let target = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.080, 0.081, 0.079],
+        memory: None,
+        ..Spec::default()
+    });
+    let other = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        cpu: "Other",
+        ..Spec::default()
+    });
+    let unsupported = result(&Spec {
+        wall: vec![],
+        memory: Some(vec![]),
+        outcome: OutcomeStatus::Unsupported,
+        ..Spec::default()
+    });
+    let id = "1".repeat(64);
+    let base_id = "2".repeat(64);
+
+    let first = report::pr_section(&[Item {
+        id: &id,
+        result: &target,
+        base: Base::First,
+    }]);
+    assert!(
+        first.contains("Статус: измерено") && first.contains("первое измерение"),
+        "{first}"
+    );
+    assert!(first.contains("`memory_peak_resident`"), "{first}");
+
+    // Объявленная версия входа — произвольный текст: многобайтные символы
+    // и короткое значение не ломают отчёт.
+    for version in ["версия-α", "v1", "ä".repeat(20).as_str()] {
+        let mut declared = target.clone();
+        declared.inputs[1].identity = Identity {
+            method: IdentityMethod::DeclaredVersion,
+            value: version.into(),
+        };
+        let section = report::pr_section(&[Item {
+            id: &id,
+            result: &declared,
+            base: Base::First,
+        }]);
+        let shown: String = version.chars().take(12).collect();
+        assert!(
+            section.contains(&format!("`declared-version` `{shown}`")),
+            "{section}"
+        );
+    }
+    assert!(
+        first
+            .contains("`memory_peak_resident@largest-process-in-tree` не измерена (`unavailable`)"),
+        "недоступная метрика видна: {first}"
+    );
+
+    let comparable = report::pr_section(&[Item {
+        id: &id,
+        result: &target,
+        base: Base::Chosen {
+            id: &base_id,
+            result: &base,
+            comparison: analysis::compare(scenario, &base, &target),
+            how: "указана явно".into(),
+            notes: vec![],
+        },
+    }]);
+    assert!(
+        comparable.contains("−20 %") && comparable.contains("лучше сверх разброса"),
+        "{comparable}"
+    );
+    assert!(comparable.contains("не является проверкой статистической значимости"));
+    assert!(comparable.contains(&base_id) && comparable.contains(&id));
+
+    let incomparable = report::pr_section(&[Item {
+        id: &id,
+        result: &other,
+        base: Base::Chosen {
+            id: &base_id,
+            result: &base,
+            comparison: analysis::compare(scenario, &base, &other),
+            how: "указана явно".into(),
+            notes: vec![],
+        },
+    }]);
+    assert!(
+        incomparable.contains("**несопоставимы**")
+            && incomparable.contains("вывод об изменении не делается"),
+        "{incomparable}"
+    );
+    assert!(!incomparable.contains("лучше сверх"));
+
+    let missing = report::pr_section(&[Item {
+        id: &id,
+        result: &target,
+        base: Base::Missing { reasons: vec![] },
+    }]);
+    assert!(
+        missing.contains("База: не найдена") && missing.contains("сравнение до/после не выполнено")
+    );
+
+    let unmeasured = report::pr_section(&[Item {
+        id: &id,
+        result: &unsupported,
+        base: Base::Missing { reasons: vec![] },
+    }]);
+    assert!(unmeasured.contains("Статус: не измерено"), "{unmeasured}");
+    assert!(unmeasured.contains("Hyperfine 2.x не найден"));
+    assert!(unmeasured.contains(report::NO_EVIDENCE));
+
+    for section in [&first, &comparable, &incomparable, &missing, &unmeasured] {
+        let (ok, stderr) = check_pr_body(section);
+        assert!(
+            ok,
+            "сгенерированный раздел отвергнут проверкой PR body: {stderr}\n{section}"
+        );
+    }
+}
+
+/// Более поздний результат с той же нагрузкой, что и `base`.
+fn newer_same_workload(base: &BenchmarkResult) -> BenchmarkResult {
+    let mut next = base.clone();
+    next.provenance.recorded_at = "2026-10-06T12:00:00Z".into();
+    next
+}
+
+const PAGE_RU: &str = "# Производительность: `fixture`\n\n**Русский** · [English](fixture.en.md) · [简体中文](fixture.zh-CN.md)\n\n## Снимки\n\n<!-- benchmark-snapshot:anchor -->\n\n## Методика\n\nТекст.\n";
+
+fn page(lang: &str, ru_sha: &str) -> String {
+    let nav = match lang {
+        "en" => "[Русский](fixture.md) · **English** · [简体中文](fixture.zh-CN.md)",
+        _ => "[Русский](fixture.md) · [English](fixture.en.md) · **简体中文**",
+    };
+    format!(
+        "# Performance: `fixture`\n\n{nav}\n<!-- i18n-source-git-blob: {ru_sha} -->\n\n## Snapshots\n\n<!-- benchmark-snapshot:anchor -->\n\n## Method\n\nText.\n"
+    )
+}
+
+#[test]
+fn snapshots_update_one_pair_and_guard_reference_environment() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let docs = f.root.join("workspace/docs");
+    let ru = docs.join("fixture.md");
+    fs::write(&ru, PAGE_RU).unwrap();
+    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
+    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
+    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
+    let options = Options::default();
+
+    let first = result(&Spec::default());
+    let plan = snapshot::plan(&ru, scenario, &first, &options).unwrap();
+    assert_eq!(plan.action, snapshot::Action::Added);
+    snapshot::apply(&plan).unwrap();
+    let text = fs::read_to_string(&ru).unwrap();
+    assert!(text.contains("### `fixture.cli` · профиль `warm`"));
+    assert!(
+        !text.contains(&"a".repeat(40)),
+        "коммит не попадает в документацию"
+    );
+    assert!(
+        !text.contains(&"d".repeat(64)),
+        "идентичность входа не попадает в документацию"
+    );
+    let new_sha = snapshot::git_blob_sha(text.as_bytes());
+    for lang in ["en", "zh-CN"] {
+        let translated = fs::read_to_string(docs.join(format!("fixture.{lang}.md"))).unwrap();
+        assert!(
+            translated.contains(&new_sha),
+            "{lang}: отметка перевода обновлена"
+        );
+        assert!(translated.contains("benchmark-snapshot: {"));
+    }
+    assert!(
+        fs::read_to_string(docs.join("fixture.en.md"))
+            .unwrap()
+            .contains("Last confirmed measurement")
+    );
+    assert!(
+        fs::read_to_string(docs.join("fixture.zh-CN.md"))
+            .unwrap()
+            .contains("最近一次确认的测量：")
+    );
+
+    // Повтор того же результата ничего не меняет.
+    assert_eq!(
+        snapshot::plan(&ru, scenario, &first, &options)
+            .unwrap()
+            .action,
+        snapshot::Action::Unchanged
+    );
+    // Страница с CRLF: повтор тоже без изменений, вставка сохраняет CRLF.
+    let lf = fs::read_to_string(&ru).unwrap();
+    fs::write(&ru, lf.replace('\n', "\r\n")).unwrap();
+    assert_eq!(
+        snapshot::plan(&ru, scenario, &first, &options)
+            .unwrap()
+            .action,
+        snapshot::Action::Unchanged
+    );
+    let mut other = first.clone();
+    other.profile.id = "crlf".into();
+    let plan = snapshot::plan(&ru, scenario, &other, &options).unwrap();
+    assert_eq!(plan.action, snapshot::Action::Added);
+    let crlf = &plan.pages[0].after;
+    assert_eq!(crlf.matches('\n').count(), crlf.matches("\r\n").count());
+    fs::write(&ru, lf).unwrap();
+
+    // Новый результат того же окружения заменяет блок той же пары.
+    let newer = result(&Spec {
+        recorded_at: "2026-10-05T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.05, 0.05],
+        memory: Some(vec![1.0, 1.0]),
+        ..Spec::default()
+    });
+    let plan = snapshot::plan(&ru, scenario, &newer, &options).unwrap();
+    assert_eq!(plan.action, snapshot::Action::Replaced);
+    snapshot::apply(&plan).unwrap();
+    let text = fs::read_to_string(&ru).unwrap();
+    assert_eq!(text.matches("benchmark-snapshot: {").count(), 1);
+    assert!(text.contains("2026-10-05") && !text.contains("2026-10-01"));
+    assert!(
+        text.contains("## Методика"),
+        "остальная страница не тронута"
+    );
+
+    // Более старый результат не заменяет более новый.
+    assert!(
+        snapshot::plan(&ru, scenario, &first, &options)
+            .unwrap_err()
+            .contains("более новое")
+    );
+    // Другое окружение не заменяет эталон без явного подтверждения.
+    let elsewhere = result(&Spec {
+        recorded_at: "2026-10-06T10:00:00Z",
+        commit: 'c',
+        cpu: "Laptop CPU",
+        ..Spec::default()
+    });
+    let refused = snapshot::plan(&ru, scenario, &elsewhere, &options).unwrap_err();
+    assert!(refused.contains("другом эталонном окружении"), "{refused}");
+    let replace = Options {
+        replace_environment: true,
+        ..Options::default()
+    };
+    assert_eq!(
+        snapshot::plan(&ru, scenario, &elsewhere, &replace)
+            .unwrap()
+            .action,
+        snapshot::Action::Replaced
+    );
+    // Нагрузка другого объёма не заменяет эталон без явного подтверждения.
+    let mut larger = result(&Spec {
+        recorded_at: "2026-10-06T10:00:00Z",
+        commit: 'c',
+        ..Spec::default()
+    });
+    larger.inputs[1].size.get_mut("bytes").unwrap().value = 8.0;
+    let refused = snapshot::plan(&ru, scenario, &larger, &options).unwrap_err();
+    assert!(refused.contains("--replace-workload"), "{refused}");
+    let replace = Options {
+        replace_workload: true,
+        ..Options::default()
+    };
+    assert_eq!(
+        snapshot::plan(&ru, scenario, &larger, &replace)
+            .unwrap()
+            .action,
+        snapshot::Action::Replaced
+    );
+    // Маркер, записанный до появления объёма нагрузки, читается и не сверяется.
+    let pages: Vec<PathBuf> = ["fixture.md", "fixture.en.md", "fixture.zh-CN.md"]
+        .iter()
+        .map(|name| docs.join(name))
+        .collect();
+    let current: Vec<String> = pages
+        .iter()
+        .map(|path| fs::read_to_string(path).unwrap())
+        .collect();
+    for (path, text) in pages.iter().zip(&current) {
+        let legacy = text
+            .split('\n')
+            .map(
+                |line| match line.strip_prefix("<!-- benchmark-snapshot: ") {
+                    Some(rest) => {
+                        let mut meta: serde_json::Value =
+                            serde_json::from_str(rest.strip_suffix(" -->").unwrap()).unwrap();
+                        assert!(meta.as_object_mut().unwrap().remove("workload").is_some());
+                        format!("<!-- benchmark-snapshot: {meta} -->")
+                    }
+                    None => line.to_owned(),
+                },
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, legacy).unwrap();
+    }
+    // Маркер прежнего формата читается, но неизвестная нагрузка совпадающей не
+    // считается: и другая, и та же нагрузка требуют явного подтверждения.
+    for candidate in [&larger, &newer_same_workload(&newer)] {
+        let refused = snapshot::plan(&ru, scenario, candidate, &options).unwrap_err();
+        assert!(
+            refused.contains("маркер прежнего формата") && refused.contains("--replace-workload"),
+            "{refused}"
+        );
+    }
+    let replace = Options {
+        replace_workload: true,
+        ..Options::default()
+    };
+    let plan = snapshot::plan(&ru, scenario, &larger, &replace).unwrap();
+    assert_eq!(plan.action, snapshot::Action::Replaced);
+    assert!(
+        plan.pages[0].block.contains("\"workload\":{"),
+        "после подтверждённой замены маркер записывает нагрузку"
+    );
+    for (path, text) in pages.iter().zip(&current) {
+        fs::write(path, text).unwrap();
+    }
+    // Неполная серия и изменённая рабочая копия не публикуются.
+    let partial = result(&Spec {
+        recorded_at: "2026-10-07T10:00:00Z",
+        failed_runs: 1,
+        outcome: OutcomeStatus::Partial,
+        ..Spec::default()
+    });
+    assert!(
+        snapshot::plan(&ru, scenario, &partial, &options)
+            .unwrap_err()
+            .contains("успешной серии")
+    );
+    let dirty = result(&Spec {
+        recorded_at: "2026-10-07T10:00:00Z",
+        dirty: true,
+        ..Spec::default()
+    });
+    assert!(
+        snapshot::plan(&ru, scenario, &dirty, &options)
+            .unwrap_err()
+            .contains("--allow-dirty")
+    );
+    // Другой сценарий или профиль добавляется рядом и прежний блок не трогает.
+    let mut other_profile = result(&Spec {
+        recorded_at: "2026-10-07T10:00:00Z",
+        ..Spec::default()
+    });
+    other_profile.profile.id = "cold".into();
+    let plan = snapshot::plan(&ru, scenario, &other_profile, &options).unwrap();
+    assert_eq!(plan.action, snapshot::Action::Added);
+    snapshot::apply(&plan).unwrap();
+    let text = fs::read_to_string(&ru).unwrap();
+    assert_eq!(text.matches("benchmark-snapshot: {").count(), 2);
+    assert!(text.contains("2026-10-05"));
+}
+
+#[test]
+fn cli_end_to_end_with_isolated_store() {
+    let f = fixture();
+    let dir = f.root.join("results");
+    fs::create_dir_all(dir.join("run-1")).unwrap();
+    fs::create_dir_all(dir.join("run-2")).unwrap();
+    fs::write(
+        dir.join("run-1/result.json"),
+        serde_json::to_string_pretty(&result(&Spec::default())).unwrap(),
+    )
+    .unwrap();
+    fs::write(dir.join("run-1/summary.json"), "{\"ok\": true}").unwrap();
+    fs::write(dir.join("run-1/result.rejected.json"), "{}").unwrap();
+    let target = result(&Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        wall: vec![0.08, 0.081, 0.079],
+        ..Spec::default()
+    });
+    fs::write(
+        dir.join("run-2/result.json"),
+        serde_json::to_string_pretty(&target).unwrap(),
+    )
+    .unwrap();
+
+    // Ссылка на предка внутри обхода не повторяет обход дерева.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&dir, dir.join("run-1/loop")).unwrap();
+
+    let (code, out, err) = f.cli(&["import", dir.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert_eq!(out.matches("принят").count(), 2, "{out}");
+    assert_eq!(out.matches("уже есть").count(), 0, "{out}");
+    let (code, out, _) = f.cli(&["import", dir.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert_eq!(out.matches("уже есть").count(), 2, "{out}");
+
+    let (code, out, _) = f.cli(&[
+        "--json",
+        "list",
+        "--scenario",
+        "fixture.cli",
+        "--since",
+        "2026-10-02",
+    ]);
+    assert_eq!(code, 0);
+    let rows: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(rows["results"].as_array().unwrap().len(), 1);
+    let target_id = rows["results"][0]["id"].as_str().unwrap().to_owned();
+    let (_, out, _) = f.cli(&["--json", "list", "--env", "cpu_model=Other"]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let (_, out, _) = f.cli(&["--json", "list", "--input", "dddd", "--outcome", "success"]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Префиксы сравниваются буквально: `%` и `_` не шаблоны LIKE.
+    for args in [["--commit", "%"], ["--input", "_"]] {
+        let (_, out, _) = f.cli(&["--json", "list", args[0], args[1]]);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "{args:?}"
+        );
+    }
+
+    let (code, out, _) = f.cli(&["baseline", &target_id[..8]]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out, _) = f.cli(&["report", &target_id[..8]]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("выбрана автоматически") && out.contains("−20 %"),
+        "{out}"
+    );
+    let (ok, stderr) = check_pr_body(&out);
+    assert!(ok, "{stderr}");
+    // Подходящая база, отсечённая только `--commit`, называется с причиной.
+    let (_, out, _) = f.cli(&["report", &target_id[..8], "--commit", "ccc"]);
+    assert!(
+        out.contains("с коммитом, начинающимся с «ccc»")
+            && out.contains("коммит не начинается с «ccc»"),
+        "{out}"
+    );
+    // Явная база не может совпадать с проверяемым результатом.
+    let (code, _, err) = f.cli(&["report", &target_id[..8], "--baseline", &target_id[..8]]);
+    assert_eq!(code, 2);
+    assert!(err.contains("совпадает с проверяемым"), "{err}");
+    let (code, out, _) = f.cli(&["report", &target_id[..8], "--first"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("новая функциональность"));
+
+    let (code, out, _) = f.cli(&["verify"]);
+    assert_eq!(code, 0, "{out}");
+    // verify не создаёт хранилище по опечатке в пути.
+    let missing = f.root.join("missing-store");
+    let (code, _, err) = f.cli(&["--store", missing.to_str().unwrap(), "verify"]);
+    assert_eq!(code, 3, "{err}");
+    assert!(err.contains("нет"), "{err}");
+    assert!(!missing.exists());
+    let (code, _, err) = f.cli(&["--store", missing.to_str().unwrap(), "reindex"]);
+    assert_eq!(
+        code, 3,
+        "недоступное хранилище — код 3, как у verify: {err}"
+    );
+    let (code, _, _) = f.cli(&["show", "zz"]);
+    assert_eq!(code, 2);
+
+    // Каталог без результатов — код 2 и ровно один JSON-документ в stdout.
+    let empty = f.root.join("empty-results");
+    fs::create_dir_all(&empty).unwrap();
+    fs::write(empty.join("notes.txt"), "не результат").unwrap();
+    let (code, out, _) = f.cli(&["--json", "import", empty.to_str().unwrap()]);
+    assert_eq!(code, 2);
+    let mut documents = serde_json::Deserializer::from_str(&out).into_iter::<serde_json::Value>();
+    let only = documents.next().unwrap().unwrap();
+    assert_eq!(only["ok"], false, "{out}");
+    assert!(documents.next().is_none(), "{out}");
+
+    // Отвергнутый документ — код 4, и в хранилище ничего не добавлено.
+    let bad = f.root.join("bad.json");
+    fs::write(&bad, "{\"schema_version\": 1}").unwrap();
+    let (code, _, err) = f.cli(&["import", bad.to_str().unwrap()]);
+    assert_eq!(code, 4, "{err}");
+
+    // Хранилище внутри рабочей копии репозитория отвергается.
+    let output = Command::new(BIN)
+        .arg("--catalog")
+        .arg(f.catalog_dir())
+        .args([
+            "--store",
+            f.root.join("workspace/history").to_str().unwrap(),
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!f.root.join("workspace/history").exists());
+
+    let resolved = location::resolve_with(None, &|name| {
+        (name == "HOME").then(|| "/home/someone".into())
+    })
+    .unwrap();
+    assert!(resolved.root.ends_with(location::DATA_SUBDIR));
+    assert!(index::bound("2026-13-01", false).is_err());
+}
+
+#[test]
+fn baseline_requires_proven_different_code() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let mut store = f.open();
+    let target_spec = Spec {
+        recorded_at: "2026-10-09T10:00:00Z",
+        commit: 'f',
+        ..Spec::default()
+    };
+    let target_id = f.import(&mut store, &result(&target_spec));
+    // Тот же коммит без записанного дерева: повтор измерения, а не «до».
+    let same_commit = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-01T10:00:00Z",
+            commit: 'f',
+            tree: false,
+            ..Spec::default()
+        }),
+    );
+    // Дерево неизвестно, а состояние рабочей копии не записано: отличие не доказано.
+    let unknown = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-02T10:00:00Z",
+            commit: 'a',
+            tree: false,
+            state: false,
+            ..Spec::default()
+        }),
+    );
+    // Разные коммиты, оба без изменений, дерево записано не в обоих: отличие доказано с оговоркой.
+    let other_commit = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-03T10:00:00Z",
+            commit: 'b',
+            tree: false,
+            ..Spec::default()
+        }),
+    );
+    // Тот же коммит, изменённая рабочая копия, деревьев нет: тоже не доказано.
+    let dirty_same = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-04T10:00:00Z",
+            commit: 'f',
+            tree: false,
+            dirty: true,
+            ..Spec::default()
+        }),
+    );
+    // Одинаковые деревья — повтор независимо от коммитов.
+    let same_tree = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-05T10:00:00Z",
+            commit: 'f',
+            ..Spec::default()
+        }),
+    );
+    let ids = [
+        same_commit.clone(),
+        unknown.clone(),
+        other_commit.clone(),
+        dirty_same.clone(),
+        same_tree.clone(),
+    ];
+    let list = analysis::candidates(
+        scenario,
+        &target_id,
+        &result(&target_spec),
+        &pool(&store, &ids),
+    );
+    let find = |id: &str| list.iter().find(|c| c.id == id).unwrap();
+    let says = |id: &str, text: &str| find(id).reasons.iter().any(|r| r.contains(text));
+    assert!(says(&same_commit, "тот же коммит без изменений"));
+    assert!(says(&unknown, "отличие исходного кода не доказано"));
+    assert!(says(&dirty_same, "отличие исходного кода не доказано"));
+    assert!(says(&same_tree, "тот же исходный код"));
+    assert!(find(&other_commit).eligible);
+    assert!(
+        find(&other_commit)
+            .notes
+            .iter()
+            .any(|n| n.contains("только разными коммитами"))
+    );
+    assert_eq!(analysis::choose(&list, None).unwrap().id, other_commit);
+    drop(store);
+
+    // CLI называет причины, а явная база вне правила видна в отчёте.
+    let (code, out, _) = f.cli(&["baseline", &target_id[..12]]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("не подходит: тот же коммит без изменений"),
+        "{out}"
+    );
+    assert!(
+        out.contains("не подходит: отличие исходного кода не доказано"),
+        "{out}"
+    );
+    assert!(out.contains(&format!("база: {other_commit}")), "{out}");
+    let (code, out, _) = f.cli(&["report", &target_id[..12], "--baseline", &same_commit[..12]]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("указана явно")
+            && out.contains("не соответствует правилу автоматического выбора — тот же коммит"),
+        "{out}"
+    );
+    // База, равная проверяемому результату, отвергается и в report, и в compare.
+    let (code, _, err) = f.cli(&["report", &target_id[..12], "--baseline", &target_id[..12]]);
+    assert_eq!(code, 2, "{err}");
+    let (code, _, err) = f.cli(&["compare", &target_id[..12], &target_id[..12]]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("совпадает с проверяемым"), "{err}");
+}
+
+/// Каталог, отмеченный как рабочая копия Git: настоящий `git init`, если Git
+/// доступен, иначе каталог `.git` — проверка опирается только на него.
+fn git_repository(path: &Path) {
+    fs::create_dir_all(path).unwrap();
+    let initialized = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(path)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !initialized {
+        fs::create_dir_all(path.join(".git")).unwrap();
+    }
+}
+
+#[test]
+fn store_inside_git_is_refused_from_any_directory() {
+    let f = fixture();
+    let repo = f.root.join("repo");
+    git_repository(&repo);
+    fs::create_dir_all(repo.join("sub")).unwrap();
+    let outside = f.root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let run = |args: &[&str], env: Option<&Path>| {
+        let mut command = Command::new(BIN);
+        command
+            .args(args)
+            .current_dir(&outside)
+            .env_remove("BENCHMARK_HISTORY_DIR")
+            .env("XDG_DATA_HOME", f.root.join("xdg"));
+        if let Some(path) = env {
+            command.env("BENCHMARK_HISTORY_DIR", path);
+        }
+        let output = command.output().unwrap();
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let nested = repo.join("sub/./new/history");
+    let nested = nested.to_str().unwrap();
+    let missing_catalog = f.root.join("no-catalog");
+    fs::create_dir_all(&missing_catalog).unwrap();
+    // Каталога сценариев нет выше текущего каталога, либо --catalog некорректен.
+    for args in [
+        vec!["--store", nested, "list"],
+        vec!["--store", nested, "status"],
+        vec!["--store", nested, "reindex"],
+        vec![
+            "--store",
+            nested,
+            "--catalog",
+            missing_catalog.to_str().unwrap(),
+            "list",
+        ],
+    ] {
+        let (code, err) = run(&args, None);
+        assert_eq!(code, 2, "{args:?}: {err}");
+        assert!(err.contains("внутри рабочей копии Git"), "{err}");
+    }
+    let (code, err) = run(&["list"], Some(Path::new(nested)));
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("внутри рабочей копии Git"), "{err}");
+    // Корень репозитория и путь через символическую ссылку тоже внутри.
+    let (code, _) = run(&["--store", repo.to_str().unwrap(), "list"], None);
+    assert_eq!(code, 2);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(repo.join("sub"), f.root.join("link")).unwrap();
+        let via_link = f.root.join("link/history");
+        let (code, _) = run(&["--store", via_link.to_str().unwrap(), "list"], None);
+        assert_eq!(code, 2);
+    }
+    assert!(
+        !repo.join("sub/new").exists(),
+        "после отказа ничего не создано"
+    );
+    let untracked = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&repo)
+        .output();
+    if let Ok(status) = untracked
+        && status.status.success()
+    {
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout),
+            "",
+            "в git status нет данных истории"
+        );
+    }
+    // Абсолютный путь и XDG вне Git работают из того же каталога.
+    let elsewhere = f.root.join("elsewhere/history");
+    let (code, err) = run(&["--store", elsewhere.to_str().unwrap(), "list"], None);
+    assert_eq!(code, 0, "{err}");
+    assert!(elsewhere.join("store.json").is_file());
+    let (code, err) = run(&["list"], None);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        f.root
+            .join("xdg/anki-deck-toolkit/benchmark-history/store.json")
+            .is_file()
+    );
+    // Резервная копия в рабочую копию Git тоже не пишется.
+    let (code, err) = run(
+        &[
+            "--store",
+            elsewhere.to_str().unwrap(),
+            "backup",
+            repo.join("sub/backup").to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(!repo.join("sub/backup").exists());
+}
+
+#[test]
+fn restore_checks_backup_inventory() {
+    let f = fixture();
+    let mut store = f.open();
+    let a = f.import(&mut store, &result(&Spec::default()));
+    let b = f.import(
+        &mut store,
+        &result(&Spec {
+            recorded_at: "2026-10-02T10:00:00Z",
+            commit: 'b',
+            ..Spec::default()
+        }),
+    );
+    let backup = f.root.join("backup");
+    assert_eq!(store.backup(&backup).unwrap(), 2);
+    let copy = |name: &str| {
+        let target = f.root.join(name);
+        copy_tree(&backup, &target);
+        target
+    };
+
+    // Нормальный перенос и идемпотентный повтор.
+    let mut other = Store::open(&f.root.join("other")).unwrap();
+    let restored = other.restore(&backup).unwrap();
+    assert!(restored.complete && restored.expected == 2 && restored.added.len() == 2);
+    let again = other.restore(&backup).unwrap();
+    assert!(again.complete);
+    assert_eq!((again.added.len(), again.present.len()), (0, 2));
+    assert_eq!(other.index().count().unwrap(), 2);
+
+    // Повреждённая локальная копия заменяется проверенной из резервной, а
+    // прежний файл откладывается; остальные записи обрабатываются.
+    let damaged = f.root.join("other").join(archive::relative_path(&a));
+    fs::write(&damaged, "{испорчено").unwrap();
+    let repaired = other.restore(&backup).unwrap();
+    assert!(repaired.complete, "{:?}", repaired.problems);
+    assert_eq!(repaired.replaced, vec![a.clone()]);
+    assert_eq!(repaired.present, vec![b.clone()]);
+    assert_eq!(
+        archive::content_id(&fs::read_to_string(&damaged).unwrap()).unwrap(),
+        a
+    );
+    let aside: Vec<_> = fs::read_dir(f.root.join("other").join(archive::CORRUPT_DIR))
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(aside, vec!["{испорчено".to_owned()]);
+    assert!(other.verify().unwrap().problems.is_empty());
+
+    // Пропавшая запись: исправная принимается, перенос не полный.
+    let lost = copy("lost");
+    fs::remove_file(lost.join(archive::relative_path(&b))).unwrap();
+    let mut third = Store::open(&f.root.join("third")).unwrap();
+    let restored = third.restore(&lost).unwrap();
+    assert!(!restored.complete);
+    assert_eq!(restored.added, vec![a.clone()]);
+    assert_eq!(restored.missing, vec![b.clone()]);
+    drop(third);
+    let cli = |source: &Path, store: &str| {
+        let output = Command::new(BIN)
+            .args(["restore", source.to_str().unwrap()])
+            .env("BENCHMARK_HISTORY_DIR", f.root.join(store))
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    };
+    let (code, out) = cli(&lost, "cli-lost");
+    assert_eq!(code, 4, "{out}");
+    assert!(
+        out.contains("перенесена не полностью") && out.contains("файла в копии нет"),
+        "{out}"
+    );
+
+    // Повреждённая запись не принимается, и перенос не полный.
+    let damaged = copy("damaged");
+    let path = damaged.join(archive::relative_path(&a));
+    let text = fs::read_to_string(&path).unwrap().replace("0.098", "0.001");
+    fs::write(&path, text).unwrap();
+    let restored = Store::open(&f.root.join("fourth"))
+        .unwrap()
+        .restore(&damaged)
+        .unwrap();
+    assert!(!restored.complete);
+    assert_eq!(restored.added, vec![b.clone()]);
+
+    // Запись, которой нет в инвентаре, не принимается.
+    let shrunk = copy("shrunk");
+    let manifest_path = shrunk.join("backup.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["results"] = serde_json::json!([a.clone()]);
+    fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let restored = Store::open(&f.root.join("fifth"))
+        .unwrap()
+        .restore(&shrunk)
+        .unwrap();
+    assert!(!restored.complete);
+    assert_eq!(restored.added, vec![a.clone()]);
+    assert!(
+        restored
+            .problems
+            .iter()
+            .any(|p| p.item == b && p.reason.contains("не перечислена"))
+    );
+
+    // Без манифеста, с другой версией, повтором или мусором — это не резервная копия.
+    let broken = copy("broken");
+    let manifest_path = broken.join("backup.json");
+    let original = fs::read_to_string(&manifest_path).unwrap();
+    let variants = [
+        None,
+        Some(original.replace("\"archive_version\": 1", "\"archive_version\": 2")),
+        Some(original.replace(&b, &a)),
+        Some("{\"format\": ".into()),
+    ];
+    for variant in variants {
+        match &variant {
+            Some(text) => fs::write(&manifest_path, text).unwrap(),
+            None => fs::remove_file(&manifest_path).unwrap(),
+        }
+        let mut target = Store::open(&f.root.join("sixth")).unwrap();
+        assert!(
+            matches!(target.restore(&broken), Err(Error::Usage(_))),
+            "{variant:?}"
+        );
+        assert_eq!(target.index().count().unwrap(), 0, "ничего не принято");
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn index_projection_is_checked_and_rebuilt_from_archive() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let mut store = f.open();
+    let base = f.import(&mut store, &result(&Spec::default()));
+    let target_spec = Spec {
+        recorded_at: "2026-10-02T10:00:00Z",
+        commit: 'b',
+        ..Spec::default()
+    };
+    let target = f.import(&mut store, &result(&target_spec));
+    drop(store);
+    let archive_bytes = || -> Vec<Vec<u8>> {
+        [&base, &target]
+            .iter()
+            .map(|id| fs::read(f.store().join(archive::relative_path(id))).unwrap())
+            .collect()
+    };
+    let before = archive_bytes();
+    let index_path = f.store().join("index.sqlite");
+
+    // quick_check = ok и текущая версия, но таблицы results нет.
+    {
+        let conn = rusqlite_connection(&index_path);
+        conn.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE results;")
+            .unwrap();
+        let check: String = conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((check.as_str(), version), ("ok", index::SCHEMA_VERSION));
+    }
+    let store = f.open();
+    assert_eq!(store.index().count().unwrap(), 2);
+    assert!(
+        store
+            .opened_sync()
+            .notes
+            .iter()
+            .any(|n| n.contains("не совпадает с ожидаемой") && n.contains("results")),
+        "{:?}",
+        store.opened_sync().notes
+    );
+    drop(store);
+
+    // Подмена scenario_id у существующего ID: строка перестраивается из архива,
+    // и база снова находится в серии.
+    {
+        let conn = rusqlite_connection(&index_path);
+        conn.execute(
+            "UPDATE results SET scenario_id = 'fixture.other' WHERE id = ?1",
+            [&base],
+        )
+        .unwrap();
+    }
+    let store = f.open();
+    assert_eq!(store.opened_sync().repaired, vec![base.clone()]);
+    assert_eq!(
+        store.index().series("fixture.cli", "warm").unwrap().len(),
+        2
+    );
+    let ids = store.index().series("fixture.cli", "warm").unwrap();
+    let list = analysis::candidates(
+        scenario,
+        &target,
+        &result(&target_spec),
+        &pool(&store, &ids),
+    );
+    assert_eq!(analysis::choose(&list, None).unwrap().id, base);
+    assert!(store.verify().unwrap().index_problems.is_empty());
+
+    // Порча строки при открытом хранилище видна полной сверке verify.
+    {
+        let conn = rusqlite_connection(&index_path);
+        conn.execute(
+            "UPDATE metrics SET mean = 1.0 WHERE result_id = ?1",
+            [&target],
+        )
+        .unwrap();
+    }
+    let report = store.verify().unwrap();
+    assert!(report.problems.is_empty(), "архив цел");
+    assert_eq!(report.index_problems.len(), 1);
+    assert_eq!(report.index_problems[0].item, target);
+    drop(store);
+    // Открытие перестраивает строку до сверки, но verify не выдаёт это за
+    // целый индекс: исправление видно, код 1; следующая проверка — чистая.
+    let (code, out, err) = f.cli(&["verify"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("индекс исправлен при открытии"), "{out}");
+    assert!(!out.contains("индекс совпадает с архивом"), "{out}");
+    assert!(err.contains(&target), "{err}");
+    let (code, out, _) = f.cli(&["verify"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("индекс совпадает с архивом"), "{out}");
+    {
+        let conn = rusqlite_connection(&index_path);
+        conn.execute(
+            "UPDATE metrics SET mean = 1.0 WHERE result_id = ?1",
+            [&target],
+        )
+        .unwrap();
+    }
+    let (code, out, _) = f.cli(&["--json", "verify"]);
+    assert_eq!(code, 1, "{out}");
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["opened_sync"]["repaired"][0], target.as_str());
+
+    // Устаревшая схема мигрирует, более новая — отказ с поддерживаемым reindex.
+    {
+        let conn = rusqlite_connection(&index_path);
+        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+    }
+    let store = f.open();
+    assert!(
+        store
+            .opened_sync()
+            .notes
+            .iter()
+            .any(|n| n.contains("устарела"))
+    );
+    assert_eq!(store.index().count().unwrap(), 2);
+    drop(store);
+    {
+        let conn = rusqlite_connection(&index_path);
+        conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+    }
+    assert!(matches!(Store::open(&f.store()), Err(Error::Store(m)) if m.contains("более новой")));
+    let (code, out, _) = f.cli(&["reindex"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(f.open().verify().unwrap().index_problems.is_empty());
+    assert_eq!(archive_bytes(), before, "архив не переписан");
+}
+
+#[test]
+fn snapshot_reference_hardware_is_separate_from_comparability() {
+    let f = fixture();
+    let catalog = f.catalog();
+    // Процессор записывается, но не входит в условие сопоставимости.
+    let mut scenario = catalog.scenario("fixture.cli").unwrap().scenario.clone();
+    scenario
+        .environment
+        .comparable
+        .retain(|name| name != "cpu_model");
+    let docs = f.root.join("workspace/docs");
+    let ru = docs.join("fixture.md");
+    fs::write(&ru, PAGE_RU).unwrap();
+    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
+    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
+    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
+    let options = Options::default();
+    let first = result(&Spec::default());
+    snapshot::apply(&snapshot::plan(&ru, &scenario, &first, &options).unwrap()).unwrap();
+    let published = fs::read_to_string(&ru).unwrap();
+    assert!(
+        published.contains("| `memory_total_bytes` ★ |"),
+        "{published}"
+    );
+
+    let later = |spec: Spec| {
+        result(&Spec {
+            recorded_at: "2026-10-03T10:00:00Z",
+            commit: 'c',
+            ..spec
+        })
+    };
+    let cases = [
+        (
+            "другой процессор",
+            later(Spec {
+                cpu: "Other CPU",
+                ..Spec::default()
+            }),
+        ),
+        (
+            "другая память",
+            later(Spec {
+                ram: Some("8589934592"),
+                ..Spec::default()
+            }),
+        ),
+        (
+            "WSL2 вместо Linux",
+            later(Spec {
+                virtualization: "wsl2",
+                ..Spec::default()
+            }),
+        ),
+    ];
+    for (name, candidate) in &cases {
+        // Для сопоставимости процессор и память не важны…
+        if *name != "WSL2 вместо Linux" {
+            assert!(
+                benchmark_contract::comparability::compare(&scenario, &first, candidate).comparable,
+                "{name}"
+            );
+        }
+        // …но публичный эталон другой машины молча не заменяет.
+        let refused = snapshot::plan(&ru, &scenario, candidate, &options).unwrap_err();
+        assert!(
+            refused.contains("--replace-environment"),
+            "{name}: {refused}"
+        );
+        assert_eq!(fs::read_to_string(&ru).unwrap(), published, "{name}");
+    }
+    // Неизвестный обязательный факт совпадающим не считается.
+    let unknown = later(Spec {
+        ram: None,
+        ..Spec::default()
+    });
+    let refused = snapshot::plan(&ru, &scenario, &unknown, &options).unwrap_err();
+    assert!(
+        refused.contains("memory_total_bytes неизвестен"),
+        "{refused}"
+    );
+    // Прежний маркер без аппаратного факта: совпадение не доказано.
+    let legacy = published.replace(",\"memory_total_bytes\":\"17179869184\"", "");
+    assert_ne!(legacy, published);
+    fs::write(&ru, &legacy).unwrap();
+    let same = later(Spec::default());
+    let refused = snapshot::plan(&ru, &scenario, &same, &options).unwrap_err();
+    assert!(
+        refused.contains("не записаны memory_total_bytes"),
+        "{refused}"
+    );
+    fs::write(&ru, &published).unwrap();
+    // Та же машина обновляет снимок, явная замена эталона разрешена.
+    assert_eq!(
+        snapshot::plan(&ru, &scenario, &same, &options)
+            .unwrap()
+            .action,
+        snapshot::Action::Replaced
+    );
+    let replace = Options {
+        replace_environment: true,
+        ..Options::default()
+    };
+    let plan = snapshot::plan(&ru, &scenario, &cases[0].1, &replace).unwrap();
+    snapshot::apply(&plan).unwrap();
+    assert!(fs::read_to_string(&ru).unwrap().contains("Other CPU"));
+}
+
+#[test]
+fn snapshot_pages_stay_consistent_when_a_write_fails() {
+    let f = fixture();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
+    let docs = f.root.join("workspace/docs");
+    let ru = docs.join("fixture.md");
+    // Русская страница с CRLF и соседним блоком другого профиля.
+    fs::write(&ru, PAGE_RU.replace('\n', "\r\n")).unwrap();
+    let sha = snapshot::git_blob_sha(fs::read(&ru).unwrap().as_slice());
+    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
+    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
+    let options = Options::default();
+    let mut neighbour = result(&Spec::default());
+    neighbour.profile.id = "cold".into();
+    snapshot::apply(&snapshot::plan(&ru, scenario, &neighbour, &options).unwrap()).unwrap();
+    let paths: Vec<PathBuf> = ["fixture.md", "fixture.en.md", "fixture.zh-CN.md"]
+        .iter()
+        .map(|n| docs.join(n))
+        .collect();
+    let read = || -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| fs::read_to_string(p).unwrap())
+            .collect()
+    };
+    let leftovers = || {
+        fs::read_dir(&docs)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count()
+    };
+    let before = read();
+    let plan = snapshot::plan(&ru, scenario, &result(&Spec::default()), &options).unwrap();
+    let fail_at = |target: snapshot::Step| {
+        move |step: snapshot::Step| {
+            if step == target {
+                Err(std::io::Error::other("внедрённый отказ"))
+            } else {
+                Ok(())
+            }
+        }
+    };
+    use snapshot::Step::{Commit, Prepare, Restore};
+    for target in [Prepare(1), Prepare(2), Commit(1), Commit(2)] {
+        let error = snapshot::apply_with(&plan, &mut fail_at(target)).unwrap_err();
+        assert!(
+            error.contains("страницы не изменены"),
+            "{target:?}: {error}"
+        );
+        assert_eq!(read(), before, "{target:?}: все три страницы прежние");
+        assert_eq!(leftovers(), 0, "{target:?}: временных файлов нет");
+    }
+    // Не удался и возврат: ошибка называет рассогласованные страницы.
+    let mut faults = [Commit(2), Restore(1)].into_iter().collect::<Vec<_>>();
+    let error = snapshot::apply_with(&plan, &mut |step| {
+        if let Some(n) = faults.iter().position(|s| *s == step) {
+            faults.remove(n);
+            Err(std::io::Error::other("внедрённый отказ"))
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert!(error.contains("рассогласованы"), "{error}");
+    assert!(
+        error.contains("fixture.en.md") && error.contains("fixture.zh-CN.md"),
+        "{error}"
+    );
+    for (path, text) in paths.iter().zip(&before) {
+        fs::write(path, text).unwrap();
+    }
+    // Страница, изменённая после подготовки плана, не перезаписывается.
+    fs::write(&paths[2], format!("{}\nправка", before[2])).unwrap();
+    let error = snapshot::apply(&plan).unwrap_err();
+    assert!(error.contains("изменилась после подготовки"), "{error}");
+    fs::write(&paths[2], &before[2]).unwrap();
+    // Успешное обновление: CRLF, отметки i18n и соседний блок сохранены.
+    snapshot::apply(&plan).unwrap();
+    let after = read();
+    assert_eq!(
+        after[0].matches('\n').count(),
+        after[0].matches("\r\n").count()
+    );
+    let new_sha = snapshot::git_blob_sha(after[0].as_bytes());
+    for text in &after[1..] {
+        assert!(text.contains(&format!("i18n-source-git-blob: {new_sha} -->")));
+        assert_eq!(text.matches("benchmark-snapshot: {").count(), 2);
+    }
+    assert!(after[0].contains("профиль `cold`") && after[0].contains("профиль `warm`"));
+}

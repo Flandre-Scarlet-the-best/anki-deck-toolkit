@@ -1,9 +1,9 @@
 # 性能：`anki-e2e`
 
 [Русский](anki-e2e.md) · [English](anki-e2e.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 599f34cf2b900545270b22aae03d3e257c8d0c1a -->
+<!-- i18n-source-git-blob: 93ac0e760305500a1730c73beb7027b195717cef -->
 
-Anki Desktop E2E 测试台的性能与资源消耗日志（[测试台契约](../../tools/anki-e2e/README.zh-CN.md)）。
+Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](../../tools/anki-e2e/README.zh-CN.md)）。
 通用测量规则和来源精度见[方法说明](README.zh-CN.md)。
 
 ## 测量内容
@@ -56,7 +56,18 @@ docker image ls --filter label=io.github.anki-deck-toolkit.e2e=1
 docker system df -v
 ```
 
-## 日志
+## 快照
+
+下面的块由 `benchmark-history snapshot` 根据参考环境中经过验证的
+`benchmark-runner` 结果生成；如果没有块，说明尚无确认的快照。
+
+<!-- benchmark-snapshot:anchor -->
+
+## 无原始 JSON 的手动观测
+
+下面的观测是在本地历史出现之前手动记录的。它没有原始 JSON 结果：不是已确认的快照，其数值
+不与 `benchmark-history` 的结果比较，也不作为基线。它在出现相同条件的首个确认快照之前保留
+背景信息。
 
 ### 2026-10-26 · `anki-e2e` 0.1.0 · Anki 26.09.3 · `full`
 

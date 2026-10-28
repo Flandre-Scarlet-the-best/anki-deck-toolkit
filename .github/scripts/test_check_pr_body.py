@@ -14,14 +14,56 @@ HEADINGS = (
     "Область изменений",
     "Реализация",
     "Проверки",
+    "Производительность",
     "CI",
     "Готовность",
     "Ограничения",
 )
 
 
+NOT_APPLICABLE = (
+    "Статус: не применимо\n"
+    "Причина: изменены только тексты документации и проверка описания PR, исполняемый код инструментов не затронут."
+)
+
+MEASURED = """Статус: измерено
+
+### `anki-repo.validate` · профиль `warm`
+
+- Сценарий: `anki-repo.validate`, ревизия 1, `short-cli`; профиль `warm` (кэш `warm`, сеть `online`)
+- Измеренный код: `anki-repo` 0.1.0 · коммит `bbbbbbbbbbbb` · рабочая копия без изменений
+- Нагрузка: вход `export` (workload, `content-tree-sha256` `dddddddddddd`): `notes` 4 321
+- Окружение: `arch`=x86_64, `os`=linux, `virtualization`=wsl2
+- Прогоны: 10 успешных из 10, прогрев 3; итог `success`; hyperfine 2.0.0
+- База: результат `2222222222222222` · записан 2026-10-01T10:00:00Z — выбрана автоматически
+- Сопоставимость: сопоставимы по контракту `benchmark-contract` по метрикам `time_wall_clock@command`
+
+| Метрика | Scope / источник | До: среднее ± σ (n) | После: среднее ± σ (n) | Δ | Δ % | Оценка |
+|---|---|---|---|---|---|---|
+| `time_wall_clock` | command / hyperfine | 100 ms ± 2 ms (n=10) | 80 ms ± 1 ms (n=10) | −20 ms | −20 % | лучше сверх разброса |
+
+- Вывод: `time_wall_clock@command` — улучшение сверх разброса повторов (−20 %).
+- Ограничения: существенных нет
+- Источники: проверяемый результат `1111111111111111`, база `2222222222222222` в локальной истории
+"""
+
+NOT_MEASURED = """Статус: не измерено
+
+Причина: `anki-e2e.full` · `warm`: Docker недоступен в окружении исполнителя
+Диагностика: benchmark-runner check вернул код 5, итог `unsupported` записан, прогонов 0
+Доказательство производительности: отсутствует
+"""
+
+
+def body_with(performance: str) -> str:
+    return "\n\n".join(
+        f"## {name}\n{performance if name == 'Производительность' else f'Фактическая информация для раздела {name}.'}"
+        for name in HEADINGS
+    )
+
+
 def valid_body() -> str:
-    return "\n\n".join(f"## {name}\nФактическая информация для раздела {name}." for name in HEADINGS)
+    return body_with(NOT_APPLICABLE)
 
 
 class PrBodyContractTests(unittest.TestCase):
@@ -74,8 +116,9 @@ class PrBodyContractTests(unittest.TestCase):
 
     def test_atx_closing_hashes_are_not_part_of_heading_name(self):
         # `## Цель ##` — корректный ATX-заголовок, и GitHub показывает имя «Цель».
-        self.assertEqual(validate("\n\n".join(f"## {n} ##\nИнформация." for n in HEADINGS)), [])
-        self.assertEqual(validate("\n\n".join(f"## {n} ###\nИнформация." for n in HEADINGS)), [])
+        text = {n: NOT_APPLICABLE if n == "Производительность" else "Информация." for n in HEADINGS}
+        self.assertEqual(validate("\n\n".join(f"## {n} ##\n{text[n]}" for n in HEADINGS)), [])
+        self.assertEqual(validate("\n\n".join(f"## {n} ###\n{text[n]}" for n in HEADINGS)), [])
 
     def test_fenced_content_does_not_make_section_nonempty(self):
         body = valid_body().replace("Фактическая информация для раздела CI.", "```md\nThis is a sample, not CI evidence.\n```")
@@ -110,6 +153,111 @@ class PrBodyContractTests(unittest.TestCase):
         table = "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n"
         self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
         self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"), [])
+
+    def test_performance_decisions_are_accepted(self):
+        for performance in (NOT_APPLICABLE, MEASURED, NOT_MEASURED, "**Статус:** не применимо\n- **Причина:** перевод README на английский, код и сборка не меняются."):
+            self.assertEqual(validate(body_with(performance)), [], performance)
+
+    def test_performance_requires_one_known_status(self):
+        for performance in ("Измерения выполнены.", "Статус: N/A", "Статус: готово", NOT_APPLICABLE + "\nСтатус: измерено", "<!-- Статус: не применимо -->\nПричина: изменены только тексты документации, исполняемый код не затронут."):
+            self.assertTrue(any("Статус" in e for e in validate(body_with(performance))), performance)
+
+    def test_not_applicable_needs_concrete_reason(self):
+        for reason in ("", "Причина: N/A", "Причина: не применимо", "Причина: <причина>", "Причина: нет изменений", "Причина: —"):
+            errors = validate(body_with("Статус: не применимо\n" + reason))
+            self.assertTrue(any("причины" in e for e in errors), reason)
+
+    def test_not_measured_needs_reason_diagnostics_and_missing_evidence(self):
+        for line in ("Причина:", "Диагностика:", "Доказательство производительности:"):
+            broken = "\n".join(l for l in NOT_MEASURED.splitlines() if not l.startswith(line))
+            self.assertTrue(validate(body_with(broken)), line)
+        claimed = NOT_MEASURED.replace("отсутствует", "есть")
+        self.assertTrue(any("Доказательство" in e for e in validate(body_with(claimed))))
+
+    def test_measured_needs_fields_and_metric_table(self):
+        for field in ("Сценарий", "Измеренный код", "Нагрузка", "Окружение", "Прогоны", "База", "Сопоставимость", "Вывод", "Ограничения", "Источники"):
+            broken = "\n".join(l for l in MEASURED.splitlines() if not l.startswith(f"- {field}:"))
+            self.assertTrue(any(field in e for e in validate(body_with(broken))), field)
+        placeholder = MEASURED.replace("- База: результат `2222222222222222` · записан 2026-10-01T10:00:00Z — выбрана автоматически", "- База: N/A")
+        self.assertTrue(any("База" in e for e in validate(body_with(placeholder))))
+        table = [l for l in MEASURED.splitlines() if l.startswith("|")]
+        without_table = "\n".join(l for l in MEASURED.splitlines() if not l.startswith("|"))
+        self.assertTrue(any("таблица" in e for e in validate(body_with(without_table))))
+        # Таблица-пример внутри код-блока не является результатом.
+        fenced = without_table + "\n```md\n" + "\n".join(table) + "\n```"
+        self.assertTrue(any("таблица" in e for e in validate(body_with(fenced))))
+        empty_row = without_table + "\n" + "\n".join(table[:2]) + "\n| `time_wall_clock` | — | — | — | — | — | — |"
+        self.assertTrue(any("таблица" in e for e in validate(body_with(empty_row))))
+        # Число из посторонней таблицы после таблицы прочерков не засчитывается.
+        foreign = empty_row + "\n\nТекст.\n\n| Прочее | Тип | Значение |\n|---|---|---|\n| x | y | 42 |"
+        self.assertTrue(any("таблица" in e for e in validate(body_with(foreign))))
+        # Версия инструмента в колонке источника не делает строку прочерков результатом.
+        source_only = without_table + "\n" + "\n".join(table[:2]) + "\n| `time_wall_clock` | command / hyperfine 2.0 | — | — | — | — | — |"
+        self.assertTrue(any("таблица" in e for e in validate(body_with(source_only))))
+
+    def test_only_measurement_columns_count_as_measured(self):
+        fields = "\n".join(l for l in MEASURED.splitlines() if not l.startswith("|"))
+        with_base = "| Метрика | Область (scope) / источник | До: среднее ± σ (n) | После: среднее ± σ (n) | Δ | Δ % | Оценка |\n|---|---|---|---|---|---|---|\n"
+        alone = "| Метрика | Область (scope) / источник | Значение: среднее ± σ (n) | Медиана | Мин–макс |\n|---|---|---|---|---|\n"
+        rejected = {
+            "цифра в оценке": with_base + "| `time_wall_clock` | command / hyperfine | — | — | — | — | — (n=0: данных нет) |",
+            "только состояние «до»": with_base + "| `time_wall_clock` | command / hyperfine | 100 ms (n=10) | `failed`: код 1 | — | — | — |",
+            "версия в scope": alone + "| `time_wall_clock` | command / hyperfine 2.0.0 | — | — | — |",
+            "n=0 в пояснении": alone + "| `time_wall_clock` | command / hyperfine | n=0: данных нет | — | — |",
+            "причина с цифрой": alone + "| `time_wall_clock` | command / hyperfine | `unavailable`: нет perf_event 4 | — | — |",
+            "экранированная черта": alone + "| `time_wall_clock` | command \\| 2 / hyperfine | — | — | — |",
+            "таблица в fenced-блоке": "```md\n" + alone + "| `time_wall_clock` | command / hyperfine | 54 ms (n=10) | 54 ms | 52 ms – 56 ms |\n```",
+            "таблица в HTML-комментарии": "<!--\n" + alone + "| `time_wall_clock` | command / hyperfine | 54 ms (n=10) | 54 ms | 52 ms – 56 ms |\n-->",
+        }
+        for name, table in rejected.items():
+            errors = validate(body_with(fields + "\n" + table))
+            self.assertTrue(any("таблица" in e and "строкой значений" in e for e in errors), (name, errors))
+        accepted = {
+            "с базой": with_base + "| `time_wall_clock` | command / hyperfine | 100 ms (n=10) | 80 ms ± 1 ms (n=10) | −20 ms | −20 % | лучше сверх разброса |",
+            "без базы": alone + "| `time_wall_clock` | command / hyperfine | 54.41 ms ± 1.26 ms (n=10) | 54.53 ms | 52.02 ms – 56.4 ms |",
+            "прежний заголовок": alone.replace("Область (scope)", "Scope") + "| `notes` | module / module | 20 000 (n=1) | 20 000 | 20 000 – 20 000 |",
+        }
+        for name, table in accepted.items():
+            self.assertEqual(validate(body_with(fields + "\n" + table)), [], name)
+        # Каждый блок `###` проверяется своей таблицей: значение первого не
+        # засчитывается второму.
+        second = "\n### `anki-repo.stats` · профиль `warm`\n" + fields.split("\n", 3)[3].replace("anki-repo.validate", "anki-repo.stats") + "\n" + rejected["цифра в оценке"]
+        errors = validate(body_with(fields + "\n" + accepted["с базой"] + "\n" + second))
+        self.assertTrue(any("anki-repo.stats" in e and "таблица" in e for e in errors), errors)
+        self.assertFalse(any("anki-repo.validate" in e for e in errors), errors)
+
+    def test_each_measured_scenario_needs_its_own_fields(self):
+        second = "\n### `anki-repo.qa` · профиль `warm`\n\n- Сценарий: `anki-repo.qa`, ревизия 1\n"
+        errors = validate(body_with(MEASURED + second))
+        self.assertTrue(any("anki-repo.qa" in e and "Источники" in e for e in errors), errors)
+        self.assertTrue(any("anki-repo.qa" in e and "таблица" in e for e in errors), errors)
+        # Неизмеренный сценарий рядом с измеренным проверяется по своим правилам.
+        unmeasured = "\n### `anki-e2e.full` · профиль `warm` — не измерено\n\n- Сценарий: `anki-e2e.full`\n- Причина: Docker недоступен\n- Диагностика: исполнитель записал итог `unsupported`: прогонов 0, успешных 0\n- Доказательство производительности: отсутствует\n"
+        self.assertEqual(validate(body_with(MEASURED + unmeasured)), [])
+        for line in ("- Причина:", "- Диагностика:", "- Доказательство производительности:"):
+            incomplete = "\n".join(l for l in unmeasured.split("\n") if not l.startswith(line))
+            errors = validate(body_with(MEASURED + incomplete))
+            self.assertTrue(any("anki-e2e.full" in e and "неизмеренный" in e for e in errors), (line, errors))
+
+    def test_open_pr_without_performance_section_gets_actionable_error(self):
+        # Требование действует для уже открытых PR со следующего события
+        # edited/synchronize: зелёной проверки без решения о применимости нет.
+        legacy = "\n\n".join(f"## {n}\nФактическая информация." for n in HEADINGS if n != "Производительность")
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / "event.json"
+            event.write_text(json.dumps({"action": "synchronize", "pull_request": {"body": legacy, "user": {"login": "someone"}, "head": {"ref": "feat/x"}}}), encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(Path(__file__).with_name("check_pr_body.py")), "--event-path", str(event)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("benchmark-history report", proc.stderr)
+            self.assertIn("не применимо", proc.stderr)
+            # Исключение dependency-ботов сохраняется и для нового раздела.
+            event.write_text(json.dumps({"pull_request": {"body": legacy, "user": {"login": "renovate[bot]"}, "head": {"ref": "renovate/x"}}}), encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(Path(__file__).with_name("check_pr_body.py")), "--event-path", str(event)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0)
+
+    def test_performance_section_coexists_with_coderabbit_table(self):
+        body = body_with(MEASURED) + "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"
+        self.assertEqual(validate(body), [])
 
     def test_bot_exception_is_limited_to_account_and_branch(self):
         def payload(login, branch):

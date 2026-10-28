@@ -11,6 +11,7 @@ autotests = false
 
 [dependencies]
 benchmark-contract = { path = "../benchmark-contract" }
+benchmark-history = { path = "../benchmark-history" }
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 rustix = { version = "1.1", features = ["param", "process", "time"] }
