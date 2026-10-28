@@ -1788,15 +1788,25 @@ fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
         .current_dir(&repo)
         .status()
         .is_ok_and(|s| s.success());
+    // Как python3 и Hyperfine: локально без Git проверка пропускается с
+    // сообщением, в CI его отсутствие — ошибка.
     if !initialized {
-        eprintln!("Git недоступен: проверка состава изменений пропущена");
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "в CI нужен Git: без него состав изменений не проверяется"
+        );
+        eprintln!("ПРОПУСК: Git недоступен, проверка состава изменений не выполнена");
         return;
     }
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(repo.join("README.md"), "# Модуль\n").unwrap();
     let Some(original) = commit_all(&repo, "исходная реализация") else {
-        eprintln!("git commit недоступен: проверка пропущена");
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "в CI нужен рабочий git commit: без него состав изменений не проверяется"
+        );
+        eprintln!("ПРОПУСК: git commit недоступен, проверка состава изменений не выполнена");
         return;
     };
     fs::write(repo.join("README.md"), "# Модуль\n\nОписание.\n").unwrap();
