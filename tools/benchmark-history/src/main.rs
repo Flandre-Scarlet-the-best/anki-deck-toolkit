@@ -1008,12 +1008,11 @@ fn git_changes(repository: &Path, a: &str, b: &str) -> Result<Vec<String>, Strin
             return Err(format!("«{commit}» не идентификатор коммита"));
         }
     }
-    // Унаследованные GIT_* (например, из Git-хука) перенаправили бы diff
-    // мимо репозитория каталога.
-    let output = std::process::Command::new("git")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
+    let mut command = std::process::Command::new("git");
+    for name in analysis::GIT_LOCAL_ENV {
+        command.env_remove(name);
+    }
+    let output = command
         .arg("-C")
         .arg(repository)
         .args(["diff", "--name-only", "-z", "--no-renames", a, b, "--"])

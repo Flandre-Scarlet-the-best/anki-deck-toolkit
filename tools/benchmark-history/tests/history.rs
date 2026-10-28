@@ -27,14 +27,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const BIN: &str = env!("CARGO_BIN_EXE_benchmark-history");
 
-/// Переменные Git, которые перенаправили бы команду из временного репозитория
-/// в чужой (например, при запуске тестов из Git-хука).
-const GIT_ENV: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"];
-
-/// Команда без унаследованных переменных Git.
+/// Команда без унаследованных переменных, привязывающих Git к репозиторию:
+/// иначе, например из Git-хука, она ушла бы из временного репозитория в чужой.
 fn isolated(program: &str) -> Command {
     let mut command = Command::new(program);
-    for name in GIT_ENV {
+    for name in analysis::GIT_LOCAL_ENV {
         command.env_remove(name);
     }
     command
@@ -1929,6 +1926,7 @@ fn baseline_distinguishes_documentation_only_changes_from_code_changes() {
         .env("BENCHMARK_HISTORY_DIR", f.store())
         .env_remove("XDG_DATA_HOME")
         .env("GIT_DIR", f.root.join("elsewhere.git"))
+        .env("GIT_OBJECT_DIRECTORY", f.root.join("elsewhere.git/objects"))
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&inherited.stdout), out);

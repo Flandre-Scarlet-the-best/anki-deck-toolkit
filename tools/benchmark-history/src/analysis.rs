@@ -276,6 +276,27 @@ pub enum CodeChange {
     Unverified { reason: String },
 }
 
+/// Переменные окружения, привязывающие Git к конкретному репозиторию
+/// (`git rev-parse --local-env-vars`). Унаследованные, например из Git-хука,
+/// они увели бы `Changes` мимо нужного репозитория, поэтому их снимают.
+pub const GIT_LOCAL_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
 /// Изменённые пути между двумя коммитами (относительно корня репозитория).
 pub type Changes<'a> = &'a dyn Fn(&str, &str) -> Result<Vec<String>, String>;
 
