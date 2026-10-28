@@ -1,8 +1,0 @@
-# Скомпилированные gh-aw workflow (`*.lock.yml`) генерируются `gh aw compile` и
-# вручную не правятся. Они используют возможности GitHub Actions, которых ещё нет
-# в схеме закреплённой версии actionlint; игнорируются только эти сообщения.
-paths:
-  .github/workflows/*.lock.yml:
-    ignore:
-      - 'unexpected key "queue" for "concurrency" section'
-      - 'property "workflow_ref" is not defined in object type \{check_run_id: number; container: .+\}'
