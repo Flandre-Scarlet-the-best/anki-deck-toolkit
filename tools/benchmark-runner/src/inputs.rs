@@ -106,9 +106,22 @@ pub fn file_sha256(path: &Path) -> io::Result<String> {
     file_digest(path)
 }
 
+/// Git рабочей копии `repo` без унаследованных переменных, привязывающих его
+/// к другому репозиторию (`git rev-parse --local-env-vars`, например из
+/// Git-хука): иначе коммит, признак изменений и дерево исходников результата
+/// описали бы чужой репозиторий или чужой индекс.
+pub fn git(repo: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(repo);
+    for name in benchmark_history::analysis::GIT_LOCAL_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 /// Записи дерева рабочей копии: отслеживаемые и неигнорируемые файлы Git.
 pub fn repo_tree_entries(repo: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = Command::new("git")
+    let output = git(repo)
         .args([
             "ls-files",
             "-z",
@@ -116,7 +129,6 @@ pub fn repo_tree_entries(repo: &Path) -> Result<Vec<PathBuf>, String> {
             "--others",
             "--exclude-standard",
         ])
-        .current_dir(repo)
         .output()
         .map_err(|e| format!("git не запускается: {e}"))?;
     if !output.status.success() {
@@ -146,9 +158,8 @@ pub fn repo_tree_sha256(repo: &Path) -> Result<String, String> {
 /// Состояние Git рабочей копии: коммит и наличие незафиксированных изменений.
 pub fn git_state(repo: &Path) -> (Option<String>, Option<bool>) {
     let run = |args: &[&str]| {
-        Command::new("git")
+        git(repo)
             .args(args)
-            .current_dir(repo)
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -280,9 +291,8 @@ mod tests {
     fn repo_tree_size_skips_git_ignored_data() {
         let dir = scratch("repo");
         let git = |args: &[&str]| {
-            let status = Command::new("git")
+            let status = super::git(&dir)
                 .args(args)
-                .current_dir(&dir)
                 .output()
                 .map(|o| o.status.success());
             status.unwrap_or(false)

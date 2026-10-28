@@ -1,7 +1,7 @@
 # Benchmark runner: `benchmark-runner`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: d9bd1bdf62f2ed29c1cc247e16135416f2e3efca -->
+<!-- i18n-source-git-blob: df674dc00203e7451f1a7e5bfb6e01f61eeec110 -->
 
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
@@ -255,7 +255,11 @@ commit, the dirty flag of the working copy, `source_tree_sha256` and the
 runner and Hyperfine versions. The commit, dirty flag and
 `source_tree_sha256` are the snapshot confirmed before measurement, from which
 the programs were built and the `repo-tree` identity computed, not the state
-after the series. After cleanup the snapshot is compared once more: if the
+after the series. Git is called for the snapshot without inherited variables
+that bind it to another repository (`git rev-parse --local-env-vars`: `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_INDEX_FILE` and others), so a run from a Git hook does
+not replace the provenance with another repository's commit or index. After
+cleanup the snapshot is compared once more: if the
 commit or tracked or non-ignored files changed, the outcome is not `success`
 (`partial` or worse) with a reason. Files ignored by Git (for example
 `target/`) are not compared, so scenario temporary data must not remain in
