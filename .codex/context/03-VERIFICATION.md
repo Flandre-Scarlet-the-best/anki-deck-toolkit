@@ -386,7 +386,9 @@ workspace-набор; живой Anki и пользовательский `decks
   данных репозитория: регрессионные тесты `.github/scripts/test_*.py`, проверка
   метаданных и ссылок Agent Skills и локализаций; `actionlint` закреплённой
   версии (официальный релиз, проверенный по SHA-256) по всем workflow, включая
-  выражения `${{ }}` и shellcheck скриптов `run:`; затем `cargo fmt --all --check`
+  выражения `${{ }}` и shellcheck скриптов `run:` (для сгенерированных gh-aw
+  `*.lock.yml` `.github/actionlint.yaml` игнорирует только перечисленные в нём
+  сообщения о ещё не известных actionlint возможностях); затем `cargo fmt --all --check`
   и `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
 - «Код и тесты» — `cargo test --workspace --locked --profile ci --no-fail-fast`,
   а также `python3 .github/scripts/check_local_data_untracked.py`: постоянная

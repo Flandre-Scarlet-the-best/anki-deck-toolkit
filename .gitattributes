@@ -9,3 +9,5 @@
 *:Zone.Identifier
 # Шрифты хранятся побайтово: от SHA-256 зависит калибровка рендера.
 *.otf binary
+
+.github/workflows/*.lock.yml linguist-generated=true
