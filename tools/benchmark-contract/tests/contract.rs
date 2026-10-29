@@ -513,6 +513,15 @@ fn run_policy_limits_prevent_unbounded_series() {
     );
 
     let scratch = Scratch::new();
+    scratch.edit(CLI, "run_timeout_seconds = 10", "run_timeout_seconds = 601");
+    rejected(
+        &scratch,
+        "unbounded_runs",
+        Some("demo-cli.count-bytes"),
+        Some("runs.run_timeout_seconds"),
+    );
+
+    let scratch = Scratch::new();
     scratch.edit(CLI, "total_budget_seconds = 60", "total_budget_seconds = 5");
     rejected(
         &scratch,
@@ -549,6 +558,25 @@ fn run_policy_limits_prevent_unbounded_series() {
         &scratch,
         "unbounded_runs",
         Some("demo-e2e.suite"),
+        Some("setup[0].timeout_seconds"),
+    );
+}
+
+#[test]
+fn short_cli_lifecycle_step_timeout_has_its_own_bounded_limit() {
+    let scratch = Scratch::new();
+    scratch.edit(
+        CLI,
+        "[scenario.runs]",
+        "[[scenario.setup]]\ndescription = \"Подготовка.\"\nprogram = { kind = \"executable\", name = \"touch\" }\nargs = [\"prepared\"]\ntouches = \"scenario-temp\"\ntimeout_seconds = 1800\n\n[scenario.runs]",
+    );
+    assert!(scratch.load().catalog.is_some());
+
+    scratch.edit(CLI, "timeout_seconds = 1800", "timeout_seconds = 1801");
+    rejected(
+        &scratch,
+        "unbounded_runs",
+        Some("demo-cli.count-bytes"),
         Some("setup[0].timeout_seconds"),
     );
 }

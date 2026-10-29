@@ -512,7 +512,7 @@ fn validate_scenario(ctx: &Context<'_>, module: &str, scenario: &Scenario, sink:
     for (list, name) in [(&scenario.setup, "setup"), (&scenario.cleanup, "cleanup")] {
         for (index, step) in list.iter().enumerate() {
             let at = format!("{name}[{index}]");
-            validate_step(ctx, step, &at, limits.max_run_timeout_seconds, sink);
+            validate_step(ctx, step, &at, limits.max_step_timeout_seconds, sink);
             refs.check_step(step, &at, &always, sink);
         }
     }
@@ -1221,7 +1221,7 @@ fn validate_profile_bindings(
         ] {
             for (step_index, step) in list.iter().enumerate() {
                 let at = format!("profile[{index}].{name}[{step_index}]");
-                validate_step(ctx, step, &at, limits.max_run_timeout_seconds, sink);
+                validate_step(ctx, step, &at, limits.max_step_timeout_seconds, sink);
                 refs.check_step(step, &at, &guaranteed, sink);
             }
         }
@@ -1710,7 +1710,7 @@ fn validate_measurement_sources(
                 ctx,
                 probe,
                 &at("probe"),
-                limits.max_run_timeout_seconds,
+                limits.max_step_timeout_seconds,
                 sink,
             );
             refs.check_step(probe, &at("probe"), &BTreeSet::new(), sink);

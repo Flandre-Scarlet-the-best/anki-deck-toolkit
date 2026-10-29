@@ -1,20 +1,19 @@
 # 性能：`anki-e2e`
 
 [Русский](anki-e2e.md) · [English](anki-e2e.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 032de30b17eb41b6c53bed92fc86814e6018e5c5 -->
+<!-- i18n-source-git-blob: 856c6c540dff9c82fd4352280b4af98c3aab6845 -->
 
 Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](../../tools/anki-e2e/README.zh-CN.md)）。
 通用测量规则和来源精度见[方法说明](README.zh-CN.md)。
 
 ## 测量内容
 
-- **runner 各阶段**，依据 `runner.log` 的时间戳：版本选择（GitHub 索引请求、归档下载或
-  缓存 SHA-256 重新校验）、源码快照、Anki 镜像构建、运行镜像构建（Docker 内的
-  `cargo build`）、场景、清理。每个场景的耗时和 `anki-repo` 启动次数
-  （`commands_started`）取自 `report.json`。
+- **阶段耗时**目前为 `unsupported`：`anki-e2e` 未发布机器可读的阶段标记，
+  因此不会从人类可读的 `runner.log` 推导耗时。`report.json` 提供
+  `anki-repo` 启动次数（`commands_started`）。
 - **场景容器** —— 其 scope 的 cgroup v2：`memory.peak` 和 `usage_usec`。
 - **镜像构建。** BuildKit 步骤在 `docker.service` cgroup 之外执行，也没有按运行划分的
-  独立 cgroup。因此构建代价按整个主机测量（`/proc/stat`、`MemAvailable`）——这是上限。
+  独立 cgroup。`/proc/stat` 和 `MemAvailable` 只提供整个主机的采样观测值，并非构建资源的上限。
 - **主机上的 runner** —— `anki-e2e` 进程的 `VmHWM` 和 CPU。
 - **磁盘** —— 工作目录的 `cache/`、`build/`、`runs/`，测试台镜像以及 BuildKit cache
   mount `anki-e2e-cargo-*`。
@@ -96,7 +95,7 @@ BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配
 | `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 1.193 s ± 66.21 ms | 1.193 s | 1.147 s – 1.24 s | 2 |
 | `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 309.13 MiB ± 370.52 KiB | 309.13 MiB | 308.87 MiB – 309.38 MiB | 2 |
 
-未测量：`phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста。
+未测量：`phase_duration@phase/scenarios` — `unsupported`: 模块未声明日志标记的机器可读格式，无法从人类可读文本推导阶段耗时。
 
 ★ 参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。
 <!-- /benchmark-snapshot -->
@@ -139,7 +138,7 @@ BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配
 | `module_counter@module-report/commands_started` | module-report / module-report | 103 ± 0 | 103 | 103 – 103 | 2 |
 | `disk_usage@path/work-cache` | path / filesystem | 182.44 MiB ± 0 B | 182.44 MiB | 182.44 MiB – 182.44 MiB | 2 |
 
-未测量：`phase_duration@phase/release` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/anki-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/run-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста。
+未测量：`phase_duration@phase/release` — `unsupported`: 模块未声明日志标记的机器可读格式，无法从人类可读文本推导阶段耗时; `phase_duration@phase/anki-image` — `unsupported`: 模块未声明日志标记的机器可读格式，无法从人类可读文本推导阶段耗时; `phase_duration@phase/run-image` — `unsupported`: 模块未声明日志标记的机器可读格式，无法从人类可读文本推导阶段耗时; `phase_duration@phase/scenarios` — `unsupported`: 模块未声明日志标记的机器可读格式，无法从人类可读文本推导阶段耗时。
 
 ★ 参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。
 <!-- /benchmark-snapshot -->

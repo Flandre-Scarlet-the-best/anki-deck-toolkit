@@ -3222,7 +3222,7 @@ fn snapshot_shows_and_guards_comparability_parameters() {
         .map(|(_, body)| body)
         .unwrap();
     let parametrized = format!(
-        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = true\nchoices = [\"1\", \"4\"]\nrecord = true\naffects_comparability = true\n",
+        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = true\nchoices = [\"1\", \"4\", \"a|b\"]\nrecord = true\naffects_comparability = true\n",
         scenario_body.replace("id = \"fixture.cli\"", "id = \"fixture.param\"")
     );
     fs::write(f.catalog_dir().join("scenarios/fixture.toml"), parametrized).unwrap();
@@ -3239,7 +3239,7 @@ fn snapshot_shows_and_guards_comparability_parameters() {
         result.parameters = BTreeMap::from([("writers".to_owned(), writers.to_owned())]);
         result
     };
-    let first = with("4", "2026-10-03T10:00:00Z");
+    let first = with("a|b", "2026-10-03T10:00:00Z");
     let history = vec![snapshot::Recorded::of(scenario, &first)];
     let options = Options {
         history: history.clone(),
@@ -3248,22 +3248,24 @@ fn snapshot_shows_and_guards_comparability_parameters() {
     let plan = snapshot::plan(ru, scenario, &first, &options).unwrap();
     snapshot::apply(&plan).unwrap();
     let text = fs::read_to_string(ru).unwrap();
-    assert!(text.contains(r#""parameters":{"writers":"4"}"#), "{text}");
-    assert!(text.contains("| параметр `writers` | `4` |"), "{text}");
+    assert!(text.contains(r#""parameters":{"writers":"a|b"}"#), "{text}");
+    let escaped = "| параметр `writers` | `a\\|b` |".to_owned();
+    assert!(text.contains(&escaped), "{text}");
     let en = fs::read_to_string(&pages[1]).unwrap();
-    assert!(en.contains("| parameter `writers` | `4` |"), "{en}");
+    let escaped_en = "| parameter `writers` | `a\\|b` |".to_owned();
+    assert!(en.contains(&escaped_en), "{en}");
 
-    // Тот же объём и та же нагрузка, но другое число писателей: несопоставимо.
+    // Тот же объём и та же нагрузка, но другое значение параметра: несопоставимо.
     let other = with("1", "2026-10-04T10:00:00Z");
     let refused = snapshot::plan(ru, scenario, &other, &options).unwrap_err();
     assert!(
-        refused.contains("writers=4")
+        refused.contains("writers=a|b")
             && refused.contains("writers=1")
             && refused.contains("--replace-workload"),
         "{refused}"
     );
     // Тот же параметр и нагрузка, доказанная историей, заменяются без флага.
-    let same = with("4", "2026-10-05T10:00:00Z");
+    let same = with("a|b", "2026-10-05T10:00:00Z");
     let plan = snapshot::plan(ru, scenario, &same, &options).unwrap();
     assert_eq!(plan.workload, snapshot::WorkloadBasis::ProvenByHistory);
     // Подтверждённая смена параметра разрешена флагом.

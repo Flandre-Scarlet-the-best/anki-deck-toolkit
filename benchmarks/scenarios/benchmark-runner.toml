@@ -101,7 +101,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+description = "Опрос /proc/stat всей системы по интервалам: наблюдение хостовой нагрузки, не верхняя граница пиковой загрузки цели."
 
 [[scenario.metric]]
 metric = "memory_host_peak_increase"
@@ -208,7 +208,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+description = "Опрос /proc/stat всей системы по интервалам: наблюдение хостовой нагрузки, не верхняя граница пиковой загрузки цели."
 
 [[scenario.metric]]
 metric = "memory_host_peak_increase"
@@ -385,7 +385,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+description = "Опрос /proc/stat всей системы по интервалам: наблюдение хостовой нагрузки, не верхняя граница пиковой загрузки цели."
 
 [[scenario.metric]]
 metric = "memory_host_peak_increase"
@@ -405,7 +405,7 @@ title = "Известная резидентная память"
 revision = 1
 kind = "short-cli"
 status = "executable"
-description = "Процесс записывает каждую страницу блока 256 MiB и держит его 200 мс. Ожидается memory_peak_resident ≈ 256 MiB плюс база процесса, memory_peak_cgroup того же порядка, memory_host_peak_increase — верхняя оценка по всей системе."
+description = "Процесс записывает каждую страницу блока 256 MiB и держит его 200 мс. Ожидается memory_peak_resident ≈ 256 MiB плюс база процесса, memory_peak_cgroup того же порядка, memory_host_peak_increase — наблюдение MemAvailable по всей системе, не верхняя граница памяти цели."
 measured = "Один запуск собранного release-бинарника benchmark-workload от старта процесса до выхода; сборка и прогревы в интервал не входят."
 platforms = ["linux"]
 
@@ -492,7 +492,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+description = "Опрос /proc/stat всей системы по интервалам: наблюдение хостовой нагрузки, не верхняя граница пиковой загрузки цели."
 
 [[scenario.metric]]
 metric = "memory_host_peak_increase"

@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: 816aabe7a49e896662c3cbe7370c2df3ccee5d3b -->
+<!-- i18n-source-git-blob: e8f959dc022bdae5ca48c378b744fbcf73fd9fd7 -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -229,13 +229,16 @@ purpose). "Cold" never implicitly means dropping the OS page cache.
 |---|---|---|
 | warmup | ≤ 100 | ≤ 3 |
 | runs | ≤ 1000 | ≤ 10 |
+| step timeout | 1…1800 s | 1…14 400 s |
 | run timeout | 1…600 s | 1…14 400 s |
 | series budget | ≤ 3600 s | ≤ 86 400 s |
 | single run | forbidden | allowed (`single_run_allowed`) |
 
 Without `single_run_allowed`, `min_runs ≥ 2` is required. A scenario with a warm
 profile always requires `min_runs ≥ 2`: the warm state is measured at least twice. The budget must fit at
-least one run. `benchmark-contract vocabulary` prints the limits.
+least one run. `benchmark-contract vocabulary` prints the limits. A step
+timeout bounds `setup`, `prepare`/`conclude`, `cleanup` and input probes; the run
+timeout bounds the measured target.
 
 ## Inputs and workload size
 

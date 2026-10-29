@@ -1,7 +1,7 @@
 # Performance: `anki-e2e`
 
 [Русский](anki-e2e.md) · **English** · [简体中文](anki-e2e.zh-CN.md)
-<!-- i18n-source-git-blob: 032de30b17eb41b6c53bed92fc86814e6018e5c5 -->
+<!-- i18n-source-git-blob: 856c6c540dff9c82fd4352280b4af98c3aab6845 -->
 
 Performance and resource usage of the Anki Desktop E2E stand: the last
 confirmed snapshot and an earlier manual observation
@@ -10,16 +10,15 @@ rules and source accuracy are in the [methodology](README.en.md).
 
 ## What is measured
 
-- **Runner phases** from the `runner.log` timestamps: release selection (the
-  GitHub index request, the archive download or the cache SHA-256
-  re-verification), source snapshot, Anki image build, run image build
-  (`cargo build` in Docker), scenarios, cleanup. Each scenario's duration and
-  the number of `anki-repo` starts (`commands_started`) come from `report.json`.
+- **Phase durations** are currently `unsupported`: `anki-e2e` does not publish
+  machine-readable phase markers, so durations are not derived from the
+  human-readable `runner.log`. `report.json` provides the number of
+  `anki-repo` starts (`commands_started`).
 - **Scenario container** — the cgroup v2 of its scope: `memory.peak` and
   `usage_usec`.
 - **Image builds.** BuildKit steps run outside the `docker.service` cgroup and
-  have no per-run cgroup of their own. Build cost is therefore measured for the
-  whole host (`/proc/stat`, `MemAvailable`) — an upper bound.
+  have no per-run cgroup of their own. `/proc/stat` and `MemAvailable` provide
+  sampled observations of the whole host, not an upper bound on build resources.
 - **Runner on the host** — `VmHWM` and CPU of the `anki-e2e` process.
 - **Disk** — `cache/`, `build/`, `runs/` of the working directory, the stand's
   images and the BuildKit cache mounts `anki-e2e-cargo-*`.
@@ -109,7 +108,7 @@ Last confirmed measurement: 2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.
 | `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 1.193 s ± 66.21 ms | 1.193 s | 1.147 s – 1.24 s | 2 |
 | `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 309.13 MiB ± 370.52 KiB | 309.13 MiB | 308.87 MiB – 309.38 MiB | 2 |
 
-Not measured: `phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста.
+Not measured: `phase_duration@phase/scenarios` — `unsupported`: module does not declare a machine-readable phase-marker format in its log, so phase duration cannot be derived from human-readable text.
 
 ★ The reference environment is defined by hardware and platform facts and by the scenario's comparability facts; on update, a snapshot from another environment or other hardware never silently replaces this one. The values are an observation of this environment, not a norm for other systems and not a CI threshold.
 <!-- /benchmark-snapshot -->
@@ -152,7 +151,7 @@ Last confirmed measurement: 2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.
 | `module_counter@module-report/commands_started` | module-report / module-report | 103 ± 0 | 103 | 103 – 103 | 2 |
 | `disk_usage@path/work-cache` | path / filesystem | 182.44 MiB ± 0 B | 182.44 MiB | 182.44 MiB – 182.44 MiB | 2 |
 
-Not measured: `phase_duration@phase/release` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/anki-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/run-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста.
+Not measured: `phase_duration@phase/release` — `unsupported`: module does not declare a machine-readable phase-marker format in its log, so phase duration cannot be derived from human-readable text; `phase_duration@phase/anki-image` — `unsupported`: module does not declare a machine-readable phase-marker format in its log, so phase duration cannot be derived from human-readable text; `phase_duration@phase/run-image` — `unsupported`: module does not declare a machine-readable phase-marker format in its log, so phase duration cannot be derived from human-readable text; `phase_duration@phase/scenarios` — `unsupported`: module does not declare a machine-readable phase-marker format in its log, so phase duration cannot be derived from human-readable text.
 
 ★ The reference environment is defined by hardware and platform facts and by the scenario's comparability facts; on update, a snapshot from another environment or other hardware never silently replaces this one. The values are an observation of this environment, not a norm for other systems and not a CI threshold.
 <!-- /benchmark-snapshot -->

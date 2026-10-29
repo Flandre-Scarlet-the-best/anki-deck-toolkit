@@ -875,6 +875,10 @@ fn marker(meta: &Meta) -> String {
 }
 
 /// Блок снимка на одном языке.
+fn markdown_table_cell(value: &str) -> String {
+    value.replace('|', "\\|")
+}
+
 pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
     let l = labels(lang);
     let show = |value: f64, unit| format::quantity_in(value, unit, l.cores);
@@ -927,7 +931,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
             } else {
                 ""
             };
-            let _ = writeln!(out, "| `{name}`{mark} | {} |", value.replace('|', "\\|"));
+            let _ = writeln!(out, "| `{name}`{mark} | {} |", markdown_table_cell(value));
         }
     }
     out.push('\n');
@@ -937,7 +941,12 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
     let mut sizes: Vec<(String, String)> = meta
         .parameters
         .iter()
-        .map(|(name, value)| (format!("{} `{name}`", l.parameter), format!("`{value}`")))
+        .map(|(name, value)| {
+            (
+                format!("{} `{name}`", l.parameter),
+                format!("`{}`", markdown_table_cell(value)),
+            )
+        })
         .collect();
     let input_sizes: Vec<(String, String)> = result
         .inputs

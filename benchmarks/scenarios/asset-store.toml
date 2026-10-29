@@ -62,7 +62,7 @@ description = "Эталон серии: корпус штатной публик
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
 args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
 touches = "scenario-temp"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[scenario.cleanup]]
 description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
@@ -144,7 +144,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Загрузка всей системы во время прогона: контроль фоновой нагрузки, верхняя оценка."
+description = "Опрос /proc/stat всей системы: выборочное наблюдение хостовой нагрузки, не верхняя граница пиковой загрузки цели."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
@@ -200,7 +200,7 @@ description = "Эталон серии: корпус штатной публик
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
 args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
 touches = "scenario-temp"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[scenario.cleanup]]
 description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
@@ -330,7 +330,7 @@ description = "Эталон серии: корпус штатной публик
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
 args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
 touches = "scenario-temp"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[scenario.cleanup]]
 description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
@@ -461,7 +461,7 @@ description = "Эталон серии: корпус штатной публик
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
 args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
 touches = "scenario-temp"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[scenario.cleanup]]
 description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
@@ -616,7 +616,7 @@ description = "Эталон серии: корпус штатной публик
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
 args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
 touches = "scenario-temp"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[scenario.cleanup]]
 description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
@@ -769,7 +769,7 @@ description = "Эталон серии: корпус штатной публик
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
 args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
 touches = "scenario-temp"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[scenario.cleanup]]
 description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
@@ -907,7 +907,7 @@ description = "Эталон серии: корпус штатной публик
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
 args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
 touches = "scenario-temp"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[scenario.cleanup]]
 description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."

@@ -450,7 +450,7 @@ pub static REGISTRY: &[MetricDefinition] = &[
     MetricDefinition {
         metric: MetricId::MemoryHostPeakIncrease,
         unit: Unit::Byte,
-        summary: "Наибольшее снижение MemAvailable относительно начала прогона: верхняя оценка для всей системы.",
+        summary: "Максимальное снижение MemAvailable по выборочным наблюдениям с начала прогона; включает влияние посторонних процессов и не является верхней границей потребления цели.",
         measurements: &[m(
             Scope::Host,
             Source::Procfs,
@@ -557,12 +557,13 @@ pub static REGISTRY: &[MetricDefinition] = &[
     },
 ];
 
-/// Предельные значения политики прогонов для вида нагрузки. Они защищают от
-/// случайно бесконечного или неоправданно дорогого сценария.
+/// Предельные значения политики прогонов и шагов для вида нагрузки. Они
+/// защищают от случайно бесконечного или неоправданно дорогого сценария.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct RunLimits {
     pub max_warmup: u32,
     pub max_runs: u32,
+    pub max_step_timeout_seconds: u64,
     pub max_run_timeout_seconds: u64,
     pub max_total_budget_seconds: u64,
     pub single_run_allowed: bool,
@@ -574,6 +575,7 @@ impl WorkloadKind {
             WorkloadKind::ShortCli => RunLimits {
                 max_warmup: 100,
                 max_runs: 1000,
+                max_step_timeout_seconds: 1800,
                 max_run_timeout_seconds: 600,
                 max_total_budget_seconds: 3600,
                 single_run_allowed: false,
@@ -581,6 +583,7 @@ impl WorkloadKind {
             WorkloadKind::LongE2e => RunLimits {
                 max_warmup: 3,
                 max_runs: 10,
+                max_step_timeout_seconds: 4 * 3600,
                 max_run_timeout_seconds: 4 * 3600,
                 max_total_budget_seconds: 24 * 3600,
                 single_run_allowed: true,

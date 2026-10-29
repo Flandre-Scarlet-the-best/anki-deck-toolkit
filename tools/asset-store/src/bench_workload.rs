@@ -507,6 +507,10 @@ pub fn describe(spec: &WorkloadSpec) -> WorkloadDescription {
     for index in 0..spec.batch_blobs {
         digest.push_str(&sha256_hex(spec.blob(index)));
     }
+    digest.push_str(&sha256_hex(checkpoint_blob(spec)));
+    for index in 0..spec.batch_entries {
+        digest.push_str(&sha256_hex(note_text(spec.seed, index).as_bytes()));
+    }
     WorkloadDescription {
         generator: spec.generator,
         domain: spec.domain,

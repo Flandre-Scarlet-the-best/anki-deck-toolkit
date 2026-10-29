@@ -283,12 +283,12 @@ fn generator_output_is_pinned_to_its_version() {
         (
             "kanji",
             2,
-            "978e4635f62191daa38ff9f8e7700cdab99e83418b4934898b3ad2f5995c92b1",
+            "6b20969f5999c39535686cbac65c49c3371e15ea9116ac08825db06ace3f70ff",
         ),
         (
             "generic",
             0,
-            "1bfc9ec864c1c40e20fdf76372f48edfe4a0240667f1ba99bfcbedb3de8183de",
+            "3417d3cde18aac07d3468968c476c427174770d1a4ac6490a53eb8fb88fda27d",
         ),
     ] {
         let spec: WorkloadSpec = toml::from_str(&spec_text(domain, 1, png_every)).unwrap();

@@ -1,7 +1,7 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 816aabe7a49e896662c3cbe7370c2df3ccee5d3b -->
+<!-- i18n-source-git-blob: e8f959dc022bdae5ca48c378b744fbcf73fd9fd7 -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
@@ -209,12 +209,14 @@ comparable = ["os", "arch", "cpu_model"]
 |---|---|---|
 | 预热 | ≤ 100 | ≤ 3 |
 | 运行次数 | ≤ 1000 | ≤ 10 |
+| 步骤超时 | 1…1800 秒 | 1…14 400 秒 |
 | 单次运行超时 | 1…600 秒 | 1…14 400 秒 |
 | 系列预算 | ≤ 3600 秒 | ≤ 86 400 秒 |
 | 单次运行 | 禁止 | 允许（`single_run_allowed`） |
 
 未设置 `single_run_allowed` 时要求 `min_runs ≥ 2`。带有热配置的场景始终要求 `min_runs ≥ 2`：热状态至少测量两次。预算至少要容纳一次运行。
-`benchmark-contract vocabulary` 输出这些限制。
+`benchmark-contract vocabulary` 输出这些限制。步骤超时适用于 `setup`、`prepare`/`conclude`、
+`cleanup` 和输入探测；单次运行超时适用于被测目标。
 
 ## 输入与负载规模
 
