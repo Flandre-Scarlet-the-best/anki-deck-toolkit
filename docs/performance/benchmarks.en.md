@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: da52bba6cdf2d0237e9c3f82136695004f9db5a2 -->
+<!-- i18n-source-git-blob: 816aabe7a49e896662c3cbe7370c2df3ccee5d3b -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -40,6 +40,18 @@ Scenarios as of today (the declarations themselves are the source of truth; the 
 | `anki-e2e.smoke` | `long-e2e` | `warm`, `offline-warm` |
 | `anki-repo.validate` | `short-cli` | `warm`, `offline-warm` |
 | `anki-repo.stats` | `short-cli` | `warm` |
+| `asset-store.verify-integrity` | `short-cli` | `warm` |
+| `asset-store.read-batch` | `short-cli` | `warm` |
+| `asset-store.read-single` | `short-cli` | `warm` |
+| `asset-store.ingest` | `short-cli` | `warm` |
+| `asset-store.ingest-contention` | `short-cli` | `warm` |
+| `asset-store.batch-reopen` | `short-cli` | `warm` |
+| `asset-store.batch-checkpoint` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-noop` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
 
 ## Registering a scenario for a new module
 
@@ -270,8 +282,8 @@ per second). The contract has no other units. The metric key in a result is
 | `memory_peak_resident` | byte | `largest-process-in-tree` / `hyperfine`; `process` / `procfs` | peak RSS of **one** process, not a tree total |
 | `memory_peak_cgroup` | byte | `cgroup` / `cgroup-v2` | simultaneous peak of the whole group (`memory.peak`) |
 | `cpu_time_cgroup` | second | `cgroup` / `cgroup-v2` | CPU time of the whole group (`usage_usec`) |
-| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | observed load; the peak is a lower bound per interval |
-| `memory_host_peak_increase` | byte | `host` / `procfs` | drop of `MemAvailable`: an upper bound for the whole system |
+| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | observed load; the peak is a lower bound per interval; the mean of the run's own subgroup is its CPU time over its lifetime (the whole Hyperfine invocation) |
+| `memory_host_peak_increase` | byte | `host` / `procfs` | largest drop of `MemAvailable` during the run across the whole system: it includes other processes' allocations and is offset by concurrent releases (including delayed return of the previous run's memory), so it is a host observation, not a bound |
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | CPU counters; need `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | a phase inside the target from the module log; needs a label and `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | a counter from the module's machine report; needs a label |

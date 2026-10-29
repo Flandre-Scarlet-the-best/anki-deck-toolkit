@@ -1,7 +1,7 @@
 # 性能：`anki-e2e`
 
 [Русский](anki-e2e.md) · [English](anki-e2e.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 93ac0e760305500a1730c73beb7027b195717cef -->
+<!-- i18n-source-git-blob: d568675b4ec927aa8511c0ddde37e3b509a4d388 -->
 
 Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](../../tools/anki-e2e/README.zh-CN.md)）。
 通用测量规则和来源精度见[方法说明](README.zh-CN.md)。
@@ -61,13 +61,96 @@ docker system df -v
 下面的块由 `benchmark-history snapshot` 根据参考环境中经过验证的
 `benchmark-runner` 结果生成；如果没有块，说明尚无确认的快照。
 
+参考环境中不测量 `anki-e2e.smoke` 场景的 `offline-warm` 配置：`benchmark-runner check`
+返回 `unsupported`，因为系列的网络命名空间不覆盖运行在主机网络中的 Docker 守护进程和
+BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配置尚未通过目录测量。
+
+<!-- benchmark-snapshot: {"scenario":"anki-e2e.smoke","profile":"warm","recorded_at":"2026-10-29T10:36:16Z","environment":{"anki_version":"26.09.3","arch":"x86_64","container_limits":"nano_cpus=4000000000,memory=6442450944,pids_limit=4096","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","docker_version":"29.9.2","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"anki-archive":{"archive_bytes":{"value":191305871.0,"unit":"byte"}}}} -->
+### `anki-e2e.smoke` · 配置 `warm`
+
+最近一次确认的测量：2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · 结果 `success`：2 次运行中 2 次成功，预热 1 次。
+
+| 环境事实 | 值 |
+|---|---|
+| `anki_version` ★ | 26.09.3 |
+| `arch` ★ | x86_64 |
+| `container_limits` ★ | nano_cpus=4000000000,memory=6442450944,pids_limit=4096 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `docker_version` ★ | 29.9.2 |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730976256 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| 负载 | 值 |
+|---|---|
+| `anki-archive` · `archive_bytes` | 182.44 MiB |
+
+| 指标 | 范围 / 来源 | 均值 ± σ | 中位数 | 最小–最大 | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 26.148 s ± 54.16 ms | 26.148 s | 26.11 s – 26.187 s | 2 |
+| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 1.193 s ± 66.21 ms | 1.193 s | 1.147 s – 1.24 s | 2 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 309.13 MiB ± 370.52 KiB | 309.13 MiB | 308.87 MiB – 309.38 MiB | 2 |
+
+未测量：`phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста。
+
+★ 参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。
+<!-- /benchmark-snapshot -->
+
+<!-- benchmark-snapshot: {"scenario":"anki-e2e.full","profile":"warm","recorded_at":"2026-10-29T10:34:34Z","environment":{"anki_version":"26.09.3","arch":"x86_64","container_limits":"nano_cpus=4000000000,memory=6442450944,pids_limit=4096","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","docker_version":"29.9.2","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"anki-archive":{"archive_bytes":{"value":191305871.0,"unit":"byte"}}}} -->
+### `anki-e2e.full` · 配置 `warm`
+
+最近一次确认的测量：2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · 结果 `success`：2 次运行中 2 次成功，预热 0 次。
+
+| 环境事实 | 值 |
+|---|---|
+| `anki_version` ★ | 26.09.3 |
+| `arch` ★ | x86_64 |
+| `container_limits` ★ | nano_cpus=4000000000,memory=6442450944,pids_limit=4096 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `docker_version` ★ | 29.9.2 |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730976256 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| 负载 | 值 |
+|---|---|
+| `anki-archive` · `archive_bytes` | 182.44 MiB |
+
+| 指标 | 范围 / 来源 | 均值 ± σ | 中位数 | 最小–最大 | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 235.474 s ± 18.393 s | 235.474 s | 222.468 s – 248.48 s | 2 |
+| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 1.626 s ± 253.12 ms | 1.626 s | 1.447 s – 1.805 s | 2 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 120.58 MiB ± 316.78 KiB | 120.58 MiB | 120.36 MiB – 120.8 MiB | 2 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 503.51 MiB ± 7.86 MiB | 503.51 MiB | 497.95 MiB – 509.07 MiB | 2 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 200.145 s ± 30.88 ms | 200.145 s | 200.124 s – 200.167 s | 2 |
+| `cpu_utilization_peak@cgroup` | cgroup / cgroup-v2 | 1.86 核 ± 0.01 核 | 1.86 核 | 1.85 核 – 1.86 核 | 2 |
+| `cpu_utilization_peak@host` | host / procfs | 2.59 核 ± 0.41 核 | 2.59 核 | 2.3 核 – 2.88 核 | 2 |
+| `memory_host_peak_increase@host` | host / procfs | 472.87 MiB ± 121.82 MiB | 472.87 MiB | 386.73 MiB – 559 MiB | 2 |
+| `module_counter@module-report/commands_started` | module-report / module-report | 103 ± 0 | 103 | 103 – 103 | 2 |
+| `disk_usage@path/work-cache` | path / filesystem | 182.44 MiB ± 0 B | 182.44 MiB | 182.44 MiB – 182.44 MiB | 2 |
+
+未测量：`phase_duration@phase/release` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/anki-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/run-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста。
+
+★ 参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。
+<!-- /benchmark-snapshot -->
+
 <!-- benchmark-snapshot:anchor -->
 
 ## 无原始 JSON 的手动观测
 
 下面的观测是在本地历史出现之前手动记录的。它没有原始 JSON 结果：不是已确认的快照，其数值
 不与 `benchmark-history` 的结果比较，也不作为基线。它在出现相同条件的首个确认快照之前保留
-背景信息。
+背景信息。温态 `full` 现在由上面的快照描述；冷态和增量状态、按阶段的分解、主机资源和磁盘尚未被确认快照覆盖。
 
 ### 2026-10-26 · `anki-e2e` 0.1.0 · Anki 26.09.3 · `full`
 

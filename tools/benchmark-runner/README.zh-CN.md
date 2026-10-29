@@ -1,7 +1,7 @@
 # 基准执行器：`benchmark-runner`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: df674dc00203e7451f1a7e5bfb6e01f61eeec110 -->
+<!-- i18n-source-git-blob: 9aed1ae0659bf7ca09006d26dc16b0ce12eda091 -->
 
 `benchmark-runner` 是一个 Linux CLI：按 ID 和配置运行 `benchmarks/` 目录中的场景，用
 Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、模块的机器可读报告、
@@ -146,8 +146,8 @@ hyperfine --version
 | 来源 | 采集方式 | 覆盖范围 |
 |---|---|---|
 | `hyperfine` | 每次运行的 Hyperfine 导出 | 目标进程及被等待的后代 |
-| `procfs` / `host` | 运行期间轮询 `/proc/stat` 和 `MemAvailable` | 整个系统：上界估计 |
-| 无容器时的 `cgroup-v2` / `cgroup` | 每次运行一个自有子组，`cpu.stat`、`memory.peak` | 目标、其全部后代以及 Hyperfine 进程本身 |
+| `procfs` / `host` | 运行期间轮询 `/proc/stat` 和 `MemAvailable` | 整个系统：主机观测值而非界限——包含其他分配，并会被同时发生的释放抵消 |
+| 无容器时的 `cgroup-v2` / `cgroup` | 每次运行一个自有子组，`cpu.stat`、`memory.peak` | 目标、其全部后代以及 Hyperfine 进程本身；平均负载为该组 CPU 时间除以其存活时间 |
 | 带 `container` 的 `cgroup-v2` / `cgroup` | 运行期间找到的 Docker 容器 cgroup | 容器内的进程 |
 | `module-report` | 本次运行期间出现的模块机器可读报告 | 声明的 JSON Pointer 处的值 |
 | `filesystem` | 运行后路径的大小 | 仅限指定路径 |

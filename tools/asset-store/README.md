@@ -2352,6 +2352,57 @@ SHA, generation, ревизии элемента, отпечатку запро�
 Если строка изменилась во время запроса, результат отбрасывается
 (`stale_discarded`). Код `3` — есть отказы модели или остановка не доказана.
 
+## Нагрузка бенчмарков: `asset-store-bench`
+
+`asset-store-bench` — исполнитель измеряемой нагрузки для сценариев
+`benchmarks/scenarios/asset-store.toml`. Он вызывает настоящие `AssetStore` и
+`SafeBatchRuntime` (логика — модуль `asset_store::bench_workload`) и ничего не
+измеряет сам: время, процессор и память собирает
+[`benchmark-runner`](../benchmark-runner/README.md), методика и снимки —
+[страница производительности](../../docs/performance/asset-store.md).
+
+Подкоманды соответствуют шагам сценария: `describe` (проба объёма нагрузки,
+без записи), `setup` (эталон штатной публикацией `ingest_verified` и пакетное
+состояние), `prepare` (рабочая копия из эталона с `fsync` каждого файла),
+`run <операция>` (измеряемая операция), `verify <операция>` (постусловия вне
+интервала), `clean` (удаление каталога; с `--keep-template` — только рабочей
+копии). Операции: `verify-integrity`, `read-batch`, `read-single`, `ingest`,
+`ingest-contention --writers N`, `batch-reopen`,
+`batch-checkpoint --change unchanged|modified`. Коды: `0` — успех, `1` —
+отказ операции или постусловия, `2` — неверное использование.
+
+Нагрузка задаётся спецификацией `benchmarks/workloads/asset-store/*.toml`:
+домен (`kanji` или `generic`), зерно, число идентичностей, доля PNG-вариантов,
+сторона изображения, число чтений и публикаций, размер пакетного состояния.
+Генератор детерминирован: настоящие GIF и PNG из блоков псевдослучайных
+оттенков, blob пакета — псевдослучайные байты. Поле `generator` обязано
+совпасть с версией генератора исполнителя; изменение порождаемых байтов
+повышает версию (это закрепляет тест отпечатка), поэтому SHA-256 файла
+спецификации описывает и содержимое корпуса.
+
+Границы:
+
+- семантический валидатор нагрузки — полное чтение и декодирование
+  изображения с проверкой размера; стоимость `KanjiImageValidator`, OCR и
+  браузерного получения в сценарии не входит;
+- политика домена, staging, манифест, журнал, `fsync`, блокировки, CAS и
+  сверка SHA-256 при чтении исполняются штатным кодом без обходов;
+- `ingest-contention` запускает писателей потоками одного процесса с
+  независимыми дескрипторами хранилища: исключение даёт тот же `flock`, что и
+  между процессами, но запуск процессов не измеряется;
+- рабочий каталог — `target/benchmark-workloads/asset-store` рабочей копии
+  (игнорируется Git). Каталог без маркера `.asset-store-bench.json` исполнитель
+  не удаляет; эталон переиспользуется, только если его построил тот же
+  исполняемый файл (SHA-256) по той же спецификации и дерево эталона совпало с
+  записанным при построении.
+
+```bash
+cargo run -p benchmark-runner -- check asset-store.ingest --profile warm --param workload_spec=benchmarks/workloads/asset-store/kanji-medium.toml
+cargo run -p benchmark-runner -- run asset-store.ingest --profile warm --param workload_spec=benchmarks/workloads/asset-store/kanji-medium.toml --runs 10
+cargo run --release -p asset-store --bin asset-store-bench -- describe --spec benchmarks/workloads/asset-store/kanji-medium.toml
+cargo run --release -p asset-store --bin asset-store-bench -- clean --workdir target/benchmark-workloads/asset-store
+```
+
 ## Проверки
 
 Локальные тесты получения ресурсов и проверки изображений не обращаются к сети;

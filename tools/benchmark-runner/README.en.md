@@ -1,7 +1,7 @@
 # Benchmark runner: `benchmark-runner`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: df674dc00203e7451f1a7e5bfb6e01f61eeec110 -->
+<!-- i18n-source-git-blob: 9aed1ae0659bf7ca09006d26dc16b0ce12eda091 -->
 
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
@@ -176,8 +176,8 @@ overwritten.
 | Source | How it is collected | Scope |
 |---|---|---|
 | `hyperfine` | Hyperfine export of each run | the target process and waited-for descendants |
-| `procfs` / `host` | polling `/proc/stat` and `MemAvailable` during a run | the whole system: an upper bound |
-| `cgroup-v2` / `cgroup` without a container | an own subgroup per run, `cpu.stat`, `memory.peak` | the target, all its descendants and the Hyperfine process itself |
+| `procfs` / `host` | polling `/proc/stat` and `MemAvailable` during a run | the whole system: a host observation, not a bound — it includes other allocations and is offset by concurrent releases |
+| `cgroup-v2` / `cgroup` without a container | an own subgroup per run, `cpu.stat`, `memory.peak` | the target, all its descendants and the Hyperfine process itself; mean load is the group's CPU time over its lifetime |
 | `cgroup-v2` / `cgroup` with `container` | the Docker container's cgroup found during the run | the container's processes |
 | `module-report` | the module's machine-readable report that appeared during this run | values at the declared JSON Pointer |
 | `filesystem` | path size after the run | only the named path |

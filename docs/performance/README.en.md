@@ -1,7 +1,7 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: ed22df35b27de7b06bf87bbf49953f22329c8562 -->
+<!-- i18n-source-git-blob: 07adad8c786a02310ef90e7eed1054fc4c3752ad -->
 
 This directory holds the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
@@ -34,9 +34,10 @@ explicit confirmation.
 
 | Module | Page | Snapshots from JSON results |
 |---|---|---|
-| `anki-repo` | [anki-repo.en.md](anki-repo.en.md) | `anki-repo.validate` · `warm` |
-| `anki-e2e` | [anki-e2e.en.md](anki-e2e.en.md) | none yet; a manual observation without original JSON |
-| `benchmark-runner` | [benchmark-runner.en.md](benchmark-runner.en.md) | none yet; a manual observation without original JSON |
+| `anki-repo` | [anki-repo.en.md](anki-repo.en.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store.en.md](asset-store.en.md) | `asset-store.*` · `warm` (`kanji-medium`) |
+| `anki-e2e` | [anki-e2e.en.md](anki-e2e.en.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; a manual observation without original JSON for the other states |
+| `benchmark-runner` | [benchmark-runner.en.md](benchmark-runner.en.md) | `benchmark-runner.calibration-*` · `warm` |
 
 A new module gets its own page `docs/performance/<module>.md` with
 translations, a `<!-- benchmark-snapshot:anchor -->` line where snapshots go and
@@ -103,7 +104,7 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
 | Container memory peak | cgroup v2 `memory.peak` | exact peak tracked by the kernel |
 | Container CPU | `usage_usec` in the cgroup `cpu.stat` | exact for the total; average and peak cores come from differences between samples |
 | Peak cores over 1 s | difference of `usage_usec` between adjacent samples | lower bound: bursts shorter than the interval are smoothed out |
-| Host load and memory | `/proc/stat`, `MemAvailable` in `/proc/meminfo` | the whole system: an upper bound when the process has no cgroup of its own |
+| Host load and memory | `/proc/stat`, `MemAvailable` in `/proc/meminfo` | the whole system: a host observation, not a bound — it includes other allocations and is offset by concurrent releases |
 | Disk | `du -sb`, `docker image ls`, `docker system df -v` | sizes of images with shared layers are not summed |
 
 ## How to update a snapshot

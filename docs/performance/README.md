@@ -32,9 +32,10 @@ Docker дают другие значения.
 
 | Модуль | Страница | Снимки по JSON-результатам |
 |---|---|---|
-| `anki-repo` | [anki-repo.md](anki-repo.md) | `anki-repo.validate` · `warm` |
-| `anki-e2e` | [anki-e2e.md](anki-e2e.md) | пока нет; ручное наблюдение без первичных JSON |
-| `benchmark-runner` | [benchmark-runner.md](benchmark-runner.md) | пока нет; ручное наблюдение без первичных JSON |
+| `anki-repo` | [anki-repo.md](anki-repo.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store.md](asset-store.md) | `asset-store.*` · `warm` (`kanji-medium`) |
+| `anki-e2e` | [anki-e2e.md](anki-e2e.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; ручное наблюдение без первичных JSON для остальных состояний |
+| `benchmark-runner` | [benchmark-runner.md](benchmark-runner.md) | `benchmark-runner.calibration-*` · `warm` |
 
 Новый модуль добавляется отдельной страницей `docs/performance/<модуль>.md` с
 переводами, строкой `<!-- benchmark-snapshot:anchor -->` в месте для снимков и
@@ -98,7 +99,7 @@ Docker дают другие значения.
 | Пик памяти контейнера | `memory.peak` cgroup v2 | точный пик, который ведёт ядро |
 | CPU контейнера | `usage_usec` в `cpu.stat` cgroup | точно для суммы; средние и пиковые ядра — по разностям между сэмплами |
 | Пик ядер за 1 с | разность `usage_usec` соседних сэмплов | нижняя оценка: всплески короче интервала сглаживаются |
-| Загрузка и память хоста | `/proc/stat`, `MemAvailable` в `/proc/meminfo` | вся система: верхняя оценка, если у процесса нет своей cgroup |
+| Загрузка и память хоста | `/proc/stat`, `MemAvailable` в `/proc/meminfo` | вся система: наблюдение хоста, а не граница — включает чужие выделения и смещается одновременными освобождениями |
 | Диск | `du -sb`, `docker image ls`, `docker system df -v` | размеры образов с общими слоями не суммируются |
 
 ## Как обновлять снимок

@@ -38,6 +38,18 @@ JSON, в котором исполнитель записывает измере
 | `anki-e2e.smoke` | `long-e2e` | `warm`, `offline-warm` |
 | `anki-repo.validate` | `short-cli` | `warm`, `offline-warm` |
 | `anki-repo.stats` | `short-cli` | `warm` |
+| `asset-store.verify-integrity` | `short-cli` | `warm` |
+| `asset-store.read-batch` | `short-cli` | `warm` |
+| `asset-store.read-single` | `short-cli` | `warm` |
+| `asset-store.ingest` | `short-cli` | `warm` |
+| `asset-store.ingest-contention` | `short-cli` | `warm` |
+| `asset-store.batch-reopen` | `short-cli` | `warm` |
+| `asset-store.batch-checkpoint` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-noop` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
 
 ## Как зарегистрировать сценарий нового модуля
 
@@ -263,8 +275,8 @@ argv, а не строкой shell: `sh`, `bash`, `env`, `sudo`, `rm`, `dd`, о�
 | `memory_peak_resident` | byte | `largest-process-in-tree` / `hyperfine`; `process` / `procfs` | пиковый RSS **одного** процесса, не сумма дерева |
 | `memory_peak_cgroup` | byte | `cgroup` / `cgroup-v2` | одновременный пик всей группы (`memory.peak`) |
 | `cpu_time_cgroup` | second | `cgroup` / `cgroup-v2` | процессорное время всей группы (`usage_usec`) |
-| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | наблюдаемая загрузка; пик — нижняя оценка за интервал |
-| `memory_host_peak_increase` | byte | `host` / `procfs` | снижение `MemAvailable`: верхняя оценка по всей системе |
+| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | наблюдаемая загрузка; пик — нижняя оценка за интервал; среднее собственной подгруппы прогона — её процессорное время за время её жизни (весь вызов Hyperfine) |
+| `memory_host_peak_increase` | byte | `host` / `procfs` | наибольшее снижение `MemAvailable` за прогон по всей системе: включает чужие выделения и смещается одновременными освобождениями (в том числе отложенным возвратом памяти прошлого прогона), поэтому это наблюдение хоста, а не граница |
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | счётчики процессора; нужен `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | фаза внутри цели по журналу модуля; нужны метка и `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | счётчик из машинного отчёта модуля; нужна метка |

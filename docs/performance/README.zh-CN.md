@@ -1,7 +1,7 @@
 # 性能与资源消耗
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: ed22df35b27de7b06bf87bbf49953f22329c8562 -->
+<!-- i18n-source-git-blob: 07adad8c786a02310ef90e7eed1054fc4c3752ad -->
 
 此目录保存仓库各模块性能与资源消耗的**最近确认指标**：时间、CPU、内存、磁盘。每个模块有
 自己的页面，包含测量方法、指标定义，以及在明确命名的参考环境中按场景和配置划分的快照。
@@ -26,9 +26,10 @@
 
 | 模块 | 页面 | 基于 JSON 结果的快照 |
 |---|---|---|
-| `anki-repo` | [anki-repo.zh-CN.md](anki-repo.zh-CN.md) | `anki-repo.validate` · `warm` |
-| `anki-e2e` | [anki-e2e.zh-CN.md](anki-e2e.zh-CN.md) | 暂无；无原始 JSON 的手动观测 |
-| `benchmark-runner` | [benchmark-runner.zh-CN.md](benchmark-runner.zh-CN.md) | 暂无；无原始 JSON 的手动观测 |
+| `anki-repo` | [anki-repo.zh-CN.md](anki-repo.zh-CN.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store.zh-CN.md](asset-store.zh-CN.md) | `asset-store.*` · `warm`（`kanji-medium`） |
+| `anki-e2e` | [anki-e2e.zh-CN.md](anki-e2e.zh-CN.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
+| `benchmark-runner` | [benchmark-runner.zh-CN.md](benchmark-runner.zh-CN.md) | `benchmark-runner.calibration-*` · `warm` |
 
 新模块需要单独的页面 `docs/performance/<模块>.md`（含翻译），在放置快照的位置加入
 `<!-- benchmark-snapshot:anchor -->` 一行，并在此表中增加一行。
@@ -78,7 +79,7 @@ skill [`performance-benchmarking`](../../.agents/skills/performance-benchmarking
 | 容器内存峰值 | cgroup v2 的 `memory.peak` | 内核记录的精确峰值 |
 | 容器 CPU | cgroup `cpu.stat` 中的 `usage_usec` | 总量精确；平均和峰值核数由采样之间的差值得出 |
 | 1 秒内峰值核数 | 相邻采样 `usage_usec` 的差值 | 下限：短于间隔的突发会被平滑 |
-| 主机负载与内存 | `/proc/stat`、`/proc/meminfo` 中的 `MemAvailable` | 整个系统：当进程没有自己的 cgroup 时为上限 |
+| 主机负载与内存 | `/proc/stat`、`/proc/meminfo` 中的 `MemAvailable` | 整个系统：主机观测值而非界限——包含其他分配，并会被同时发生的释放抵消 |
 | 磁盘 | `du -sb`、`docker image ls`、`docker system df -v` | 共享层的镜像大小不相加 |
 
 ## 如何更新快照

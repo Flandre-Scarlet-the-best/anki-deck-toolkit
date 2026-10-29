@@ -1,7 +1,7 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: da52bba6cdf2d0237e9c3f82136695004f9db5a2 -->
+<!-- i18n-source-git-blob: 816aabe7a49e896662c3cbe7370c2df3ccee5d3b -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
@@ -35,6 +35,18 @@
 | `anki-e2e.smoke` | `long-e2e` | `warm`, `offline-warm` |
 | `anki-repo.validate` | `short-cli` | `warm`, `offline-warm` |
 | `anki-repo.stats` | `short-cli` | `warm` |
+| `asset-store.verify-integrity` | `short-cli` | `warm` |
+| `asset-store.read-batch` | `short-cli` | `warm` |
+| `asset-store.read-single` | `short-cli` | `warm` |
+| `asset-store.ingest` | `short-cli` | `warm` |
+| `asset-store.ingest-contention` | `short-cli` | `warm` |
+| `asset-store.batch-reopen` | `short-cli` | `warm` |
+| `asset-store.batch-checkpoint` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-noop` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
 
 ## 为新模块注册场景
 
@@ -241,8 +253,8 @@ comparable = ["os", "arch", "cpu_model"]
 | `memory_peak_resident` | byte | `largest-process-in-tree` / `hyperfine`；`process` / `procfs` | **单个**进程的峰值 RSS，不是进程树总和 |
 | `memory_peak_cgroup` | byte | `cgroup` / `cgroup-v2` | 整个组的同时峰值（`memory.peak`） |
 | `cpu_time_cgroup` | second | `cgroup` / `cgroup-v2` | 整个组的 CPU 时间（`usage_usec`） |
-| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`；`host` / `procfs` | 观测到的负载；峰值是区间内的下界 |
-| `memory_host_peak_increase` | byte | `host` / `procfs` | `MemAvailable` 的下降：整个系统的上界 |
+| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`；`host` / `procfs` | 观测到的负载；峰值是区间内的下界；运行自有子组的平均值是其 CPU 时间除以其存活时间（整个 Hyperfine 调用） |
+| `memory_host_peak_increase` | byte | `host` / `procfs` | 运行期间整个系统 `MemAvailable` 的最大下降：包含其他进程的分配，并会被同时发生的释放（包括上一轮内存的延迟归还）抵消，因此是主机观测值而不是界限 |
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | CPU 计数器；需要 `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | 依据模块日志得到的目标内部阶段；需要标签和 `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | 模块机器报告中的计数器；需要标签 |

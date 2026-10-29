@@ -68,6 +68,91 @@ docker system df -v
 `benchmark-runner` в эталонном окружении; если блоков нет, подтверждённого снимка
 ещё не было.
 
+Профиль `offline-warm` сценария `anki-e2e.smoke` в эталонном окружении не
+измеряется: `benchmark-runner check` возвращает `unsupported`, потому что
+сетевое пространство имён серии не охватывает демона Docker и BuildKit,
+работающих в сети хоста, и отсутствие сети у нагрузки не обеспечено. Профиль
+`cold` сценария `anki-e2e.full` по каталогу ещё не измерялся.
+
+<!-- benchmark-snapshot: {"scenario":"anki-e2e.smoke","profile":"warm","recorded_at":"2026-10-29T10:36:16Z","environment":{"anki_version":"26.09.3","arch":"x86_64","container_limits":"nano_cpus=4000000000,memory=6442450944,pids_limit=4096","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","docker_version":"29.9.2","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"anki-archive":{"archive_bytes":{"value":191305871.0,"unit":"byte"}}}} -->
+### `anki-e2e.smoke` · профиль `warm`
+
+Последнее подтверждённое измерение: 2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 2 из 2, прогревов 1.
+
+| Факт окружения | Значение |
+|---|---|
+| `anki_version` ★ | 26.09.3 |
+| `arch` ★ | x86_64 |
+| `container_limits` ★ | nano_cpus=4000000000,memory=6442450944,pids_limit=4096 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `docker_version` ★ | 29.9.2 |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730976256 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| Нагрузка | Значение |
+|---|---|
+| `anki-archive` · `archive_bytes` | 182.44 MiB |
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 26.148 s ± 54.16 ms | 26.148 s | 26.11 s – 26.187 s | 2 |
+| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 1.193 s ± 66.21 ms | 1.193 s | 1.147 s – 1.24 s | 2 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 309.13 MiB ± 370.52 KiB | 309.13 MiB | 308.87 MiB – 309.38 MiB | 2 |
+
+Не измерено: `phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста.
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
+<!-- benchmark-snapshot: {"scenario":"anki-e2e.full","profile":"warm","recorded_at":"2026-10-29T10:34:34Z","environment":{"anki_version":"26.09.3","arch":"x86_64","container_limits":"nano_cpus=4000000000,memory=6442450944,pids_limit=4096","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","docker_version":"29.9.2","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"anki-archive":{"archive_bytes":{"value":191305871.0,"unit":"byte"}}}} -->
+### `anki-e2e.full` · профиль `warm`
+
+Последнее подтверждённое измерение: 2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 2 из 2, прогревов 0.
+
+| Факт окружения | Значение |
+|---|---|
+| `anki_version` ★ | 26.09.3 |
+| `arch` ★ | x86_64 |
+| `container_limits` ★ | nano_cpus=4000000000,memory=6442450944,pids_limit=4096 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `docker_version` ★ | 29.9.2 |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730976256 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| Нагрузка | Значение |
+|---|---|
+| `anki-archive` · `archive_bytes` | 182.44 MiB |
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 235.474 s ± 18.393 s | 235.474 s | 222.468 s – 248.48 s | 2 |
+| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 1.626 s ± 253.12 ms | 1.626 s | 1.447 s – 1.805 s | 2 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 120.58 MiB ± 316.78 KiB | 120.58 MiB | 120.36 MiB – 120.8 MiB | 2 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 503.51 MiB ± 7.86 MiB | 503.51 MiB | 497.95 MiB – 509.07 MiB | 2 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 200.145 s ± 30.88 ms | 200.145 s | 200.124 s – 200.167 s | 2 |
+| `cpu_utilization_peak@cgroup` | cgroup / cgroup-v2 | 1.86 ядра ± 0.01 ядра | 1.86 ядра | 1.85 ядра – 1.86 ядра | 2 |
+| `cpu_utilization_peak@host` | host / procfs | 2.59 ядра ± 0.41 ядра | 2.59 ядра | 2.3 ядра – 2.88 ядра | 2 |
+| `memory_host_peak_increase@host` | host / procfs | 472.87 MiB ± 121.82 MiB | 472.87 MiB | 386.73 MiB – 559 MiB | 2 |
+| `module_counter@module-report/commands_started` | module-report / module-report | 103 ± 0 | 103 | 103 – 103 | 2 |
+| `disk_usage@path/work-cache` | path / filesystem | 182.44 MiB ± 0 B | 182.44 MiB | 182.44 MiB – 182.44 MiB | 2 |
+
+Не измерено: `phase_duration@phase/release` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/anki-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/run-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста.
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
 <!-- benchmark-snapshot:anchor -->
 
 ## Ручное наблюдение без первичных JSON
@@ -75,7 +160,9 @@ docker system df -v
 Наблюдение ниже записано вручную до появления локальной истории. Первичных
 JSON-результатов у него нет: это не подтверждённый снимок, его значения не
 сравниваются с результатами `benchmark-history` и не служат базой. Оно сохраняет
-контекст до первого подтверждённого снимка тех же условий.
+контекст до первого подтверждённого снимка тех же условий. Тёплый `full` теперь
+описывает снимок выше; холодное и инкрементальное состояния, разложение по
+фазам, ресурсы хоста и диск подтверждённым снимком пока не покрыты.
 
 ### 2026-10-26 · `anki-e2e` 0.1.0 · Anki 26.09.3 · `full`
 

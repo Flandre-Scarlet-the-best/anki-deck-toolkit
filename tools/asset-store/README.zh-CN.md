@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: df5a5b2d7a9896b8caab98789b72fc450e6528b4 -->
+<!-- i18n-source-git-blob: 84d486721fe66b1fb83e87d603c697cd3cadf785 -->
 
 `asset-store` 是用于程序管理资源的公共 Rust 库，负责清单、校验和、完整性及生命周期。领域专用 CLI `kanji-assets` 负责查找 Yarxi 条目、验证汉字图片，并把通过验证的文件发布到规范资源库。本工具不读取 `decks/**/media/`，不更改 `media_files`，也不会把图片复制到牌组中。
 
@@ -872,6 +872,46 @@ cargo run --quiet --locked --bin pitch-assets -- --output json batch review-expo
 `batch llm-review` 检查审核快照（`batch review-export`）中当前候选行已保存的 PNG，不会重新从 JPDB 获取。模型只看到用 Lanczos3 放大到长边约 448 px 的 PNG：不发送期望读音和 surface。答复包含 `verdict`（`no_defect_observed`、`defect_observed`、`insufficient`）、最多六条观察（类别为 `cropping`、`incomplete_glyph`、`artifact`、`foreign_element`、`illegible_text`、`other`）以及读到的文本 `visible_text`。模型用俄语简要书写观察（契约 `jpdb-pitch-visual-v2`；之前契约中英文观察的记录按原样读取）。代码先做 Unicode 规范组合（NFC：`か` + U+3099 等于 `が`），再把片假名折叠为平假名并删除空白，然后将读到的文本与期望读音比较；不使用兼容规范化 NFKC。模型字符串按收到的原样保存。不一致或不完整的答复记为拒绝。
 
 建议保存在批次的 `llm-review/suggestions.json` 中，并绑定到身份、SHA、世代、条目修订、请求指纹、尝试以及完整的模型与提示词来源。在 `review-export` 中，该行获得两个受保护的列——`llm:<verdict>`（或 `llm_failure:<代码>`）和建议键——并在 HTML 中显示“LLM（建议，而非决定）”摘要。决定仍然只是显式的第一列；`AUTOMATED_VERIFIED_ONLY` 规则、`VERIFIED` 和发布都不变。如果请求期间该行发生变化，结果会被丢弃（`stale_discarded`）。退出码 `3` 表示存在模型拒绝或停止未被证明。
+
+## 基准负载：`asset-store-bench`
+
+`asset-store-bench` 执行 `benchmarks/scenarios/asset-store.toml` 场景的被测负载。它调用真实的
+`AssetStore` 与 `SafeBatchRuntime`（逻辑位于 `asset_store::bench_workload`），自身不做任何测量：
+时间、CPU 和内存由 [`benchmark-runner`](../benchmark-runner/README.zh-CN.md) 采集；方法与快照见
+[性能页面](../../docs/performance/asset-store.zh-CN.md)。
+
+子命令对应场景步骤：`describe`（负载规模探针，不写盘）、`setup`（以常规 `ingest_verified`
+发布构建模板及批处理状态）、`prepare`（从模板复制工作副本并对每个文件 `fsync`）、
+`run <操作>`（被测操作）、`verify <操作>`（区间外的后置条件）、`clean`（删除目录；带
+`--keep-template` 时只删除工作副本）。操作：`verify-integrity`、`read-batch`、`read-single`、
+`ingest`、`ingest-contention --writers N`、`batch-reopen`、
+`batch-checkpoint --change unchanged|modified`。退出码：`0` 成功，`1` 操作或后置条件失败，
+`2` 用法错误。
+
+负载由 `benchmarks/workloads/asset-store/*.toml` 规格定义：领域（`kanji` 或 `generic`）、种子、
+身份数量、PNG 变体比例、图像边长、读取与发布数量、批处理状态规模。生成器是确定性的：
+由伪随机灰度块组成的真实 GIF 和 PNG，批处理 blob 为伪随机字节。`generator` 字段必须与执行器的
+生成器版本一致；生成字节的任何变化都会提升版本（由指纹测试固定），因此规格文件的 SHA-256
+同时描述语料内容。
+
+边界：
+
+- 负载的语义验证器完整读取并解码图像、检查尺寸；`KanjiImageValidator`、OCR 与浏览器获取的
+  开销不在这些场景之内；
+- 领域策略、staging、清单、日志、`fsync`、锁、CAS 以及读取时的 SHA-256 校验均走常规代码，
+  没有捷径；
+- `ingest-contention` 以同一进程内的线程运行写入者，各自持有独立的存储句柄：互斥与进程之间
+  相同，都是 `flock`，但不测量进程启动；
+- 工作目录为工作副本中的 `target/benchmark-workloads/asset-store`（被 Git 忽略）。执行器从不删除
+  没有 `.asset-store-bench.json` 标记的目录；只有当同一可执行文件（SHA-256）按同一规格构建、且
+  模板树与构建时记录的摘要一致时，模板才会被复用。
+
+```bash
+cargo run -p benchmark-runner -- check asset-store.ingest --profile warm --param workload_spec=benchmarks/workloads/asset-store/kanji-medium.toml
+cargo run -p benchmark-runner -- run asset-store.ingest --profile warm --param workload_spec=benchmarks/workloads/asset-store/kanji-medium.toml --runs 10
+cargo run --release -p asset-store --bin asset-store-bench -- describe --spec benchmarks/workloads/asset-store/kanji-medium.toml
+cargo run --release -p asset-store --bin asset-store-bench -- clean --workdir target/benchmark-workloads/asset-store
+```
 
 ## 检查
 
