@@ -800,6 +800,12 @@ scope = "cgroup"
 source = "cgroup-v2"
 required = false
 sample_interval_seconds = 0.1
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
 "#
         ),
     );
@@ -819,6 +825,14 @@ sample_interval_seconds = 0.1
         }
         for value in run.measured("cpu_utilization_peak@cgroup") {
             assert!(value > 1.0, "пик загрузки двух потоков {value}");
+        }
+        // Средняя загрузка группы — её процессорное время за время её жизни:
+        // два потока не дают больше двух ядер.
+        for value in run.measured("cpu_utilization_mean@cgroup") {
+            assert!(
+                (1.0..=2.2).contains(&value),
+                "средняя загрузка двух потоков {value}"
+            );
         }
         // Без сэмплирования группа читается только после прогона: пик
         // загрузки отсутствует, итоговые значения остаются.
@@ -846,6 +860,45 @@ sample_interval_seconds = 0.1
         eprintln!(
             "ОГРАНИЧЕНИЕ: делегированная cgroup здесь недоступна, метрики группы не доказаны: {:?}",
             run.result().metrics[2].reason
+        );
+    }
+}
+
+/// Регрессия: процессорное время подгруппы включает Hyperfine за всё время
+/// его жизни, поэтому делить его на время одной короткой цели нельзя —
+/// пустая однопоточная цель получала загрузку в несколько ядер.
+#[test]
+fn own_cgroup_mean_utilization_of_short_target_stays_physical() {
+    if !hyperfine_ready() {
+        return;
+    }
+    let body = scenario(
+        "short-mean",
+        r#""--exit", "0""#,
+        RUNS,
+        &format!(
+            r#"{WARM}{WALL}
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+"#
+        ),
+    );
+    let fixture = fixture(&body);
+    let run = fixture.run("fixture.short-mean", "warm", &[]);
+    assert_eq!(run.code, 0, "{}\n{}", run.summary, run.stderr);
+    let values = run.measured("cpu_utilization_mean@cgroup");
+    if values.is_empty() {
+        eprintln!(
+            "ОГРАНИЧЕНИЕ: делегированная cgroup здесь недоступна, загрузка группы не проверена"
+        );
+    }
+    for value in values {
+        assert!(
+            value <= 1.5,
+            "однопоточная цель и Hyperfine не занимают {value} ядра в среднем"
         );
     }
 }

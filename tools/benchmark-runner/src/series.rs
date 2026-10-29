@@ -38,9 +38,7 @@ use benchmark_contract::scenario::{
     IdentityMethod, Input, InputKind, MetricRequest, SizeMeasure, Step,
 };
 use benchmark_contract::sensitive;
-use benchmark_contract::vocabulary::{
-    BuiltinFact, MetricId, RESULT_SCHEMA_VERSION, Scope, WorkloadKind,
-};
+use benchmark_contract::vocabulary::{BuiltinFact, MetricId, RESULT_SCHEMA_VERSION, WorkloadKind};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -186,6 +184,11 @@ struct Invocation {
     export: Option<Result<import::Imported, String>>,
     samples: Samples,
     own_final: Option<Counters>,
+    /// Время жизни подгруппы прогона: от запуска Hyperfine в ней до чтения
+    /// итоговых счётчиков. Процессорное время группы включает Hyperfine за
+    /// весь этот интервал, поэтому загрузка группы делится на него, а не на
+    /// время одной цели.
+    own_span: Option<f64>,
     own_leftovers: bool,
     timeout: Duration,
     budget_limited: bool,
@@ -727,6 +730,7 @@ impl Series<'_> {
             export: None,
             samples: Samples::default(),
             own_final: None,
+            own_span: None,
             own_leftovers: false,
             timeout,
             budget_limited,
@@ -822,6 +826,7 @@ impl Series<'_> {
         let plan =
             (measured && self.request.sampling).then(|| self.sampler_plan(group.as_ref(), &env));
         let handle = plan.map(sampler::start);
+        let started = Instant::now();
         let result = procs::run_observed(
             &mut command,
             Bounds {
@@ -844,6 +849,7 @@ impl Series<'_> {
         }
         if let Some(group) = &group {
             invocation.own_final = cgroup::read(&group.dir);
+            invocation.own_span = Some(started.elapsed().as_secs_f64());
             invocation.own_leftovers = group.kill();
             group.remove();
         }
@@ -1105,13 +1111,6 @@ impl Series<'_> {
             state.measurement = Some(imported.measurement.clone());
         }
 
-        let wall = values
-            .get(&benchmark_contract::vocabulary::metric_key(
-                MetricId::TimeWallClock,
-                Scope::Command,
-                None,
-            ))
-            .and_then(MetricValue::measured);
         for request in &scenario.metrics {
             let key = request.key();
             if let Some(missing) = state
@@ -1132,7 +1131,7 @@ impl Series<'_> {
                         .unwrap_or_else(|| "Hyperfine не измерил прогон".into()),
                 },
                 Collector::HostProcfs => host_value(request, &invocation.samples),
-                Collector::OwnCgroup => own_value(request, invocation, wall),
+                Collector::OwnCgroup => own_value(request, invocation),
                 Collector::ContainerCgroup => container_value(request, &invocation.samples),
                 Collector::ModuleReport => match (report_values, &report_problem) {
                     (Some(value), _) => report_counter(request, value),
@@ -2123,7 +2122,7 @@ fn group_points(samples: &Samples) -> Vec<(f64, f64)> {
         .collect()
 }
 
-fn own_value(request: &MetricRequest, invocation: &Invocation, wall: Option<f64>) -> MetricValue {
+fn own_value(request: &MetricRequest, invocation: &Invocation) -> MetricValue {
     let Some(last) = invocation.own_final else {
         return MetricValue::Unavailable {
             reason: "счётчики подгруппы прогона не прочитаны".into(),
@@ -2146,12 +2145,12 @@ fn own_value(request: &MetricRequest, invocation: &Invocation, wall: Option<f64>
                 reason: "cpu.stat без usage_usec".into(),
             },
         },
-        MetricId::CpuUtilizationMean => match (last.usage_usec, wall) {
-            (Some(usec), Some(wall)) if wall > 0.0 => MetricValue::Measured {
-                value: usec as f64 / 1e6 / wall,
+        MetricId::CpuUtilizationMean => match (last.usage_usec, invocation.own_span) {
+            (Some(usec), Some(span)) if span > 0.0 => MetricValue::Measured {
+                value: usec as f64 / 1e6 / span,
             },
             _ => MetricValue::Unavailable {
-                reason: "нет процессорного времени группы или времени прогона".into(),
+                reason: "нет процессорного времени группы или времени её жизни".into(),
             },
         },
         MetricId::CpuUtilizationPeak => {
@@ -2422,6 +2421,7 @@ fn samples_json(samples: &Samples) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use benchmark_contract::vocabulary::Scope;
     use serde_json::json;
 
     fn run(index: u32, success: bool, report: Option<serde_json::Value>) -> RunReport {
