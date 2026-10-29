@@ -306,3 +306,133 @@ fn shipped_workload_specs_are_valid() {
     }
     assert!(seen >= 3, "нужно несколько объёмов нагрузки");
 }
+
+/// Шаги одной декларации в порядке жизненного цикла исполнителя.
+struct DeclaredSteps {
+    id: String,
+    choices: Vec<(String, Vec<String>)>,
+    steps: Vec<(&'static str, Vec<String>)>,
+}
+
+fn argv(step: &toml::Value) -> Vec<String> {
+    let program = &step["program"];
+    assert_eq!(program["kind"].as_str(), Some("cargo-bin"));
+    assert_eq!(program["package"].as_str(), Some("asset-store"));
+    assert_eq!(program["bin"].as_str(), Some("asset-store-bench"));
+    step["args"]
+        .as_array()
+        .expect("args — массив")
+        .iter()
+        .map(|arg| arg.as_str().expect("аргумент — строка").to_owned())
+        .collect()
+}
+
+fn declared_scenarios() -> Vec<DeclaredSteps> {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/scenarios/asset-store.toml");
+    let catalog: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let list = |value: &toml::Value, key: &str| -> Vec<toml::Value> {
+        value
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    list(&catalog, "scenario")
+        .iter()
+        .map(|scenario| {
+            let choices = list(scenario, "parameter")
+                .iter()
+                .filter_map(|parameter| {
+                    let values: Vec<String> = parameter
+                        .get("choices")?
+                        .as_array()?
+                        .iter()
+                        .map(|choice| choice.as_str().unwrap().to_owned())
+                        .collect();
+                    Some((parameter["name"].as_str().unwrap().to_owned(), values))
+                })
+                .collect();
+            let mut steps = Vec::new();
+            for input in list(scenario, "input") {
+                steps.push(("probe", argv(&input["probe"])));
+            }
+            for step in list(scenario, "setup") {
+                steps.push(("setup", argv(&step)));
+            }
+            for profile in list(scenario, "profile") {
+                for step in list(&profile, "prepare") {
+                    steps.push(("prepare", argv(&step)));
+                }
+                steps.push(("target", argv(&scenario["target"])));
+                for step in list(&profile, "conclude") {
+                    steps.push(("conclude", argv(&step)));
+                }
+            }
+            for step in list(scenario, "cleanup") {
+                steps.push(("cleanup", argv(&step)));
+            }
+            DeclaredSteps {
+                id: scenario["id"].as_str().unwrap().to_owned(),
+                choices,
+                steps,
+            }
+        })
+        .collect()
+}
+
+/// Декларации каталога исполнимы настоящим исполнителем: каждая подстановка,
+/// каждое значение `choices` и каждый шаг жизненного цикла в том порядке, в
+/// котором их выполняет `benchmark-runner`, на крошечной спецификации. Рабочий
+/// каталог декларации заменяется временным, остальные аргументы — как есть.
+#[test]
+fn catalog_declarations_run_end_to_end_with_the_real_executor() {
+    let fixture = Fixture::new("catalog");
+    let spec = fixture.spec("spec.toml", &spec_text("kanji", 3, 2));
+    let workdir = fixture.workdir();
+    let scenarios = declared_scenarios();
+    assert!(
+        scenarios.len() >= 5,
+        "сценарии asset-store зарегистрированы"
+    );
+    for scenario in scenarios {
+        let variants: Vec<Vec<(String, String)>> = match scenario.choices.as_slice() {
+            [] => vec![Vec::new()],
+            [(name, values)] => values
+                .iter()
+                .map(|value| vec![(name.clone(), value.clone())])
+                .collect(),
+            _ => panic!("{}: больше одного перечислимого параметра", scenario.id),
+        };
+        for variant in variants {
+            for (phase, args) in &scenario.steps {
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|arg| {
+                        let mut arg = arg.replace("{input.workload}", spec.to_str().unwrap());
+                        for (name, value) in &variant {
+                            arg = arg.replace(&format!("{{param.{name}}}"), value);
+                        }
+                        if arg == "target/benchmark-workloads/asset-store" {
+                            arg = workdir.to_str().unwrap().to_owned();
+                        }
+                        assert!(
+                            !arg.contains('{'),
+                            "{}: неподставленный аргумент {arg}",
+                            scenario.id
+                        );
+                        arg
+                    })
+                    .collect();
+                let output = Command::new(BIN).args(&args).output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{} {variant:?} {phase}: {}",
+                    scenario.id,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+    bench_workload::clean(&workdir, false).unwrap();
+}
