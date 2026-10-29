@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 84d486721fe66b1fb83e87d603c697cd3cadf785 -->
+<!-- i18n-source-git-blob: 892c6a37ee42441a76f751a8ee3bc280133a5d98 -->
 
 `asset-store` 是用于程序管理资源的公共 Rust 库，负责清单、校验和、完整性及生命周期。领域专用 CLI `kanji-assets` 负责查找 Yarxi 条目、验证汉字图片，并把通过验证的文件发布到规范资源库。本工具不读取 `decks/**/media/`，不更改 `media_files`，也不会把图片复制到牌组中。
 
@@ -903,7 +903,7 @@ cargo run --quiet --locked --bin pitch-assets -- --output json batch review-expo
 - `ingest-contention` 以同一进程内的线程运行写入者，各自持有独立的存储句柄：互斥与进程之间
   相同，都是 `flock`，但不测量进程启动；
 - 工作目录为工作副本中的 `target/benchmark-workloads/asset-store`（被 Git 忽略）。执行器从不删除
-  没有 `.asset-store-bench.json` 标记的目录；只有当同一可执行文件（SHA-256）按同一规格构建、且
+  没有 `.asset-store-bench.json` 标记的非空目录（空目录可直接删除）；只有当同一可执行文件（SHA-256）按同一规格构建、且
   模板树与构建时记录的摘要一致时，模板才会被复用。
 
 ```bash

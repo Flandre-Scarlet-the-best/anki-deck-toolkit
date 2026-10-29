@@ -1,7 +1,7 @@
 # 性能：`anki-repo`
 
 [Русский](anki-repo.md) · [English](anki-repo.en.md) · **简体中文**
-<!-- i18n-source-git-blob: fb5af7d71ebad7605fe18e3deac8b79d38d3aa2c -->
+<!-- i18n-source-git-blob: 4b49d407c5b7e70375ebc5fc7e0435f744a0283e -->
 
 CrowdAnki 导出分析短命令的性能（[命令契约](../../tools/anki-repo/README.zh-CN.md)）：按目录场景
 给出的最近确认快照。通用测量规则见[测量方法](README.zh-CN.md)，场景字段见
@@ -14,8 +14,8 @@ CrowdAnki 导出分析短命令的性能（[命令契约](../../tools/anki-repo/
 - `anki-repo.stats` —— `anki-repo --json stats`：按牌组树进行类型化加载和汇总。
 
 测量区间是已构建的 release 二进制从进程启动到退出；构建、预热和计算导出标识不计入。指标：
-`time_wall_clock`（必需）、`time_cpu`、`memory_peak_resident` 和 `instructions`（无
-`perf_event` 访问权限时为带原因的 `unavailable`）。
+两个场景均声明 `time_wall_clock`（必需）、`time_cpu` 和 `memory_peak_resident`；
+`anki-repo.validate` 还声明 `instructions`（无 `perf_event` 访问权限时为带原因的 `unsupported`）。
 
 ## 负载
 

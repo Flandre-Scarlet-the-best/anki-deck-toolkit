@@ -828,11 +828,19 @@ required = false
         }
         // Средняя загрузка группы — её процессорное время за время её жизни:
         // два потока не дают больше двух ядер.
-        for value in run.measured("cpu_utilization_mean@cgroup") {
-            assert!(
-                (1.0..=2.2).contains(&value),
-                "средняя загрузка двух потоков {value}"
-            );
+        let cpu = run.values("cpu_time_cgroup@cgroup");
+        let mean = run.values("cpu_utilization_mean@cgroup");
+        assert_eq!(cpu.len(), mean.len());
+        for (time, value) in cpu.iter().zip(&mean) {
+            if time.measured().is_some() {
+                let value = value
+                    .measured()
+                    .expect("при измеренном CPU средняя загрузка есть");
+                assert!(
+                    value > 0.0 && value <= 2.2,
+                    "средняя загрузка двух потоков {value}"
+                );
+            }
         }
         // Без сэмплирования группа читается только после прогона: пик
         // загрузки отсутствует, итоговые значения остаются.

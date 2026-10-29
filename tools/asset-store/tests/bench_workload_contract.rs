@@ -278,14 +278,26 @@ fn binary_reports_usage_and_failure_with_distinct_codes() {
 /// описывать корпус. Тест фиксирует отпечаток содержимого генератора.
 #[test]
 fn generator_output_is_pinned_to_its_version() {
-    let spec: WorkloadSpec = toml::from_str(&spec_text("kanji", 1, 2)).unwrap();
-    let description = bench_workload::describe(&spec);
     assert_eq!(GENERATOR_VERSION, 1);
-    assert_eq!(
-        description.content_sha256,
-        "978e4635f62191daa38ff9f8e7700cdab99e83418b4934898b3ad2f5995c92b1",
-        "содержимое генератора изменилось: повысьте GENERATOR_VERSION и generator в спецификациях benchmarks/workloads/asset-store"
-    );
+    for (domain, png_every, expected) in [
+        (
+            "kanji",
+            2,
+            "978e4635f62191daa38ff9f8e7700cdab99e83418b4934898b3ad2f5995c92b1",
+        ),
+        (
+            "generic",
+            0,
+            "1bfc9ec864c1c40e20fdf76372f48edfe4a0240667f1ba99bfcbedb3de8183de",
+        ),
+    ] {
+        let spec: WorkloadSpec = toml::from_str(&spec_text(domain, 1, png_every)).unwrap();
+        assert_eq!(
+            bench_workload::describe(&spec).content_sha256,
+            expected,
+            "содержимое генератора {domain} изменилось: повысьте GENERATOR_VERSION и generator в спецификациях benchmarks/workloads/asset-store"
+        );
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 # 性能：`asset-store`
 
 [Русский](asset-store.md) · [English](asset-store.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 02d8467d6234ec92bd24866f641d6fdedc828e18 -->
+<!-- i18n-source-git-blob: 273c05d1ad32124c0aff812e16c413ed51abf057 -->
 
 资源存储文件核心的性能（[存储契约与负载执行器](../../tools/asset-store/README.zh-CN.md)）：方法、
 测量边界、合成负载特征以及目录场景最近一次已确认的快照。通用测量规则见[方法论](README.zh-CN.md)，
@@ -370,7 +370,7 @@ PR 描述中。
 
 供下一阶段工作参考的假设（观测，而非已证实的原因）：
 
-- **单次读取呈二次方增长。** 一次 `read_verified_variants_with_policy` 调用在 250 / 1250 / 3000
+- **对 N 条记录逐条读取 N 次的总成本呈二次方增长。** 一次 `read_verified_variants_with_policy` 调用在 250 / 1250 / 3000
   条记录时分别耗时 6.9 / 33.6 / 80 ms——与清单规模成正比，即使 medium 与 large 的读取次数相同。
   同样的请求用批量 API，small 快 93 倍，medium 与 large 快 670–890 倍。三分之二是系统时间
   （medium 为 42 s 中的 28 s）：可能原因是每个请求都重新打开、解析并检查整个清单并访问文件。

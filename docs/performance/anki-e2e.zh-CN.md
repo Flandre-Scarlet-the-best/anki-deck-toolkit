@@ -1,7 +1,7 @@
 # 性能：`anki-e2e`
 
 [Русский](anki-e2e.md) · [English](anki-e2e.en.md) · **简体中文**
-<!-- i18n-source-git-blob: d568675b4ec927aa8511c0ddde37e3b509a4d388 -->
+<!-- i18n-source-git-blob: 032de30b17eb41b6c53bed92fc86814e6018e5c5 -->
 
 Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](../../tools/anki-e2e/README.zh-CN.md)）。
 通用测量规则和来源精度见[方法说明](README.zh-CN.md)。
@@ -150,7 +150,8 @@ BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配
 
 下面的观测是在本地历史出现之前手动记录的。它没有原始 JSON 结果：不是已确认的快照，其数值
 不与 `benchmark-history` 的结果比较，也不作为基线。它在出现相同条件的首个确认快照之前保留
-背景信息。温态 `full` 现在由上面的快照描述；冷态和增量状态、按阶段的分解、主机资源和磁盘尚未被确认快照覆盖。
+背景信息。温态 `full` 现在由上面的快照描述，包含主机 CPU、内存观测值及 `work-cache` 大小；
+冷态和增量状态以及按阶段的分解尚未被确认快照覆盖。
 
 ### 2026-10-26 · `anki-e2e` 0.1.0 · Anki 26.09.3 · `full`
 

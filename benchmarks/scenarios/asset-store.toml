@@ -713,7 +713,7 @@ metric = "cpu_utilization_mean"
 scope = "cgroup"
 source = "cgroup-v2"
 required = false
-description = "Средняя загрузка подгруппы прогона: сколько ядер в среднем заняли писатели."
+description = "Средняя загрузка подгруппы за время её жизни: писатели и Hyperfine вместе, весь вызов Hyperfine до остановки сэмплера."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]

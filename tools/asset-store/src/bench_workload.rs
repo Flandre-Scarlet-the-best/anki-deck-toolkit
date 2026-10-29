@@ -50,7 +50,8 @@ use crate::{AssetDomainPolicy, GenericDomainPolicy, KanjiDomainPolicy};
 /// содержимое корпуса. Спецификация с другой версией отвергается.
 pub const GENERATOR_VERSION: u32 = 1;
 
-/// Маркер рабочего каталога: [`clean`] и [`setup`] удаляют только помеченное.
+/// Маркер рабочего каталога: [`clean`] и [`setup`] требуют его для удаления
+/// непустого каталога; пустой каталог может быть удалён без маркера.
 pub const MARKER_FILE: &str = ".asset-store-bench.json";
 const MARKER_TOOL: &str = "asset-store-bench";
 const TEMPLATE_DIR: &str = "template";

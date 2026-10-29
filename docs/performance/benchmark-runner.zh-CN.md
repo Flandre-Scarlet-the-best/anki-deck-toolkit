@@ -1,7 +1,7 @@
 # 性能：`benchmark-runner`
 
 [Русский](benchmark-runner.md) · [English](benchmark-runner.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 8e7d76fbfdb32c0a7a55789d8c99c9b884fcb40d -->
+<!-- i18n-source-git-blob: 0ca12ade87ac8fcea2de240a65d75b4ea9201827 -->
 
 基准执行器自身的测量（[接口与语义](../../tools/benchmark-runner/README.zh-CN.md)）：它对已知开销的
 负载测得有多准确、每个指标究竟包含什么，以及轮询 `/proc` 和运行自有 cgroup 的代价。通用测量规则见
@@ -253,7 +253,8 @@ cargo run -p benchmark-history -- list --module benchmark-runner
   差异小于系列离散度；短运行上影响低于 0.2 %，一秒运行上未检出。
 - **分辨率。** 以 0.05 s 间隔轮询 `/proc` 时，短于间隔的目标没有任何窗口：空目标的
   `cpu_utilization_peak@host` 为带原因的 `unavailable`，而不是零。在 `perf_event_paranoid = 2`
-  下 `instructions` 计数器可用，相对离散度稳定在 10⁻⁴。
+  下 `instructions` 计数器可用。相对离散度取决于负载：`calibration-cpu` 约 1.4 %，
+  `calibration-parallel` 约 0.9 %，`calibration-noop` 约 10⁻³，`calibration-memory` 约 4×10⁻⁴。
 
 未测量：非 WSL2 环境、多进程负载、Docker 容器的 cgroup（500 ms 查找）以及轮询对长于数秒目标的影响。
 

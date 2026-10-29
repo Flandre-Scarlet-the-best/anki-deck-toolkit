@@ -1,7 +1,7 @@
 # Performance: `asset-store`
 
 [Русский](asset-store.md) · **English** · [简体中文](asset-store.zh-CN.md)
-<!-- i18n-source-git-blob: 02d8467d6234ec92bd24866f641d6fdedc828e18 -->
+<!-- i18n-source-git-blob: 273c05d1ad32124c0aff812e16c413ed51abf057 -->
 
 Performance of the asset store's file core
 ([store contract and workload executor](../../tools/asset-store/README.en.md)):
@@ -182,7 +182,7 @@ Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2
 <!-- benchmark-snapshot: {"scenario":"asset-store.read-single","profile":"warm","recorded_at":"2026-10-29T09:32:37Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"read_bytes":{"value":1213680.0,"unit":"byte"},"reads":{"value":1250.0,"unit":"count"},"records":{"value":1250.0,"unit":"count"}}}} -->
 ### `asset-store.read-single` · profile `warm`
 
-Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 5 of 5 runs successful, 1 warmup runs.
+Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 5 of 5 runs successful, 1 warmup run.
 
 | Environment fact | Value |
 |---|---|
@@ -219,7 +219,7 @@ Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2
 <!-- benchmark-snapshot: {"scenario":"asset-store.ingest","profile":"warm","recorded_at":"2026-10-29T09:37:54Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"ingest":{"value":50.0,"unit":"count"},"ingest_bytes":{"value":53887.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}}} -->
 ### `asset-store.ingest` · profile `warm`
 
-Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 10 of 10 runs successful, 1 warmup runs.
+Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 10 of 10 runs successful, 1 warmup run.
 
 | Environment fact | Value |
 |---|---|
@@ -258,7 +258,7 @@ Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2
 <!-- benchmark-snapshot: {"scenario":"asset-store.ingest-contention","profile":"warm","recorded_at":"2026-10-29T09:41:57Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"ingest":{"value":50.0,"unit":"count"},"ingest_bytes":{"value":53887.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}},"parameters":{"writers":"4"}} -->
 ### `asset-store.ingest-contention` · profile `warm`
 
-Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 5 of 5 runs successful, 1 warmup runs.
+Last confirmed measurement: 2026-10-29 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 5 of 5 runs successful, 1 warmup run.
 
 | Environment fact | Value |
 |---|---|
@@ -393,7 +393,7 @@ and their IDs are in the local history and the PR description.
 
 Hypotheses for the next line of work (observations, not proven causes):
 
-- **Single reads are quadratic.** One `read_verified_variants_with_policy` call
+- **A series of N single reads over N records has quadratic total cost.** One `read_verified_variants_with_policy` call
   costs 6.9 / 33.6 / 80 ms at 250 / 1250 / 3000 records — proportional to the
   manifest size, even with the same number of reads for medium and large. The
   batch API on the same requests is 93 times faster for small and 670–890 times

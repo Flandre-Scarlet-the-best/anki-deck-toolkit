@@ -93,7 +93,7 @@ metric = "cpu_utilization_mean"
 scope = "cgroup"
 source = "cgroup-v2"
 required = false
-description = "cpu_time_cgroup, делённое на длительность прогона."
+description = "cpu_time_cgroup, делённое на время жизни подгруппы прогона: весь вызов Hyperfine, включая цель, до остановки сэмплера."
 
 [[scenario.metric]]
 metric = "cpu_utilization_peak"
@@ -109,7 +109,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
@@ -200,7 +200,7 @@ metric = "cpu_utilization_mean"
 scope = "cgroup"
 source = "cgroup-v2"
 required = false
-description = "cpu_time_cgroup, делённое на длительность прогона."
+description = "cpu_time_cgroup, делённое на время жизни подгруппы прогона: весь вызов Hyperfine, включая цель, до остановки сэмплера."
 
 [[scenario.metric]]
 metric = "cpu_utilization_peak"
@@ -216,7 +216,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
@@ -377,7 +377,7 @@ metric = "cpu_utilization_mean"
 scope = "cgroup"
 source = "cgroup-v2"
 required = false
-description = "cpu_time_cgroup, делённое на длительность прогона."
+description = "cpu_time_cgroup, делённое на время жизни подгруппы прогона: весь вызов Hyperfine, включая цель, до остановки сэмплера."
 
 [[scenario.metric]]
 metric = "cpu_utilization_peak"
@@ -393,7 +393,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
@@ -484,7 +484,7 @@ metric = "cpu_utilization_mean"
 scope = "cgroup"
 source = "cgroup-v2"
 required = false
-description = "cpu_time_cgroup, делённое на длительность прогона."
+description = "cpu_time_cgroup, делённое на время жизни подгруппы прогона: весь вызов Hyperfine, включая цель, до остановки сэмплера."
 
 [[scenario.metric]]
 metric = "cpu_utilization_peak"
@@ -500,7 +500,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 0.05
-description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]

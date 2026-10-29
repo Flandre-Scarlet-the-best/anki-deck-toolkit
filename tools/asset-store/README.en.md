@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 84d486721fe66b1fb83e87d603c697cd3cadf785 -->
+<!-- i18n-source-git-blob: 892c6a37ee42441a76f751a8ee3bc280133a5d98 -->
 
 `asset-store` is the shared Rust library for program-managed assets, responsible for manifests, checksums, integrity, and lifecycle. The domain-specific `kanji-assets` CLI provides Yarxi entry discovery, kanji image validation, and publication of approved files to the canonical corpus. The tool does not read `decks/**/media/`, does not modify `media_files`, and does not copy images into decks.
 
@@ -952,8 +952,8 @@ Boundaries:
   store handles: exclusion is the same `flock` as between processes, but
   process start-up is not measured;
 - the working directory is `target/benchmark-workloads/asset-store` of the
-  working copy (ignored by Git). The executor never removes a directory without
-  the `.asset-store-bench.json` marker; a template is reused only if the same
+  working copy (ignored by Git). The executor never removes a non-empty directory
+  without the `.asset-store-bench.json` marker (an empty directory may be removed); a template is reused only if the same
   executable (SHA-256) built it from the same spec and the template tree matches
   the digest recorded when it was built.
 

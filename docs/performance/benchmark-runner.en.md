@@ -1,7 +1,7 @@
 # Performance: `benchmark-runner`
 
 [Русский](benchmark-runner.md) · **English** · [简体中文](benchmark-runner.zh-CN.md)
-<!-- i18n-source-git-blob: 8e7d76fbfdb32c0a7a55789d8c99c9b884fcb40d -->
+<!-- i18n-source-git-blob: 0ca12ade87ac8fcea2de240a65d75b4ea9201827 -->
 
 Measurements of the benchmark runner itself
 ([interface and semantics](../../tools/benchmark-runner/README.en.md)): how
@@ -160,7 +160,7 @@ The scenario declares no inputs.
 <!-- benchmark-snapshot: {"scenario":"benchmark-runner.calibration-parallel","profile":"warm","recorded_at":"2026-10-29T09:23:30Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{}} -->
 ### `benchmark-runner.calibration-parallel` · profile `warm`
 
-Last confirmed measurement: 2026-10-29 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 10 of 10 runs successful, 1 warmup runs.
+Last confirmed measurement: 2026-10-29 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 10 of 10 runs successful, 1 warmup run.
 
 | Environment fact | Value |
 |---|---|
@@ -197,7 +197,7 @@ The scenario declares no inputs.
 <!-- benchmark-snapshot: {"scenario":"benchmark-runner.calibration-memory","profile":"warm","recorded_at":"2026-10-29T09:24:09Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{}} -->
 ### `benchmark-runner.calibration-memory` · profile `warm`
 
-Last confirmed measurement: 2026-10-29 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 10 of 10 runs successful, 1 warmup runs.
+Last confirmed measurement: 2026-10-29 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 10 of 10 runs successful, 1 warmup run.
 
 | Environment fact | Value |
 |---|---|
@@ -277,8 +277,9 @@ description.
 - **Resolution.** `/proc` polling at a 0.05 s interval yields no window on a
   target shorter than the interval: `cpu_utilization_peak@host` of the empty
   target is `unavailable` with a reason, not zero. The `instructions` counter is
-  available with `perf_event_paranoid = 2` and is stable to 10⁻⁴ relative
-  spread.
+  available with `perf_event_paranoid = 2`. Its relative spread depends on the
+  workload: about 1.4 % for `calibration-cpu`, 0.9 % for `calibration-parallel`,
+  10⁻³ for `calibration-noop` and 4×10⁻⁴ for `calibration-memory`.
 
 Not measured: an environment without WSL2, multi-process workloads, a Docker
 container's cgroup (500 ms lookup) and the effect of polling on targets longer

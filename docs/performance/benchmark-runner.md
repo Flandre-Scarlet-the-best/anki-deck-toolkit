@@ -274,7 +274,9 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 - **Разрешение.** Опрос `/proc` с интервалом 0,05 с не даёт ни одного окна
   на цели короче интервала: `cpu_utilization_peak@host` пустой цели —
   `unavailable` с причиной, а не ноль. Счётчик `instructions` доступен при
-  `perf_event_paranoid = 2` и стабилен до 10⁻⁴ относительного разброса.
+  `perf_event_paranoid = 2`. Относительный разброс зависит от нагрузки:
+  около 1,4 % у `calibration-cpu`, 0,9 % у `calibration-parallel`, 10⁻³ у
+  `calibration-noop` и 4×10⁻⁴ у `calibration-memory`.
 
 Не измерено: окружение без WSL2, многопроцессная нагрузка, cgroup контейнера
 Docker (500 мс поиска) и влияние опроса на цели длиннее нескольких секунд.

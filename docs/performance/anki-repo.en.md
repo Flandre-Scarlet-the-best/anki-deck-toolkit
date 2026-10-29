@@ -1,7 +1,7 @@
 # Performance: `anki-repo`
 
 [Русский](anki-repo.md) · **English** · [简体中文](anki-repo.zh-CN.md)
-<!-- i18n-source-git-blob: fb5af7d71ebad7605fe18e3deac8b79d38d3aa2c -->
+<!-- i18n-source-git-blob: 4b49d407c5b7e70375ebc5fc7e0435f744a0283e -->
 
 Performance of the short CrowdAnki export analysis commands
 ([command contract](../../tools/anki-repo/README.en.md)): the last confirmed
@@ -18,8 +18,9 @@ snapshot per catalog scenario. The general measurement rules are in the
 
 The measured interval is the built release binary from process start to exit;
 the build, warmups and computing the export identity are outside it. Metrics:
-`time_wall_clock` (required), `time_cpu`, `memory_peak_resident` and
-`instructions` (without `perf_event` access — `unavailable` with a reason).
+`time_wall_clock` (required), `time_cpu` and `memory_peak_resident` for both
+scenarios; `anki-repo.validate` additionally declares `instructions`
+(without `perf_event` access — `unsupported` with a reason).
 
 ## Workload
 

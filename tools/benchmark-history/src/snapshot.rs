@@ -824,7 +824,8 @@ fn labels(lang: Lang) -> Labels {
             heading: "profile",
             confirmed: "Last confirmed measurement",
             outcome: |ok, all, warmup| {
-                format!("outcome `success`: {ok} of {all} runs successful, {warmup} warmup runs")
+                let unit = if warmup == 1 { "run" } else { "runs" };
+                format!("outcome `success`: {ok} of {all} runs successful, {warmup} warmup {unit}")
             },
             dirty: "a working copy with changes was measured",
             environment: "Environment fact",

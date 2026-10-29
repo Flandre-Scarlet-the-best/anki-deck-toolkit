@@ -1,7 +1,7 @@
 # Performance: `anki-e2e`
 
 [Русский](anki-e2e.md) · **English** · [简体中文](anki-e2e.zh-CN.md)
-<!-- i18n-source-git-blob: d568675b4ec927aa8511c0ddde37e3b509a4d388 -->
+<!-- i18n-source-git-blob: 032de30b17eb41b6c53bed92fc86814e6018e5c5 -->
 
 Performance and resource usage of the Anki Desktop E2E stand: the last
 confirmed snapshot and an earlier manual observation
@@ -81,7 +81,7 @@ has not been measured through the catalog yet.
 <!-- benchmark-snapshot: {"scenario":"anki-e2e.smoke","profile":"warm","recorded_at":"2026-10-29T10:36:16Z","environment":{"anki_version":"26.09.3","arch":"x86_64","container_limits":"nano_cpus=4000000000,memory=6442450944,pids_limit=4096","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","docker_version":"29.9.2","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"anki-archive":{"archive_bytes":{"value":191305871.0,"unit":"byte"}}}} -->
 ### `anki-e2e.smoke` · profile `warm`
 
-Last confirmed measurement: 2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 2 of 2 runs successful, 1 warmup runs.
+Last confirmed measurement: 2026-10-29 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 2 of 2 runs successful, 1 warmup run.
 
 | Environment fact | Value |
 |---|---|
@@ -165,9 +165,9 @@ The observation below was recorded by hand before the local history existed. It
 has no original JSON results: it is not a confirmed snapshot, its values are not
 compared with `benchmark-history` results and do not serve as a baseline. It keeps
 the context until the first confirmed snapshot of the same conditions. The warm
-`full` run is now described by the snapshot above; the cold and incremental
-states, the per-phase breakdown, host resources and disk are not yet covered by
-a confirmed snapshot.
+`full` run is now described by the snapshot above, including host CPU and
+memory observations and the size of `work-cache`. The cold and incremental
+states and the per-phase breakdown are not yet covered by a confirmed snapshot.
 
 ### 2026-10-26 · `anki-e2e` 0.1.0 · Anki 26.09.3 · `full`
 

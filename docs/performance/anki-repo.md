@@ -16,8 +16,9 @@
 
 Измеряется собранный release-бинарник от старта процесса до выхода; сборка,
 прогревы и вычисление идентичности экспорта в интервал не входят. Метрики:
-`time_wall_clock` (обязательная), `time_cpu`, `memory_peak_resident` и
-`instructions` (без доступа к `perf_event` — `unavailable` с причиной).
+`time_wall_clock` (обязательная), `time_cpu` и `memory_peak_resident` для обоих
+сценариев; `instructions` дополнительно объявлена у `anki-repo.validate`
+(без доступа к `perf_event` — `unsupported` с причиной).
 
 ## Нагрузка
 
