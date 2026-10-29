@@ -639,12 +639,19 @@ fn remove_owned(workdir: &Path) -> Result<(), BenchError> {
     fs::remove_dir_all(workdir).map_err(|error| io_failed("рабочий каталог не удаляется", error))
 }
 
-fn checked_marker(workdir: &Path, spec_path: &Path) -> Result<(), BenchError> {
+/// Сверяет маркер эталона. Хеш исполняемого файла читает весь бинарник, поэтому в
+/// измеряемой `run` он не проверяется: идентичность сборки доказывают `setup`,
+/// `prepare` и `verify` вне измеряемого интервала.
+fn checked_marker(
+    workdir: &Path,
+    spec_path: &Path,
+    check_executable: bool,
+) -> Result<(), BenchError> {
     let marker = read_marker(workdir)?
         .ok_or_else(|| BenchError::failed("эталон не подготовлен: сначала setup"))?;
     if marker.spec_sha256 != spec_sha256(spec_path)?
         || marker.generator != GENERATOR_VERSION
-        || marker.executable_sha256 != executable_sha256()?
+        || (check_executable && marker.executable_sha256 != executable_sha256()?)
     {
         return Err(BenchError::failed(
             "эталон построен для другой спецификации, версии генератора или сборки",
@@ -655,7 +662,7 @@ fn checked_marker(workdir: &Path, spec_path: &Path) -> Result<(), BenchError> {
 
 /// Пригоден ли эталон прежней серии: тот же маркер и неизменное дерево.
 fn reusable_template(workdir: &Path, spec_path: &Path) -> bool {
-    if checked_marker(workdir, spec_path).is_err() {
+    if checked_marker(workdir, spec_path, true).is_err() {
         return false;
     }
     let template = workdir.join(TEMPLATE_DIR);
@@ -929,7 +936,7 @@ fn remove_run_copy(workdir: &Path) -> Result<(), BenchError> {
 
 /// Восстанавливает рабочую копию хранилища из эталона.
 pub fn prepare(spec_path: &Path, workdir: &Path) -> Result<Summary, BenchError> {
-    checked_marker(workdir, spec_path)?;
+    checked_marker(workdir, spec_path, true)?;
     let run = workdir.join(RUN_DIR);
     remove_run_copy(workdir)?;
     fs::create_dir(&run).map_err(|error| io_failed("рабочая копия не создаётся", error))?;
@@ -1009,7 +1016,7 @@ fn load_batch(runtime: &mut SafeBatchRuntime) -> Result<BenchBatchState, BenchEr
 /// Измеряемая операция.
 pub fn run(spec_path: &Path, workdir: &Path, operation: Operation) -> Result<Summary, BenchError> {
     let spec = WorkloadSpec::load(spec_path)?;
-    checked_marker(workdir, spec_path)?;
+    checked_marker(workdir, spec_path, false)?;
     let expected = read_expected(workdir)?;
     let root = operation_store(workdir, operation);
     if operation.mutates() && !root.is_dir() {
@@ -1160,7 +1167,7 @@ pub fn verify(
     operation: Operation,
 ) -> Result<Summary, BenchError> {
     let spec = WorkloadSpec::load(spec_path)?;
-    checked_marker(workdir, spec_path)?;
+    checked_marker(workdir, spec_path, true)?;
     let expected = read_expected(workdir)?;
     let root = operation_store(workdir, operation);
     if !operation.mutates() {

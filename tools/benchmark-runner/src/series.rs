@@ -840,6 +840,14 @@ impl Series<'_> {
                 }
             },
         );
+        // Длительность и счётчики группы снимаются сразу после завершения цели,
+        // до остановки сэмплера и записи файла сэмплов: эти затраты зависят от режима
+        // и не должны попадать в знаменатель средней загрузки.
+        let span = started.elapsed().as_secs_f64();
+        if let Some(group) = &group {
+            invocation.own_final = cgroup::read(&group.dir);
+            invocation.own_span = Some(span);
+        }
         if let Some(handle) = handle {
             invocation.samples = handle.finish();
             let _ = fs::write(
@@ -848,8 +856,6 @@ impl Series<'_> {
             );
         }
         if let Some(group) = &group {
-            invocation.own_final = cgroup::read(&group.dir);
-            invocation.own_span = Some(started.elapsed().as_secs_f64());
             invocation.own_leftovers = group.kill();
             group.remove();
         }
