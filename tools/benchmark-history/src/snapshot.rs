@@ -69,6 +69,12 @@ pub struct Meta {
     /// и её смену подтверждает только `--replace-workload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<BTreeMap<String, BTreeMap<String, Quantity>>>,
+    /// Записанные параметры, влияющие на сопоставимость (например, число
+    /// писателей): результаты с разными значениями несопоставимы, поэтому
+    /// смену параметров снимка, как и смену нагрузки, подтверждает только
+    /// `--replace-workload`. Пустой набор в маркер не пишется.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +189,25 @@ pub fn workload_identities(result: &BenchmarkResult) -> BTreeMap<String, Identit
         .collect()
 }
 
+/// Записанные параметры результата, которые сценарий объявил влияющими на
+/// сопоставимость.
+pub fn comparability_parameters(
+    scenario: &Scenario,
+    result: &BenchmarkResult,
+) -> BTreeMap<String, String> {
+    result
+        .parameters
+        .iter()
+        .filter(|(name, _)| {
+            scenario
+                .parameters
+                .iter()
+                .any(|p| &p.name == *name && p.affects_comparability)
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 /// Машинная часть маркера, которую результат даёт снимку.
 fn meta_of(scenario: &Scenario, result: &BenchmarkResult) -> Result<Meta, String> {
     Ok(Meta {
@@ -191,6 +216,7 @@ fn meta_of(scenario: &Scenario, result: &BenchmarkResult) -> Result<Meta, String
         recorded_at: result.provenance.recorded_at.clone(),
         environment: reference_environment(scenario, result)?,
         workload: Some(reference_workload(result)),
+        parameters: comparability_parameters(scenario, result),
     })
 }
 
@@ -510,6 +536,13 @@ fn workload_basis(
             "в маркере снимка {pair} эталонная нагрузка не записана: совпадение с новой нагрузкой не доказано — {confirm}"
         ));
     };
+    if old.parameters != new.meta.parameters {
+        return refuse(format!(
+            "снимок {pair} получен с другими параметрами, влияющими на сопоставимость ({}); новые параметры ({}) его молча не заменяют — {confirm}",
+            describe(&old.parameters),
+            describe(&new.meta.parameters)
+        ));
+    }
     if Some(old_workload) != new.meta.workload.as_ref() {
         return refuse(format!(
             "снимок {pair} получен на нагрузке другого объёма; новая нагрузка его молча не заменяет — {confirm}"
@@ -747,6 +780,7 @@ struct Labels {
     environment: &'static str,
     value: &'static str,
     workload: &'static str,
+    parameter: &'static str,
     no_workload: &'static str,
     metric: &'static str,
     scope: &'static str,
@@ -773,6 +807,7 @@ fn labels(lang: Lang) -> Labels {
             environment: "Факт окружения",
             value: "Значение",
             workload: "Нагрузка",
+            parameter: "параметр",
             no_workload: "Сценарий не объявляет входов.",
             metric: "Метрика",
             scope: "Scope / источник",
@@ -795,6 +830,7 @@ fn labels(lang: Lang) -> Labels {
             environment: "Environment fact",
             value: "Value",
             workload: "Workload",
+            parameter: "parameter",
             no_workload: "The scenario declares no inputs.",
             metric: "Metric",
             scope: "Scope / source",
@@ -817,6 +853,7 @@ fn labels(lang: Lang) -> Labels {
             environment: "环境事实",
             value: "值",
             workload: "负载",
+            parameter: "参数",
             no_workload: "该场景未声明输入。",
             metric: "指标",
             scope: "范围 / 来源",
@@ -894,7 +931,14 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
     }
     out.push('\n');
 
-    let sizes: Vec<(String, String)> = result
+    // Параметры, влияющие на сопоставимость, — часть определения нагрузки
+    // снимка: без них блок не говорит, что именно измерено.
+    let mut sizes: Vec<(String, String)> = meta
+        .parameters
+        .iter()
+        .map(|(name, value)| (format!("{} `{name}`", l.parameter), format!("`{value}`")))
+        .collect();
+    let input_sizes: Vec<(String, String)> = result
         .inputs
         .iter()
         .flat_map(|input| {
@@ -904,6 +948,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
                 .map(move |(name, q)| (format!("`{}` · `{name}`", input.id), show(q.value, q.unit)))
         })
         .collect();
+    sizes.extend(input_sizes);
     if sizes.is_empty() {
         let _ = writeln!(out, "{}\n", l.no_workload);
     } else {
@@ -988,9 +1033,16 @@ mod tests {
             recorded_at: "2026-10-28T00:00:00Z".into(),
             environment: BTreeMap::from([("cpu_model".into(), "X -- Y --- Z".into())]),
             workload: None,
+            parameters: BTreeMap::from([("writers".into(), "4 -- 8".into())]),
         };
         let text = marker(&meta);
         assert!(!text[4..text.len() - 3].contains("--"), "{text}");
+        // Пустые параметры в маркер не пишутся: маркеры сценариев без них не меняются.
+        let plain = Meta {
+            parameters: BTreeMap::new(),
+            ..meta.clone()
+        };
+        assert!(!marker(&plain).contains("parameters"));
         let parsed = blocks(&format!("{text}\nbody\n{END}\n")).unwrap();
         assert_eq!(parsed[0].meta, meta);
     }

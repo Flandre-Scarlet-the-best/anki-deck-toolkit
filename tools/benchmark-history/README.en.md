@@ -1,7 +1,7 @@
 # Local benchmark history: `benchmark-history`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 32ba15d7b9913f691601ed7f338f8505e2055a9d -->
+<!-- i18n-source-git-blob: 38d7b32e82cc63e35a4e205c141678b00d5761d4 -->
 
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
@@ -231,9 +231,12 @@ GitHub.
 `snapshot` replaces the block of the same scenario × profile pair on a module
 page together with its translations (`<module>.en.md`, `<module>.zh-CN.md`); a
 new pair is added before the `<!-- benchmark-snapshot:anchor -->` line. The block
-holds the date, versions, environment facts, workload size and metrics, but not
-the commit, the record ID, the input identity or paths. Refusals that write
-nothing:
+holds the date, versions, environment facts, workload size, recorded
+parameters that affect comparability (for example `writers`) and metrics, but
+not the commit, the record ID, the input identity or paths. Parameters are part
+of the marker as part of the workload definition: a snapshot with other values
+does not replace the previous one without `--replace-workload`. Refusals that
+write nothing:
 
 - the outcome is not `success`, or the result belongs to an outdated scenario
   revision;
