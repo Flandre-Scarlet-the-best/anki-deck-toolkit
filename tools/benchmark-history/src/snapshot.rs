@@ -189,22 +189,23 @@ pub fn workload_identities(result: &BenchmarkResult) -> BTreeMap<String, Identit
         .collect()
 }
 
-/// Записанные параметры результата, которые сценарий объявил влияющими на
-/// сопоставимость.
+/// Действующие значения параметров, объявленных влияющими на сопоставимость;
+/// отсутствующее значение берётся из `default` сценария.
 pub fn comparability_parameters(
     scenario: &Scenario,
     result: &BenchmarkResult,
 ) -> BTreeMap<String, String> {
-    result
+    scenario
         .parameters
         .iter()
-        .filter(|(name, _)| {
-            scenario
+        .filter(|parameter| parameter.affects_comparability)
+        .filter_map(|parameter| {
+            result
                 .parameters
-                .iter()
-                .any(|p| &p.name == *name && p.affects_comparability)
+                .get(&parameter.name)
+                .or(parameter.default.as_ref())
+                .map(|value| (parameter.name.clone(), value.clone()))
         })
-        .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
 }
 
@@ -876,7 +877,7 @@ fn marker(meta: &Meta) -> String {
 
 /// Блок снимка на одном языке.
 fn markdown_table_cell(value: &str) -> String {
-    value.replace('|', "\\|")
+    value.replace('\\', "\\\\").replace('|', "\\|")
 }
 
 pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
@@ -1034,6 +1035,11 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_table_cell_escapes_backslashes_before_pipes() {
+        assert_eq!(markdown_table_cell(r"a\|b"), r"a\\\|b");
+    }
 
     #[test]
     fn marker_never_contains_comment_terminator() {

@@ -1,7 +1,7 @@
 # 性能：`asset-store`
 
 [Русский](asset-store.md) · [English](asset-store.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 273c05d1ad32124c0aff812e16c413ed51abf057 -->
+<!-- i18n-source-git-blob: 8f0a3dec205a45aeac40e52eab824194737ac9ea -->
 
 资源存储文件核心的性能（[存储契约与负载执行器](../../tools/asset-store/README.zh-CN.md)）：方法、
 测量边界、合成负载特征以及目录场景最近一次已确认的快照。通用测量规则见[方法论](README.zh-CN.md)，
@@ -27,7 +27,9 @@
 打开存储。构建模板、恢复工作副本和检查后置条件不在区间内。指标：`time_wall_clock`（必需）、
 `time_user`、`time_system`、`memory_peak_resident`、`instructions`、运行子组的 `cpu_time_cgroup`
 与 `memory_peak_cgroup`；发布场景另有工作副本的 `disk_usage`，并发场景另有子组的
-`cpu_utilization_mean`。
+`cpu_utilization_mean`。`verify-integrity` 场景中的
+`cpu_utilization_peak@host` 是基于 `/proc/stat` 对整台主机负载的采样观测，
+不是目标负载的上限。
 
 ## 负载
 

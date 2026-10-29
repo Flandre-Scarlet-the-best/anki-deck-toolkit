@@ -31,7 +31,9 @@
 интервал не входят. Метрики: `time_wall_clock` (обязательная), `time_user`,
 `time_system`, `memory_peak_resident`, `instructions`, `cpu_time_cgroup` и
 `memory_peak_cgroup` подгруппы прогона, для публикации — `disk_usage` рабочей
-копии, для конкуренции — `cpu_utilization_mean` подгруппы.
+копии, для конкуренции — `cpu_utilization_mean` подгруппы. В сценарии
+`verify-integrity` метрика `cpu_utilization_peak@host` — выборочное наблюдение
+загрузки всего хоста по `/proc/stat`, а не верхняя граница загрузки цели.
 
 ## Нагрузка
 

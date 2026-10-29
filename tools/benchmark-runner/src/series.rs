@@ -184,10 +184,9 @@ struct Invocation {
     export: Option<Result<import::Imported, String>>,
     samples: Samples,
     own_final: Option<Counters>,
-    /// Время жизни подгруппы прогона: от запуска Hyperfine в ней до чтения
-    /// итоговых счётчиков. Процессорное время группы включает Hyperfine за
-    /// весь этот интервал, поэтому загрузка группы делится на него, а не на
-    /// время одной цели.
+    /// Время от входа Hyperfine в подгруппу до чтения итоговых счётчиков.
+    /// Процессорное время группы включает Hyperfine за весь этот интервал,
+    /// поэтому загрузка группы делится на него, а не на время одной цели.
     own_span: Option<f64>,
     own_leftovers: bool,
     timeout: Duration,
@@ -775,6 +774,35 @@ impl Series<'_> {
             },
             None => None,
         };
+        let started_at_marker = if group.is_some() {
+            let marker_dir = match fs::canonicalize(self.dir.join("samples")) {
+                Ok(dir) => dir,
+                Err(error) => {
+                    self.warn(format!(
+                        "{name}: каталог метки времени не разрешается: {error}"
+                    ));
+                    if let Some(group) = &group {
+                        group.remove();
+                    }
+                    invocation.spawn_error = Some("каталог метки времени не разрешается".into());
+                    return invocation;
+                }
+            };
+            let marker = marker_dir.join(format!("{name}.cgroup-start"));
+            if let Err(error) = fs::remove_file(&marker)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                self.warn(format!("{name}: прежняя метка времени не удалена: {error}"));
+                if let Some(group) = &group {
+                    group.remove();
+                }
+                invocation.spawn_error = Some("прежняя метка времени не удалена".into());
+                return invocation;
+            }
+            Some(marker)
+        } else {
+            None
+        };
         let export = self.dir.join("hyperfine").join(format!("{name}.json"));
         let target_output = self.dir.join("output").join(format!("{name}.log"));
         let output = match scenario.kind {
@@ -794,11 +822,12 @@ impl Series<'_> {
         // цель рождается уже в ней. Перенос самой цели попал бы в измеряемый
         // интервал: миграция процесса между группами ждёт синхронизации RCU и
         // на практике добавляет к первому fork/clone цели десятки миллисекунд.
-        if let Some(group) = &group {
+        if let (Some(group), Some(started_at_marker)) = (&group, &started_at_marker) {
             let mut wrapped = vec![
                 self.runner.to_string_lossy().into_owned(),
                 "__enter-cgroup".to_owned(),
                 group.dir.to_string_lossy().into_owned(),
+                started_at_marker.to_string_lossy().into_owned(),
                 "--".to_owned(),
             ];
             wrapped.append(&mut argv);
@@ -826,7 +855,6 @@ impl Series<'_> {
         let plan =
             (measured && self.request.sampling).then(|| self.sampler_plan(group.as_ref(), &env));
         let handle = plan.map(sampler::start);
-        let started = Instant::now();
         let result = procs::run_observed(
             &mut command,
             Bounds {
@@ -840,13 +868,18 @@ impl Series<'_> {
                 }
             },
         );
-        // Длительность и счётчики группы снимаются сразу после завершения цели,
+        // Итоговые счётчики и конец интервала снимаются сразу после завершения цели,
         // до остановки сэмплера и записи файла сэмплов: эти затраты зависят от режима
         // и не должны попадать в знаменатель средней загрузки.
-        let span = started.elapsed().as_secs_f64();
         if let Some(group) = &group {
             invocation.own_final = cgroup::read(&group.dir);
-            invocation.own_span = Some(span);
+            let ended_ns = cgroup::monotonic_ns();
+            invocation.own_span = started_at_marker
+                .as_deref()
+                .and_then(|marker| cgroup::span_since_marker(marker, ended_ns));
+            if let Some(marker) = &started_at_marker {
+                let _ = fs::remove_file(marker);
+            }
         }
         if let Some(handle) = handle {
             invocation.samples = handle.finish();

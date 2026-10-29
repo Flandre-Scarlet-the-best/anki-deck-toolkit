@@ -3276,3 +3276,57 @@ fn snapshot_shows_and_guards_comparability_parameters() {
     let plan = snapshot::plan(ru, scenario, &other, &confirmed).unwrap();
     assert_eq!(plan.workload, snapshot::WorkloadBasis::ConfirmedReplacement);
 }
+
+#[test]
+fn snapshot_materializes_optional_default_comparability_parameter() {
+    let f = fixture();
+    let scenario_body = SCENARIO
+        .split_once("[[scenario]]")
+        .map(|(_, body)| body)
+        .unwrap();
+    let parametrized = format!(
+        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = false\ndefault = \"4\"\nchoices = [\"4\", \"8\"]\nrecord = true\naffects_comparability = true\n",
+        scenario_body.replace("id = \"fixture.cli\"", "id = \"fixture.default\"")
+    );
+    fs::write(f.catalog_dir().join("scenarios/fixture.toml"), parametrized).unwrap();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.default").unwrap().scenario;
+    let pages = snapshot_pages(&f, "fixture");
+    let ru = &pages[0];
+
+    let mut implicit = result(&Spec {
+        recorded_at: "2026-10-06T10:00:00Z",
+        ..Spec::default()
+    });
+    implicit.scenario.id = "fixture.default".into();
+    implicit.parameters.clear();
+    let mut explicit = result(&Spec {
+        recorded_at: "2026-10-07T10:00:00Z",
+        ..Spec::default()
+    });
+    explicit.scenario.id = "fixture.default".into();
+    explicit.parameters = BTreeMap::from([("writers".to_owned(), "4".to_owned())]);
+
+    let effective = BTreeMap::from([("writers".to_owned(), "4".to_owned())]);
+    assert_eq!(
+        snapshot::comparability_parameters(scenario, &implicit),
+        effective
+    );
+    assert_eq!(
+        snapshot::comparability_parameters(scenario, &explicit),
+        effective
+    );
+    assert!(benchmark_contract::comparability::compare(scenario, &implicit, &explicit).comparable);
+
+    let options = Options {
+        history: vec![snapshot::Recorded::of(scenario, &implicit)],
+        ..Options::default()
+    };
+    let initial = snapshot::plan(ru, scenario, &implicit, &options).unwrap();
+    snapshot::apply(&initial).unwrap();
+    let text = fs::read_to_string(ru).unwrap();
+    assert!(text.contains(r#""parameters":{"writers":"4"}"#), "{text}");
+
+    let update = snapshot::plan(ru, scenario, &explicit, &options).unwrap();
+    assert_eq!(update.workload, snapshot::WorkloadBasis::ProvenByHistory);
+}

@@ -1,7 +1,7 @@
 # Performance: `asset-store`
 
 [Русский](asset-store.md) · **English** · [简体中文](asset-store.zh-CN.md)
-<!-- i18n-source-git-blob: 273c05d1ad32124c0aff812e16c413ed51abf057 -->
+<!-- i18n-source-git-blob: 8f0a3dec205a45aeac40e52eab824194737ac9ea -->
 
 Performance of the asset store's file core
 ([store contract and workload executor](../../tools/asset-store/README.en.md)):
@@ -33,7 +33,9 @@ Building the template, restoring the working copy and checking postconditions
 are outside the interval. Metrics: `time_wall_clock` (required), `time_user`,
 `time_system`, `memory_peak_resident`, `instructions`, the run subgroup's
 `cpu_time_cgroup` and `memory_peak_cgroup`, `disk_usage` of the working copy for
-publication and the subgroup's `cpu_utilization_mean` for contention.
+publication and the subgroup's `cpu_utilization_mean` for contention. In
+`verify-integrity`, `cpu_utilization_peak@host` is a sampled observation of
+whole-host load from `/proc/stat`, not an upper bound on the target's load.
 
 ## Workload
 

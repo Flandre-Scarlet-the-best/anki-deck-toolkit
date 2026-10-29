@@ -8,8 +8,10 @@
 //! делегировал пользователю systemd (`systemd-run --user --scope -p Delegate=yes`)
 //! или окружение контейнера.
 
+use rustix::time::{ClockId, clock_gettime};
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const ROOT: &str = "/sys/fs/cgroup";
@@ -178,9 +180,35 @@ pub fn read(dir: &Path) -> Option<Counters> {
     })
 }
 
+/// Монотонное время в наносекундах, общее для родителя и его процессов.
+pub fn monotonic_ns() -> u128 {
+    let now = clock_gettime(ClockId::Monotonic);
+    (now.tv_sec as u128) * 1_000_000_000 + (now.tv_nsec as u128)
+}
+
+/// Длительность от метки, записанной обёрткой после входа в cgroup.
+pub fn span_since_marker(marker: &Path, ended_ns: u128) -> Option<f64> {
+    let started_at = fs::read_to_string(marker).ok()?;
+    span_from_marker_text(&started_at, ended_ns)
+}
+
+fn span_from_marker_text(started_at: &str, ended_ns: u128) -> Option<f64> {
+    let started_ns = started_at.trim().parse().ok()?;
+    span_seconds(started_ns, ended_ns)
+}
+
+fn span_seconds(started_ns: u128, ended_ns: u128) -> Option<f64> {
+    Some(ended_ns.checked_sub(started_ns)? as f64 / 1_000_000_000.0)
+}
+
 /// Обёртка измеряемой цели: поместить себя в группу и заменить себя целью.
 /// PID сохраняется, поэтому Hyperfine измеряет тот же процесс.
-pub fn enter_and_exec(group: &Path, program: &str, args: &[String]) -> io::Error {
+pub fn enter_and_exec(
+    group: &Path,
+    started_at: &Path,
+    program: &str,
+    args: &[String],
+) -> io::Error {
     use std::os::unix::process::CommandExt;
     if let Err(error) = fs::write(group.join("cgroup.procs"), "0") {
         return io::Error::new(
@@ -188,5 +216,40 @@ pub fn enter_and_exec(group: &Path, program: &str, args: &[String]) -> io::Error
             format!("процесс не помещён в группу прогона: {error}"),
         );
     }
+    let mut marker = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(started_at)
+    {
+        Ok(marker) => marker,
+        Err(error) => {
+            return io::Error::new(
+                error.kind(),
+                format!("время входа в группу не записано: {error}"),
+            );
+        }
+    };
+    if let Err(error) = writeln!(marker, "{}", monotonic_ns()) {
+        return io::Error::new(
+            error.kind(),
+            format!("время входа в группу не записано: {error}"),
+        );
+    }
+    drop(marker);
     std::process::Command::new(program).args(args).exec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_uses_the_monotonic_start_marker() {
+        assert_eq!(
+            span_from_marker_text("1000000000\n", 2_250_000_000),
+            Some(1.25)
+        );
+        assert_eq!(span_from_marker_text("invalid", 2_250_000_000), None);
+        assert_eq!(span_seconds(2, 1), None);
+    }
 }
