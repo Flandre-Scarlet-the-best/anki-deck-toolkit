@@ -1,0 +1,507 @@
+# Калибровка самого измерителя: синтетическая нагрузка benchmark-workload с
+# заранее известной ценой (процессорное время, число потоков, резидентная
+# память). Сравнение измеренного с известным проверяет точность и охват
+# метрик, а пары серий с опросом и без него (--no-sampling) и сценарий без
+# дополнительных метрик — накладные расходы сборщика. Эти сценарии не
+# описывают производительность asset-store, anki-repo или Anki. Методика и
+# снимки — docs/performance/benchmark-runner.md.
+schema_version = 1
+module = "benchmark-runner"
+
+[[scenario]]
+id = "benchmark-runner.calibration-noop"
+title = "Пустая цель"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "benchmark-workload без действий: запуск и выход процесса. Нижняя граница времени и памяти, разрешение счётчиков и цена Hyperfine в значениях группы."
+measured = "Один запуск собранного release-бинарника benchmark-workload от старта процесса до выхода; сборка и прогревы в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "benchmark-runner", bin = "benchmark-workload" }
+args = []
+expect_exit_codes = [0]
+
+[scenario.runs]
+warmup = 3
+min_runs = 20
+max_runs = 200
+single_run_allowed = false
+run_timeout_seconds = 60
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Нагрузка не читает файлов, кроме собственного исполняемого файла; он в page cache после прогревов."
+cleared = []
+retained = ["page cache ОС с исполняемым файлом benchmark-workload"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event — unsupported с причиной."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Подгруппа прогона: цель и процесс Hyperfine; превышение над time_cpu — цена Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона; страницы, уже начисленные другой группе (например, кэш исполняемого файла), сюда не входят."
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "cpu_time_cgroup, делённое на длительность прогона."
+
+[[scenario.metric]]
+metric = "cpu_utilization_peak"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+
+[[scenario.metric]]
+metric = "memory_host_peak_increase"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "benchmark-runner.calibration-cpu"
+title = "Известная цена процессора"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Один поток тратит 50 мс собственного процессорного времени (ThreadCPUTime). Ожидается time_cpu ≈ 50 мс плюс запуск процесса, time_wall_clock чуть больше, cpu_time_cgroup ≈ time_cpu плюс цена Hyperfine."
+measured = "Один запуск собранного release-бинарника benchmark-workload от старта процесса до выхода; сборка и прогревы в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "benchmark-runner", bin = "benchmark-workload" }
+args = ["--busy-ms", "50"]
+expect_exit_codes = [0]
+
+[scenario.runs]
+warmup = 3
+min_runs = 20
+max_runs = 200
+single_run_allowed = false
+run_timeout_seconds = 60
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Нагрузка не читает файлов, кроме собственного исполняемого файла; он в page cache после прогревов."
+cleared = []
+retained = ["page cache ОС с исполняемым файлом benchmark-workload"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event — unsupported с причиной."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Подгруппа прогона: цель и процесс Hyperfine; превышение над time_cpu — цена Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона; страницы, уже начисленные другой группе (например, кэш исполняемого файла), сюда не входят."
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "cpu_time_cgroup, делённое на длительность прогона."
+
+[[scenario.metric]]
+metric = "cpu_utilization_peak"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+
+[[scenario.metric]]
+metric = "memory_host_peak_increase"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "benchmark-runner.calibration-cpu-plain"
+title = "Та же цена процессора без дополнительных метрик"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Та же цель, что у calibration-cpu, но только метрики Hyperfine: без собственной cgroup прогона и без опроса /proc. Сравнение с calibration-cpu показывает накладные расходы дополнительного мониторинга; результаты разных сценариев контракт не сопоставляет, сравнение — наблюдение методики."
+measured = "Один запуск собранного release-бинарника benchmark-workload от старта процесса до выхода; сборка и прогревы в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "benchmark-runner", bin = "benchmark-workload" }
+args = ["--busy-ms", "50"]
+expect_exit_codes = [0]
+
+[scenario.runs]
+warmup = 3
+min_runs = 20
+max_runs = 200
+single_run_allowed = false
+run_timeout_seconds = 60
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Нагрузка не читает файлов, кроме собственного исполняемого файла; он в page cache после прогревов."
+cleared = []
+retained = ["page cache ОС с исполняемым файлом benchmark-workload"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event — unsupported с причиной."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "benchmark-runner.calibration-parallel"
+title = "Известная многопоточная нагрузка"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Четыре потока по 1000 мс собственного процессорного времени. Ожидается time_cpu ≈ 4 с, time_wall_clock ≈ 1 с при четырёх свободных ядрах, cpu_utilization_mean подгруппы ≈ 4 ядра. Длинный прогон для оценки опроса /proc и cgroup."
+measured = "Один запуск собранного release-бинарника benchmark-workload от старта процесса до выхода; сборка и прогревы в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "benchmark-runner", bin = "benchmark-workload" }
+args = ["--threads", "4", "--busy-ms", "1000"]
+expect_exit_codes = [0]
+
+[scenario.runs]
+warmup = 1
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 60
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Нагрузка не читает файлов, кроме собственного исполняемого файла; он в page cache после прогревов."
+cleared = []
+retained = ["page cache ОС с исполняемым файлом benchmark-workload"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event — unsupported с причиной."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Подгруппа прогона: цель и процесс Hyperfine; превышение над time_cpu — цена Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона; страницы, уже начисленные другой группе (например, кэш исполняемого файла), сюда не входят."
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "cpu_time_cgroup, делённое на длительность прогона."
+
+[[scenario.metric]]
+metric = "cpu_utilization_peak"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+
+[[scenario.metric]]
+metric = "memory_host_peak_increase"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "benchmark-runner.calibration-memory"
+title = "Известная резидентная память"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Процесс записывает каждую страницу блока 256 MiB и держит его 200 мс. Ожидается memory_peak_resident ≈ 256 MiB плюс база процесса, memory_peak_cgroup того же порядка, memory_host_peak_increase — верхняя оценка по всей системе."
+measured = "Один запуск собранного release-бинарника benchmark-workload от старта процесса до выхода; сборка и прогревы в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "benchmark-runner", bin = "benchmark-workload" }
+args = ["--alloc-mib", "256", "--sleep-ms", "200"]
+expect_exit_codes = [0]
+
+[scenario.runs]
+warmup = 1
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 60
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Нагрузка не читает файлов, кроме собственного исполняемого файла; он в page cache после прогревов."
+cleared = []
+retained = ["page cache ОС с исполняемым файлом benchmark-workload"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event — unsupported с причиной."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Подгруппа прогона: цель и процесс Hyperfine; превышение над time_cpu — цена Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона; страницы, уже начисленные другой группе (например, кэш исполняемого файла), сюда не входят."
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "cpu_time_cgroup, делённое на длительность прогона."
+
+[[scenario.metric]]
+metric = "cpu_utilization_peak"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Опрос /proc/stat всей системы: фоновая нагрузка и цена опроса; верхняя оценка."
+
+[[scenario.metric]]
+metric = "memory_host_peak_increase"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Наибольшее снижение MemAvailable за прогон по всей системе: верхняя оценка."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]

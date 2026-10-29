@@ -1,0 +1,14 @@
+# Средний корпус generic: 1000 ресурсов с адресацией по содержимому, без вариантов формата.
+# Контракт полей — tools/asset-store/README.md, раздел о нагрузке бенчмарков;
+# SHA-256 этого файла — идентичность нагрузки сценариев asset-store.
+generator = 1
+domain = "generic"
+seed = 1
+assets = 1000
+png_every = 0
+image_side = 48
+reads = 1000
+ingest = 50
+batch_entries = 1000
+batch_blobs = 250
+blob_bytes = 4096

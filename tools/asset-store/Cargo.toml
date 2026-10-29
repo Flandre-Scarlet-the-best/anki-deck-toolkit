@@ -69,6 +69,13 @@ name = "pronunciation-assets"
 test = false
 path = "src/bin/pronunciation_assets.rs"
 
+# Измеряемая нагрузка для сценариев benchmarks/scenarios/asset-store.toml:
+# настоящие операции AssetStore и SafeBatchRuntime над синтетическим корпусом.
+[[bin]]
+name = "asset-store-bench"
+test = false
+path = "src/bin/asset_store_bench.rs"
+
 [[bin]]
 name = "build-kanjivg-reference"
 path = "src/bin/build_kanjivg_reference.rs"
