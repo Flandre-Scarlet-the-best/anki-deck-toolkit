@@ -330,7 +330,7 @@ The repository's own software, automation, configuration, and original project d
 
 AGPL-3.0 does not automatically cover user decks, downloaded third-party assets, or program outputs (such as HTML reports and processed images). The project does not claim ownership of third-party material or impose a new license on generated files. Rights and restrictions depend on the inputs, their owners, and the applicable source licenses. User data is not published through Git.
 
-[AGPL-3.0 license text →](LICENSE) · [Licensing scope and asset rights →](LICENSING.md)
+[AGPL-3.0 license text →](LICENSE) · [Licensing scope and asset rights →](LICENSING.en.md)
 
 ---
 
