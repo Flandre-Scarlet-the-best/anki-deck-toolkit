@@ -244,6 +244,51 @@ def validate_performance(content: str) -> list[str]:
     return errors
 
 
+
+# Полный журнал хранится в Gist. Для ранее опубликованных PR сохраняем
+# совместимость с традиционной накопительной таблицей в body.
+CODERABBIT_TABLE_HEADER = "| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |"
+CODERABBIT_ROW = re.compile(
+    r"(?m)^\|\s*[1-9]\d*\s*·\s*[\x60][0-9a-f]{7,40}[\x60]\s*\|(?:\s*[^|\n\s][^|\n]*\|){5}\s*$"
+)
+CODERABBIT_GIST = re.compile(
+    r"\]\(https://gist\.github\.com/[A-Za-z0-9-]+/[0-9a-f]{20,64}(?:#[a-zA-Z0-9-]+)?\)"
+)
+
+
+def validate_coderabbit(content: str) -> list[str]:
+    """Validate the legacy cumulative table or a compact Gist-backed summary."""
+    if CODERABBIT_TABLE_HEADER in content:
+        if not CODERABBIT_ROW.search(content):
+            return ["В разделе CodeRabbit отсутствует строка завершённой итерации"]
+        return []
+
+    errors: list[str] = []
+    captured: dict[str, str] = {}
+    for name in ("Прогресс", "Итог", "Существенное", "Полный журнал"):
+        match = re.search(
+            rf"(?ms)^\s*[-*+]\s+\*\*{name}:\*\*\s*(.*?)(?=^\s*[-*+]\s+\*\*|\Z)",
+            content,
+        )
+        if not match or not match.group(1).strip() or placeholder(match.group(1)):
+            errors.append(f"CodeRabbit: требуется содержательное поле «{name}»")
+        else:
+            captured[name] = match.group(1).strip()
+
+    if "Прогресс" in captured:
+        progress = captured["Прогресс"]
+        shas = re.findall(r"[\x60][0-9a-f]{7,40}[\x60]", progress)
+        if not re.search(r"\b[1-9]\d*\b", progress) or len(shas) < 2:
+            errors.append("CodeRabbit: в «Прогресс» нужны номер итерации, reviewed HEAD и опубликованный HEAD")
+    if "Полный журнал" not in captured or not CODERABBIT_GIST.search(captured["Полный журнал"]):
+        errors.append("CodeRabbit: нужна проверенная ссылка на полный журнал в GitHub Gist")
+
+    if errors:
+        return ["CodeRabbit: нужна накопительная таблица либо полноценная сводка с Gist"] + errors
+    return []
+
+
+
 def validate(body: str) -> list[str]:
     """Return deterministic errors; empty list means structurally valid."""
     blocks = sections(body)
@@ -273,10 +318,7 @@ def validate(body: str) -> list[str]:
             errors.append("Раздел CodeRabbit повторяется")
         for name, content in blocks:
             if name == "CodeRabbit review и disposition":
-                if "| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |" not in content:
-                    errors.append("В разделе CodeRabbit отсутствует заголовок накопительной таблицы")
-                if not re.search(r"(?m)^\|\s*[1-9]\d*\s*·\s*`[0-9a-f]{7,40}`\s*\|(?:\s*[^|\n\s][^|\n]*\|){5}\s*$", content):
-                    errors.append("В разделе CodeRabbit отсутствует строка завершённой итерации")
+                errors.extend(validate_coderabbit(content))
     return errors
 
 

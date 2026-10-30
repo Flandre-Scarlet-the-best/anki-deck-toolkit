@@ -2,7 +2,7 @@
 
 Этот файл владеет механикой CodeRabbit review cycle: разбор текущего checkout,
 discovery фактического provider interface, invocation, triage findings,
-verification, commit/push, накопительное обновление PR body, rate-limit handling
+verification, commit/push, накопительное обновление Gist и сводки PR, rate-limit handling
 и отчёт.
 
 Контракт и границы (trigger, `target_iterations`, определение completed
@@ -11,8 +11,9 @@ iteration, clean iteration, инварианты) задаёт `SKILL.md`. Зд�
 
 Общую процедуру публикации — staging, commit, push, exact remote verification,
 PR create/edit и read-back — владеет repository skill `anki-git-workflow`.
-Содержательную структуру body и cumulative CodeRabbit table задаёт его
-`references/pr-body.md`. Этот файл не дублирует механику Git/GitHub: он только
+Содержательную структуру сводки PR задаёт его `references/pr-body.md`,
+формат полного журнала и механику Gist — `references/pr-gist.md`.
+Этот файл не дублирует механику Git/GitHub: он только
 определяет CodeRabbit-specific данные, которые каждая completed iteration обязана
 опубликовать через этого владельца.
 
@@ -525,48 +526,52 @@ branch, переключение на другой PR, изменение base P
 несвязанных локальных изменений.
 
 
-### 4.8 Обновление PR body после iteration
+### 4.8 Публикация журнала Gist и сводки PR после iteration
 
-После подтверждённого push и exact remote verification **до перехода к следующей
-iteration** опубликуй disposition текущего CodeRabbit review в body текущего PR.
+После подтверждённого push и exact remote verification **до перехода к
+следующей iteration** обнови **полный** журнал CodeRabbit в Gist текущего work
+item, затем короткую сводку со ссылкой в body текущего PR.
 
 Порядок:
 
-1. Установи единственный PR текущего repository/base/head. Если публикация этой
-   task branch ещё не создала PR, доведи обычный PR lifecycle через
-   `anki-git-workflow`; не создавай второй PR.
-2. Сначала установи source body по recovery-правилам
-   `anki-git-workflow/references/pr-lifecycle.md`: если локальный ignored-файл
-   отсутствует, прочитай **полный** body текущего PR и материализуй его как
-   локальный source; если локальный и remote body расходятся без доказанной
-   причины, явно примири их до mutation. Не реконструируй существующий PR по
-   памяти или prompt'у.
-3. Открой repository-local source body и раздел
-   `## CodeRabbit review и disposition`. Если CodeRabbit запускается впервые,
-   создай раздел и таблицу в формате
-   `anki-git-workflow/references/pr-body.md`.
-4. Для текущей iteration **добавь** строки в существующую cumulative table:
-   provider severity, путь, технический эффект, фактический disposition и
-   реальный результат. Свяжи строки с номером iteration и тем reviewed HEAD,
-   который действительно видел CodeRabbit.
-5. Для authoritative clean review с `0 findings` добавь одну clean summary-row
-   с опубликованным marker commit. Если findings были false positive/stale,
-   сохрани их отдельными строками с честным disposition вместо искусственного
-   `clean`.
-6. Сначала перечитай полный локальный body, затем опубликуй его через
-   `anki-git-workflow` и выполни обязательный read-back опубликованного PR.
-7. Убедись, что предыдущие строки таблицы сохранены, новые строки присутствуют
-   ровно один раз, а опубликованный body совпадает с локальным источником с
-   учётом допустимой нормализации переводов строк.
+1. Установи единственный PR текущего repository/base/head. Если PR не создан,
+   доведи обычный lifecycle через `anki-git-workflow`, не создавая дубликат.
+2. Восстанови **полный** актуальный body PR из remote по
+   `anki-git-workflow/references/pr-lifecycle.md`. При наличии старой
+   таблицы CodeRabbit сохрани все её строки. Установи имеющийся Gist по
+   фактической ссылке (если есть), считай опубликованные файлы и согласуй
+   расхождения с локальным ignored-source.
+3. Сформируй/обнови в **том же** Gist `coderabbit-review.md` по
+   `anki-git-workflow/references/pr-gist.md`. После каждой итерации добавь
+   записи для **всех** provider findings: severity, путь, эффект, проверенное
+   disposition, реальное исправление/отказ с commit. Для `0 findings`
+   запиши одну `clean`-строку с marker commit. Отклонённые и повторные
+   findings не превращай в `clean`.
+4. При первом переходе с legacy-таблицы PR перенеси **все** прежние записи
+   в Gist до сокращения PR. Не создавай отдельный Gist на каждый цикл:
+   существующий отчёт дополнить файлом журнала, а новый Gist создавать лишь
+   при отсутствии прежнего.
+5. Опубликуй Gist **до** изменения PR. Прочитай удалённый файл целиком,
+   сравни с локальным source и убедись, что старые строки сохранены, новые
+   появились ровно один раз. При неясном исходе сетевого запроса сначала
+   установи фактическое удалённое состояние, а не повторяй создание/edit.
+6. В `## CodeRabbit review и disposition` PR оставь по
+   `anki-git-workflow/references/pr-body.md` только `Прогресс` (итерации,
+   reviewed HEAD и новый HEAD), `Итог` (подтверждённые/отклонённые/clean и
+   нерешённые риски), `Существенное` (главные исправления/проблемы) и
+   `Полный журнал` с **проверенным** URL. Не копируй туда всю таблицу.
+7. Проверь локальный body через `check_pr_body.py`, опубликуй его через
+   `anki-git-workflow`, затем перечитай **полный** опубликованный PR и Gist.
+   Проверь base/head, Draft/Ready, факт сохранения всех данных и совпадение
+   обоих документов с локальными источниками.
 
-Только после успешного read-back текущая iteration может увеличить
-`completed_iterations` и открыть следующую. Если результат PR edit неизвестен
-из-за network/provider failure, сначала перечитай удалённый PR и установи
-фактическое состояние; не повторяй mutation вслепую и не создавай duplicate
-rows.
+Только после успешного read-back **двух** публикаций iteration может
+увеличить `completed_iterations` и открыть следующую. Если Gist создать
+или обновить нельзя, оставь подготовленные файлы локально, сообщи blocker:
+ссылка-заглушка, потерянные findings и фиктивное завершение запрещены.
 
-Обновление body не меняет reviewed HEAD и не превращает fix commit текущей
-iteration в CodeRabbit-reviewed: его сможет проверить только следующая iteration.
+Обновление body/Gist не превращает fix commit текущей iteration в
+CodeRabbit-reviewed: его сможет проверить только следующая iteration.
 
 ## 5. Rate limit handling
 

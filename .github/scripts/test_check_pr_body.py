@@ -66,6 +66,17 @@ def valid_body() -> str:
     return body_with(NOT_APPLICABLE)
 
 
+
+COMPACT_CODERABBIT = """## CodeRabbit review и disposition
+
+- **Прогресс:** 3 завершённые итерации; последнее ревью \x60abcdef012345\x60
+  (итерация 3), опубликован \x601234567abcde\x60 (этот HEAD ещё не проверен).
+- **Итог:** confirmed 4 исправлены, false positive 1, stale/repeated 2, clean 1; нерешённых блокирующих нет.
+- **Существенное:** исправлена гонка в \x60src/example.rs\x60, commit \x601234567abcde\x60.
+- **Полный журнал:** [все результаты ревью](https://gist.github.com/example/0123456789abcdef0123456789abcdef).
+"""
+
+
 class PrBodyContractTests(unittest.TestCase):
     def test_valid_body(self):
         self.assertEqual(validate(valid_body()), [])
@@ -153,6 +164,46 @@ class PrBodyContractTests(unittest.TestCase):
         table = "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n"
         self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
         self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"), [])
+
+    def test_coderabbit_compact_summary_with_gist(self):
+        self.assertEqual(validate(valid_body() + "\n\n" + COMPACT_CODERABBIT), [])
+
+    def test_coderabbit_compact_summary_with_measurements(self):
+        self.assertEqual(validate(body_with(MEASURED) + "\n\n" + COMPACT_CODERABBIT), [])
+
+    def test_coderabbit_compact_summary_requires_valid_gist_url(self):
+        invalid = COMPACT_CODERABBIT.replace(
+            "https://gist.github.com/example/0123456789abcdef0123456789abcdef",
+            "https://example.com/not-a-gist",
+        )
+        self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + invalid)))
+
+    def test_coderabbit_compact_summary_requires_both_head_shas(self):
+        invalid = COMPACT_CODERABBIT.replace(
+            "\x601234567abcde\x60 (этот HEAD ещё не проверен)", "неизвестный HEAD"
+        )
+        self.assertTrue(any("HEAD" in e for e in validate(valid_body() + "\n\n" + invalid)))
+
+    def test_coderabbit_compact_summary_requires_all_fields(self):
+        for label in ("Прогресс", "Итог", "Существенное", "Полный журнал"):
+            invalid = COMPACT_CODERABBIT.replace(f"**{label}:**", f"**Пропущено_{label}:**")
+            self.assertTrue(
+                any(f"«{label}»" in e for e in validate(valid_body() + "\n\n" + invalid)),
+                label,
+            )
+
+    def test_coderabbit_gist_link_in_fence_is_not_accepted(self):
+        fake = (
+            "## CodeRabbit review и disposition\n"
+            "- **Прогресс:** 1 итерация, ревью \x60abcdef012345\x60, опубликован \x601234567abcde\x60.\n"
+            "- **Итог:** 0 findings, clean 1, блокирующих нет.\n"
+            "- **Существенное:** важных ошибок нет.\n"
+            "- **Полный журнал:** пример, фактической ссылки нет.\n"
+            "\x60\x60\x60markdown\n"
+            "[журнал](https://gist.github.com/example/0123456789abcdef0123456789abcdef)\n"
+            "\x60\x60\x60"
+        )
+        self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + fake)))
 
     def test_performance_decisions_are_accepted(self):
         for performance in (NOT_APPLICABLE, MEASURED, NOT_MEASURED, "**Статус:** не применимо\n- **Причина:** перевод README на английский, код и сборка не меняются."):
