@@ -12,7 +12,7 @@
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
 ![CrowdAnki JSON](https://img.shields.io/badge/CrowdAnki-JSON-2f81f7)
 ![Linux 平台](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
-[![MIT 许可证](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![AGPL-3.0 许可证](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
 
 这套工具面向 Anki 牌组维护者和开发者：查看导出数据、验证结构和媒体引用、检查笔记质量、通过 `dry-run` 安全地进行修改、使用现有笔记类型创建笔记，并生成“修改前 / 修改后”的 HTML 对比报告。工具本身不会调用 LLM API，但支持与外部 AI 智能体配合，形成可核查的工作流程。
@@ -326,11 +326,11 @@ cargo run --quiet --locked -p asset-store --bin kanji-corpus-gate
 
 ## 许可证
 
-仓库自有的软件代码、自动化程序、配置及项目文档均采用 **MIT 许可证**。
+仓库自有的软件代码、自动化程序、配置及原创项目文档采用 **GNU Affero General Public License v3.0（AGPL-3.0-only）**。
 
-`decks/` 中的内容、用户媒体文件以及第三方资源或资源库不会自动获得 MIT 许可；这些内容仍受原权利人的权利及另行声明的条款约束。用户数据不会通过 Git 发布，也不受本项目的 MIT 许可证涵盖。
+AGPL-3.0 不会自动适用于用户牌组、下载的第三方素材或程序输出（例如 HTML 报告和处理后的图片）。本项目不主张拥有第三方素材的版权，也不会自动为输出文件附加新许可证。其权利及使用限制取决于输入内容、原权利人及原始许可条款。用户数据不会通过 Git 发布。
 
-[查看完整许可证文本及适用范围 →](LICENSE)
+[查看 AGPL-3.0 正文 →](LICENSE) · [查看许可范围与素材权利 →](LICENSING.md)
 
 ---
 
