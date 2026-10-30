@@ -6,9 +6,8 @@
 
 **Rust CLI для анализа, проверки, точечного редактирования и визуального сравнения экспортов CrowdAnki JSON.**
 
-[![Проверки репозитория](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml)
+[![Проверки репозитория](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
-![CrowdAnki JSON](https://img.shields.io/badge/CrowdAnki-JSON-2f81f7)
 ![Платформа Linux](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
 [![Лицензия: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
