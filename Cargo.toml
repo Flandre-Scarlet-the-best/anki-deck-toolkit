@@ -23,7 +23,7 @@ resolver = "3"
 # а CI проверяет совпадение двух TOML и всех участников workspace.
 rust-version = "1.99.1"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 # CI и локальная команда `cargo test` не требуют полноценных символов DWARF. При этом
 # профиль `test` по-прежнему наследует `debug-assertions=true` и `overflow-checks=true`

@@ -6,11 +6,11 @@
 
 **Rust CLI для анализа, проверки, точечного редактирования и визуального сравнения экспортов CrowdAnki JSON.**
 
-[![Проверки репозитория](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml)
+[![Проверки репозитория](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
-![CrowdAnki JSON](https://img.shields.io/badge/CrowdAnki-JSON-2f81f7)
 ![Платформа Linux](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
-[![Лицензия: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Лицензия: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Просмотры](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.svg?label=%D0%9F%D1%80%D0%BE%D1%81%D0%BC%D0%BE%D1%82%D1%80%D1%8B&color=blue)](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
 
 Набор инструментов для владельцев и разработчиков Anki-колод: исследование экспорта, проверка структуры и медиассылок, контроль качества заметок, безопасные правки с `dry-run`, создание заметок в существующих моделях и HTML-отчёт «до / после». Инструменты не вызывают LLM API, но поддерживают проверяемый рабочий процесс с внешними ИИ-агентами.
@@ -328,11 +328,11 @@ cargo run --quiet --locked -p asset-store --bin kanji-corpus-gate
 
 ## Лицензия
 
-Собственный программный код, автоматизация и настройки репозитория, а также документация проекта распространяются по **лицензии MIT**.
+Собственный программный код, автоматизация, конфигурация и авторская документация проекта распространяются по **GNU Affero General Public License v3.0 (AGPL-3.0-only)**.
 
-Содержимое `decks/`, пользовательские медиафайлы и сторонние ресурсы или корпуса не получают лицензию MIT автоматически: для них действуют права исходных правообладателей или отдельные условия, если они указаны. Пользовательские данные не публикуются через Git и не покрываются лицензией MIT.
+AGPL-3.0 не применяется автоматически к пользовательским колодам, скачанным сторонним ассетам или результатам работы инструментов (например, HTML-отчётам и обработанным изображениям). Проект не заявляет авторских прав на сторонние материалы и не назначает новую лицензию выходным файлам: их правовой режим зависит от исходного содержимого, правообладателей и условий источников. Пользовательские данные не публикуются через Git.
 
-[Полный текст и границы лицензии →](LICENSE)
+[Текст AGPL-3.0 →](LICENSE) · [Границы лицензирования и права на ассеты →](LICENSING.md)
 
 ---
 
