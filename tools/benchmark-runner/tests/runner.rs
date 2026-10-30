@@ -1992,6 +1992,12 @@ scope = "cgroup"
 source = "cgroup-v2"
 required = true
 
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = true
+
 [[scenario.requires]]
 kind = "linux-cgroup-v2"
 "#
@@ -2184,4 +2190,65 @@ fn docker_readiness_uses_the_target_environment_only() {
         !seen.is_empty() && seen.iter().all(|h| h == dead),
         "{seen:?}"
     );
+}
+
+#[test]
+fn block_io_counts_real_file_work_and_survives_no_sampling() {
+    if !hyperfine_ready() {
+        return;
+    }
+    let mut metrics = format!("{WARM}{WALL}");
+    for name in [
+        "io_read_bytes",
+        "io_write_bytes",
+        "io_read_operations",
+        "io_write_operations",
+    ] {
+        metrics.push_str(&format!("\n[[scenario.metric]]\nmetric = \"{name}\"\nscope = \"cgroup\"\nsource = \"cgroup-v2\"\nrequired = false\n"));
+    }
+    let fixture = fixture(&scenario(
+        "io",
+        r#""--file-io", "io.bin", "8""#,
+        RUNS,
+        &metrics,
+    ));
+    for extra in [vec![], vec!["--no-sampling"]] {
+        let run = fixture.run("fixture.io", "warm", &extra);
+        assert_eq!(run.code, 0, "{} {}", run.summary, run.stderr);
+        assert!(!fixture.workspace().join("io.bin").exists());
+        let writes: Vec<_> = run
+            .values("io_write_bytes@cgroup")
+            .iter()
+            .filter_map(|v| v.measured())
+            .collect();
+        if writes.iter().any(|n| *n > 0.0) {
+            assert!(
+                writes.iter().all(|n| *n >= 8.0 * 1024.0 * 1024.0),
+                "{writes:?}"
+            );
+            assert!(
+                run.measured("io_write_operations@cgroup")
+                    .iter()
+                    .all(|n| *n > 0.0)
+            );
+        } else {
+            eprintln!(
+                "ОГРАНИЧЕНИЕ: в этом окружении учтённый блочный I/O записи не доказан: {:?}",
+                run.values("io_write_bytes@cgroup")
+            );
+        }
+        for key in [
+            "io_read_bytes@cgroup",
+            "io_write_bytes@cgroup",
+            "io_read_operations@cgroup",
+            "io_write_operations@cgroup",
+        ] {
+            assert!(!run.values(key).is_empty());
+        }
+    }
+    // Чужой файл никогда не перезаписывается и не удаляется этой нагрузкой.
+    fs::write(fixture.workspace().join("io.bin"), "keep").unwrap();
+    let run = fixture.run("fixture.io", "warm", &[]);
+    assert_ne!(run.code, 0);
+    assert_eq!(fixture.read("io.bin"), "keep");
 }

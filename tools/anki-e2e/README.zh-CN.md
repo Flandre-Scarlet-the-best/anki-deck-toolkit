@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: dd5dc88e75c8122f15b9edd5496a554b1ff704b3 -->
+<!-- i18n-source-git-blob: e27c55c68fc36811d7c07499e65daab60c0238d8 -->
 
 `anki-e2e` 是 `anki-repo anki` 命令组（[契约](../anki-repo/desktop.md)）的常设本地
 E2E 测试台。主机上的 Rust runner 构建包含**官方 Linux Anki Desktop** 的可复现
@@ -189,12 +189,12 @@ Linux 或 WSL2，带 Docker Engine（rootful 或 rootless）和 BuildKit，架�
 aarch64，可访问 GitHub、AnkiWeb、Docker Hub 和 Ubuntu 镜像源，默认每个容器
 4 个 CPU 和 6 GB 内存。在测量环境中，测试台镜像、Cargo 缓存和归档占用约 6.6 GB
 磁盘；Docker 基础镜像、构建临时数据和缓存增长余量还需要额外空间
-（[测量详情](../../docs/performance/anki-e2e.zh-CN.md)）。首次运行构建镜像；之后的运行使用缓存。
+（[测量详情](performance.zh-CN.md)）。首次运行构建镜像；之后的运行使用缓存。
 
 ## 性能
 
 测试台各阶段的耗时、CPU、内存和磁盘占用及其测量方法记录在
-[性能页面](../../docs/performance/anki-e2e.zh-CN.md)中；通用测量规则见
+[性能页面](performance.zh-CN.md)中；通用测量规则见
 [方法说明](../../docs/performance/README.zh-CN.md)。
 
 ## 边界

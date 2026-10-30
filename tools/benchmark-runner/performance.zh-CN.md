@@ -1,11 +1,11 @@
 # 性能：`benchmark-runner`
 
-[Русский](benchmark-runner.md) · [English](benchmark-runner.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 0ca12ade87ac8fcea2de240a65d75b4ea9201827 -->
+[Русский](performance.md) · [English](performance.en.md) · **简体中文**
+<!-- i18n-source-git-blob: fdb08a1ac07061bd2d6f539c338b47372585b6db -->
 
-基准执行器自身的测量（[接口与语义](../../tools/benchmark-runner/README.zh-CN.md)）：它对已知开销的
+基准执行器自身的测量（[接口与语义](README.zh-CN.md)）：它对已知开销的
 负载测得有多准确、每个指标究竟包含什么，以及轮询 `/proc` 和运行自有 cgroup 的代价。通用测量规则见
-[方法论](README.zh-CN.md)。
+[方法论](../../docs/performance/README.zh-CN.md)。
 
 ## 测量内容
 
@@ -19,6 +19,7 @@
 | `calibration-cpu-plain` | 同一目标，仅 Hyperfine 指标 | 比较可显示额外监控的代价 |
 | `calibration-parallel` | 四个线程各 1000 ms | `time_cpu` ≈ 4 s，时间 ≈ 1 s，组负载 ≈ 4 核 |
 | `calibration-memory` | 写入 256 MiB 块的每一页并保持 200 ms | `memory_peak_resident` ≈ 256 MiB 加进程基础 |
+| `calibration-io` | 新建 16 MiB 文件，写入、`fsync`、仅驱逐自身干净页面、校验读取并删除 | 已记账字节与操作应为正；实际总量取决于文件系统和设备 |
 
 ## 如何测量
 
@@ -36,6 +37,7 @@ cargo run -p benchmark-runner -- run benchmark-runner.calibration-cpu-plain --pr
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-parallel --profile warm --runs 10
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-parallel --profile warm --runs 10 --no-sampling
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-memory --profile warm --runs 10
+cargo run -p benchmark-runner -- run benchmark-runner.calibration-io --profile warm --runs 5
 cargo run -p benchmark-history -- list --module benchmark-runner
 ```
 

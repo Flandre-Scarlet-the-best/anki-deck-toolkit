@@ -3346,3 +3346,44 @@ fn snapshot_materializes_optional_default_comparability_parameter() {
     let update = snapshot::plan(ru, scenario, &explicit, &options).unwrap();
     assert_eq!(update.workload, snapshot::WorkloadBasis::ProvenByHistory);
 }
+
+#[test]
+fn snapshot_cli_publishes_next_to_the_module() {
+    let f = fixture();
+    let dir = f.root.join("workspace/tools/fixture");
+    fs::create_dir_all(&dir).unwrap();
+    let source = PAGE_RU
+        .replace("fixture.en.md", "performance.en.md")
+        .replace("fixture.zh-CN.md", "performance.zh-CN.md");
+    fs::write(dir.join("performance.md"), &source).unwrap();
+    let sha = snapshot::git_blob_sha(source.as_bytes());
+    for lang in ["en", "zh-CN"] {
+        let text = page(if lang == "en" { "en" } else { "zh" }, &sha)
+            .replace("fixture.md", "performance.md")
+            .replace("fixture.en.md", "performance.en.md")
+            .replace("fixture.zh-CN.md", "performance.zh-CN.md");
+        fs::write(dir.join(format!("performance.{lang}.md")), text).unwrap();
+    }
+    let mut store = f.open();
+    let id = f.import(&mut store, &result(&Spec::default()));
+    drop(store);
+    let (code, out, err) = f.cli(&[
+        "snapshot",
+        &id,
+        "--page",
+        dir.join("performance.md").to_str().unwrap(),
+        "--apply",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    for name in [
+        "performance.md",
+        "performance.en.md",
+        "performance.zh-CN.md",
+    ] {
+        assert!(
+            fs::read_to_string(dir.join(name))
+                .unwrap()
+                .contains("benchmark-snapshot: {")
+        );
+    }
+}

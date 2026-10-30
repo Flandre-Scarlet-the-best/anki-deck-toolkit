@@ -1572,7 +1572,12 @@ fn profile_required_parameters_must_be_recorded() {
 fn private_parameters_never_reach_published_results() {
     let catalog = catalog::load(&repository_catalog()).catalog.unwrap();
     let mut value = cli_result();
-    value["scenario"] = json!({"id": "anki-repo.validate", "module": "anki-repo", "revision": 1, "kind": "short-cli"});
+    let revision = catalog
+        .scenario("anki-repo.validate")
+        .unwrap()
+        .scenario
+        .revision;
+    value["scenario"] = json!({"id": "anki-repo.validate", "module": "anki-repo", "revision": revision, "kind": "short-cli"});
     value["parameters"] = json!({"export_dir": "decks/output/Example"});
     result_rejected(
         &value,

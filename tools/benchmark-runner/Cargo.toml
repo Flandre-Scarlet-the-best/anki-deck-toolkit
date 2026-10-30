@@ -17,7 +17,7 @@ benchmark-contract = { path = "../benchmark-contract" }
 benchmark-history = { path = "../benchmark-history" }
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = { version = "3.5", features = ["termination"] }
-rustix = { version = "1.1", features = ["param", "process", "time"] }
+rustix = { version = "1.1", features = ["fs", "param", "process", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"

@@ -2,7 +2,7 @@
 # SafeBatchRuntime над детерминированным синтетическим корпусом. Исполнитель
 # нагрузки — asset-store-bench (tools/asset-store/README.md), спецификации
 # объёмов — benchmarks/workloads/asset-store/*.toml, методика и снимки —
-# docs/performance/asset-store.md.
+# tools/asset-store/performance.md.
 #
 # Эталон строится шагом setup штатной публикацией ingest_verified в
 # игнорируемом Git каталоге target/benchmark-workloads/asset-store; cleanup
@@ -16,7 +16,7 @@ module = "asset-store"
 [[scenario]]
 id = "asset-store.verify-integrity"
 title = "Проверка целостности корпуса"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Открытие существующего хранилища (проверка владельца, манифестов, сверка runtime-границы) и verify_integrity: манифест и наличие каждого файла под разделяемой блокировкой. Байты файлов не хешируются."
@@ -146,6 +146,34 @@ required = false
 sample_interval_seconds = 0.05
 description = "Опрос /proc/stat всей системы: выборочное наблюдение хостовой нагрузки, не верхняя граница пиковой загрузки цели."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -153,7 +181,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "asset-store.read-batch"
 title = "Пакетное чтение доверенных байтов"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Штатный пакетный API visit_verified_variants_with_policy: одна разделяемая блокировка и одна полная проверка манифеста на весь набор, затем чтение каждого файла со сверкой размера, формата и SHA-256."
@@ -276,6 +304,34 @@ source = "cgroup-v2"
 required = false
 description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -283,7 +339,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "asset-store.read-single"
 title = "Те же чтения по одному запросу"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Те же запросы, что у read-batch, но отдельным вызовом read_verified_variants_with_policy на каждый: блокировка, разбор и проверка всего манифеста повторяются для каждого запроса. Сценарий отделяет стоимость повторной проверки манифеста от стоимости чтения байтов."
@@ -406,6 +462,34 @@ source = "cgroup-v2"
 required = false
 description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -413,7 +497,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "asset-store.ingest"
 title = "Публикация новых ресурсов"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Открытие хранилища и публикация ingest новых идентичностей штатным ingest_verified: staging, семантическая проверка (полное декодирование изображения), атомарная фиксация файла, перезапись манифеста, интент и закрытие журнала, fsync. Один писатель."
@@ -553,6 +637,34 @@ required = false
 path = "target/benchmark-workloads/asset-store/run/store"
 description = "Кажущийся размер рабочей копии хранилища после прогона."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -560,7 +672,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "asset-store.ingest-contention"
 title = "Публикация конкурирующими писателями"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Тот же объём публикации, что у ingest, распределённый между writers независимыми дескрипторами хранилища в потоках одного процесса; исключение обеспечивает штатная блокировка flock, как между процессами. Писатели стартуют одновременно после открытия. Измеряет сериализацию на блокировке, а не межпроцессный запуск."
@@ -715,6 +827,34 @@ source = "cgroup-v2"
 required = false
 description = "Средняя загрузка подгруппы за время её жизни: писатели и Hyperfine вместе, весь вызов Hyperfine до остановки сэмплера."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -722,7 +862,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "asset-store.batch-reopen"
 title = "Повторное открытие пакетного состояния"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "SafeBatchRuntime::open и load: исключительная блокировка пакета, ограниченное чтение state.json, разбор, проверка структуры и полная сверка размера и SHA-256 каждого blob, на который ссылается состояние. Это путь восстановления после перезапуска."
@@ -845,6 +985,34 @@ source = "cgroup-v2"
 required = false
 description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -852,7 +1020,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "asset-store.batch-checkpoint"
 title = "Сохранение пакетного состояния"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "SafeBatchRuntime: open, load с полной сверкой blob и save. unchanged сохраняет то же состояние; modified записывает новый неизменяемый blob, меняет запись и повышает ревизию. save атомарен и синхронизирует файл и каталог."
@@ -989,6 +1157,34 @@ scope = "cgroup"
 source = "cgroup-v2"
 required = false
 description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]

@@ -94,7 +94,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/performance/anki-repo.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup

@@ -84,7 +84,7 @@ pub enum OwnCgroup {
     NotNeeded,
     Ready(Delegated),
     /// Делегированная группа доступна после перезапуска через systemd-run.
-    ViaScope(PathBuf),
+    ViaScope(PathBuf, bool),
     Unavailable(String),
 }
 
@@ -355,7 +355,7 @@ pub fn assess(selection: &Selection<'_>, runner: &Path, sampling: bool) -> Readi
                 Status::Available,
                 "подгруппы прогонов создаются в группе исполнителя",
             ),
-            OwnCgroup::ViaScope(_) => r.push(
+            OwnCgroup::ViaScope(_, _) => r.push(
                 "cgroup-delegation",
                 Status::Available,
                 "группа исполнителя не делегирована; run перезапустится в systemd-run --user --scope -p Delegate=yes",
@@ -387,8 +387,38 @@ pub fn assess(selection: &Selection<'_>, runner: &Path, sampling: bool) -> Readi
             OwnCgroup::NotNeeded => {}
         }
     }
+    let io_available = match &r.own_cgroup {
+        OwnCgroup::Ready(group) => Some(group.has_io()),
+        OwnCgroup::ViaScope(_, io) => Some(*io),
+        _ => None,
+    };
+    if io_available == Some(false) {
+        for request in scenario
+            .metrics
+            .iter()
+            .filter(|m| m.metric.is_io() && collector(selection, m) == Collector::OwnCgroup)
+        {
+            let reason =
+                "контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно"
+                    .to_owned();
+            if request.required {
+                r.block(
+                    &format!("metric:{}", request.key()),
+                    Status::Unsupported,
+                    reason.clone(),
+                );
+            }
+            r.unavailable.insert(
+                request.key(),
+                Missing {
+                    unsupported: true,
+                    reason,
+                },
+            );
+        }
+    }
     if let Some(reason) = cgroup_restricted {
-        if matches!(r.own_cgroup, OwnCgroup::ViaScope(_)) {
+        if matches!(r.own_cgroup, OwnCgroup::ViaScope(_, _)) {
             r.push(
                 "linux-cgroup-v2",
                 Status::Available,
@@ -435,7 +465,9 @@ fn own_cgroup(runner: &Path) -> OwnCgroup {
         .arg(runner)
         .arg("__cgroup-probe");
     match procs::output(&mut command, Duration::from_secs(20)) {
-        Ok((procs::Ending::Exited(0), _, _)) => OwnCgroup::ViaScope(systemd_run),
+        Ok((procs::Ending::Exited(0), out, _)) => {
+            OwnCgroup::ViaScope(systemd_run, String::from_utf8_lossy(&out).trim() == "io")
+        }
         Ok((ending, out, err)) => OwnCgroup::Unavailable(format!(
             "{direct}; systemd-run --user --scope не дал делегированной группы ({}): {}",
             ending.describe(),

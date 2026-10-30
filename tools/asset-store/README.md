@@ -2359,7 +2359,7 @@ SHA, generation, ревизии элемента, отпечатку запро�
 `SafeBatchRuntime` (логика — модуль `asset_store::bench_workload`) и ничего не
 измеряет сам: время, процессор и память собирает
 [`benchmark-runner`](../benchmark-runner/README.md), методика и снимки —
-[страница производительности](../../docs/performance/asset-store.md).
+[страница производительности](performance.md).
 
 Подкоманды соответствуют шагам сценария: `describe` (проба объёма нагрузки,
 без записи), `setup` (эталон штатной публикацией `ingest_verified` и пакетное

@@ -30,7 +30,7 @@ def canonical(path: Path) -> Path:
 
 
 def managed_sources(root: Path) -> list[Path]:
-    candidates = [root / "README.md", *root.glob("tools/" + chr(42) + "/README*.md"), *root.glob("docs/" + chr(42) + chr(42) + "/*.md")]
+    candidates = [root / "README.md", *root.glob("tools/" + chr(42) + "/README*.md"), *root.glob("tools/" + chr(42) + "/performance*.md"), *root.glob("docs/" + chr(42) + chr(42) + "/*.md")]
     return sorted({canonical(path) for path in candidates if path.is_file() or path == root / "README.md"})
 
 

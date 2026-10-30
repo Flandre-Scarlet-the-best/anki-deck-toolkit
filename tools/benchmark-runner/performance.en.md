@@ -1,13 +1,13 @@
 # Performance: `benchmark-runner`
 
-[Русский](benchmark-runner.md) · **English** · [简体中文](benchmark-runner.zh-CN.md)
-<!-- i18n-source-git-blob: 0ca12ade87ac8fcea2de240a65d75b4ea9201827 -->
+[Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
+<!-- i18n-source-git-blob: fdb08a1ac07061bd2d6f539c338b47372585b6db -->
 
 Measurements of the benchmark runner itself
-([interface and semantics](../../tools/benchmark-runner/README.en.md)): how
+([interface and semantics](README.en.md)): how
 accurately it measures a workload with a known cost, what exactly each metric
 contains and what polling `/proc` and the run's own cgroup cost. General
-measurement rules are in the [methodology](README.en.md).
+measurement rules are in the [methodology](../../docs/performance/README.en.md).
 
 ## What is measured
 
@@ -22,6 +22,7 @@ do not describe the performance of `asset-store`, `anki-repo` or Anki.
 | `calibration-cpu-plain` | the same target with Hyperfine metrics only | the comparison shows the cost of extra monitoring |
 | `calibration-parallel` | four threads of 1000 ms each | `time_cpu` ≈ 4 s, time ≈ 1 s, group load ≈ 4 cores |
 | `calibration-memory` | writes every page of a 256 MiB block, holds it 200 ms | `memory_peak_resident` ≈ 256 MiB plus process base |
+| `calibration-io` | new 16 MiB file: write, `fsync`, own-page eviction advice, verified read and removal | positive accounted bytes and operations; physical totals depend on filesystem and devices |
 
 ## How to measure
 
@@ -41,6 +42,7 @@ cargo run -p benchmark-runner -- run benchmark-runner.calibration-cpu-plain --pr
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-parallel --profile warm --runs 10
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-parallel --profile warm --runs 10 --no-sampling
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-memory --profile warm --runs 10
+cargo run -p benchmark-runner -- run benchmark-runner.calibration-io --profile warm --runs 5
 cargo run -p benchmark-history -- list --module benchmark-runner
 ```
 

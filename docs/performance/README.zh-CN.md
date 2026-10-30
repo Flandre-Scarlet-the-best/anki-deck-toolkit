@@ -1,9 +1,9 @@
 # 性能与资源消耗
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 07adad8c786a02310ef90e7eed1054fc4c3752ad -->
+<!-- i18n-source-git-blob: 7e8844b595691a300c8dbf05b20bfd00ecd4148f -->
 
-此目录保存仓库各模块性能与资源消耗的**最近确认指标**：时间、CPU、内存、磁盘。每个模块有
+本目录提供通用方法及指向各模块页面的链接，展示仓库各模块性能与资源消耗的**最近确认指标**：时间、CPU、内存、磁盘。每个模块有
 自己的页面，包含测量方法、指标定义，以及在明确命名的参考环境中按场景和配置划分的快照。
 本页规定测量的进行、保存和发布的通用规则。
 
@@ -26,12 +26,12 @@
 
 | 模块 | 页面 | 基于 JSON 结果的快照 |
 |---|---|---|
-| `anki-repo` | [anki-repo.zh-CN.md](anki-repo.zh-CN.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
-| `asset-store` | [asset-store.zh-CN.md](asset-store.zh-CN.md) | `asset-store.*` · `warm`（`kanji-medium`） |
-| `anki-e2e` | [anki-e2e.zh-CN.md](anki-e2e.zh-CN.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
-| `benchmark-runner` | [benchmark-runner.zh-CN.md](benchmark-runner.zh-CN.md) | `benchmark-runner.calibration-*` · `warm` |
+| `anki-repo` | [anki-repo/performance.zh-CN.md](../../tools/anki-repo/performance.zh-CN.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store/performance.zh-CN.md](../../tools/asset-store/performance.zh-CN.md) | `asset-store.*` · `warm`（`kanji-medium`） |
+| `anki-e2e` | [anki-e2e/performance.zh-CN.md](../../tools/anki-e2e/performance.zh-CN.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
+| `benchmark-runner` | [benchmark-runner/performance.zh-CN.md](../../tools/benchmark-runner/performance.zh-CN.md) | `benchmark-runner.calibration-*` · `warm` |
 
-新模块需要单独的页面 `docs/performance/<模块>.md`（含翻译），在放置快照的位置加入
+新模块需要单独的页面 `tools/<模块>/performance.md`（含翻译），在放置快照的位置加入
 `<!-- benchmark-snapshot:anchor -->` 一行，并在此表中增加一行。
 
 ## 场景目录与结果契约
@@ -88,7 +88,7 @@ skill [`performance-benchmarking`](../../.agents/skills/performance-benchmarking
 2. 找到结果（`benchmark-history list`），检查其结果、运行、环境和不可用指标
    （`benchmark-history show`）。
 3. 不写入地预览页面变更：
-   `benchmark-history snapshot <ID> --page docs/performance/<模块>.md`，然后用 `--apply` 写入。
+   `benchmark-history snapshot <ID> --page tools/<模块>/performance.md`，然后用 `--apply` 写入。
    工具会同时更新三种语言中该对的块；若系列不完整、工作副本有修改、环境与参考环境不同或页面
    上有更新的测量，则拒绝。
 4. 将同一结果的 `benchmark-history report` 章节粘贴到 PR 描述中：确切的代码状态和记录 ID

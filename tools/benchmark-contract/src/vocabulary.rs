@@ -129,6 +129,10 @@ closed_enum!(
         MemoryPeakResident => "memory_peak_resident",
         MemoryPeakCgroup => "memory_peak_cgroup",
         CpuTimeCgroup => "cpu_time_cgroup",
+        IoReadBytes => "io_read_bytes",
+        IoWriteBytes => "io_write_bytes",
+        IoReadOperations => "io_read_operations",
+        IoWriteOperations => "io_write_operations",
         CpuUtilizationMean => "cpu_utilization_mean",
         CpuUtilizationPeak => "cpu_utilization_peak",
         MemoryHostPeakIncrease => "memory_host_peak_increase",
@@ -176,12 +180,15 @@ impl MetricId {
             TimeWallClock | TimeUser | TimeSystem | TimeCpu | CpuTimeCgroup | PhaseDuration => {
                 Unit::Second
             }
-            MemoryPeakResident | MemoryPeakCgroup | MemoryHostPeakIncrease | DiskUsage => {
-                Unit::Byte
-            }
+            MemoryPeakResident
+            | MemoryPeakCgroup
+            | MemoryHostPeakIncrease
+            | DiskUsage
+            | IoReadBytes
+            | IoWriteBytes => Unit::Byte,
             CpuUtilizationMean | CpuUtilizationPeak => Unit::Core,
             CpuCycles | Instructions | CacheReferences | CacheMisses | BranchMisses
-            | ModuleCounter => Unit::Count,
+            | ModuleCounter | IoReadOperations | IoWriteOperations => Unit::Count,
         }
     }
 
@@ -190,6 +197,17 @@ impl MetricId {
         matches!(
             self,
             MetricId::PhaseDuration | MetricId::ModuleCounter | MetricId::DiskUsage
+        )
+    }
+
+    /// Блочный I/O, учтённый ядром для группы, а не логические байты приложения.
+    pub const fn is_io(self) -> bool {
+        matches!(
+            self,
+            Self::IoReadBytes
+                | Self::IoWriteBytes
+                | Self::IoReadOperations
+                | Self::IoWriteOperations
         )
     }
 
@@ -391,6 +409,54 @@ pub static REGISTRY: &[MetricDefinition] = &[
             LINUX,
             false,
             "memory.peak cgroup v2: одновременное потребление всех процессов группы, включая page cache группы.",
+        )],
+    },
+    MetricDefinition {
+        metric: MetricId::IoReadBytes,
+        unit: Unit::Byte,
+        summary: "Байты чтения блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма rbytes по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
+        )],
+    },
+    MetricDefinition {
+        metric: MetricId::IoWriteBytes,
+        unit: Unit::Byte,
+        summary: "Байты записи блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма wbytes по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
+        )],
+    },
+    MetricDefinition {
+        metric: MetricId::IoReadOperations,
+        unit: Unit::Count,
+        summary: "Операции чтения блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма rios по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
+        )],
+    },
+    MetricDefinition {
+        metric: MetricId::IoWriteOperations,
+        unit: Unit::Count,
+        summary: "Операции записи блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма wios по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
         )],
     },
     MetricDefinition {

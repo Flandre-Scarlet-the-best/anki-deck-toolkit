@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: e8f959dc022bdae5ca48c378b744fbcf73fd9fd7 -->
+<!-- i18n-source-git-blob: e0cc3970e68c4911c288e83ad93759dc3dc09c03 -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -16,7 +16,7 @@ and Linux system metrics. It uses this contract instead of inventing its own.
 The local result history, baseline selection and reports are kept by
 [`benchmark-history`](../../tools/benchmark-history/README.en.md); the repository
 holds no run history and no thresholds. Module snapshots
-(`docs/performance/<module>.md`) remain evidence of specific environments.
+(`tools/<module>/performance.md`) remain evidence of specific environments.
 
 ## Where things live
 
@@ -482,3 +482,32 @@ There is no history storage, no regression computation and no CI thresholds
 here: history and reports live in
 [`benchmark-history`](../../tools/benchmark-history/README.en.md), without
 thresholds. Numbers from module snapshots do not become thresholds.
+
+## Block I/O
+
+`io_read_bytes`/`io_write_bytes` (byte) and `io_read_operations`/`io_write_operations`
+(count) use scope `cgroup`, source `cgroup-v2`: sums of `rbytes`/`wbytes`/`rios`/`wios`
+across devices in `io.stat`, per the
+[Linux kernel documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#io-interface-files).
+A fresh own group includes the target, its children and Hyperfine from entry to the
+final read before removal. Setup/prepare/conclude/cleanup and the sampler stay outside.
+Container measurements require a discovered group and an available final sample;
+a vanished group yields `unavailable`, never an incomplete final total.
+
+The optional `io` controller is enabled only in the runner's delegated group when
+these metrics are requested. Its absence leaves CPU/RAM available: `check` reports
+why, and results retain `unsupported`/`unavailable`. A readable empty `io.stat`
+means zero **accounted** operations. Read errors, incomplete rows, duplicate devices
+and overflow never become zero.
+
+These are kernel block-layer counts, not logical read/write bytes, system calls,
+`disk_usage`, or physical media behind a VM/WSL. Page-cache hits need no disk read.
+Writeback after the interval is excluded; completed writes require `fsync` in the
+target. Writeback attribution depends on filesystem support and inode ownership;
+shared files may be charged elsewhere. Stacked devices may count the same I/O more
+than once: totals are not unique physical-media bytes. Throughput and IOPS are not
+published: dividing these counts by Hyperfine target time would mix different scopes.
+
+Scenarios gaining these metrics have a new revision. Earlier JSON remains valid
+for its original revision and available in local history; it must not be validated
+against the new declaration. Existing snapshots gain no fabricated I/O columns.

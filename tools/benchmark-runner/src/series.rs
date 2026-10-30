@@ -359,11 +359,18 @@ impl Series<'_> {
             );
         }
         match &self.readiness.own_cgroup {
-            OwnCgroup::Ready(delegated) => match delegated.activate() {
+            OwnCgroup::Ready(delegated) => match delegated.activate(
+                self.selection
+                    .item
+                    .scenario
+                    .metrics
+                    .iter()
+                    .any(|m| m.metric.is_io()),
+            ) {
                 Ok(()) => self.own = Some(delegated.clone()),
                 Err(reason) => self.mark_own_unavailable(&mut state, &reason),
             },
-            OwnCgroup::ViaScope(_) => self.mark_own_unavailable(
+            OwnCgroup::ViaScope(_, _) => self.mark_own_unavailable(
                 &mut state,
                 "группа исполнителя не делегирована, а перезапуск в systemd-run не выполнен",
             ),
@@ -872,7 +879,10 @@ impl Series<'_> {
         // до остановки сэмплера и записи файла сэмплов: эти затраты зависят от режима
         // и не должны попадать в знаменатель средней загрузки.
         if let Some(group) = &group {
-            invocation.own_final = cgroup::read(&group.dir);
+            invocation.own_final = cgroup::read(
+                &group.dir,
+                scenario.metrics.iter().any(|m| m.metric.is_io()),
+            );
             let ended_ns = cgroup::monotonic_ns();
             invocation.own_span = started_at_marker
                 .as_deref()
@@ -941,6 +951,7 @@ impl Series<'_> {
         let tick = declared.min(group_tick).clamp(0.02, 1.0);
         sampler::Plan {
             host,
+            io: scenario.metrics.iter().any(|m| m.metric.is_io()),
             tick: Duration::from_secs_f64(tick),
             group: group_source,
         }
@@ -2161,12 +2172,35 @@ fn group_points(samples: &Samples) -> Vec<(f64, f64)> {
         .collect()
 }
 
+fn io_value(metric: MetricId, io: Option<cgroup::IoCounters>) -> MetricValue {
+    let Some(io) = io else {
+        return MetricValue::Unavailable {
+            reason:
+                "io.stat отсутствует, недоступен или некорректен: учёт блочного I/O не подтверждён"
+                    .into(),
+        };
+    };
+    let value = match metric {
+        MetricId::IoReadBytes => io.read_bytes,
+        MetricId::IoWriteBytes => io.write_bytes,
+        MetricId::IoReadOperations => io.read_operations,
+        MetricId::IoWriteOperations => io.write_operations,
+        _ => unreachable!("проверено is_io"),
+    };
+    MetricValue::Measured {
+        value: value as f64,
+    }
+}
+
 fn own_value(request: &MetricRequest, invocation: &Invocation) -> MetricValue {
     let Some(last) = invocation.own_final else {
         return MetricValue::Unavailable {
             reason: "счётчики подгруппы прогона не прочитаны".into(),
         };
     };
+    if request.metric.is_io() {
+        return io_value(request.metric, last.io);
+    }
     match request.metric {
         MetricId::MemoryPeakCgroup => match last.memory_peak {
             Some(value) => MetricValue::Measured {
@@ -2223,6 +2257,15 @@ fn container_value(request: &MetricRequest, samples: &Samples) -> MetricValue {
             reason: "контейнер обнаружен, но его группа не прочитана до удаления".into(),
         };
     };
+    if request.metric.is_io() {
+        // Последний снимок исчезнувшей группы не является итогом её I/O.
+        if samples.group_vanished {
+            return MetricValue::Unavailable {
+                reason: "группа контейнера исчезла: итоговый io.stat не прочитан".into(),
+            };
+        }
+        return io_value(request.metric, last.counters.io);
+    }
     match request.metric {
         MetricId::MemoryPeakCgroup => match last.counters.memory_peak {
             Some(value) => MetricValue::Measured {
@@ -2444,7 +2487,7 @@ fn samples_json(samples: &Samples) -> String {
     let group: Vec<_> = samples
         .group
         .iter()
-        .map(|s| serde_json::json!({"t": s.at, "usage_usec": s.counters.usage_usec, "memory_peak": s.counters.memory_peak}))
+        .map(|s| serde_json::json!({"t": s.at, "usage_usec": s.counters.usage_usec, "memory_peak": s.counters.memory_peak, "io": s.counters.io}))
         .collect();
     serde_json::to_string_pretty(&serde_json::json!({
         "clock_ticks_per_second": clock_ticks(),
@@ -2480,6 +2523,49 @@ mod tests {
             Fact::Unavailable { reason } => reason,
             Fact::Known { value } => panic!("ожидался unavailable, получен known {value}"),
         }
+    }
+
+    #[test]
+    fn io_values_have_exact_units_and_missing_final_is_not_zero() {
+        let io = cgroup::IoCounters {
+            read_bytes: 1024,
+            write_bytes: 2048,
+            read_operations: 3,
+            write_operations: 4,
+        };
+        for (metric, value) in [
+            (MetricId::IoReadBytes, 1024.0),
+            (MetricId::IoWriteBytes, 2048.0),
+            (MetricId::IoReadOperations, 3.0),
+            (MetricId::IoWriteOperations, 4.0),
+        ] {
+            assert_eq!(io_value(metric, Some(io)).measured(), Some(value));
+            assert!(matches!(
+                io_value(metric, None),
+                MetricValue::Unavailable { .. }
+            ));
+        }
+        let mut samples = Samples {
+            container: Some("fixture".into()),
+            group_vanished: true,
+            ..Samples::default()
+        };
+        samples.group.push(crate::sampler::GroupSample {
+            at: 1.0,
+            counters: Counters {
+                usage_usec: Some(1),
+                memory_peak: Some(1),
+                io: Some(io),
+            },
+        });
+        // Запрос берём из маленькой декларации, чтобы не дублировать его поля.
+        let request: MetricRequest = toml::from_str("metric = \"io_read_bytes\"\nscope = \"cgroup\"\nsource = \"cgroup-v2\"\nrequired = false").unwrap();
+        assert!(matches!(
+            container_value(&request, &samples),
+            MetricValue::Unavailable { .. }
+        ));
+        samples.group_vanished = false;
+        assert_eq!(container_value(&request, &samples).measured(), Some(1024.0));
     }
 
     #[test]

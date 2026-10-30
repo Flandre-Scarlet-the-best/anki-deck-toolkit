@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 997718a793cc17ae350719b101fc23f5f48fbac6 -->
+<!-- i18n-source-git-blob: eb53bd4102955318126c5c2bfac503b5a17946d2 -->
 
 `asset-store` 是用于程序管理资源的公共 Rust 库，负责清单、校验和、完整性及生命周期。领域专用 CLI `kanji-assets` 负责查找 Yarxi 条目、验证汉字图片，并把通过验证的文件发布到规范资源库。本工具不读取 `decks/**/media/`，不更改 `media_files`，也不会把图片复制到牌组中。
 
@@ -878,7 +878,7 @@ cargo run --quiet --locked --bin pitch-assets -- --output json batch review-expo
 `asset-store-bench` 执行 `benchmarks/scenarios/asset-store.toml` 场景的被测负载。它调用真实的
 `AssetStore` 与 `SafeBatchRuntime`（逻辑位于 `asset_store::bench_workload`），自身不做任何测量：
 时间、CPU 和内存由 [`benchmark-runner`](../benchmark-runner/README.zh-CN.md) 采集；方法与快照见
-[性能页面](../../docs/performance/asset-store.zh-CN.md)。
+[性能页面](performance.zh-CN.md)。
 
 子命令对应场景步骤：`describe`（负载规模探针，不写盘）、`setup`（以常规 `ingest_verified`
 发布构建模板及批处理状态）、`prepare`（从模板复制工作副本并对每个文件 `fsync`）、

@@ -97,9 +97,18 @@ pub fn probe() -> Result<Delegated, String> {
 }
 
 impl Delegated {
+    pub fn has_io(&self) -> bool {
+        controllers(&self.base, "cgroup.controllers")
+            .iter()
+            .any(|c| c == "io")
+            || controllers(&self.base, "cgroup.subtree_control")
+                .iter()
+                .any(|c| c == "io")
+    }
+
     /// Перенести исполнитель в собственную подгруппу и включить контроллеры
     /// для измеряемых подгрупп.
-    pub fn activate(&self) -> Result<(), String> {
+    pub fn activate(&self, with_io: bool) -> Result<(), String> {
         let leaf = self.base.join(SELF_LEAF);
         if !leaf.is_dir() {
             fs::create_dir(&leaf).map_err(|e| format!("подгруппа исполнителя не создана: {e}"))?;
@@ -109,7 +118,17 @@ impl Delegated {
         })?;
         fs::write(self.base.join("cgroup.subtree_control"), "+cpu +memory").map_err(|e| {
             format!("контроллеры cpu и memory не включаются для подгрупп: {e}; в группе есть посторонние процессы или контроллеры не делегированы")
-        })
+        })?;
+        // Необязательный контроллер: отказ не лишает группу CPU/RAM.
+        // Отсутствие io.stat будет явным отсутствием каждой I/O-метрики.
+        if with_io
+            && controllers(&self.base, "cgroup.controllers")
+                .iter()
+                .any(|c| c == "io")
+        {
+            let _ = fs::write(self.base.join("cgroup.subtree_control"), "+io");
+        }
+        Ok(())
     }
 
     pub fn create(&self, name: &str) -> io::Result<RunGroup> {
@@ -157,15 +176,63 @@ fn events(dir: &Path) -> Option<bool> {
         .map(|v| v.trim() == "1")
 }
 
+/// Суммарный учтённый блочный I/O всех устройств. Пустой доступный io.stat
+/// означает отсутствие учтённых операций; ошибка чтения/разбора — не ноль.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct IoCounters {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub read_operations: u64,
+    pub write_operations: u64,
+}
+
+fn parse_io(text: &str) -> Option<IoCounters> {
+    let mut sum = [0u64; 4];
+    let mut devices = std::collections::BTreeSet::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let device = fields.next()?;
+        let (major, minor) = device.split_once(':')?;
+        major.parse::<u32>().ok()?;
+        minor.parse::<u32>().ok()?;
+        if !devices.insert(device) {
+            return None;
+        }
+        let mut values = [None; 4];
+        for field in fields {
+            let (key, value) = field.split_once('=')?;
+            if let Some(index) = ["rbytes", "wbytes", "rios", "wios"]
+                .iter()
+                .position(|k| *k == key)
+            {
+                if values[index].is_some() {
+                    return None;
+                }
+                values[index] = Some(value.parse::<u64>().ok()?);
+            }
+        }
+        for (total, value) in sum.iter_mut().zip(values) {
+            *total = total.checked_add(value?)?;
+        }
+    }
+    Some(IoCounters {
+        read_bytes: sum[0],
+        write_bytes: sum[1],
+        read_operations: sum[2],
+        write_operations: sum[3],
+    })
+}
+
 /// Счётчики группы в момент чтения.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Counters {
     pub usage_usec: Option<u64>,
     pub memory_peak: Option<u64>,
+    pub io: Option<IoCounters>,
 }
 
 /// `None` — группы уже нет.
-pub fn read(dir: &Path) -> Option<Counters> {
+pub fn read(dir: &Path, with_io: bool) -> Option<Counters> {
     let stat = fs::read_to_string(dir.join("cpu.stat")).ok()?;
     let usage_usec = stat
         .lines()
@@ -177,6 +244,13 @@ pub fn read(dir: &Path) -> Option<Counters> {
     Some(Counters {
         usage_usec,
         memory_peak,
+        io: with_io
+            .then(|| {
+                fs::read_to_string(dir.join("io.stat"))
+                    .ok()
+                    .and_then(|text| parse_io(&text))
+            })
+            .flatten(),
     })
 }
 
@@ -242,6 +316,54 @@ pub fn enter_and_exec(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn io_stat_is_complete_checked_and_forward_compatible() {
+        assert_eq!(parse_io(""), Some(IoCounters::default()));
+        let text = "8:16 wios=4 rbytes=10 rios=3 wbytes=20 dbytes=99 dios=1\n8:0 rbytes=5 wbytes=7 rios=1 wios=2\n";
+        assert_eq!(
+            parse_io(text),
+            Some(IoCounters {
+                read_bytes: 15,
+                write_bytes: 27,
+                read_operations: 4,
+                write_operations: 6
+            })
+        );
+        for bad in [
+            "8:0 rbytes=1",
+            "bad rbytes=1 wbytes=1 rios=1 wios=1",
+            "8:0 rbytes=no wbytes=1 rios=1 wios=1",
+            "8:0 rbytes=1 rbytes=2 wbytes=1 rios=1 wios=1",
+            "8:0 rbytes=1 wbytes=1 rios=1 wios=1\n8:0 rbytes=1 wbytes=1 rios=1 wios=1",
+            "8:0 rbytes=18446744073709551615 wbytes=1 rios=1 wios=1\n8:1 rbytes=1 wbytes=1 rios=1 wios=1",
+        ] {
+            assert!(parse_io(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn absent_or_invalid_io_never_disables_cpu_and_never_becomes_zero() {
+        let dir =
+            std::env::temp_dir().join(format!("benchmark-io-counters-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("cpu.stat"), "usage_usec 123\n").unwrap();
+        for contents in [None, Some("invalid"), Some("")] {
+            if let Some(text) = contents {
+                fs::write(dir.join("io.stat"), text).unwrap();
+            }
+            let counters = read(&dir, true).unwrap();
+            assert_eq!(counters.usage_usec, Some(123));
+            assert_eq!(
+                counters.io,
+                contents
+                    .filter(|s| s.is_empty())
+                    .map(|_| IoCounters::default())
+            );
+            assert_eq!(read(&dir, false).unwrap().io, None);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn span_uses_the_monotonic_start_marker() {

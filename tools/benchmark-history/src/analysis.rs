@@ -45,6 +45,10 @@ pub fn direction(metric: MetricId) -> Direction {
         | MemoryPeakCgroup
         | MemoryHostPeakIncrease
         | DiskUsage
+        | IoReadBytes
+        | IoWriteBytes
+        | IoReadOperations
+        | IoWriteOperations
         | CpuCycles
         | Instructions
         | CacheMisses

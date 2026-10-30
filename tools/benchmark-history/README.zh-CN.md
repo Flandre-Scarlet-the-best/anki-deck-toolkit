@@ -1,7 +1,7 @@
 # 本地基准历史：`benchmark-history`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 38d7b32e82cc63e35a4e205c141678b00d5761d4 -->
+<!-- i18n-source-git-blob: 46d18e6615e67b6460ec6de63d28ad00fe8e6db4 -->
 
 `benchmark-history` 为每个用户保存其自己的已验证基准结果历史，在其中查找比较基线，
 对比“之前”与“之后”，并把结果生成为 PR 描述中的 `## Производительность`（性能）章节以及
@@ -73,7 +73,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/performance/anki-repo.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup

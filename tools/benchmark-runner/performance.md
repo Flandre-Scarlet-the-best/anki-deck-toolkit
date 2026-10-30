@@ -1,12 +1,12 @@
 # Производительность: `benchmark-runner`
 
-**Русский** · [English](benchmark-runner.en.md) · [简体中文](benchmark-runner.zh-CN.md)
+**Русский** · [English](performance.en.md) · [简体中文](performance.zh-CN.md)
 
 Измерения самого исполнителя бенчмарков
-([интерфейс и семантика](../../tools/benchmark-runner/README.md)): насколько
+([интерфейс и семантика](README.md)): насколько
 точно он измеряет нагрузку с заранее известной ценой, что именно попадает в
 значения каждой метрики и сколько стоят опрос `/proc` и собственная cgroup
-прогона. Общие правила замера — в [методике](README.md).
+прогона. Общие правила замера — в [методике](../../docs/performance/README.md).
 
 ## Что измеряется
 
@@ -22,6 +22,7 @@
 | `calibration-cpu-plain` | та же цель только с метриками Hyperfine | сравнение показывает цену дополнительного мониторинга |
 | `calibration-parallel` | четыре потока по 1000 мс | `time_cpu` ≈ 4 с, время ≈ 1 с, загрузка группы ≈ 4 ядра |
 | `calibration-memory` | запись каждой страницы блока 256 MiB, удержание 200 мс | `memory_peak_resident` ≈ 256 MiB плюс база процесса |
+| `calibration-io` | новый файл 16 MiB: запись, `fsync`, сброс собственных чистых страниц, проверенное чтение и удаление | положительные учтённые байты и операции; физические итоги зависят от файловой системы и устройств |
 
 ## Как замерять
 
@@ -41,6 +42,7 @@ cargo run -p benchmark-runner -- run benchmark-runner.calibration-cpu-plain --pr
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-parallel --profile warm --runs 10
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-parallel --profile warm --runs 10 --no-sampling
 cargo run -p benchmark-runner -- run benchmark-runner.calibration-memory --profile warm --runs 10
+cargo run -p benchmark-runner -- run benchmark-runner.calibration-io --profile warm --runs 5
 cargo run -p benchmark-history -- list --module benchmark-runner
 ```
 

@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 997718a793cc17ae350719b101fc23f5f48fbac6 -->
+<!-- i18n-source-git-blob: eb53bd4102955318126c5c2bfac503b5a17946d2 -->
 
 `asset-store` is the shared Rust library for program-managed assets, responsible for manifests, checksums, integrity, and lifecycle. The domain-specific `kanji-assets` CLI provides Yarxi entry discovery, kanji image validation, and publication of approved files to the canonical corpus. The tool does not read `decks/**/media/`, does not modify `media_files`, and does not copy images into decks.
 
@@ -921,7 +921,7 @@ Suggestions live in the batch's `llm-review/suggestions.json` and are bound to i
 `AssetStore` and `SafeBatchRuntime` (logic: `asset_store::bench_workload`) and
 measures nothing itself: time, CPU and memory are collected by
 [`benchmark-runner`](../benchmark-runner/README.en.md); method and snapshots are on
-the [performance page](../../docs/performance/asset-store.en.md).
+the [performance page](performance.en.md).
 
 Subcommands map to scenario steps: `describe` (workload size probe, no
 writes), `setup` (template built by regular `ingest_verified` publication plus

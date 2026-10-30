@@ -1,7 +1,7 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: e8f959dc022bdae5ca48c378b744fbcf73fd9fd7 -->
+<!-- i18n-source-git-blob: e0cc3970e68c4911c288e83ad93759dc3dc09c03 -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
@@ -12,7 +12,7 @@
 [`benchmark-runner`](../../tools/benchmark-runner/README.zh-CN.md) 执行：Hyperfine 2.0
 与 Linux 系统指标。它使用本契约，而不是另起一套。本地结果历史、基线选择和报告由
 [`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 负责；仓库中没有运行历史
-和阈值。模块快照（`docs/performance/<模块>.md`）仍然是特定环境的证据。
+和阈值。模块快照（`tools/<模块>/performance.md`）仍然是特定环境的证据。
 
 ## 文件位置
 
@@ -414,3 +414,26 @@ cargo run -p benchmark-contract -- --json vocabulary
 这里没有历史存储、没有回归计算，也没有 CI 阈值：历史和报告在
 [`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 中，且没有阈值。模块快照中的
 数字不会成为阈值。
+
+## 块 I/O
+
+`io_read_bytes`/`io_write_bytes`（byte）和 `io_read_operations`/`io_write_operations`
+（count）的 scope 为 `cgroup`，source 为 `cgroup-v2`：按
+[Linux 内核文档](https://docs.kernel.org/admin-guide/cgroup-v2.html#io-interface-files)，
+汇总 `io.stat` 各设备的 `rbytes`/`wbytes`/`rios`/`wios`。
+新的自有组包含目标、其子进程和 Hyperfine，从进入组到删除组前的最终读取；
+setup/prepare/conclude/cleanup 与采样器在组外。容器必须已发现且能获得最终组快照；
+组消失时返回 `unavailable`，不把最后一次不完整采样当作总量。
+
+仅在请求这些指标时，才在执行器自己获委派的组启用可选 `io` 控制器。
+缺少它不影响 CPU/RAM；`check` 显示原因，结果保留 `unsupported`/`unavailable`。
+可读且为空的 `io.stat` 表示零次**已记账**操作；读取失败、不完整行、重复设备或溢出不能变为零。
+
+这是内核块层记账，不是逻辑读写字节、系统调用、`disk_usage`，也不是 VM/WSL 后面的物理介质。
+page cache 命中无需读盘。区间结束后的 writeback 不计入，完成写入要求目标自身执行 `fsync`。
+writeback 归属依赖文件系统支持和 inode 所有权；共享文件可能计入其他组。
+多层设备可能重复记账，所以总量不代表唯一物理介质字节。此处不发布吞吐量或 IOPS：
+不能用 Hyperfine 单个目标的时间去除覆盖范围不同的组计数。
+
+增加指标的场景使用新修订。旧 JSON 仍是原修订的有效独立结果，可从本地历史读取，
+但不能按新声明验证；现有快照不会补上虚构的 I/O 列。

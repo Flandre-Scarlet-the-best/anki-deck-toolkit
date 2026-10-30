@@ -121,7 +121,12 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
             Ok(ExitCode::SUCCESS)
         }
         Command::CgroupProbe => match cgroup::probe() {
-            Ok(_) => Ok(ExitCode::SUCCESS),
+            Ok(group) => {
+                if group.has_io() {
+                    println!("io");
+                }
+                Ok(ExitCode::SUCCESS)
+            }
             Err(reason) => {
                 println!("{reason}");
                 Ok(ExitCode::FAILURE)
@@ -288,7 +293,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
                 );
             }
             let ready = readiness::assess(&selection, &runner, !target.no_sampling);
-            if let OwnCgroup::ViaScope(systemd_run) = &ready.own_cgroup {
+            if let OwnCgroup::ViaScope(systemd_run, _) = &ready.own_cgroup {
                 return Err(reexec_in_scope(systemd_run));
             }
             let needs_own = selection

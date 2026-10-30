@@ -2,7 +2,7 @@
 
 **Русский** · [English](README.en.md) · [简体中文](README.zh-CN.md)
 
-Здесь хранятся **последние подтверждённые показатели** производительности и
+Здесь собраны общая методика и ссылки на **последние подтверждённые показатели** производительности и
 потребления ресурсов модулей репозитория: время, CPU, память, диск. У каждого
 модуля — своя страница с методикой, определениями метрик и снимками по
 сценариям и профилям в явно названном эталонном окружении. Эта страница задаёт
@@ -19,7 +19,7 @@ Docker дают другие значения.
 |---|---|---|
 | Полная история каждого замера | локальная история [`benchmark-history`](../../tools/benchmark-history/README.md): неизменяемый архив исходных JSON и индекс SQLite в каталоге данных пользователя | только её владелец |
 | Публичная историческая запись | раздел `## Производительность` описания PR: реальные результаты, база, сопоставимость, условия и выводы | все, через историю PR |
-| Актуальный снимок | страницы этого каталога: последнее подтверждённое измерение каждой пары «сценарий × профиль» | все |
+| Актуальный снимок | страницы `tools/<модуль>/performance.md`: последнее подтверждённое измерение каждой пары «сценарий × профиль» | все |
 
 Страницы не накапливают записи всех PR: новое подтверждённое измерение
 заменяет снимок той же пары, а прежние значения остаются в истории Git и в
@@ -32,12 +32,12 @@ Docker дают другие значения.
 
 | Модуль | Страница | Снимки по JSON-результатам |
 |---|---|---|
-| `anki-repo` | [anki-repo.md](anki-repo.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
-| `asset-store` | [asset-store.md](asset-store.md) | `asset-store.*` · `warm` (`kanji-medium`) |
-| `anki-e2e` | [anki-e2e.md](anki-e2e.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; ручное наблюдение без первичных JSON для остальных состояний |
-| `benchmark-runner` | [benchmark-runner.md](benchmark-runner.md) | `benchmark-runner.calibration-*` · `warm` |
+| `anki-repo` | [anki-repo/performance.md](../../tools/anki-repo/performance.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store/performance.md](../../tools/asset-store/performance.md) | `asset-store.*` · `warm` (`kanji-medium`) |
+| `anki-e2e` | [anki-e2e/performance.md](../../tools/anki-e2e/performance.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; ручное наблюдение без первичных JSON для остальных состояний |
+| `benchmark-runner` | [benchmark-runner/performance.md](../../tools/benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
-Новый модуль добавляется отдельной страницей `docs/performance/<модуль>.md` с
+Новый модуль добавляется отдельной страницей `tools/<модуль>/performance.md` с
 переводами, строкой `<!-- benchmark-snapshot:anchor -->` в месте для снимков и
 строкой в этой таблице.
 
@@ -109,7 +109,7 @@ Docker дают другие значения.
 2. Найди результат (`benchmark-history list`) и проверь его итог, прогоны,
    окружение и недоступные метрики (`benchmark-history show`).
 3. Посмотри изменение страницы без записи:
-   `benchmark-history snapshot <ID> --page docs/performance/<модуль>.md`, затем
+   `benchmark-history snapshot <ID> --page tools/<модуль>/performance.md`, затем
    запиши его с `--apply`. Инструмент обновляет блок пары на трёх языках сразу и
    отказывается, если серия неполна, рабочая копия изменена, окружение отличается
    от эталонного или на странице более новое измерение.

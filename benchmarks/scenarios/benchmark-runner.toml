@@ -4,14 +4,14 @@
 # метрик, а пары серий с опросом и без него (--no-sampling) и сценарий без
 # дополнительных метрик — накладные расходы сборщика. Эти сценарии не
 # описывают производительность asset-store, anki-repo или Anki. Методика и
-# снимки — docs/performance/benchmark-runner.md.
+# снимки — tools/benchmark-runner/performance.md.
 schema_version = 1
 module = "benchmark-runner"
 
 [[scenario]]
 id = "benchmark-runner.calibration-noop"
 title = "Пустая цель"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "benchmark-workload без действий: запуск и выход процесса. Нижняя граница времени и памяти, разрешение счётчиков и цена Hyperfine в значениях группы."
@@ -111,6 +111,34 @@ required = false
 sample_interval_seconds = 0.05
 description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -118,7 +146,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "benchmark-runner.calibration-cpu"
 title = "Известная цена процессора"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Один поток тратит 50 мс собственного процессорного времени (ThreadCPUTime). Ожидается time_cpu ≈ 50 мс плюс запуск процесса, time_wall_clock чуть больше, cpu_time_cgroup ≈ time_cpu плюс цена Hyperfine."
@@ -218,6 +246,34 @@ required = false
 sample_interval_seconds = 0.05
 description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -295,7 +351,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "benchmark-runner.calibration-parallel"
 title = "Известная многопоточная нагрузка"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Четыре потока по 1000 мс собственного процессорного времени. Ожидается time_cpu ≈ 4 с, time_wall_clock ≈ 1 с при четырёх свободных ядрах, cpu_utilization_mean подгруппы ≈ 4 ядра. Длинный прогон для оценки опроса /proc и cgroup."
@@ -395,6 +451,34 @@ required = false
 sample_interval_seconds = 0.05
 description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -402,7 +486,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "benchmark-runner.calibration-memory"
 title = "Известная резидентная память"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "Процесс записывает каждую страницу блока 256 MiB и держит его 200 мс. Ожидается memory_peak_resident ≈ 256 MiB плюс база процесса, memory_peak_cgroup того же порядка, memory_host_peak_increase — наблюдение MemAvailable по всей системе, не верхняя граница памяти цели."
@@ -501,6 +585,97 @@ source = "procfs"
 required = false
 sample_interval_seconds = 0.05
 description = "Наибольшее снижение MemAvailable за прогон по всей системе: наблюдение хоста, не граница; включает чужие выделения и смещается одновременными освобождениями."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "benchmark-runner.calibration-io"
+title = "Контролируемый блочный ввод-вывод"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Создание нового файла 16 MiB, fsync, POSIX_FADV_DONTNEED только этого файла, проверенное чтение и удаление. Совет по кэшу может быть проигнорирован; байты io.stat не обязаны равняться 16 MiB из-за метаданных и нескольких устройств."
+measured = "Один release-запуск benchmark-workload: весь файловый цикл. Сборка и прогрев не входят; метрики собственной cgroup включают Hyperfine."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "benchmark-runner", bin = "benchmark-workload" }
+args = ["--file-io", "target/benchmark-workloads/runner-io.bin", "16"]
+expect_exit_codes = [0]
+
+[scenario.runs]
+warmup = 1
+min_runs = 5
+max_runs = 20
+single_run_allowed = false
+run_timeout_seconds = 60
+total_budget_seconds = 600
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Бинарник прогрет; файл создаётся новым, синхронизируется, его собственные чистые страницы запрашиваются к удалению из кэша перед чтением. Общие кэши не очищаются."
+cleared = ["собственный файл после каждого успешного запуска"]
+retained = ["общие кэши ОС и файловой системы"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
