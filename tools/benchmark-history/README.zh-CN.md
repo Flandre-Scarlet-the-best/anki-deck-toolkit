@@ -1,11 +1,11 @@
 # 本地基准历史：`benchmark-history`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 46d18e6615e67b6460ec6de63d28ad00fe8e6db4 -->
+<!-- i18n-source-git-blob: f2ce11401442c20e6f7515307bd58d62a87c3269 -->
 
 `benchmark-history` 为每个用户保存其自己的已验证基准结果历史，在其中查找比较基线，
 对比“之前”与“之后”，并把结果生成为 PR 描述中的 `## Производительность`（性能）章节以及
-[`docs/performance/`](../../docs/performance/README.zh-CN.md) 页面的快照。它不做任何测量：
+`tools/<模块>/performance.md` 模块性能页面和其翻译的快照。它不做任何测量：
 系列由 [`benchmark-runner`](../benchmark-runner/README.zh-CN.md) 执行，结果模型、校验和
 可比性规则属于 [`benchmark-contract`](../benchmark-contract/README.zh-CN.md)。这里没有第二种
 结果格式，也没有第二个测量引擎。
@@ -88,7 +88,7 @@ cargo run -p benchmark-history -- restore /path/to/backup
 | `baseline <ID>` | 每个基线候选及其适合或不适合的原因，以及选中的基线；`--commit` 缩小选择范围 |
 | `compare <基线> <结果>` | `benchmark-contract` 的结论、之前/之后、差值以及相对离散度的评估 |
 | `report <ID>...` | PR 的 Markdown `## Производительность` 章节；`--baseline ID`（每个场景 × 配置一对一个）、`--first` 或 `--commit` |
-| `snapshot <ID> --page P` | 为 `docs/performance/` 页面生成三种语言的快照；没有 `--apply` 时只显示 |
+| `snapshot <ID> --page P` | 为 `tools/<模块>/performance.md` 模块页面及 `performance.en.md`、`performance.zh-CN.md` 翻译生成快照；没有 `--apply` 时只显示 |
 | `verify` | 按标识和契约检查每个归档副本，并将索引与归档投影比对；不修改归档，也不创建存储（存储不存在时返回代码 3）；打开时索引同步在比对前修复的内容会被报告，并返回代码 1 |
 | `reindex` | 从归档重建索引 |
 | `backup <目录>` | 将归档复制到新目录或空目录，以便迁移到另一台 Linux 机器 |
@@ -165,8 +165,8 @@ PR 描述中；工具本身从不写入 GitHub。
 
 ## 文档快照
 
-`snapshot` 替换模块页面上同一场景 × 配置对的块，同时替换其翻译（`<模块>.en.md`、
-`<模块>.zh-CN.md`）；新的一对添加在 `<!-- benchmark-snapshot:anchor -->` 行之前。块中包含日期、
+`snapshot` 替换模块页面上同一场景 × 配置对的块，同时替换其翻译（`performance.en.md`、
+`performance.zh-CN.md`）；新的一对添加在 `<!-- benchmark-snapshot:anchor -->` 行之前。块中包含日期、
 版本、环境事实、负载规模、记录的影响可比性的参数（例如 `writers`）和指标，但不包含提交、记录 ID、
 输入标识或路径。参数作为负载定义的一部分写入标记：参数值不同的快照不会在没有 `--replace-workload`
 的情况下替换先前的快照。以下情况拒绝且不写入：

@@ -1,7 +1,7 @@
 # 性能：`benchmark-runner`
 
 [Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 3841ea59b8671c288b044591f53f7c6496fd4748 -->
+<!-- i18n-source-git-blob: fc16f0f09f5e44949116c4fb07d8bef34ece20e2 -->
 
 基准执行器自身的测量（[接口与语义](README.zh-CN.md)）：它对已知开销的
 负载测得有多准确、每个指标究竟包含什么，以及轮询 `/proc` 和运行自有 cgroup 的代价。通用测量规则见
@@ -263,15 +263,17 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 ## 校准结论
 
 以下结论来自这些场景在快照参考环境中被接受的 JSON 结果（WSL2，AMD Ryzen 7 5800X3D，16 个逻辑 CPU，
-`perf_event_paranoid = 2`，通过 `systemd-run --user` 委派 cgroup）：50 ms 负载为交替的 30 次运行
-系列，并行与内存负载为 10 次。完整结果及其 ID 在本地历史和 PR 描述中。
+`perf_event_paranoid = 2`，通过 `systemd-run --user` 委派 cgroup）：空目标校准和 50 ms 负载各 30 次，
+并行与内存负载各 10 次。以下空目标数值来自 `r2` 快照。
 
 - **CPU 时间准确。** 50 ms 负载的 `time_cpu` 为 50.91–51.03 ms：比目标多 0.9–1.0 ms，与启动空进程
   （0.73 ms）及创建工作线程的开销相当。四个线程各 1 s 得到 4.0018–4.0019 s，`time_wall_clock` 为 1.0017 s。
 - **组值包含 Hyperfine。** `cpu_time_cgroup` 比目标的 `time_cpu` 多约 1.4 ms（52.27–52.48 ms 对
-  50.96–51.03 ms）；空目标时组耗费 2.5 ms，而目标本身仅 0.73 ms。
+  50.96–51.03 ms）；`r2` 快照中空目标的 `cpu_time_cgroup` 平均为 3.19 ms（中位数 3.27 ms），
+  进程 `time_cpu` 平均为 333.1 µs，中位数为 0。
 - **组的平均负载**是组 CPU 时间除以其存活时间，即整个 Hyperfine 调用。对于短目标，组的存活时间
-  明显长于目标，因此该值是"目标加 Hyperfine"这一组合的属性：空目标 0.16 核，50 ms 单线程
+  明显长于目标，因此该值是"目标加 Hyperfine"这一组合的属性：`r2` 快照中空目标平均为 0.32 核
+  （中位数 0.33），50 ms 单线程
   0.62–0.67，四线程各 1 s 为 3.85–3.88。修复前分母是目标自身的时间，空的单线程目标得到 3.35 核。
 - **常驻内存准确，范围不同。** 256 MiB 块（268.4 MB）得到 `memory_peak_resident` 270.6–270.9 MB。
   同一运行的 `memory_peak_cgroup` 低约 1 MB：已在 page cache 中的可执行文件页面计入另一个组。空目标

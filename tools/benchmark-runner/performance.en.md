@@ -1,7 +1,7 @@
 # Performance: `benchmark-runner`
 
 [Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: 3841ea59b8671c288b044591f53f7c6496fd4748 -->
+<!-- i18n-source-git-blob: fc16f0f09f5e44949116c4fb07d8bef34ece20e2 -->
 
 Measurements of the benchmark runner itself
 ([interface and semantics](README.en.md)): how
@@ -271,9 +271,9 @@ The scenario declares no inputs.
 The findings below come from accepted JSON results of these scenarios in the
 snapshots' reference environment (WSL2, AMD Ryzen 7 5800X3D, 16 logical CPUs,
 `perf_event_paranoid = 2`, cgroup delegation via `systemd-run --user`):
-alternating series of 30 runs for 50 ms and 10 runs for the parallel and memory
-workloads. Full results and their IDs are in the local history and the PR
-description.
+30 runs for the empty-target calibration and the 50 ms workload, and 10 runs
+for the parallel and memory workloads. Empty-target values below use the `r2`
+snapshot.
 
 - **CPU time is accurate.** `time_cpu` of the 50 ms workload is 50.91–51.03 ms:
   0.9–1.0 ms above the target, comparable to the cost of starting an empty
@@ -281,11 +281,13 @@ description.
   1.0017 s.
 - **Group values include Hyperfine.** `cpu_time_cgroup` exceeds the target's
   `time_cpu` by ≈ 1.4 ms (52.27–52.48 ms against 50.96–51.03 ms); for the empty
-  target the group spends 2.5 ms while the target itself takes 0.73 ms.
+  target, the `r2` snapshot records mean `cpu_time_cgroup` of 3.19 ms (3.27 ms
+  median), while process `time_cpu` has a 333.1 µs mean and a zero median.
 - **The group's mean load** is the group's CPU time over its lifetime, i.e. the
   whole Hyperfine invocation. For short targets the group lives noticeably
   longer than the target, so the value is a property of the "target plus
-  Hyperfine" pair: 0.16 cores for the empty target, 0.62–0.67 for the 50 ms
+  Hyperfine" pair: the `r2` snapshot gives the empty target 0.32 cores on average
+  (0.33 median), 0.62–0.67 for the 50 ms
   single thread, 3.85–3.88 for four threads of 1 s. Before the fix the
   denominator was the target's own time, and the empty single-threaded target
   got 3.35 cores.

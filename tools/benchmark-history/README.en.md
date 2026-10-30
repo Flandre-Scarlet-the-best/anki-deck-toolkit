@@ -1,13 +1,13 @@
 # Local benchmark history: `benchmark-history`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 46d18e6615e67b6460ec6de63d28ad00fe8e6db4 -->
+<!-- i18n-source-git-blob: f2ce11401442c20e6f7515307bd58d62a87c3269 -->
 
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
 results into the `## Производительность` (performance) section of a PR
-description and into snapshots for the
-[`docs/performance/`](../../docs/performance/README.en.md) pages. It measures
+description and into snapshots for module performance pages at
+`tools/<module>/performance.md` and their translations. It measures
 nothing: series are run by [`benchmark-runner`](../benchmark-runner/README.en.md),
 while the result model, its validation and the comparability rules belong to
 [`benchmark-contract`](../benchmark-contract/README.en.md). There is no second
@@ -111,7 +111,7 @@ cargo run -p benchmark-history -- restore /path/to/backup
 | `baseline <ID>` | every baseline candidate with reasons why it fits or not, and the chosen baseline; `--commit` narrows the choice |
 | `compare <base> <result>` | the `benchmark-contract` verdict, before/after, deltas and the assessment against the spread |
 | `report <ID>...` | Markdown `## Производительность` section for a PR; `--baseline ID` (one per scenario × profile pair), `--first` or `--commit` |
-| `snapshot <ID> --page P` | snapshot for a `docs/performance/` page in three languages; without `--apply` it only shows it |
+| `snapshot <ID> --page P` | snapshot for a module page `tools/<module>/performance.md` and translations `performance.en.md`, `performance.zh-CN.md`; without `--apply` it only shows it |
 | `verify` | checks every archive copy against its identifier and the contract, and the index against the archive projection; does not change the archive or create a store (a missing store is code 3); whatever index reconciliation on opening fixed before the check is reported and gives code 1 |
 | `reindex` | rebuilds the index from the archive |
 | `backup <dir>` | copies the archive into a new or empty directory to move it to another Linux machine |
@@ -229,7 +229,7 @@ GitHub.
 ## Documentation snapshot
 
 `snapshot` replaces the block of the same scenario × profile pair on a module
-page together with its translations (`<module>.en.md`, `<module>.zh-CN.md`); a
+page together with its translations (`performance.en.md`, `performance.zh-CN.md`); a
 new pair is added before the `<!-- benchmark-snapshot:anchor -->` line. The block
 holds the date, versions, environment facts, workload size, recorded
 parameters that affect comparability (for example `writers`) and metrics, but
