@@ -204,6 +204,41 @@ class PrBodyContractTests(unittest.TestCase):
         )
         self.assertTrue(any("HEAD" in e for e in validate(valid_body() + "\n\n" + invalid)))
 
+    def test_coderabbit_summary_requires_quantitative_result(self):
+        line = next(line for line in COMPACT_CODERABBIT.splitlines() if line.startswith("- **Итог:**"))
+        for result in ("Подтверждённые замечания исправлены, блокирующих рисков нет.",
+                       "Все замечания рассмотрены, оставшихся проблем не обнаружено."):
+            with self.subTest(result=result):
+                summary = COMPACT_CODERABBIT.replace(line, f"- **Итог:** {result}")
+                self.assertTrue(any("количественные" in e for e in validate(valid_body() + "\n\n" + summary)))
+        for result in ("Подтверждено 2 замечания, исправлены оба.",
+                       "Найдено 0 замечаний; блокирующих рисков нет.",
+                       "Подтверждено:\n  2 исправленных замечания, блокирующих нет."):
+            with self.subTest(result=result):
+                summary = COMPACT_CODERABBIT.replace(line, f"- **Итог:** {result}")
+                self.assertEqual(validate(valid_body() + "\n\n" + summary), [])
+
+    def test_coderabbit_progress_binds_shas_to_roles(self):
+        original = ("3 завершённые итерации; последнее ревью `abcdef012345`\n"
+                    "  (итерация 3), опубликован `1234567abcde` (этот HEAD ещё не проверен).")
+        for progress in (
+            "3 итерации; reviewed HEAD неизвестен, опубликованный HEAD неизвестен; `abcdef012345` и `1234567abcde`.",
+            "3 итерации; reviewed HEAD `abcdef012345`, другой SHA `1234567abcde`.",
+            "3 итерации; опубликован `abcdef012345`, другой SHA `1234567abcde`.",
+            "3 итерации; reviewed HEAD `abcdef012345`, опубликован `abcdef012345`, другой `1234567abcde`.",
+        ):
+            with self.subTest(progress=progress):
+                summary = COMPACT_CODERABBIT.replace(original, progress)
+                self.assertTrue(any("HEAD" in e for e in validate(valid_body() + "\n\n" + summary)))
+        for progress in (
+            "3 итерации; reviewed HEAD: `abcdef012345`; опубликованный HEAD:\n  `1234567abcde`.",
+            "3 итерации; `abcdef012345` — reviewed HEAD; `1234567abcde` — published HEAD.",
+            "3 завершённые итерации; последнее ревью: `abcdef012345`\n  (итерация 3); опубликован `1234567abcde`.",
+        ):
+            with self.subTest(progress=progress):
+                summary = COMPACT_CODERABBIT.replace(original, progress)
+                self.assertEqual(validate(valid_body() + "\n\n" + summary), [])
+
     def test_coderabbit_compact_summary_requires_all_fields(self):
         for label in ("Прогресс", "Итог", "Существенное", "Полный журнал"):
             invalid = COMPACT_CODERABBIT.replace(f"**{label}:**", f"**Пропущено_{label}:**")

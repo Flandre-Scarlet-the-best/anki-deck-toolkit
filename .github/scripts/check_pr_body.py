@@ -336,6 +336,20 @@ COMPACT_CANDIDATE = re.compile(
 LEGACY_HEADER = ("Итерация / reviewed HEAD", "Уровень", "Путь", "Влияние", "Решение", "Исправление")
 LEGACY_SEPARATOR = re.compile(r":?-{3,}:?\Z")
 LEGACY_ROW_ID = re.compile(r"[1-9]\d*\s*·\s*`[0-9a-f]{7,40}`\Z")
+# Роль должна непосредственно относиться к SHA, а не просто встречаться рядом
+# с двумя произвольными идентификаторами. Перенос строки внутри пункта допустим.
+SHA = r"`([0-9a-f]{7,40})`"
+REVIEW_ROLE = r"(?:reviewed(?:\s+head)?|(?:последн\w+\s+)?ревью|проверенн\w+\s+head)"
+PUBLISHED_ROLE = r"(?:опубликован\w*(?:\s+(?:после\s+\w+\s+)?head)?|published(?:\s+head)?)"
+
+
+def role_shas(text: str, role: str) -> set[str]:
+    """SHA после названия роли либо перед ним через тире/скобку."""
+    before = re.compile(rf"\b{role}\s*[:=—–-]?\s*{SHA}", re.IGNORECASE)
+    after = re.compile(rf"{SHA}\s*(?:[—–-]\s*|\(\s*){role}\b", re.IGNORECASE)
+    return set(before.findall(text)) | set(after.findall(text))
+
+
 CODERABBIT_GIST = re.compile(
     r"\[(?P<label>[^\[\]\n]+?)\]\(https://gist\.github\.com/"
     r"[A-Za-z0-9-]+/[0-9a-f]{20,64}(?:#[a-zA-Z0-9-]+)?\)"
@@ -503,15 +517,21 @@ def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> l
     progress_values = captured["Прогресс"]
     if len(progress_values) == 1 and substantive(progress_values, 4):
         progress = progress_values[0]
-        shas = set(re.findall(r"`([0-9a-f]{7,40})`", progress))
+        reviewed = role_shas(progress, REVIEW_ROLE)
+        published = role_shas(progress, PUBLISHED_ROLE)
         iteration = re.search(
             r"(?:\b[1-9]\d*\s+(?:завершённ\w+\s+)?итерац|"
             r"\bитераци\w*\s*[:№#]?\s*[1-9]\d*)",
             progress,
             re.IGNORECASE,
         )
-        if not iteration or len(shas) < 2:
+        if not iteration or not any(r != p for r in reviewed for p in published):
             errors.append("CodeRabbit: в «Прогресс» нужны номер итерации, reviewed HEAD и опубликованный HEAD")
+
+    result_values = captured["Итог"]
+    if (len(result_values) == 1 and substantive(result_values, 4)
+            and not re.search(r"(?<!\w)\d+(?!\w)", re.sub(SHA, "", result_values[0]))):
+        errors.append("CodeRabbit: в «Итог» нужны количественные данные")
 
     visible = without_inline_code(content)
     fields_visible = [match for match in COMPACT_FIELD.finditer(visible)]
