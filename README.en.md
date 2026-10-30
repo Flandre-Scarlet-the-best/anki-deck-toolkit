@@ -4,7 +4,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 6479ab51ad7e5fd160dfd6e3862dc4effbb492a9 -->
+<!-- i18n-source-git-blob: 6ac9eb831d9e0917839cf6acbbf565d144462f89 -->
 
 **Rust CLI tools for inspecting and validating CrowdAnki JSON exports, making targeted edits, and visually comparing exports.**
 
