@@ -94,7 +94,7 @@ coderabbit review --help
 coderabbit review findings --help
 coderabbit auth status
 coderabbit usage
-coderabbit config validate
+check-jsonschema --no-cache --schemafile https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json .coderabbit.yaml
 ```
 
 Установи фактом минимум следующее:
@@ -102,7 +102,7 @@ coderabbit config validate
 - какая версия установлена и является ли она latest;
 - какие review-flags реально доступны, включая наличие и форму deep;
 - какова доступность включённых review прямо сейчас (`usage`);
-- валиден ли repository config (`config validate`).
+- валиден ли repository config по официальной JSON Schema (`check-jsonschema`).
 
 Latest-версию не угадывай по внешним источникам и не считай закреплённой:
 официальный способ проверки — сам CLI.
@@ -127,26 +127,24 @@ curl -s https://cli.coderabbit.ai/releases/latest/VERSION
 Так безопаснее: при наличии новой версии `coderabbit update` не ограничивается
 проверкой, а сразу её ставит.
 
-Repository `.coderabbit.yaml` проверяй штатным для текущей версии способом,
-например:
+Repository `.coderabbit.yaml` проверяй через официальную JSON Schema командой
+из discovery выше. Не используй `coderabbit config validate`: официальная
+валидация CLI не работает на стороне CodeRabbit. `--no-cache` позволяет получать
+актуальную schema, а не использовать сохранённую копию.
 
-```bash
-coderabbit config validate
-```
-
-`coderabbit config validate` возвращает `0`, если файл валиден против актуальной
-официальной schema, и `1`, если файл отсутствует, нечитаем, невалиден, либо
-schema не удалось загрузить. Если repository config невалиден — это отдельная
-задача про конфигурацию, а не побочный эффект review: не правь `.coderabbit.yaml`
-ради того, чтобы cycle поехал.
+Проверка требует установленного `check-jsonschema` и доступа к URL schema.
+Ненулевой код не доказывает сам по себе невалидность конфигурации: различай
+ошибки файла и схемы, отсутствие инструмента и сетевую ошибку по выводу команды.
+Если проверка недоступна, сообщи конкретное препятствие и не выдавай конфигурацию
+за проверенную. Если repository config невалиден — это отдельная задача про
+конфигурацию, а не побочный эффект review: не правь `.coderabbit.yaml` ради того,
+чтобы cycle поехал.
 
 `coderabbit config` **не является** read-only командой начиная с 0.8.x: вызов
 без подкоманды запускает guided setup и может записать `.coderabbit.yaml`, а
 `coderabbit config apply` применяет готовое YAML-предложение (с `--dry-run`
-для preview и `--yes` для применения без подтверждения). В рамках review cycle
-допустим только `config validate`; генерация и применение конфигурации
-остаются отдельной задачей про repository configuration и не входят в этот
-workflow.
+для preview и `--yes` для применения без подтверждения). Генерация и применение
+конфигурации остаются отдельной задачей и не входят в этот workflow.
 
 `coderabbit doctor` возвращает `1`, если хотя бы одна проверка провалена;
 warnings не дают ненулевой код возврата. Неспособность CLI работать не из-за
@@ -673,7 +671,7 @@ CLI умеет заметно больше, чем этот cycle, и расши
   — облачные задачи и управление их навыками.
 - **`coderabbit skills`** — user-level skills CodeRabbit, не skills репозитория.
 - **`coderabbit config` / `config apply`** — отдельная задача настройки;
-  в этом цикле допустим только `coderabbit config validate`.
+  конфигурация в этом цикле проверяется через `check-jsonschema`, а не CLI.
 
 Если для одной из этих возможностей появится настоящий пользовательский запрос,
 это отдельная задача и, возможно, отдельный skill, а не тихое расширение этого.
