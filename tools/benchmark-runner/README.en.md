@@ -1,7 +1,7 @@
 # Benchmark runner: `benchmark-runner`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 91d5e346b0b34b4d959e9aa4956992fc34b902ff -->
+<!-- i18n-source-git-blob: 926d1abd926410fce7cde1065e3db16a1b6ffc39 -->
 
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
@@ -315,7 +315,8 @@ tests do not read `decks/**`. The suite is part of
 
 `io_read_bytes`, `io_write_bytes`, `io_read_operations` and `io_write_operations`
 come from `io.stat` of an own delegated cgroup or a discovered container.
-Missing `io` delegation leaves CPU/RAM available. Scope, units, writeback attribution,
+Missing or refused `io` leaves CPU/RAM available: enabling is verified through
+`cgroup.subtree_control`, and a refusal is `unsupported` with its reason. Scope, units, writeback attribution,
 stacked/virtual-device limits and declaration revisions are defined by the
 [metric contract](../../docs/performance/benchmarks.en.md#block-io).
 `benchmark-runner.calibration-io` performs a controlled file cycle with `fsync`

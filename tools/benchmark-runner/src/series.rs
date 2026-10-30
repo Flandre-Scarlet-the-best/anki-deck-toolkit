@@ -16,7 +16,7 @@
 //! вычислена идентичность `repo-tree`. После уборки снимок сверяется ещё раз,
 //! и изменение исходников за серию не даёт итога `success`.
 
-use crate::cgroup::{self, Counters, Delegated, RunGroup};
+use crate::cgroup::{self, Counters, Delegated, IoControl, RunGroup};
 use crate::environment::{self, known, unavailable};
 use crate::hyperfine_exec::{self, Output};
 use crate::inputs;
@@ -39,6 +39,7 @@ use benchmark_contract::scenario::{
 };
 use benchmark_contract::sensitive;
 use benchmark_contract::vocabulary::{BuiltinFact, MetricId, RESULT_SCHEMA_VERSION, WorkloadKind};
+use benchmark_history::reason;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -204,6 +205,9 @@ struct Series<'a> {
     deadline: Option<Instant>,
     step_counter: usize,
     own: Option<Delegated>,
+    /// Контроллер io включён для подгрупп прогонов: только тогда их `io.stat`
+    /// читается как учёт блочного I/O.
+    own_io: bool,
     warnings: Vec<String>,
 }
 
@@ -288,6 +292,7 @@ pub fn execute(
         deadline: None,
         step_counter: 0,
         own: None,
+        own_io: false,
         warnings: Vec::new(),
     };
     let summary = series.run();
@@ -359,22 +364,45 @@ impl Series<'_> {
             );
         }
         match &self.readiness.own_cgroup {
-            OwnCgroup::Ready(delegated) => match delegated.activate(
-                self.selection
-                    .item
-                    .scenario
-                    .metrics
-                    .iter()
-                    .any(|m| m.metric.is_io()),
-            ) {
-                Ok(()) => self.own = Some(delegated.clone()),
-                Err(reason) => self.mark_own_unavailable(&mut state, &reason),
-            },
+            OwnCgroup::Ready(delegated) => {
+                let wants_io = scenario.metrics.iter().any(|m| {
+                    m.metric.is_io()
+                        && collector(self.selection, m) == Collector::OwnCgroup
+                        && !self.readiness.unavailable.contains_key(&m.key())
+                });
+                match delegated.activate(wants_io) {
+                    Ok(io) => {
+                        self.own = Some(delegated.clone());
+                        self.own_io = io == IoControl::Enabled;
+                        if let IoControl::Unavailable(reason) = io {
+                            self.mark_own_io_unavailable(&mut state, &reason);
+                        }
+                    }
+                    Err(reason) => self.mark_own_unavailable(&mut state, &reason),
+                }
+            }
             OwnCgroup::ViaScope(_, _) => self.mark_own_unavailable(
                 &mut state,
                 "группа исполнителя не делегирована, а перезапуск в systemd-run не выполнен",
             ),
             OwnCgroup::Unavailable(_) | OwnCgroup::NotNeeded => {}
+        }
+        // Обязательная метрика, источник которой отказал при активации, не
+        // будет измерена ни в одном прогоне: серия здесь не поддерживается,
+        // как если бы отказ был виден при оценке готовности.
+        let refused = refused_required(&scenario.metrics, &state.missing);
+        if !refused.is_empty() {
+            let reason = refused.join("; ");
+            self.log
+                .line(&format!("серия не может измеряться здесь: {reason}"));
+            state.outcome = Some((OutcomeStatus::Unsupported, reason));
+            return self.finish(
+                state,
+                CleanupState {
+                    ok: true,
+                    reason: None,
+                },
+            );
         }
 
         self.deadline =
@@ -879,10 +907,7 @@ impl Series<'_> {
         // до остановки сэмплера и записи файла сэмплов: эти затраты зависят от режима
         // и не должны попадать в знаменатель средней загрузки.
         if let Some(group) = &group {
-            invocation.own_final = cgroup::read(
-                &group.dir,
-                scenario.metrics.iter().any(|m| m.metric.is_io()),
-            );
+            invocation.own_final = cgroup::read(&group.dir, self.own_io);
             let ended_ns = cgroup::monotonic_ns();
             invocation.own_span = started_at_marker
                 .as_deref()
@@ -951,7 +976,10 @@ impl Series<'_> {
         let tick = declared.min(group_tick).clamp(0.02, 1.0);
         sampler::Plan {
             host,
-            io: scenario.metrics.iter().any(|m| m.metric.is_io()),
+            io: match group_source {
+                GroupSource::Own(_) => self.own_io,
+                _ => scenario.metrics.iter().any(|m| m.metric.is_io()),
+            },
             tick: Duration::from_secs_f64(tick),
             group: group_source,
         }
@@ -1040,6 +1068,24 @@ impl Series<'_> {
         self.warn(format!("собственная группа прогонов недоступна: {reason}"));
         for request in &self.selection.item.scenario.metrics {
             if collector(self.selection, request) == Collector::OwnCgroup {
+                state.missing.insert(
+                    request.key(),
+                    Missing {
+                        unsupported: true,
+                        reason: reason.to_owned(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Контроллер io не включился: I/O-метрики собственной группы явно
+    /// отсутствуют с точной причиной, CPU и память измеряются как прежде.
+    fn mark_own_io_unavailable(&mut self, state: &mut State, reason: &str) {
+        self.warn(format!("учёт блочного I/O подгрупп недоступен: {reason}"));
+        for request in &self.selection.item.scenario.metrics {
+            if request.metric.is_io() && collector(self.selection, request) == Collector::OwnCgroup
+            {
                 state.missing.insert(
                     request.key(),
                     Missing {
@@ -2139,9 +2185,7 @@ fn host_value(request: &MetricRequest, samples: &Samples) -> MetricValue {
             match sampler::peak_rate(&points, interval) {
                 Some(value) => MetricValue::Measured { value },
                 None => MetricValue::Unavailable {
-                    reason: format!(
-                        "прогон короче интервала сэмплирования {interval} с: ни одного полного окна"
-                    ),
+                    reason: reason::SAMPLING_WINDOW.with(interval),
                 },
             }
         }
@@ -2172,12 +2216,24 @@ fn group_points(samples: &Samples) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// Обязательные метрики, источник которых отказал до первого прогона.
+fn refused_required(metrics: &[MetricRequest], missing: &BTreeMap<String, Missing>) -> Vec<String> {
+    metrics
+        .iter()
+        .filter(|m| m.required)
+        .filter_map(|m| {
+            missing
+                .get(&m.key())
+                .filter(|missing| missing.unsupported)
+                .map(|missing| format!("metric:{}: {}", m.key(), missing.reason))
+        })
+        .collect()
+}
+
 fn io_value(metric: MetricId, io: Option<cgroup::IoCounters>) -> MetricValue {
     let Some(io) = io else {
         return MetricValue::Unavailable {
-            reason:
-                "io.stat отсутствует, недоступен или некорректен: учёт блочного I/O не подтверждён"
-                    .into(),
+            reason: reason::IO_STAT_UNREADABLE.text(),
         };
     };
     let value = match metric {
@@ -2195,7 +2251,7 @@ fn io_value(metric: MetricId, io: Option<cgroup::IoCounters>) -> MetricValue {
 fn own_value(request: &MetricRequest, invocation: &Invocation) -> MetricValue {
     let Some(last) = invocation.own_final else {
         return MetricValue::Unavailable {
-            reason: "счётчики подгруппы прогона не прочитаны".into(),
+            reason: reason::OWN_COUNTERS_UNREAD.text(),
         };
     };
     if request.metric.is_io() {
@@ -2231,9 +2287,7 @@ fn own_value(request: &MetricRequest, invocation: &Invocation) -> MetricValue {
             match sampler::peak_rate(&group_points(&invocation.samples), interval) {
                 Some(value) => MetricValue::Measured { value },
                 None => MetricValue::Unavailable {
-                    reason: format!(
-                        "прогон короче интервала сэмплирования {interval} с: ни одного полного окна"
-                    ),
+                    reason: reason::SAMPLING_WINDOW.with(interval),
                 },
             }
         }
@@ -2249,19 +2303,19 @@ fn container_value(request: &MetricRequest, samples: &Samples) -> MetricValue {
             reason: samples
                 .group_problem
                 .clone()
-                .unwrap_or_else(|| "контейнер нагрузки этого прогона не обнаружен".into()),
+                .unwrap_or_else(|| reason::CONTAINER_NOT_FOUND.text()),
         };
     }
     let Some(last) = samples.group.last() else {
         return MetricValue::Unavailable {
-            reason: "контейнер обнаружен, но его группа не прочитана до удаления".into(),
+            reason: reason::CONTAINER_GROUP_UNREAD.text(),
         };
     };
     if request.metric.is_io() {
         // Последний снимок исчезнувшей группы не является итогом её I/O.
         if samples.group_vanished {
             return MetricValue::Unavailable {
-                reason: "группа контейнера исчезла: итоговый io.stat не прочитан".into(),
+                reason: reason::CONTAINER_IO_VANISHED.text(),
             };
         }
         return io_value(request.metric, last.counters.io);
@@ -2566,6 +2620,41 @@ mod tests {
         ));
         samples.group_vanished = false;
         assert_eq!(container_value(&request, &samples).measured(), Some(1024.0));
+    }
+
+    #[test]
+    fn refused_io_blocks_only_when_required_and_never_touches_cpu() {
+        let request = |text: &str| -> MetricRequest { toml::from_str(text).unwrap() };
+        let metrics = [
+            request(
+                "metric = \"io_write_bytes\"\nscope = \"cgroup\"\nsource = \"cgroup-v2\"\nrequired = false",
+            ),
+            request(
+                "metric = \"cpu_time_cgroup\"\nscope = \"cgroup\"\nsource = \"cgroup-v2\"\nrequired = true",
+            ),
+        ];
+        let refusal = reason::IO_NOT_ENABLED.with("os error 16");
+        let mut missing = BTreeMap::from([(
+            metrics[0].key(),
+            Missing {
+                unsupported: true,
+                reason: refusal.clone(),
+            },
+        )]);
+        assert!(refused_required(&metrics, &missing).is_empty());
+        let required = [
+            request(
+                "metric = \"io_write_bytes\"\nscope = \"cgroup\"\nsource = \"cgroup-v2\"\nrequired = true",
+            ),
+            metrics[1].clone(),
+        ];
+        assert_eq!(
+            refused_required(&required, &missing),
+            [format!("metric:io_write_bytes@cgroup: {refusal}")]
+        );
+        // Отказ по решению запуска (--no-sampling) не делает серию неподдерживаемой.
+        missing.get_mut(&metrics[0].key()).unwrap().unsupported = false;
+        assert!(refused_required(&required, &missing).is_empty());
     }
 
     #[test]

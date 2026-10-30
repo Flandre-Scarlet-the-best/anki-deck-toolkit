@@ -1,7 +1,7 @@
 # Local benchmark history: `benchmark-history`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: f2ce11401442c20e6f7515307bd58d62a87c3269 -->
+<!-- i18n-source-git-blob: b996ce4f27be0f41ce0d0601bbdb3001688ac5e3 -->
 
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
@@ -235,8 +235,13 @@ holds the date, versions, environment facts, workload size, recorded
 parameters that affect comparability (for example `writers`) and metrics, but
 not the commit, the record ID, the input identity or paths. Parameters are part
 of the marker as part of the workload definition: a snapshot with other values
-does not replace the previous one without `--replace-workload`. Refusals that
-write nothing:
+does not replace the previous one without `--replace-workload`. A fact or
+parameter value that Markdown would read as markup or as a cell boundary (line
+breaks, control characters, backticks, HTML, links, edge spaces) is shown as the
+exact JSON string inside `<code>`; an ordinary value is shown as is. Known reasons
+for missing metrics are translated through the `benchmark_history::reason`
+dictionary the runner builds them from; an unknown reason stays untranslated.
+Refusals that write nothing:
 
 - the outcome is not `success`, or the result belongs to an outdated scenario
   revision;

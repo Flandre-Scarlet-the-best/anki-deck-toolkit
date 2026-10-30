@@ -7,7 +7,7 @@
 //! пространства. Отказ обязательной возможности делает серию `unsupported`,
 //! отказ необязательной — заранее известную причину отсутствия метрики.
 
-use crate::cgroup::{self, Delegated};
+use crate::cgroup::{self, Delegated, IoControl};
 use crate::environment::docker_server_version;
 use crate::hyperfine_exec::{self, Hyperfine, which};
 use crate::offline::{self, Isolation};
@@ -15,6 +15,7 @@ use crate::plan::Selection;
 use crate::procs;
 use benchmark_contract::scenario::{MetricRequest, Program, Requirement};
 use benchmark_contract::vocabulary::{MetricId, Os, Scope, Source};
+use benchmark_history::reason;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -83,8 +84,9 @@ pub struct Missing {
 pub enum OwnCgroup {
     NotNeeded,
     Ready(Delegated),
-    /// Делегированная группа доступна после перезапуска через systemd-run.
-    ViaScope(PathBuf, bool),
+    /// Делегированная группа доступна после перезапуска через systemd-run;
+    /// состояние io проверено активацией в одноразовой группе.
+    ViaScope(PathBuf, IoControl),
     Unavailable(String),
 }
 
@@ -310,14 +312,12 @@ pub fn assess(selection: &Selection<'_>, runner: &Path, sampling: bool) -> Readi
                 "модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста".to_owned(),
             ),
             Collector::ModuleReport | Collector::Filesystem => None,
-            Collector::ContainerCgroup if !sampling => Some(
-                "сэмплирование отключено параметром --no-sampling: группа контейнера наблюдается только во время прогона".to_owned(),
-            ),
+            Collector::ContainerCgroup if !sampling => Some(reason::CONTAINER_NO_SAMPLING.text()),
             Collector::ContainerCgroup if !cgroup::mounted() => {
-                Some("единая иерархия cgroup v2 не смонтирована".to_owned())
+                Some(reason::CGROUP_NOT_MOUNTED.text())
             }
             Collector::ContainerCgroup if !r.docker => {
-                Some("демон Docker недоступен: контейнер нагрузки не найти".to_owned())
+                Some(reason::DOCKER_UNAVAILABLE.text())
             }
             Collector::ContainerCgroup => None,
             Collector::OwnCgroup => {
@@ -387,20 +387,30 @@ pub fn assess(selection: &Selection<'_>, runner: &Path, sampling: bool) -> Readi
             OwnCgroup::NotNeeded => {}
         }
     }
-    let io_available = match &r.own_cgroup {
-        OwnCgroup::Ready(group) => Some(group.has_io()),
-        OwnCgroup::ViaScope(_, io) => Some(*io),
-        _ => None,
-    };
-    if io_available == Some(false) {
-        for request in scenario
-            .metrics
-            .iter()
-            .filter(|m| m.metric.is_io() && collector(selection, m) == Collector::OwnCgroup)
-        {
-            let reason =
-                "контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно"
-                    .to_owned();
+    let io_refusal = io_refusal(&r.own_cgroup);
+    let io_requests: Vec<&MetricRequest> = scenario
+        .metrics
+        .iter()
+        .filter(|m| m.metric.is_io() && collector(selection, m) == Collector::OwnCgroup)
+        .collect();
+    if !io_requests.is_empty() {
+        match &io_refusal {
+            Some(reason) => r.push("cgroup-io", Status::Unsupported, reason.clone()),
+            None if matches!(r.own_cgroup, OwnCgroup::ViaScope(_, _)) => r.push(
+                "cgroup-io",
+                Status::Available,
+                "контроллер io включается для подгрупп в делегированной группе systemd",
+            ),
+            None if matches!(r.own_cgroup, OwnCgroup::Ready(_)) => r.push(
+                "cgroup-io",
+                Status::Available,
+                "контроллер io делегирован; включение для подгрупп проверяется активацией перед серией",
+            ),
+            None => {}
+        }
+    }
+    if let Some(reason) = io_refusal {
+        for request in io_requests {
             if request.required {
                 r.block(
                     &format!("metric:{}", request.key()),
@@ -412,7 +422,7 @@ pub fn assess(selection: &Selection<'_>, runner: &Path, sampling: bool) -> Readi
                 request.key(),
                 Missing {
                     unsupported: true,
-                    reason,
+                    reason: reason.clone(),
                 },
             );
         }
@@ -429,6 +439,27 @@ pub fn assess(selection: &Selection<'_>, runner: &Path, sampling: bool) -> Readi
         }
     }
     r
+}
+
+/// Почему I/O-метрики собственной группы не будут измерены. Делегирование
+/// io прямо доступной группе — необходимое условие; включение для подгрупп
+/// серия проверяет активацией и при отказе записывает точную причину. Через
+/// systemd-run включение уже проверено активацией в одноразовой группе.
+fn io_refusal(own: &OwnCgroup) -> Option<String> {
+    match own {
+        OwnCgroup::Ready(group) if !group.io_delegated() => Some(reason::IO_NOT_DELEGATED.text()),
+        OwnCgroup::ViaScope(_, IoControl::Unavailable(reason)) => Some(reason.clone()),
+        _ => None,
+    }
+}
+
+/// Состояние io по выводу `__cgroup-probe`: `io` или причина отказа.
+fn scope_io(out: &str) -> IoControl {
+    match out.trim() {
+        "io" => IoControl::Enabled,
+        "" => IoControl::Unavailable(reason::IO_PROBE_SILENT.text()),
+        refusal => IoControl::Unavailable(refusal.to_owned()),
+    }
 }
 
 fn perf_paranoid() -> Option<i32> {
@@ -466,7 +497,7 @@ fn own_cgroup(runner: &Path) -> OwnCgroup {
         .arg("__cgroup-probe");
     match procs::output(&mut command, Duration::from_secs(20)) {
         Ok((procs::Ending::Exited(0), out, _)) => {
-            OwnCgroup::ViaScope(systemd_run, String::from_utf8_lossy(&out).trim() == "io")
+            OwnCgroup::ViaScope(systemd_run, scope_io(&String::from_utf8_lossy(&out)))
         }
         Ok((ending, out, err)) => OwnCgroup::Unavailable(format!(
             "{direct}; systemd-run --user --scope не дал делегированной группы ({}): {}",
@@ -601,4 +632,37 @@ fn probe_hyperfine_metrics(
         format!("экспортируются: {}", accepted.join(", ")),
     );
     r.hyperfine_metrics = accepted;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_refusal_follows_delegation_and_the_scope_activation() {
+        let base =
+            std::env::temp_dir().join(format!("benchmark-io-readiness-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let ready = OwnCgroup::Ready(Delegated { base: base.clone() });
+        std::fs::write(base.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        assert_eq!(io_refusal(&ready), Some(reason::IO_NOT_DELEGATED.text()));
+        std::fs::write(base.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+        assert_eq!(io_refusal(&ready), None);
+        std::fs::remove_dir_all(&base).unwrap();
+
+        let scope = |io| OwnCgroup::ViaScope(PathBuf::from("systemd-run"), io);
+        assert_eq!(io_refusal(&scope(IoControl::Enabled)), None);
+        let refused = reason::IO_NOT_ENABLED.with("Device or resource busy (os error 16)");
+        assert_eq!(
+            scope_io(&format!("{refused}\n")),
+            IoControl::Unavailable(refused.clone())
+        );
+        assert_eq!(io_refusal(&scope(scope_io(&refused))), Some(refused));
+        assert_eq!(scope_io("io\n"), IoControl::Enabled);
+        assert_eq!(
+            scope_io(""),
+            IoControl::Unavailable(reason::IO_PROBE_SILENT.text())
+        );
+        assert_eq!(io_refusal(&OwnCgroup::NotNeeded), None);
+    }
 }

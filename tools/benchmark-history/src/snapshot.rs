@@ -12,6 +12,7 @@
 //! другим результатом, а не публикуемым, который даёт в точности тот же блок.
 
 use crate::format;
+use crate::reason;
 use benchmark_contract::result::{
     Aggregate, Availability, BenchmarkResult, Fact, Identity, OutcomeStatus, Quantity, RunStatus,
 };
@@ -869,56 +870,48 @@ fn labels(lang: Lang) -> Labels {
     }
 }
 
-fn localized_reason(reason: &str, lang: Lang) -> String {
-    const PREFIX: &str = "прогон короче интервала сэмплирования ";
-    const SUFFIX: &str = " с: ни одного полного окна";
-    if let Some(interval) = reason
-        .strip_prefix(PREFIX)
-        .and_then(|rest| rest.strip_suffix(SUFFIX))
-    {
-        return match lang {
-            Lang::Ru => reason.to_owned(),
-            Lang::En => {
-                format!("run shorter than the sampling interval {interval} s: no complete window")
-            }
-            Lang::ZhCn => format!("运行时长短于 {interval} 秒的采样间隔：没有完整采样窗口"),
-        };
-    }
-    if reason == "контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно"
-    {
-        return match lang {
-            Lang::Ru => reason.to_owned(),
-            Lang::En => {
-                "the io controller is not delegated to the runner's cgroup; CPU and memory are available separately".into()
-            }
-            Lang::ZhCn => "执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取".into(),
-        };
-    }
-    reason.to_owned()
-}
-
 fn marker(meta: &Meta) -> String {
     let json = serde_json::to_string(meta).expect("JSON");
     // `--` внутри HTML-комментария недопустимо: экранируется в строке JSON.
     format!("{BEGIN}{} -->", json.replace("--", "-\\u002d"))
 }
 
-/// Блок снимка на одном языке.
-fn markdown_table_cell(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('|', "\\|")
+/// Текст, который GFM покажет буквально: без управляющих символов и краевых
+/// пробелов (их съедает ячейка), без экранирования, кода, выделения, ссылок,
+/// HTML, сущностей, формул, автоссылок и эмодзи-кодов. `|` допустим: в ячейке
+/// он экранируется на уровне таблицы, в том числе внутри кода.
+fn literal_in_markdown(value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    let alphanumeric = |index: Option<usize>| {
+        index
+            .and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphanumeric())
+    };
+    !value.is_empty()
+        && value.trim() == value
+        && !value.to_lowercase().contains("www.")
+        && chars.iter().enumerate().all(|(i, &c)| match c {
+            c if c.is_alphanumeric() => true,
+            ' ' | '.' | ',' | ';' | '-' | '+' | '=' | '/' | '(' | ')' | '%' | '\'' | '"' | '|' => {
+                true
+            }
+            // Внутри слова `_` не открывает выделение (`x86_64`).
+            '_' => alphanumeric(i.checked_sub(1)) && alphanumeric(Some(i + 1)),
+            // `:` перед пробелом или в конце не начинает ни схему ссылки, ни эмодзи-код.
+            ':' => chars.get(i + 1).is_none_or(|n| *n == ' '),
+            _ => false,
+        })
 }
 
-/// Обычные значения сохраняют прежний вид. Произвольный текст представляем
-/// JSON-строкой в HTML-коде: видны пробелы и управляющие символы, а Markdown
-/// не интерпретирует обратные кавычки и разделители таблицы.
-fn markdown_parameter(value: &str) -> String {
-    if !value.is_empty()
-        && value.trim() == value
-        && !value
-            .chars()
-            .any(|c| c == '`' || c == '\\' || c.is_control())
-    {
-        return format!("`{}`", markdown_table_cell(value));
+/// Значение в ячейке таблицы. Обычное остаётся прежним: текстом или, для
+/// `code`, в обратных кавычках. Иное — точная JSON-строка в `<code>`, где всё,
+/// кроме букв и цифр, записано числовыми ссылками: Markdown не видит в ней ни
+/// разделителей ячеек и строк, ни разметки, а управляющие символы, краевые
+/// пробелы и обратные кавычки остаются видимыми и однозначными.
+fn markdown_cell(value: &str, code: bool) -> String {
+    if literal_in_markdown(value) {
+        let text = value.replace('|', "\\|");
+        return if code { format!("`{text}`") } else { text };
     }
     let json = serde_json::to_string(value).expect("строка JSON");
     let escaped: String = json
@@ -932,6 +925,31 @@ fn markdown_parameter(value: &str) -> String {
         })
         .collect();
     format!("<code>{escaped}</code>")
+}
+
+/// Причина в абзаце «Не измерено»: ASCII-знаки разметки экранируются обратной
+/// косой чертой (CommonMark показывает их буквально), `_` внутри слова
+/// остаётся как есть, управляющие символы, включая переводы строк, заменяются
+/// пробелом: причина остаётся одной строкой абзаца и не закрывает блок снимка.
+fn markdown_text(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let intraword = c == '_'
+            && i > 0
+            && chars[i - 1].is_alphanumeric()
+            && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+        match c {
+            c if c.is_control() => out.push(' '),
+            '\\' | '`' | '*' | '[' | ']' | '<' | '>' | '&' | '~' | '|' | '!' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '_' if !intraword => out.push_str("\\_"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
@@ -986,7 +1004,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
             } else {
                 ""
             };
-            let _ = writeln!(out, "| `{name}`{mark} | {} |", markdown_table_cell(value));
+            let _ = writeln!(out, "| `{name}`{mark} | {} |", markdown_cell(value, false));
         }
     }
     out.push('\n');
@@ -999,7 +1017,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
         .map(|(name, value)| {
             (
                 format!("{} `{name}`", l.parameter),
-                markdown_parameter(value),
+                markdown_cell(value, true),
             )
         })
         .collect();
@@ -1065,7 +1083,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
                 metric
                     .reason
                     .as_deref()
-                    .map(|r| format!(": {}", localized_reason(r, lang)))
+                    .map(|r| format!(": {}", markdown_text(&reason::localize(r, lang))))
                     .unwrap_or_default()
             )),
         }
@@ -1091,76 +1109,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn markdown_table_cell_escapes_backslashes_before_pipes() {
-        assert_eq!(markdown_table_cell(r"a\|b"), r"a\\\|b");
-    }
-
-    #[test]
-    fn sampling_window_reason_is_localized_in_generated_snapshots() {
-        let reason = "прогон короче интервала сэмплирования 0.05 с: ни одного полного окна";
-        assert_eq!(localized_reason(reason, Lang::Ru), reason);
-        assert_eq!(
-            localized_reason(reason, Lang::En),
-            "run shorter than the sampling interval 0.05 s: no complete window"
-        );
-        assert_eq!(
-            localized_reason(reason, Lang::ZhCn),
-            "运行时长短于 0.05 秒的采样间隔：没有完整采样窗口"
-        );
-        assert_eq!(
-            localized_reason("another diagnostic", Lang::En),
-            "another diagnostic"
-        );
-    }
-
-    #[test]
-    fn io_controller_reason_is_localized_in_generated_snapshots() {
-        let reason =
-            "контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно";
-        assert_eq!(localized_reason(reason, Lang::Ru), reason);
-        assert_eq!(
-            localized_reason(reason, Lang::En),
-            "the io controller is not delegated to the runner's cgroup; CPU and memory are available separately"
-        );
-        assert_eq!(
-            localized_reason(reason, Lang::ZhCn),
-            "执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取"
-        );
-    }
-
-    #[test]
-    fn arbitrary_parameter_text_stays_in_one_table_cell() {
-        assert_eq!(markdown_parameter("4"), "`4`");
-        assert_eq!(markdown_parameter("a|b"), r"`a\|b`");
-        for value in [
-            "a`b|c\\d\nnext",
-            "a\\|b",
-            "\r\n",
-            "",
-            " a ",
-            "`*x*<&amp;>_[]",
-        ] {
-            let rendered = markdown_parameter(value);
-            assert!(rendered.starts_with("<code>"), "{rendered}");
-            assert!(!rendered.contains(['|', '`', '\n', '\r', '\\', '*', '_', '[', ']']));
-            let encoded = rendered
-                .strip_prefix("<code>")
-                .unwrap()
-                .strip_suffix("</code>")
-                .unwrap();
-            // Видимое содержимое — точная JSON-строка, включая escapes переводов строк.
-            let mut decoded = String::new();
-            let mut rest = encoded;
-            while let Some(pos) = rest.find("&#") {
-                decoded.push_str(&rest[..pos]);
-                rest = &rest[pos + 2..];
-                let end = rest.find(';').unwrap();
-                decoded.push(char::from_u32(rest[..end].parse().unwrap()).unwrap());
-                rest = &rest[end + 1..];
-            }
-            decoded.push_str(rest);
-            assert_eq!(serde_json::from_str::<String>(&decoded).unwrap(), value);
+    fn ordinary_values_keep_their_published_form() {
+        for value in ["x86_64", "rustc 1.99.1 (58cf8f9c3 2026-10-13)", "Ядро: 4"] {
+            assert_eq!(markdown_cell(value, false), value);
+            assert_eq!(markdown_cell(value, true), format!("`{value}`"));
         }
+        assert_eq!(markdown_cell("a|b", false), r"a\|b");
+        assert_eq!(markdown_cell("a|b", true), r"`a\|b`");
+        assert_eq!(
+            markdown_cell("a`b", false),
+            "<code>&#34;a&#96;b&#34;</code>"
+        );
+        assert_eq!(
+            markdown_text("perf_event /proc/stat"),
+            "perf_event /proc/stat"
+        );
+        assert_eq!(markdown_text("_x_ <b>\n"), r"\_x\_ \<b\> ");
     }
 
     #[test]

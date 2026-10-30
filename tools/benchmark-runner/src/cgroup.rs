@@ -8,6 +8,7 @@
 //! делегировал пользователю systemd (`systemd-run --user --scope -p Delegate=yes`)
 //! или окружение контейнера.
 
+use benchmark_history::reason;
 use rustix::time::{ClockId, clock_gettime};
 use std::fs;
 use std::io;
@@ -96,19 +97,52 @@ pub fn probe() -> Result<Delegated, String> {
     Ok(Delegated { base })
 }
 
+/// Контроллер io для измеряемых подгрупп после активации.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IoControl {
+    /// Сценарий не просит I/O-метрик.
+    NotRequested,
+    /// `io` есть в `cgroup.subtree_control`: подгруппы получат `io.stat`.
+    Enabled,
+    /// Включить не удалось; причина — из словаря `benchmark_history::reason`.
+    Unavailable(String),
+}
+
+/// Включить `io` для подгрупп группы `base` и проверить результат чтением
+/// `cgroup.subtree_control`: принятая запись ещё не доказывает включения.
+fn enable_io(base: &Path, write: impl FnOnce(&Path, &str) -> io::Result<()>) -> IoControl {
+    if !controllers(base, "cgroup.controllers")
+        .iter()
+        .any(|c| c == "io")
+    {
+        return IoControl::Unavailable(reason::IO_NOT_DELEGATED.text());
+    }
+    if let Err(error) = write(&base.join("cgroup.subtree_control"), "+io") {
+        return IoControl::Unavailable(reason::IO_NOT_ENABLED.with(error));
+    }
+    if controllers(base, "cgroup.subtree_control")
+        .iter()
+        .any(|c| c == "io")
+    {
+        IoControl::Enabled
+    } else {
+        IoControl::Unavailable(reason::IO_NOT_CONFIRMED.text())
+    }
+}
+
 impl Delegated {
-    pub fn has_io(&self) -> bool {
+    /// Контроллер io делегирован группе. Это необходимое, но не достаточное
+    /// условие: включение для подгрупп проверяет [`Delegated::activate`].
+    pub fn io_delegated(&self) -> bool {
         controllers(&self.base, "cgroup.controllers")
             .iter()
             .any(|c| c == "io")
-            || controllers(&self.base, "cgroup.subtree_control")
-                .iter()
-                .any(|c| c == "io")
     }
 
     /// Перенести исполнитель в собственную подгруппу и включить контроллеры
-    /// для измеряемых подгрупп.
-    pub fn activate(&self, with_io: bool) -> Result<(), String> {
+    /// для измеряемых подгрупп. Отказ `cpu`/`memory` — ошибка; отказ
+    /// необязательного `io` не лишает группу CPU/RAM и возвращается явно.
+    pub fn activate(&self, with_io: bool) -> Result<IoControl, String> {
         let leaf = self.base.join(SELF_LEAF);
         if !leaf.is_dir() {
             fs::create_dir(&leaf).map_err(|e| format!("подгруппа исполнителя не создана: {e}"))?;
@@ -119,16 +153,11 @@ impl Delegated {
         fs::write(self.base.join("cgroup.subtree_control"), "+cpu +memory").map_err(|e| {
             format!("контроллеры cpu и memory не включаются для подгрупп: {e}; в группе есть посторонние процессы или контроллеры не делегированы")
         })?;
-        // Необязательный контроллер: отказ не лишает группу CPU/RAM.
-        // Отсутствие io.stat будет явным отсутствием каждой I/O-метрики.
-        if with_io
-            && controllers(&self.base, "cgroup.controllers")
-                .iter()
-                .any(|c| c == "io")
-        {
-            let _ = fs::write(self.base.join("cgroup.subtree_control"), "+io");
-        }
-        Ok(())
+        Ok(if with_io {
+            enable_io(&self.base, |path, text| fs::write(path, text))
+        } else {
+            IoControl::NotRequested
+        })
     }
 
     pub fn create(&self, name: &str) -> io::Result<RunGroup> {
@@ -363,6 +392,47 @@ mod tests {
             assert_eq!(read(&dir, false).unwrap().io, None);
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn io_activation_is_confirmed_by_subtree_control_not_by_write() {
+        let base =
+            std::env::temp_dir().join(format!("benchmark-io-activation-{}", std::process::id()));
+        fs::create_dir(&base).unwrap();
+        let subtree = base.join("cgroup.subtree_control");
+        let kernel = |path: &Path, text: &str| {
+            assert_eq!(text, "+io");
+            fs::write(path, "cpu memory io\n")
+        };
+
+        fs::write(base.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        fs::write(&subtree, "cpu memory\n").unwrap();
+        assert_eq!(
+            enable_io(&base, |_, _| panic!("без делегирования запись не нужна")),
+            IoControl::Unavailable(reason::IO_NOT_DELEGATED.text())
+        );
+
+        fs::write(base.join("cgroup.controllers"), "cpu io memory pids\n").unwrap();
+        assert_eq!(enable_io(&base, kernel), IoControl::Enabled);
+
+        fs::write(&subtree, "cpu memory\n").unwrap();
+        let refused = enable_io(&base, |_, _| Err(io::Error::from_raw_os_error(16)));
+        let IoControl::Unavailable(text) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert!(
+            text.starts_with("контроллер io не включился для подгрупп прогонов (")
+                && text.contains("os error 16"),
+            "{text}"
+        );
+        assert_eq!(fs::read_to_string(&subtree).unwrap(), "cpu memory\n");
+
+        // Запись принята, но ядро io не включило: это не измерение.
+        assert_eq!(
+            enable_io(&base, |_, _| Ok(())),
+            IoControl::Unavailable(reason::IO_NOT_CONFIRMED.text())
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

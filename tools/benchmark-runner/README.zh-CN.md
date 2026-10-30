@@ -1,7 +1,7 @@
 # 基准执行器：`benchmark-runner`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 91d5e346b0b34b4d959e9aa4956992fc34b902ff -->
+<!-- i18n-source-git-blob: 926d1abd926410fce7cde1065e3db16a1b6ffc39 -->
 
 `benchmark-runner` 是一个 Linux CLI：按 ID 和配置运行 `benchmarks/` 目录中的场景，用
 Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、模块的机器可读报告、
@@ -250,7 +250,7 @@ Docker，离线配置需要 util-linux 中的 `unshare`。
 ## 块 I/O
 
 `io_read_bytes`、`io_write_bytes`、`io_read_operations` 和 `io_write_operations`
-来自自有委派 cgroup 或已发现容器的 `io.stat`。未委派 `io` 不影响 CPU/RAM。
+来自自有委派 cgroup 或已发现容器的 `io.stat`。未委派或未能启用的 `io` 不影响 CPU/RAM：启用通过 `cgroup.subtree_control` 验证，拒绝时为带原因的 `unsupported`。
 覆盖范围、单位、writeback 归属、多层/虚拟设备限制和声明修订见
 [指标契约](../../docs/performance/benchmarks.zh-CN.md#块-io)。
 `benchmark-runner.calibration-io` 执行包含 `fsync` 的受控文件循环，仅请求驱逐自身干净页面。

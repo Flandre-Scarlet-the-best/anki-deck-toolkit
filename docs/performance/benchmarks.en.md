@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: 134363313dd5ec7fcb5dd2a1828a33be9a453571 -->
+<!-- i18n-source-git-blob: 9aa0b2a7b0e59177d2747befbb40927ecc1d262c -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -496,8 +496,12 @@ Container measurements require a discovered group and an available final sample;
 a vanished group yields `unavailable`, never an incomplete final total.
 
 The optional `io` controller is enabled only in the runner's delegated group when
-these metrics are requested. Its absence leaves CPU/RAM available: `check` reports
-why, and results retain `unsupported`/`unavailable`. A readable empty `io.stat`
+these metrics are requested. Enabling is verified by action: after writing `+io`,
+the controller must appear in `cgroup.subtree_control`, and delegation through
+`systemd-run` is verified by the same activation in a throwaway group. A refused or
+missing `io` leaves CPU/RAM available: `check` reports why, results retain
+`unsupported` with that reason, and a required I/O metric makes the outcome
+`unsupported` without runs. A readable empty `io.stat`
 means zero **accounted** operations. Read errors, incomplete rows, duplicate devices
 and overflow never become zero.
 

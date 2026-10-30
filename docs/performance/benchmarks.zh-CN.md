@@ -1,7 +1,7 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 134363313dd5ec7fcb5dd2a1828a33be9a453571 -->
+<!-- i18n-source-git-blob: 9aa0b2a7b0e59177d2747befbb40927ecc1d262c -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
@@ -427,7 +427,10 @@ setup/prepare/conclude/cleanup 与采样器在组外。容器必须已发现且�
 组消失时返回 `unavailable`，不把最后一次不完整采样当作总量。
 
 仅在请求这些指标时，才在执行器自己获委派的组启用可选 `io` 控制器。
-缺少它不影响 CPU/RAM；`check` 显示原因，结果保留 `unsupported`/`unavailable`。
+启用通过实际操作验证：写入 `+io` 后，控制器必须出现在 `cgroup.subtree_control` 中；
+经 `systemd-run` 的委派也在一次性组中以同样的激活验证。
+`io` 被拒绝或缺失不影响 CPU/RAM：`check` 显示原因，结果以该原因保留 `unsupported`，
+必需的 I/O 指标使结果为 `unsupported` 且不执行运行。
 可读且为空的 `io.stat` 表示零次**已记账**操作；读取失败、不完整行、重复设备或溢出不能变为零。
 
 这是内核块层记账，不是逻辑读写字节、系统调用、`disk_usage`，也不是 VM/WSL 后面的物理介质。

@@ -13,6 +13,7 @@ pub mod archive;
 pub mod format;
 pub mod index;
 pub mod location;
+pub mod reason;
 pub mod report;
 pub mod snapshot;
 pub mod store;

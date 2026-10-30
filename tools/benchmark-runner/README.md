@@ -303,7 +303,8 @@ Desktop. Нужны `systemd --user` для собственной cgroup, Docke
 
 `io_read_bytes`, `io_write_bytes`, `io_read_operations` и `io_write_operations`
 снимаются с `io.stat` собственной делегированной cgroup или обнаруженного контейнера.
-Неделегированный `io` не отключает CPU/RAM. Охват, единицы, атрибуция writeback,
+Неделегированный или не включившийся `io` не отключает CPU/RAM: включение
+проверяется по `cgroup.subtree_control`, отказ — `unsupported` с причиной. Охват, единицы, атрибуция writeback,
 ограничения виртуальных/многослойных устройств и ревизии деклараций —
 [контракт метрик](../../docs/performance/benchmarks.md#блочный-ввод-вывод).
 `benchmark-runner.calibration-io` выполняет контролируемый файловый цикл с `fsync`

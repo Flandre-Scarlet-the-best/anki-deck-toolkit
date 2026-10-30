@@ -120,13 +120,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
             println!("{}", offline::list_interfaces());
             Ok(ExitCode::SUCCESS)
         }
-        Command::CgroupProbe => match cgroup::probe() {
-            Ok(group) => {
-                if group.has_io() {
-                    println!("io");
-                }
+        // Проба исполняется в одноразовой группе systemd-run, которую systemd
+        // удаляет вместе с подгруппами: активация здесь проверяет действием,
+        // включатся ли контроллеры, не меняя группы будущей серии.
+        Command::CgroupProbe => match cgroup::probe().and_then(|group| group.activate(true)) {
+            Ok(cgroup::IoControl::Enabled) => {
+                println!("io");
                 Ok(ExitCode::SUCCESS)
             }
+            Ok(cgroup::IoControl::Unavailable(reason)) => {
+                println!("{reason}");
+                Ok(ExitCode::SUCCESS)
+            }
+            Ok(cgroup::IoControl::NotRequested) => unreachable!("io запрошен"),
             Err(reason) => {
                 println!("{reason}");
                 Ok(ExitCode::FAILURE)
