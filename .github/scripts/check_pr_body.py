@@ -575,11 +575,11 @@ def validate_gist_link(body: str, blocks: list[tuple[str, str]]) -> list[str]:
 def validate(body: str) -> list[str]:
     """Вернуть детерминированные ошибки; пустой список означает верную структуру."""
     body = normalize_body(body)
+    if len(body) > MAX_BODY_LENGTH:
+        return [f"PR body: {len(body)} символов, максимум {MAX_BODY_LENGTH}"]
     blocks = sections(body)
     names = [heading for heading, _ in blocks]
     errors: list[str] = []
-    if len(body) > MAX_BODY_LENGTH:
-        errors.append(f"PR body: {len(body)} символов, максимум {MAX_BODY_LENGTH}")
     errors.extend(validate_gist_link(body, blocks))
     for name in REQUIRED:
         count = names.count(name)

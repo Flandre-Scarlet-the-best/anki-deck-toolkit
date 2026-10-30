@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from itertools import product
 from pathlib import Path
 
@@ -484,6 +485,13 @@ class PrBodyContractTests(unittest.TestCase):
             self.assertTrue(validate(body_with(broken)), field)
         broken = MEASURED.replace("wall-clock 100 ms → 80 ms, −20 %, n=10.", "нет числовых результатов")
         self.assertTrue(validate(body_with(broken)))
+
+    def test_oversized_body_is_rejected_before_parsing(self):
+        body = body_with(MEASURED.replace("100 ms", "1" + " " * 10000 + "x"))
+        with patch("check_pr_body.sections", side_effect=AssertionError("parsed oversized body")):
+            errors = validate(body)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("максимум 6000", errors[0])
 
     def test_full_benchmark_report_must_move_to_gist(self):
         table = "\n| Метрика | После: среднее |\n|---|---|\n| wall | 80 ms |"
