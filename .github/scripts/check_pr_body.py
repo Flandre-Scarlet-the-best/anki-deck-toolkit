@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the repository's human-authored PR body contract (stdlib only)."""
+"""Проверка структуры описания PR, написанного человеком (только stdlib)."""
 
 import argparse
 import json
@@ -52,7 +52,7 @@ PERFORMANCE_HINT = (
 
 
 def strip_comments(lines: list[str]) -> list[str]:
-    """Remove HTML comments line by line, leaving fenced code blocks intact."""
+    """Построчно удалить HTML-комментарии, сохраняя fenced-блоки кода."""
     result: list[str] = []
     inside = False
     fence_char = ""
@@ -92,7 +92,7 @@ def strip_comments(lines: list[str]) -> list[str]:
 
 
 def sections(body: str) -> list[tuple[str, str]]:
-    """Extract visible level-two headings and their text."""
+    """Извлечь видимые заголовки второго уровня и их текст."""
     lines = strip_comments(body.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
     found: list[tuple[str, str]] = []
     active: list[str] = []
@@ -141,7 +141,7 @@ def placeholder(value: str) -> bool:
 
 
 def substantive(values: list[str], minimum: int) -> bool:
-    """Есть хотя бы одно конкретное пояснение, а не шаблонная заглушка."""
+    """Проверить наличие конкретного пояснения вместо шаблонной заглушки."""
     return any(not placeholder(v) and len(v.strip()) >= minimum and len(v.split()) >= 3 for v in values)
 
 
@@ -245,44 +245,189 @@ def validate_performance(content: str) -> list[str]:
 
 
 
-# Полный журнал хранится в Gist. Для ранее опубликованных PR сохраняем
-# совместимость с традиционной накопительной таблицей в body.
-CODERABBIT_TABLE_HEADER = "| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |"
-CODERABBIT_ROW = re.compile(
-    r"(?m)^\|\s*[1-9]\d*\s*·\s*[\x60][0-9a-f]{7,40}[\x60]\s*\|(?:\s*[^|\n\s][^|\n]*\|){5}\s*$"
+# Полный журнал хранится в Gist; старые PR могут сохранить прежнюю таблицу.
+CODERABBIT_FIELDS = ("Прогресс", "Итог", "Существенное", "Полный журнал")
+COMPACT_NAMES = "|".join(map(re.escape, CODERABBIT_FIELDS))
+COMPACT_FIELD = re.compile(
+    rf"(?m)^[ \t]*[-*+][ \t]+\*\*(?P<name>{COMPACT_NAMES}):\*\*[ \t]*"
 )
+COMPACT_CANDIDATE = re.compile(
+    rf"(?m)^[ \t]*[-*+][ \t]+(?:\*\*)?(?:{COMPACT_NAMES})"
+)
+LEGACY_HEADER = ("Итерация / reviewed HEAD", "Уровень", "Путь", "Влияние", "Решение", "Исправление")
+LEGACY_SEPARATOR = re.compile(r":?-{3,}:?\Z")
+LEGACY_ROW_ID = re.compile(r"[1-9]\d*\s*·\s*`[0-9a-f]{7,40}`\Z")
 CODERABBIT_GIST = re.compile(
-    r"\]\(https://gist\.github\.com/[A-Za-z0-9-]+/[0-9a-f]{20,64}(?:#[a-zA-Z0-9-]+)?\)"
+    r"\[(?P<label>[^\[\]\n]+?)\]\(https://gist\.github\.com/"
+    r"[A-Za-z0-9-]+/[0-9a-f]{20,64}(?:#[a-zA-Z0-9-]+)?\)"
 )
+
+
+def is_escaped(content: str, index: int) -> bool:
+    """Определить, экранирован ли символ нечётным числом обратных слешей."""
+    slashes = 0
+    index -= 1
+    while index >= 0 and content[index] == "\\":
+        slashes += 1
+        index -= 1
+    return slashes % 2 == 1
+
+
+def without_inline_code(content: str) -> str:
+    """Заменить содержимое закрытых inline code span пробелами той же длины."""
+    chars = list(content)
+    index = 0
+    while index < len(content):
+        if content[index] != "`" or is_escaped(content, index):
+            index += 1
+            continue
+        end = index + 1
+        while end < len(content) and content[end] == "`":
+            end += 1
+        delimiter = content[index:end]
+        close = end
+        closing_start = -1
+        while close < len(content):
+            candidate = content.find("`", close)
+            if candidate < 0:
+                break
+            candidate_end = candidate + 1
+            while candidate_end < len(content) and content[candidate_end] == "`":
+                candidate_end += 1
+            if content[candidate:candidate_end] == delimiter:
+                closing_start = candidate
+                break
+            close = candidate_end
+        if closing_start < 0:
+            index = end
+            continue
+        for position in range(index, closing_start + len(delimiter)):
+            if chars[position] != "\n":
+                chars[position] = " "
+        index = closing_start + len(delimiter)
+    return "".join(chars)
+
+
+def has_legacy_coderabbit_row(content: str) -> bool:
+    """Проверить заголовок, разделитель и заполненную строку старой таблицы."""
+    lines = content.splitlines()
+    visible_lines = without_inline_code(content).splitlines()
+    found_table = False
+    for index, line in enumerate(visible_lines):
+        if not line.lstrip().startswith("|") or table_cells(line) != list(LEGACY_HEADER):
+            continue
+        found_table = True
+        if index + 2 >= len(visible_lines):
+            return False
+        separator = visible_lines[index + 1]
+        if not separator.lstrip().startswith("|"):
+            return False
+        separator_cells = table_cells(separator)
+        if len(separator_cells) != len(LEGACY_HEADER) or not all(
+            LEGACY_SEPARATOR.fullmatch(cell.replace(" ", "")) for cell in separator_cells
+        ):
+            return False
+        found_row = False
+        for row_index in range(index + 2, len(visible_lines)):
+            row = visible_lines[row_index]
+            if not row.lstrip().startswith("|"):
+                break
+            cells = table_cells(lines[row_index])
+            if not (
+                len(cells) == len(LEGACY_HEADER)
+                and LEGACY_ROW_ID.fullmatch(cells[0])
+                and all(cell.strip() for cell in cells[1:])
+                and len(table_cells(row)) == len(LEGACY_HEADER)
+            ):
+                return False
+            found_row = True
+        if not found_row:
+            return False
+    return found_table
+
+
+def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> list[str]:
+    """Проверить четыре поля компактной сводки и видимую ссылку на Gist."""
+    errors: list[str] = []
+    captured: dict[str, list[str]] = {name: [] for name in CODERABBIT_FIELDS}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        captured[match.group("name")].append(content[match.end():end].strip())
+
+    for name, values in captured.items():
+        if len(values) != 1:
+            errors.append(f"CodeRabbit: поле «{name}» должно встречаться ровно один раз")
+        elif name != "Полный журнал" and not substantive(values, 4):
+            errors.append(f"CodeRabbit: поле «{name}» должно содержать содержательное значение")
+
+    progress_values = captured["Прогресс"]
+    if len(progress_values) == 1 and substantive(progress_values, 4):
+        progress = progress_values[0]
+        shas = set(re.findall(r"`([0-9a-f]{7,40})`", progress))
+        iteration = re.search(
+            r"(?:\b[1-9]\d*\s+(?:завершённ\w+\s+)?итерац|"
+            r"\bитераци\w*\s*[:№#]?\s*[1-9]\d*)",
+            progress,
+            re.IGNORECASE,
+        )
+        if not iteration or len(shas) < 2:
+            errors.append("CodeRabbit: в «Прогресс» нужны номер итерации, reviewed HEAD и опубликованный HEAD")
+
+    visible = without_inline_code(content)
+    fields_visible = [match for match in COMPACT_FIELD.finditer(visible)]
+    for index, match in enumerate(fields_visible):
+        if match.group("name") != "Полный журнал":
+            continue
+        end = fields_visible[index + 1].start() if index + 1 < len(fields_visible) else len(visible)
+        field_text = visible[match.end():end]
+        links = [
+            link for link in CODERABBIT_GIST.finditer(field_text)
+            if not is_escaped(field_text, link.start())
+        ]
+        if len(links) != 1:
+            errors.append("CodeRabbit: в «Полный журнал» нужна одна видимая Markdown-ссылка на GitHub Gist")
+            break
+        label_start = match.end() + links[0].start("label")
+        label_end = match.end() + links[0].end("label")
+        if not content[label_start:label_end].strip():
+            errors.append("CodeRabbit: в «Полный журнал» нужна одна видимая Markdown-ссылка на GitHub Gist")
+            break
+    else:
+        if len(captured["Полный журнал"]) == 1 and not any(
+            match.group("name") == "Полный журнал" for match in fields_visible
+        ):
+            errors.append("CodeRabbit: в «Полный журнал» нужна одна видимая Markdown-ссылка на GitHub Gist")
+
+    return errors
 
 
 def validate_coderabbit(content: str) -> list[str]:
-    """Validate the legacy cumulative table or a compact Gist-backed summary."""
-    if CODERABBIT_TABLE_HEADER in content:
-        if not CODERABBIT_ROW.search(content):
-            return ["В разделе CodeRabbit отсутствует строка завершённой итерации"]
-        return []
+    """Проверить старую таблицу либо полную компактную сводку CodeRabbit."""
+    visible = without_inline_code(content)
+    legacy_present = any(
+        line.lstrip().startswith("|") and table_cells(line) == list(LEGACY_HEADER)
+        for line in visible.splitlines()
+    )
+    compact_candidates = list(COMPACT_CANDIDATE.finditer(visible))
+    compact_matches = list(COMPACT_FIELD.finditer(visible))
+    format_errors = []
+    if len(compact_candidates) != len(compact_matches):
+        format_errors.append("CodeRabbit: поля компактной сводки должны иметь точный формат «- **Поле:**»")
 
-    errors: list[str] = []
-    captured: dict[str, str] = {}
-    for name in ("Прогресс", "Итог", "Существенное", "Полный журнал"):
-        match = re.search(
-            rf"(?ms)^\s*[-*+]\s+\*\*{name}:\*\*\s*(.*?)(?=^\s*[-*+]\s+\*\*|\Z)",
-            content,
-        )
-        if not match or not match.group(1).strip() or placeholder(match.group(1)):
-            errors.append(f"CodeRabbit: требуется содержательное поле «{name}»")
-        else:
-            captured[name] = match.group(1).strip()
+    if legacy_present and compact_candidates:
+        errors = ["CodeRabbit: старая таблица и компактная сводка не должны сосуществовать"]
+        errors.extend(format_errors)
+        errors.extend(validate_compact_coderabbit(content, compact_matches))
+        return errors
+    if legacy_present:
+        if has_legacy_coderabbit_row(content):
+            return []
+        return ["В старой таблице CodeRabbit отсутствует корректная строка завершённой итерации"]
+    if not compact_candidates:
+        return ["CodeRabbit: нужна накопительная таблица либо полноценная сводка с Gist"]
 
-    if "Прогресс" in captured:
-        progress = captured["Прогресс"]
-        shas = re.findall(r"[\x60][0-9a-f]{7,40}[\x60]", progress)
-        if not re.search(r"\b[1-9]\d*\b", progress) or len(shas) < 2:
-            errors.append("CodeRabbit: в «Прогресс» нужны номер итерации, reviewed HEAD и опубликованный HEAD")
-    if "Полный журнал" not in captured or not CODERABBIT_GIST.search(captured["Полный журнал"]):
-        errors.append("CodeRabbit: нужна проверенная ссылка на полный журнал в GitHub Gist")
-
+    errors = validate_compact_coderabbit(content, compact_matches)
+    errors.extend(format_errors)
     if errors:
         return ["CodeRabbit: нужна накопительная таблица либо полноценная сводка с Gist"] + errors
     return []
@@ -290,7 +435,7 @@ def validate_coderabbit(content: str) -> list[str]:
 
 
 def validate(body: str) -> list[str]:
-    """Return deterministic errors; empty list means structurally valid."""
+    """Вернуть детерминированные ошибки; пустой список означает верную структуру."""
     blocks = sections(body)
     names = [heading for heading, _ in blocks]
     errors: list[str] = []
@@ -323,7 +468,7 @@ def validate(body: str) -> list[str]:
 
 
 def is_automation_pr(payload: dict) -> bool:
-    """Narrow exception for dependency PRs authored by verified bot identities."""
+    """Проверить узкое исключение для dependency-PR от известных bot-аккаунтов."""
     pr = payload.get("pull_request") or {}
     login = (pr.get("user") or {}).get("login", "")
     branch = (pr.get("head") or {}).get("ref", "")
@@ -333,8 +478,8 @@ def is_automation_pr(payload: dict) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--body-file", type=Path, help="Local Markdown source before PR publication")
-    source.add_argument("--event-path", type=Path, help="GitHub pull_request event JSON")
+    source.add_argument("--body-file", type=Path, help="Локальный исходный Markdown-файл перед публикацией PR")
+    source.add_argument("--event-path", type=Path, help="JSON-событие GitHub pull_request")
     args = parser.parse_args()
     try:
         if args.body_file is not None:
