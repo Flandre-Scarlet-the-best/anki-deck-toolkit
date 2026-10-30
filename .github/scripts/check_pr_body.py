@@ -444,6 +444,8 @@ def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> l
         links = [
             link for link in CODERABBIT_GIST.finditer(field_text)
             if not is_escaped(field_text, link.start())
+            and not (link.start() > 0 and field_text[link.start() - 1] == "!"
+                     and not is_escaped(field_text, link.start() - 1))
         ]
         if len(links) != 1:
             errors.append("CodeRabbit: в «Полный журнал» нужна одна видимая Markdown-ссылка на GitHub Gist")

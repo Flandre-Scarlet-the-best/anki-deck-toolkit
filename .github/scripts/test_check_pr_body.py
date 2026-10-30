@@ -331,6 +331,15 @@ class PrBodyContractTests(unittest.TestCase):
         )
         self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + inline_code)))
 
+    def test_coderabbit_image_is_not_a_gist_link(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        image = COMPACT_CODERABBIT.replace(
+            f"[все результаты ревью]({url})", f"![все результаты ревью]({url})"
+        )
+        self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + image)))
+        escaped_bang = image.replace("![все результаты", "\\![все результаты")
+        self.assertEqual(validate(valid_body() + "\n\n" + escaped_bang), [])
+
     def test_coderabbit_escaped_gist_link_is_not_accepted(self):
         url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
         escaped = COMPACT_CODERABBIT.replace(
