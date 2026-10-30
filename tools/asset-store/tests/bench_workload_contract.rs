@@ -63,6 +63,30 @@ fn run_and_verify(spec: &Path, workdir: &Path, operation: Operation) -> u64 {
     summary.items
 }
 
+fn isolate_workdir(mut args: Vec<String>, workdir: &Path) -> Vec<String> {
+    let workdir = workdir.to_str().expect("временный путь UTF-8").to_owned();
+    let mut found = false;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--workdir" {
+            found = true;
+            if let Some(value) = args.get_mut(index + 1) {
+                *value = workdir.clone();
+                index += 2;
+                continue;
+            }
+        } else if args[index].starts_with("--workdir=") {
+            args[index] = format!("--workdir={workdir}");
+            found = true;
+        }
+        index += 1;
+    }
+    if !found && args.first().is_some_and(|command| command != "describe") {
+        args.extend(["--workdir".into(), workdir]);
+    }
+    args
+}
+
 #[test]
 fn every_operation_passes_its_postconditions_for_both_domains() {
     for (domain, png_every, records) in [("kanji", 2, 9), ("generic", 0, 6)] {
@@ -434,10 +458,48 @@ fn multiple_choices_have_bounded_complete_value_coverage() {
     assert_eq!(covering_variants(&[]), vec![vec![]]);
 }
 
+#[test]
+fn catalog_workdirs_are_redirected_to_the_fixture_in_each_cli_form() {
+    let workdir = Path::new("fixture-workdir/work");
+    let cases = [
+        vec!["setup".to_owned()],
+        vec![
+            "setup".to_owned(),
+            "--workdir".to_owned(),
+            "target/benchmark-workloads/asset-store".to_owned(),
+        ],
+        vec![
+            "setup".to_owned(),
+            "--workdir=target/benchmark-workloads/asset-store".to_owned(),
+        ],
+        vec!["clean".to_owned()],
+        vec!["describe".to_owned()],
+    ];
+    for args in cases {
+        let command = args[0].clone();
+        let args = isolate_workdir(args, workdir);
+        if command == "describe" {
+            assert!(!args.iter().any(|arg| arg == "--workdir"));
+            continue;
+        }
+        let workdir = workdir.to_str().unwrap();
+        assert!(args.iter().enumerate().any(|(index, arg)| {
+            arg.strip_prefix("--workdir=") == Some(workdir)
+                || (arg == "--workdir" && args.get(index + 1).map(String::as_str) == Some(workdir))
+        }));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("target/benchmark-workloads/asset-store"))
+        );
+    }
+}
+
 /// Декларации каталога исполнимы настоящим исполнителем: каждая подстановка,
 /// каждое значение `choices` и каждый шаг жизненного цикла в том порядке, в
 /// котором их выполняет `benchmark-runner`, на крошечной спецификации. Рабочий
-/// каталог декларации заменяется временным, остальные аргументы — как есть.
+/// все формы параметра рабочего каталога направляются во временную папку;
+/// остальные аргументы остаются как есть.
 #[test]
 fn catalog_declarations_run_end_to_end_with_the_real_executor() {
     let fixture = Fixture::new("catalog");
@@ -511,9 +573,6 @@ fn catalog_declarations_run_end_to_end_with_the_real_executor() {
                         for (name, value) in &variant {
                             arg = arg.replace(&format!("{{param.{name}}}"), value);
                         }
-                        if arg == "target/benchmark-workloads/asset-store" {
-                            arg = workdir.to_str().unwrap().to_owned();
-                        }
                         assert!(
                             !arg.contains('{'),
                             "{}: неподставленный аргумент {arg}",
@@ -522,6 +581,7 @@ fn catalog_declarations_run_end_to_end_with_the_real_executor() {
                         arg
                     })
                     .collect();
+                let args = isolate_workdir(args, &workdir);
                 let output = Command::new(BIN).args(&args).output().unwrap();
                 assert!(
                     output.status.success(),

@@ -42,15 +42,17 @@ cargo run -p anki-e2e -- full
 
 Во время прогона раз в секунду читай cgroup контейнера стенда и `/proc`
 процесса runner. Контейнер удаляется в конце прогона, поэтому `memory.peak`
-нужно сэмплировать, а не читать после завершения. Путь scope ниже — для
+нужно сэмплировать, а не читать после завершения. При одном активном прогоне
+ID контейнера и PID runner задаются командами ниже. Путь scope — для
 cgroup-драйвера `systemd`; при драйвере `cgroupfs` это
 `/sys/fs/cgroup/docker/<ID>`.
 
 ```bash
-docker ps --filter label=io.github.anki-deck-toolkit.e2e=1 --no-trunc --format '{{.ID}}'
-cat /sys/fs/cgroup/system.slice/docker-<ID>.scope/memory.peak
-grep usage_usec /sys/fs/cgroup/system.slice/docker-<ID>.scope/cpu.stat
-grep VmHWM /proc/<PID>/status
+container_id=$(docker ps --filter label=io.github.anki-deck-toolkit.e2e=1 --no-trunc --format '{{.ID}}' | head -n 1)
+runner_pid=$(pgrep -n -x anki-e2e)
+cat "/sys/fs/cgroup/system.slice/docker-${container_id}.scope/memory.peak"
+grep usage_usec "/sys/fs/cgroup/system.slice/docker-${container_id}.scope/cpu.stat"
+grep VmHWM "/proc/${runner_pid}/status"
 ```
 
 Диск после прогона:

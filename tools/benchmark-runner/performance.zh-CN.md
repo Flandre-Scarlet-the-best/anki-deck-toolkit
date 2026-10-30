@@ -1,7 +1,7 @@
 # 性能：`benchmark-runner`
 
 [Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 7a657dedb517b47a25a3ee2bc0325787f4c2a1dc -->
+<!-- i18n-source-git-blob: 3841ea59b8671c288b044591f53f7c6496fd4748 -->
 
 基准执行器自身的测量（[接口与语义](README.zh-CN.md)）：它对已知开销的
 负载测得有多准确、每个指标究竟包含什么，以及轮询 `/proc` 和运行自有 cgroup 的代价。通用测量规则见
@@ -46,10 +46,10 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 下方区块由 `benchmark-history snapshot` 根据参考环境中经过校验的 `benchmark-runner` 结果生成；
 若没有区块，说明尚无已确认的快照。
 
-<!-- benchmark-snapshot: {"scenario":"benchmark-runner.calibration-noop","profile":"warm","recorded_at":"2026-10-29T09:23:01Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{}} -->
+<!-- benchmark-snapshot: {"scenario":"benchmark-runner.calibration-noop","profile":"warm","recorded_at":"2026-10-30T08:33:42Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{}} -->
 ### `benchmark-runner.calibration-noop` · 配置 `warm`
 
-最近一次确认的测量：2026-10-29 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · 结果 `success`：30 次运行中 30 次成功，预热 3 次。
+最近一次确认的测量：2026-10-30 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · 结果 `success`：30 次运行中 30 次成功，预热 3 次。
 
 | 环境事实 | 值 |
 |---|---|
@@ -68,18 +68,18 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 
 | 指标 | 范围 / 来源 | 均值 ± σ | 中位数 | 最小–最大 | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 809.2 µs ± 74.5 µs | 794.4 µs | 710.3 µs – 963.3 µs | 30 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 734.3 µs ± 73.5 µs | 703 µs | 646 µs – 895 µs | 30 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 0 s ± 0 s | 0 s | 0 s – 0 s | 30 |
-| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 734.3 µs ± 73.5 µs | 703 µs | 646 µs – 895 µs | 30 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 3.23 MiB ± 42.86 KiB | 3.24 MiB | 3.12 MiB – 3.27 MiB | 30 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 342 173.6 ± 339.9 | 342 133.5 | 341 560 – 342 862 | 30 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 2.55 ms ± 344.1 µs | 2.62 ms | 1.87 ms – 3.2 ms | 30 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 777.33 KiB ± 46.79 KiB | 768 KiB | 768 KiB – 1 MiB | 30 |
-| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.16 核 ± 0.02 核 | 0.17 核 | 0.12 核 – 0.2 核 | 30 |
-| `memory_host_peak_increase@host` | host / procfs | 0 B ± 0 B | 0 B | 0 B – 0 B | 30 |
+| `time_wall_clock@command` | command / hyperfine | 911.3 µs ± 101.4 µs | 886.7 µs | 784.3 µs – 1.17 ms | 30 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 209.4 µs ± 357.5 µs | 0 s | 0 s – 1.01 ms | 30 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 123.6 µs ± 286.3 µs | 0 s | 0 s – 1.03 ms | 30 |
+| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 333.1 µs ± 395.2 µs | 0 s | 0 s – 1.03 ms | 30 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 3.22 MiB ± 48.47 KiB | 3.22 MiB | 3.12 MiB – 3.27 MiB | 30 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 343 715.3 ± 335.2 | 343 602 | 343 294 – 344 631 | 30 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 3.19 ms ± 397.6 µs | 3.27 ms | 2.01 ms – 3.72 ms | 30 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 1018.8 KiB ± 6.57 KiB | 1020 KiB | 984 KiB – 1020 KiB | 30 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.32 核 ± 0.04 核 | 0.33 核 | 0.2 核 – 0.37 核 | 30 |
+| `memory_host_peak_increase@host` | host / procfs | 92.93 KiB ± 296.51 KiB | 0 B | 0 B – 1.44 MiB | 30 |
 
-未测量：`cpu_utilization_peak@host` — `unavailable`: прогон короче интервала сэмплирования 0.05 с: ни одного полного окна。
+未测量：`cpu_utilization_peak@host` — `unavailable`: 运行时长短于 0.05 秒的采样间隔：没有完整采样窗口; `io_read_bytes@cgroup` — `unsupported`: 执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取; `io_write_bytes@cgroup` — `unsupported`: 执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取; `io_read_operations@cgroup` — `unsupported`: 执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取; `io_write_operations@cgroup` — `unsupported`: 执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取。
 
 ★ 参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。
 <!-- /benchmark-snapshot -->

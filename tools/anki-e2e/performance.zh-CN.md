@@ -1,7 +1,7 @@
 # 性能：`anki-e2e`
 
 [Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: c0845270767e3ae941648da1fd8edd0eebc52a29 -->
+<!-- i18n-source-git-blob: 1b95a367d50948ebc9cc1be9282c9f87bf9e8082 -->
 
 Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](README.zh-CN.md)）。
 通用测量规则和来源精度见[方法说明](../../docs/performance/README.zh-CN.md)。
@@ -37,14 +37,15 @@ cargo run -p anki-e2e -- full
 ```
 
 运行期间每秒读取一次测试台容器的 cgroup 和 runner 的 `/proc`。容器在运行结束时被删除，
-因此 `memory.peak` 必须采样，而不能在结束后读取。下面的 scope 路径适用于 `systemd`
+因此 `memory.peak` 必须采样，而不能在结束后读取。只有一个运行实例时，下面的命令会设置容器 ID 和 runner PID。scope 路径适用于 `systemd`
 cgroup 驱动；使用 `cgroupfs` 驱动时为 `/sys/fs/cgroup/docker/<ID>`。
 
 ```bash
-docker ps --filter label=io.github.anki-deck-toolkit.e2e=1 --no-trunc --format '{{.ID}}'
-cat /sys/fs/cgroup/system.slice/docker-<ID>.scope/memory.peak
-grep usage_usec /sys/fs/cgroup/system.slice/docker-<ID>.scope/cpu.stat
-grep VmHWM /proc/<PID>/status
+container_id=$(docker ps --filter label=io.github.anki-deck-toolkit.e2e=1 --no-trunc --format '{{.ID}}' | head -n 1)
+runner_pid=$(pgrep -n -x anki-e2e)
+cat "/sys/fs/cgroup/system.slice/docker-${container_id}.scope/memory.peak"
+grep usage_usec "/sys/fs/cgroup/system.slice/docker-${container_id}.scope/cpu.stat"
+grep VmHWM "/proc/${runner_pid}/status"
 ```
 
 运行后的磁盘：

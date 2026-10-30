@@ -897,7 +897,11 @@ required = false
     let fixture = fixture(&body);
     let run = fixture.run("fixture.short-mean", "warm", &[]);
     assert_eq!(run.code, 0, "{}\n{}", run.summary, run.stderr);
-    let values = run.measured("cpu_utilization_mean@cgroup");
+    let values: Vec<_> = run
+        .values("cpu_utilization_mean@cgroup")
+        .into_iter()
+        .filter_map(|value| value.measured())
+        .collect();
     if values.is_empty() {
         eprintln!(
             "ОГРАНИЧЕНИЕ: делегированная cgroup здесь недоступна, загрузка группы не проверена"

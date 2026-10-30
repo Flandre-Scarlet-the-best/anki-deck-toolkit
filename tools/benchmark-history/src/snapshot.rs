@@ -869,6 +869,34 @@ fn labels(lang: Lang) -> Labels {
     }
 }
 
+fn localized_reason(reason: &str, lang: Lang) -> String {
+    const PREFIX: &str = "прогон короче интервала сэмплирования ";
+    const SUFFIX: &str = " с: ни одного полного окна";
+    if let Some(interval) = reason
+        .strip_prefix(PREFIX)
+        .and_then(|rest| rest.strip_suffix(SUFFIX))
+    {
+        return match lang {
+            Lang::Ru => reason.to_owned(),
+            Lang::En => {
+                format!("run shorter than the sampling interval {interval} s: no complete window")
+            }
+            Lang::ZhCn => format!("运行时长短于 {interval} 秒的采样间隔：没有完整采样窗口"),
+        };
+    }
+    if reason == "контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно"
+    {
+        return match lang {
+            Lang::Ru => reason.to_owned(),
+            Lang::En => {
+                "the io controller is not delegated to the runner's cgroup; CPU and memory are available separately".into()
+            }
+            Lang::ZhCn => "执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取".into(),
+        };
+    }
+    reason.to_owned()
+}
+
 fn marker(meta: &Meta) -> String {
     let json = serde_json::to_string(meta).expect("JSON");
     // `--` внутри HTML-комментария недопустимо: экранируется в строке JSON.
@@ -1037,7 +1065,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
                 metric
                     .reason
                     .as_deref()
-                    .map(|r| format!(": {r}"))
+                    .map(|r| format!(": {}", localized_reason(r, lang)))
                     .unwrap_or_default()
             )),
         }
@@ -1065,6 +1093,39 @@ mod tests {
     #[test]
     fn markdown_table_cell_escapes_backslashes_before_pipes() {
         assert_eq!(markdown_table_cell(r"a\|b"), r"a\\\|b");
+    }
+
+    #[test]
+    fn sampling_window_reason_is_localized_in_generated_snapshots() {
+        let reason = "прогон короче интервала сэмплирования 0.05 с: ни одного полного окна";
+        assert_eq!(localized_reason(reason, Lang::Ru), reason);
+        assert_eq!(
+            localized_reason(reason, Lang::En),
+            "run shorter than the sampling interval 0.05 s: no complete window"
+        );
+        assert_eq!(
+            localized_reason(reason, Lang::ZhCn),
+            "运行时长短于 0.05 秒的采样间隔：没有完整采样窗口"
+        );
+        assert_eq!(
+            localized_reason("another diagnostic", Lang::En),
+            "another diagnostic"
+        );
+    }
+
+    #[test]
+    fn io_controller_reason_is_localized_in_generated_snapshots() {
+        let reason =
+            "контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно";
+        assert_eq!(localized_reason(reason, Lang::Ru), reason);
+        assert_eq!(
+            localized_reason(reason, Lang::En),
+            "the io controller is not delegated to the runner's cgroup; CPU and memory are available separately"
+        );
+        assert_eq!(
+            localized_reason(reason, Lang::ZhCn),
+            "执行器 cgroup 未委派 io 控制器；CPU 和内存仍可单独读取"
+        );
     }
 
     #[test]

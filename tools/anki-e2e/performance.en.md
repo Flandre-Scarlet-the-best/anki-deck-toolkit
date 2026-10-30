@@ -1,7 +1,7 @@
 # Performance: `anki-e2e`
 
 [Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: c0845270767e3ae941648da1fd8edd0eebc52a29 -->
+<!-- i18n-source-git-blob: 1b95a367d50948ebc9cc1be9282c9f87bf9e8082 -->
 
 Performance and resource usage of the Anki Desktop E2E stand: the last
 confirmed snapshot and an earlier manual observation
@@ -45,15 +45,17 @@ cargo run -p anki-e2e -- full
 
 During the run, read the stand container's cgroup and the runner's `/proc`
 once a second. The container is removed at the end of the run, so
-`memory.peak` must be sampled rather than read after it finishes. The scope path
-below is for the `systemd` cgroup driver; with the `cgroupfs` driver it is
+`memory.peak` must be sampled rather than read after it finishes. With one
+active run, the commands below set the container ID and runner PID. The scope
+path is for the `systemd` cgroup driver; with the `cgroupfs` driver it is
 `/sys/fs/cgroup/docker/<ID>`.
 
 ```bash
-docker ps --filter label=io.github.anki-deck-toolkit.e2e=1 --no-trunc --format '{{.ID}}'
-cat /sys/fs/cgroup/system.slice/docker-<ID>.scope/memory.peak
-grep usage_usec /sys/fs/cgroup/system.slice/docker-<ID>.scope/cpu.stat
-grep VmHWM /proc/<PID>/status
+container_id=$(docker ps --filter label=io.github.anki-deck-toolkit.e2e=1 --no-trunc --format '{{.ID}}' | head -n 1)
+runner_pid=$(pgrep -n -x anki-e2e)
+cat "/sys/fs/cgroup/system.slice/docker-${container_id}.scope/memory.peak"
+grep usage_usec "/sys/fs/cgroup/system.slice/docker-${container_id}.scope/cpu.stat"
+grep VmHWM "/proc/${runner_pid}/status"
 ```
 
 Disk after the run:
