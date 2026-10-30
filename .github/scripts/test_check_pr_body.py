@@ -389,6 +389,40 @@ class PrBodyContractTests(unittest.TestCase):
         )
         self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + fake)))
 
+    def test_nested_list_fences_do_not_supply_coderabbit_evidence(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        original = f"[все результаты ревью]({url})."
+        for marker in ("~~~", "```", "~~~~"):
+            for indent in ("    ", "     ", "\t"):
+                with self.subTest(marker=marker, indent=indent):
+                    # Внутренние обратные кавычки и комментарий — литералы кода.
+                    example = (f"нет ссылки\n{indent}{marker}md\n"
+                               f"{indent}<!-- `пример`\n{indent}[журнал]({url})\n"
+                               f"{indent}{marker}")
+                    body = COMPACT_CODERABBIT.replace(original, example)
+                    self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + body)))
+
+        compact = COMPACT_CODERABBIT.split("\n", 1)[1].strip("\n")
+        for source in (compact, LEGACY_CODERABBIT.strip("\n")):
+            for opener in ("- пример\n    ~~~~md", "1. пример\n     ~~~~md", "- ~~~~md"):
+                # Короткая граница не закрывает четырёхсимвольный блок.
+                code = "\n".join("    " + line for line in source.splitlines())
+                nested = f"{opener}\n    ~~~\n{code}\n    ~~~~"
+                with self.subTest(opener=opener, source=source[:20]):
+                    body = valid_body() + "\n\n## CodeRabbit review и disposition\n" + nested
+                    self.assertTrue(any("CodeRabbit" in e for e in validate(body)))
+        # Настоящая ссылка после закрытия блока остаётся видимой.
+        body = COMPACT_CODERABBIT.replace(original, f"\n    ~~~\n    пример\n    ~~~\n  {original}")
+        self.assertEqual(validate(valid_body() + "\n\n" + body), [])
+        # Незакрытый блок прекращается при выходе из пункта списка.
+        body = COMPACT_CODERABBIT.replace("- **Итог:**", "    ~~~\n    пример\n- **Итог:**")
+        self.assertEqual(validate(valid_body() + "\n\n" + body), [])
+        # Маркер внутри комментария не скрывает видимую сводку после него.
+        comment = "<!--\n- пример\n    ~~~\n-->\n"
+        self.assertEqual(validate(valid_body() + "\n\n" + comment + COMPACT_CODERABBIT), [])
+        # Обычный кодовый блок не должен менять состояние внешнего списка.
+        self.assertEqual(validate(valid_body() + "\n\n```md\n- пример\n```\n" + COMPACT_CODERABBIT), [])
+
     def test_performance_decisions_are_accepted(self):
         for performance in (NOT_APPLICABLE, MEASURED, NOT_MEASURED, "**Статус:** не применимо\n- **Причина:** перевод README на английский, код и сборка не меняются."):
             self.assertEqual(validate(body_with(performance)), [], performance)
