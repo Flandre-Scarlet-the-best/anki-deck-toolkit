@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: eb53bd4102955318126c5c2bfac503b5a17946d2 -->
+<!-- i18n-source-git-blob: 6628e0a62498cd5097add28fc1097fa2bad95a13 -->
 
 `asset-store` is the shared Rust library for program-managed assets, responsible for manifests, checksums, integrity, and lifecycle. The domain-specific `kanji-assets` CLI provides Yarxi entry discovery, kanji image validation, and publication of approved files to the canonical corpus. The tool does not read `decks/**/media/`, does not modify `media_files`, and does not copy images into decks.
 
@@ -65,6 +65,8 @@ Manifest schema is version `6`. In addition to SHA-256, byte size, format, state
 Schema v3/v4 and the legacy flat Kanji layout can be read. A mutating open performs versioned migration under an exclusive lock: preserves old bytes with hard links, checks SHA-256, atomically updates the manifest and removes old flat links. `.tmp/` transaction markers support completion or rollback after interruption. Unchanged SHA, `ValidationRecord`, and `HumanAttestation` remain, without refetching. After commit, old/new canonical paths do not coexist. CLI JSON reports `store.layout_migrated_on_open`.
 
 `AssetStore::read_verified` remains a read API compatible with `KanjiDomainPolicy` and, for a character with two trusted formats, returns the preferred one: GIF, then PNG. `read_verified_variants_with_policy` reads exactly the requested (identity, format) pairs. Other domains use `read_verified_with_policy`, which can read v3/v4 with legacy mapping and return the explicit consumer filename without modifying manifests, making state/lock files, changing layout, or performing recovery. Only a mutating open migrates. Exact bytes, checksum, size, format, validator identity, and human decision are checked. Every read call takes a shared lock and re-validates the whole manifest and every corpus file, so read many assets as one batch rather than one call per asset. `visit_verified_variants_with_policy` streams a batch under one lock and one full validation: a store-wide error is returned before the first result, a per-request error is passed to the visitor with the request index without aborting the batch, and bytes are not accumulated in memory.
+
+A standalone read safely opens the root, takes a shared lock, validates the owner, reads and parses the manifest, validates every entry and its file (size, signature, SHA-256), traverses the asset tree, and reads the selected bytes with another integrity check. These checks run afresh: there is no trust cache across calls, and corruption in an unrequested file rejects the entire set. After verifying the sort order, identity lookup uses binary search for the entry range directly in the manifest, without an additional index of the whole corpus. During tree traversal, registered descendants of a directory are found at the beginning of a range in the ordered path set, without scanning every path or rebuilding the prefix for each comparison. This reduces auxiliary work, but an independent call still validates the entire corpus; a series of individual requests does not replace a batch.
 
 The shared batch runtime owns safe filesystem operations under `.runtime/batches/<batch-id>`: `NOFOLLOW`, locks, revisions/CAS, atomic state writes, bounded reads, and SHA-addressed payloads. It does not know about `KanjiBatch`, `KanjiMetrics`, Yarxi data, or HTML reports: domain adapters own those. A plain-text test state exercises reopening and reading blobs without kanji or image semantics.
 
