@@ -12,7 +12,7 @@
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
 ![CrowdAnki JSON](https://img.shields.io/badge/CrowdAnki-JSON-2f81f7)
 ![Linux platform](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
 
 A toolkit for Anki deck maintainers and developers: inspect exports, validate structure and media references, review note quality, perform safe edits with `dry-run`, create notes using existing note models, and generate HTML before/after reports. The tools do not call LLM APIs but support a verifiable workflow with external AI agents.
@@ -326,11 +326,11 @@ cargo run --quiet --locked -p asset-store --bin kanji-corpus-gate
 
 ## License
 
-The repository's own software, automation, configuration, and project documentation are distributed under the **MIT License**.
+The repository's own software, automation, configuration, and original project documentation are distributed under the **GNU Affero General Public License v3.0 (AGPL-3.0-only)**.
 
-The contents of `decks/`, user media, and third-party resources or corpora are not automatically covered by the MIT License. Their original copyright holders' rights or separate terms apply. User data is not published through Git and is not covered by the MIT License.
+AGPL-3.0 does not automatically cover user decks, downloaded third-party assets, or program outputs (such as HTML reports and processed images). The project does not claim ownership of third-party material or impose a new license on generated files. Rights and restrictions depend on the inputs, their owners, and the applicable source licenses. User data is not published through Git.
 
-[Full license text and scope →](LICENSE)
+[AGPL-3.0 license text →](LICENSE) · [Licensing scope and asset rights →](LICENSING.md)
 
 ---
 
