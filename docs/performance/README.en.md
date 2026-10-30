@@ -3,7 +3,7 @@
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 <!-- i18n-source-git-blob: 7e8844b595691a300c8dbf05b20bfd00ecd4148f -->
 
-This directory holds the **last confirmed figures** for the performance and
+This directory provides the common methodology and links to the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
 module has its own page with its method, metric definitions and snapshots per
 scenario and profile in an explicitly named reference environment. This page

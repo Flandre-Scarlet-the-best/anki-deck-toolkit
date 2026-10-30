@@ -1,7 +1,7 @@
 # 性能：`benchmark-runner`
 
 [Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: fdb08a1ac07061bd2d6f539c338b47372585b6db -->
+<!-- i18n-source-git-blob: 7a657dedb517b47a25a3ee2bc0325787f4c2a1dc -->
 
 基准执行器自身的测量（[接口与语义](README.zh-CN.md)）：它对已知开销的
 负载测得有多准确、每个指标究竟包含什么，以及轮询 `/proc` 和运行自有 cgroup 的代价。通用测量规则见
@@ -227,6 +227,37 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 ★ 参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。
 <!-- /benchmark-snapshot -->
 
+<!-- benchmark-snapshot: {"scenario":"benchmark-runner.calibration-io","profile":"warm","recorded_at":"2026-10-30T00:32:30Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{}} -->
+### `benchmark-runner.calibration-io` · 配置 `warm`
+
+最近一次确认的测量：2026-10-30 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · 结果 `success`：5 次运行中 5 次成功，预热 1 次。
+
+| 环境事实 | 值 |
+|---|---|
+| `arch` ★ | x86_64 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730976256 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+该场景未声明输入。
+
+| 指标 | 范围 / 来源 | 均值 ± σ | 中位数 | 最小–最大 | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 161.47 ms ± 3.38 ms | 161.32 ms | 157.66 ms – 166.06 ms | 5 |
+| `io_read_bytes@cgroup` | cgroup / cgroup-v2 | 16 MiB ± 1.79 KiB | 16 MiB | 16 MiB – 16 MiB | 5 |
+| `io_write_bytes@cgroup` | cgroup / cgroup-v2 | 16 MiB ± 0 B | 16 MiB | 16 MiB – 16 MiB | 5 |
+| `io_read_operations@cgroup` | cgroup / cgroup-v2 | 7.4 ± 0.9 | 7 | 7 – 9 | 5 |
+| `io_write_operations@cgroup` | cgroup / cgroup-v2 | 5 ± 0 | 5 | 5 – 5 | 5 |
+
+★ 参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。
+<!-- /benchmark-snapshot -->
+
 <!-- benchmark-snapshot:anchor -->
 
 ## 校准结论
@@ -263,3 +294,11 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 先前没有原始 JSON 的手动观测（2026-10-26，合成目录 `overhead.*`）已被上述结论取代。其中保留一项
 设计决定：在测量开始前移入运行子组的是 Hyperfine 而不是目标——在进程创建线程之前在组间迁移进程
 约需 17 ms 的内核等待，会使目标时间增加 20–25 ms。
+
+## 块 I/O 记账条件
+
+`calibration-io` 快照使用独立的临时 systemd 服务，委派了 `io`；
+执行器本身仍以普通用户运行。共享控制器设置与缓存未改变。
+本环境的标准用户 scope 未委派 `io`：单独系列保留带原因的 `unsupported`，而非零值。
+这证明 WSL2 内 Linux 内核的记账，不是虚拟磁盘后面的物理介质测量。
+语义及归属限制见[指标契约](../../docs/performance/benchmarks.zh-CN.md#块-io)。

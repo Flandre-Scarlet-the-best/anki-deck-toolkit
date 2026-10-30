@@ -1,7 +1,7 @@
 # Performance: `benchmark-runner`
 
 [Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: fdb08a1ac07061bd2d6f539c338b47372585b6db -->
+<!-- i18n-source-git-blob: 7a657dedb517b47a25a3ee2bc0325787f4c2a1dc -->
 
 Measurements of the benchmark runner itself
 ([interface and semantics](README.en.md)): how
@@ -233,6 +233,37 @@ The scenario declares no inputs.
 ★ The reference environment is defined by hardware and platform facts and by the scenario's comparability facts; on update, a snapshot from another environment or other hardware never silently replaces this one. The values are an observation of this environment, not a norm for other systems and not a CI threshold.
 <!-- /benchmark-snapshot -->
 
+<!-- benchmark-snapshot: {"scenario":"benchmark-runner.calibration-io","profile":"warm","recorded_at":"2026-10-30T00:32:30Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{}} -->
+### `benchmark-runner.calibration-io` · profile `warm`
+
+Last confirmed measurement: 2026-10-30 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · outcome `success`: 5 of 5 runs successful, 1 warmup run.
+
+| Environment fact | Value |
+|---|---|
+| `arch` ★ | x86_64 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730976256 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+The scenario declares no inputs.
+
+| Metric | Scope / source | Mean ± σ | Median | Min–max | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 161.47 ms ± 3.38 ms | 161.32 ms | 157.66 ms – 166.06 ms | 5 |
+| `io_read_bytes@cgroup` | cgroup / cgroup-v2 | 16 MiB ± 1.79 KiB | 16 MiB | 16 MiB – 16 MiB | 5 |
+| `io_write_bytes@cgroup` | cgroup / cgroup-v2 | 16 MiB ± 0 B | 16 MiB | 16 MiB – 16 MiB | 5 |
+| `io_read_operations@cgroup` | cgroup / cgroup-v2 | 7.4 ± 0.9 | 7 | 7 – 9 | 5 |
+| `io_write_operations@cgroup` | cgroup / cgroup-v2 | 5 ± 0 | 5 | 5 – 5 | 5 |
+
+★ The reference environment is defined by hardware and platform facts and by the scenario's comparability facts; on update, a snapshot from another environment or other hardware never silently replaces this one. The values are an observation of this environment, not a norm for other systems and not a CI threshold.
+<!-- /benchmark-snapshot -->
+
 <!-- benchmark-snapshot:anchor -->
 
 ## Calibration findings
@@ -293,3 +324,13 @@ from it is kept: Hyperfine, not the target, is moved into the run's subgroup
 before measurement starts — moving a process between groups before it creates
 threads cost about 17 ms of kernel waiting and added 20–25 ms to the target's
 time.
+
+## Block I/O accounting conditions
+
+The `calibration-io` snapshot used a separate transient systemd service with
+`io` delegation; the runner itself ran as the regular user. Shared controller
+settings and caches were unchanged. The standard user scope in this environment
+lacks `io` delegation: a separate series retained `unsupported` with a reason,
+never zeros. This confirms Linux kernel accounting inside WSL2, not physical
+media behind its virtual disk. Semantics and attribution limits are defined in the
+[metric contract](../../docs/performance/benchmarks.en.md#block-io).

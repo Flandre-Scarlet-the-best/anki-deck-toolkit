@@ -233,6 +233,37 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
+<!-- benchmark-snapshot: {"scenario":"benchmark-runner.calibration-io","profile":"warm","recorded_at":"2026-10-30T00:32:30Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{}} -->
+### `benchmark-runner.calibration-io` · профиль `warm`
+
+Последнее подтверждённое измерение: 2026-10-30 UTC · `benchmark-runner` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 1.
+
+| Факт окружения | Значение |
+|---|---|
+| `arch` ★ | x86_64 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730976256 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+Сценарий не объявляет входов.
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 161.47 ms ± 3.38 ms | 161.32 ms | 157.66 ms – 166.06 ms | 5 |
+| `io_read_bytes@cgroup` | cgroup / cgroup-v2 | 16 MiB ± 1.79 KiB | 16 MiB | 16 MiB – 16 MiB | 5 |
+| `io_write_bytes@cgroup` | cgroup / cgroup-v2 | 16 MiB ± 0 B | 16 MiB | 16 MiB – 16 MiB | 5 |
+| `io_read_operations@cgroup` | cgroup / cgroup-v2 | 7.4 ± 0.9 | 7 | 7 – 9 | 5 |
+| `io_write_operations@cgroup` | cgroup / cgroup-v2 | 5 ± 0 | 5 | 5 – 5 | 5 |
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
 <!-- benchmark-snapshot:anchor -->
 
 ## Выводы калибровки
@@ -288,3 +319,13 @@ Docker (500 мс поиска) и влияние опроса на цели дл
 конструктивное решение: в подгруппу прогона переносится Hyperfine до начала
 измерения, а не цель — перенос процесса между группами перед созданием потоков
 стоил около 17 мс ожидания ядра и добавлял к времени цели 20–25 мс.
+
+## Условия учёта блочного I/O
+
+Снимок `calibration-io` получен в отдельном временном сервисе systemd с
+делегированным `io`; сам исполнитель работал от обычного пользователя. Общие
+настройки контроллеров и кэши не менялись. В стандартной пользовательской
+scope этого окружения `io` не делегирован: отдельная серия сохранила честный
+`unsupported` с причиной, а не нули. Это подтверждает учёт ядром Linux внутри
+WSL2, но не измеряет физический носитель за виртуальным диском. Семантика и
+пределы атрибуции — [контракт метрик](../../docs/performance/benchmarks.md#блочный-ввод-вывод).
