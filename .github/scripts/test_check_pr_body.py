@@ -137,7 +137,7 @@ class PrBodyContractTests(unittest.TestCase):
 
     def test_coderabbit_table_in_fence_is_not_accepted(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\n```markdown\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| 1 · x | — | — | 0 | clean | x |\n```"
-        self.assertTrue(any("таблицы" in e for e in validate(body)))
+        self.assertTrue(any("CodeRabbit" in e for e in validate(body)))
 
     def test_duplicate_and_reordered_headings(self):
         body = valid_body() + "\n\n## Цель\nПовторный раздел."
@@ -151,7 +151,7 @@ class PrBodyContractTests(unittest.TestCase):
 
     def test_conditional_coderabbit_table(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\nПроверено."
-        self.assertTrue(any("таблицы" in e for e in validate(body)))
+        self.assertTrue(any("CodeRabbit" in e for e in validate(body)))
         body += "\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 findings | clean | `def` |"
         self.assertEqual(validate(body), [])
 
