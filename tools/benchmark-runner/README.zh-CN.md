@@ -1,7 +1,7 @@
 # 基准执行器：`benchmark-runner`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: df674dc00203e7451f1a7e5bfb6e01f61eeec110 -->
+<!-- i18n-source-git-blob: 926d1abd926410fce7cde1065e3db16a1b6ffc39 -->
 
 `benchmark-runner` 是一个 Linux CLI：按 ID 和配置运行 `benchmarks/` 目录中的场景，用
 Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、模块的机器可读报告、
@@ -11,7 +11,7 @@ Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、�
 场景字段、配置和指标的含义见[目录指南](../../docs/performance/benchmarks.zh-CN.md)；
 目录和结果的模式归 [`benchmark-contract`](../benchmark-contract/README.zh-CN.md) 所有；
 通用测量规则见[测量方法](../../docs/performance/README.zh-CN.md)；执行器自身的测量见其
-[性能页面](../../docs/performance/benchmark-runner.zh-CN.md)；本地结果历史见
+[性能页面](performance.zh-CN.md)；本地结果历史见
 [`benchmark-history`](../benchmark-history/README.zh-CN.md)。
 
 执行器不修改用户导出和 Anki 配置文件，不读取 `decks/input/`，不调用 `sudo`，不清理
@@ -146,8 +146,8 @@ hyperfine --version
 | 来源 | 采集方式 | 覆盖范围 |
 |---|---|---|
 | `hyperfine` | 每次运行的 Hyperfine 导出 | 目标进程及被等待的后代 |
-| `procfs` / `host` | 运行期间轮询 `/proc/stat` 和 `MemAvailable` | 整个系统：上界估计 |
-| 无容器时的 `cgroup-v2` / `cgroup` | 每次运行一个自有子组，`cpu.stat`、`memory.peak` | 目标、其全部后代以及 Hyperfine 进程本身 |
+| `procfs` / `host` | 运行期间轮询 `/proc/stat` 和 `MemAvailable` | 整个系统：主机观测值而非界限——包含其他分配，并会被同时发生的释放抵消 |
+| 无容器时的 `cgroup-v2` / `cgroup` | 每次运行一个自有子组，`cpu.stat`、`memory.peak` | 目标、其全部后代以及 Hyperfine 进程本身；平均负载为该组 CPU 时间除以其存活时间 |
 | 带 `container` 的 `cgroup-v2` / `cgroup` | 运行期间找到的 Docker 容器 cgroup | 容器内的进程 |
 | `module-report` | 本次运行期间出现的模块机器可读报告 | 声明的 JSON Pointer 处的值 |
 | `filesystem` | 运行后路径的大小 | 仅限指定路径 |
@@ -194,7 +194,7 @@ systemd scope 会立即被删除。对这类场景，Hyperfine 的 CPU 时间只
 ### 采样器的影响
 
 只在测量运行期间按 `sample_interval` 轮询 `/proc` 和 cgroup。对目标时间影响的测量见
-[执行器页面](../../docs/performance/benchmark-runner.zh-CN.md)；`--no-sampling` 完全
+[执行器页面](performance.zh-CN.md)；`--no-sampling` 完全
 关闭轮询。
 
 ## 发布的内容
@@ -246,3 +246,12 @@ Docker，离线配置需要 util-linux 中的 `unshare`。
 使用不同产物目录的并发系列、结果中没有私有路径、只有所有成功运行一致时才确认的模块报告事实，
 以及保存到本地历史（包括禁用和失败）。没有 Hyperfine 2.x 时，它们在本地被跳过，在 CI 中失败。测试不读取
 `decks/**`。该测试集属于 `cargo test --workspace --locked`。
+
+## 块 I/O
+
+`io_read_bytes`、`io_write_bytes`、`io_read_operations` 和 `io_write_operations`
+来自自有委派 cgroup 或已发现容器的 `io.stat`。未委派或未能启用的 `io` 不影响 CPU/RAM：启用通过 `cgroup.subtree_control` 验证，拒绝时为带原因的 `unsupported`。
+覆盖范围、单位、writeback 归属、多层/虚拟设备限制和声明修订见
+[指标契约](../../docs/performance/benchmarks.zh-CN.md#块-io)。
+`benchmark-runner.calibration-io` 执行包含 `fsync` 的受控文件循环，仅请求驱逐自身干净页面。
+已有文件不会被覆盖；强制终止进程可能留下文件，下一次运行会拒绝，直至所有者显式清理。

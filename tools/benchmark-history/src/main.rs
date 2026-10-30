@@ -130,10 +130,10 @@ enum Command {
         #[arg(long, conflicts_with_all = ["baselines", "first"])]
         commit: Option<String>,
     },
-    /// Обновить снимок на странице docs/performance (RU, EN, zh-CN); без --apply только показать.
+    /// Обновить снимок на странице модуля (RU, EN, zh-CN); без --apply только показать.
     Snapshot {
         id: String,
-        /// Русская страница модуля, например docs/performance/anki-repo.md.
+        /// Русская страница модуля, например tools/anki-repo/performance.md.
         #[arg(long)]
         page: PathBuf,
         /// Записать страницы.

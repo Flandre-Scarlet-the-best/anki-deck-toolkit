@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: da52bba6cdf2d0237e9c3f82136695004f9db5a2 -->
+<!-- i18n-source-git-blob: 9aa0b2a7b0e59177d2747befbb40927ecc1d262c -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -16,7 +16,7 @@ and Linux system metrics. It uses this contract instead of inventing its own.
 The local result history, baseline selection and reports are kept by
 [`benchmark-history`](../../tools/benchmark-history/README.en.md); the repository
 holds no run history and no thresholds. Module snapshots
-(`docs/performance/<module>.md`) remain evidence of specific environments.
+(`tools/<module>/performance.md`) remain evidence of specific environments.
 
 ## Where things live
 
@@ -40,6 +40,19 @@ Scenarios as of today (the declarations themselves are the source of truth; the 
 | `anki-e2e.smoke` | `long-e2e` | `warm`, `offline-warm` |
 | `anki-repo.validate` | `short-cli` | `warm`, `offline-warm` |
 | `anki-repo.stats` | `short-cli` | `warm` |
+| `asset-store.verify-integrity` | `short-cli` | `warm` |
+| `asset-store.read-batch` | `short-cli` | `warm` |
+| `asset-store.read-single` | `short-cli` | `warm` |
+| `asset-store.ingest` | `short-cli` | `warm` |
+| `asset-store.ingest-contention` | `short-cli` | `warm` |
+| `asset-store.batch-reopen` | `short-cli` | `warm` |
+| `asset-store.batch-checkpoint` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-noop` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-io` | `short-cli` | `warm` |
 
 ## Registering a scenario for a new module
 
@@ -217,13 +230,16 @@ purpose). "Cold" never implicitly means dropping the OS page cache.
 |---|---|---|
 | warmup | ≤ 100 | ≤ 3 |
 | runs | ≤ 1000 | ≤ 10 |
+| step timeout | 1…1800 s | 1…14 400 s |
 | run timeout | 1…600 s | 1…14 400 s |
 | series budget | ≤ 3600 s | ≤ 86 400 s |
 | single run | forbidden | allowed (`single_run_allowed`) |
 
 Without `single_run_allowed`, `min_runs ≥ 2` is required. A scenario with a warm
 profile always requires `min_runs ≥ 2`: the warm state is measured at least twice. The budget must fit at
-least one run. `benchmark-contract vocabulary` prints the limits.
+least one run. `benchmark-contract vocabulary` prints the limits. A step
+timeout bounds `setup`, `prepare`/`conclude`, `cleanup` and input probes; the run
+timeout bounds the measured target.
 
 ## Inputs and workload size
 
@@ -270,8 +286,8 @@ per second). The contract has no other units. The metric key in a result is
 | `memory_peak_resident` | byte | `largest-process-in-tree` / `hyperfine`; `process` / `procfs` | peak RSS of **one** process, not a tree total |
 | `memory_peak_cgroup` | byte | `cgroup` / `cgroup-v2` | simultaneous peak of the whole group (`memory.peak`) |
 | `cpu_time_cgroup` | second | `cgroup` / `cgroup-v2` | CPU time of the whole group (`usage_usec`) |
-| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | observed load; the peak is a lower bound per interval |
-| `memory_host_peak_increase` | byte | `host` / `procfs` | drop of `MemAvailable`: an upper bound for the whole system |
+| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | observed load; the peak is a lower bound per interval; the mean of the run's own subgroup is its CPU time over its lifetime (the whole Hyperfine invocation) |
+| `memory_host_peak_increase` | byte | `host` / `procfs` | largest drop of `MemAvailable` during the run across the whole system: it includes other processes' allocations and is offset by concurrent releases (including delayed return of the previous run's memory), so it is a host observation, not a bound |
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | CPU counters; need `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | a phase inside the target from the module log; needs a label and `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | a counter from the module's machine report; needs a label |
@@ -467,3 +483,36 @@ There is no history storage, no regression computation and no CI thresholds
 here: history and reports live in
 [`benchmark-history`](../../tools/benchmark-history/README.en.md), without
 thresholds. Numbers from module snapshots do not become thresholds.
+
+## Block I/O
+
+`io_read_bytes`/`io_write_bytes` (byte) and `io_read_operations`/`io_write_operations`
+(count) use scope `cgroup`, source `cgroup-v2`: sums of `rbytes`/`wbytes`/`rios`/`wios`
+across devices in `io.stat`, per the
+[Linux kernel documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#io-interface-files).
+A fresh own group includes the target, its children and Hyperfine from entry to the
+final read before removal. Setup/prepare/conclude/cleanup and the sampler stay outside.
+Container measurements require a discovered group and an available final sample;
+a vanished group yields `unavailable`, never an incomplete final total.
+
+The optional `io` controller is enabled only in the runner's delegated group when
+these metrics are requested. Enabling is verified by action: after writing `+io`,
+the controller must appear in `cgroup.subtree_control`, and delegation through
+`systemd-run` is verified by the same activation in a throwaway group. A refused or
+missing `io` leaves CPU/RAM available: `check` reports why, results retain
+`unsupported` with that reason, and a required I/O metric makes the outcome
+`unsupported` without runs. A readable empty `io.stat`
+means zero **accounted** operations. Read errors, incomplete rows, duplicate devices
+and overflow never become zero.
+
+These are kernel block-layer counts, not logical read/write bytes, system calls,
+`disk_usage`, or physical media behind a VM/WSL. Page-cache hits need no disk read.
+Writeback after the interval is excluded; completed writes require `fsync` in the
+target. Writeback attribution depends on filesystem support and inode ownership;
+shared files may be charged elsewhere. Stacked devices may count the same I/O more
+than once: totals are not unique physical-media bytes. Throughput and IOPS are not
+published: dividing these counts by Hyperfine target time would mix different scopes.
+
+Scenarios gaining these metrics have a new revision. Earlier JSON remains valid
+for its original revision and available in local history; it must not be validated
+against the new declaration. Existing snapshots gain no fabricated I/O columns.

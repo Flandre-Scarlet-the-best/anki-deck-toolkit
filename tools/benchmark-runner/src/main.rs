@@ -76,6 +76,7 @@ enum Command {
     #[command(name = "__enter-cgroup", hide = true)]
     EnterCgroup {
         group: PathBuf,
+        started_at: PathBuf,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
@@ -119,14 +120,29 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
             println!("{}", offline::list_interfaces());
             Ok(ExitCode::SUCCESS)
         }
-        Command::CgroupProbe => match cgroup::probe() {
-            Ok(_) => Ok(ExitCode::SUCCESS),
+        // Проба исполняется в одноразовой группе systemd-run, которую systemd
+        // удаляет вместе с подгруппами: активация здесь проверяет действием,
+        // включатся ли контроллеры, не меняя группы будущей серии.
+        Command::CgroupProbe => match cgroup::probe().and_then(|group| group.activate(true)) {
+            Ok(cgroup::IoControl::Enabled) => {
+                println!("io");
+                Ok(ExitCode::SUCCESS)
+            }
+            Ok(cgroup::IoControl::Unavailable(reason)) => {
+                println!("{reason}");
+                Ok(ExitCode::SUCCESS)
+            }
+            Ok(cgroup::IoControl::NotRequested) => unreachable!("io запрошен"),
             Err(reason) => {
                 println!("{reason}");
                 Ok(ExitCode::FAILURE)
             }
         },
-        Command::EnterCgroup { group, command } => {
+        Command::EnterCgroup {
+            group,
+            started_at,
+            command,
+        } => {
             let (program, args) = match command.split_first() {
                 Some((first, rest)) if first == "--" => match rest.split_first() {
                     Some((program, args)) => (program, args),
@@ -135,7 +151,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
                 Some((program, args)) => (program, args),
                 None => return Err((Exit::Usage, "нужна команда".into())),
             };
-            let error = cgroup::enter_and_exec(group, program, args);
+            let error = cgroup::enter_and_exec(group, started_at, program, args);
             eprintln!("benchmark-runner: {error}");
             Ok(ExitCode::from(125))
         }
@@ -283,7 +299,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Failure> {
                 );
             }
             let ready = readiness::assess(&selection, &runner, !target.no_sampling);
-            if let OwnCgroup::ViaScope(systemd_run) = &ready.own_cgroup {
+            if let OwnCgroup::ViaScope(systemd_run, _) = &ready.own_cgroup {
                 return Err(reexec_in_scope(systemd_run));
             }
             let needs_own = selection

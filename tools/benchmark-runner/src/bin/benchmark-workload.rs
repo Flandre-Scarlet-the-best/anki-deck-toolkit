@@ -7,7 +7,7 @@
 
 use rustix::time::{ClockId, clock_gettime};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,7 +18,7 @@ fn usage() -> ! {
          [--orphan-sleep-ms N] [--escape-sleep-ms N] [--ignore-sigint] [--touch FILE] [--append FILE TEXT] \
          [--fail-if-exists FILE] [--fail-on-call N --counter FILE] [--report-dir DIR --report JSON] \
          [--report-dir DIR --report-from FILE] [--write-bytes FILE N] [--print-json JSON] \
-         [--require-offline] [--spawn-rest]"
+         [--file-io FILE MiB] [--require-offline] [--spawn-rest]"
     );
     std::process::exit(2)
 }
@@ -65,6 +65,50 @@ fn write_report(root: Option<&PathBuf>, json: &str) {
     let dir = root.join(format!("{nanos}-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap_or_else(|_| std::process::exit(3));
     fs::write(dir.join("report.json"), json).unwrap_or_else(|_| std::process::exit(3));
+}
+
+/// Изолированный цикл: новая запись + fsync, сброс только её чистых страниц,
+/// чтение и удаление. Советы ядро вправе игнорировать; io.stat это покажет.
+fn file_io(path: PathBuf, mib: u64) -> std::io::Result<()> {
+    if !(1..=256).contains(&mib) {
+        usage();
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let result = (|| {
+        let chunk = [7u8; 65536];
+        for _ in 0..mib * 16 {
+            file.write_all(&chunk)?;
+        }
+        file.sync_all()?;
+        rustix::fs::fadvise(&file, 0, None, rustix::fs::Advice::DontNeed)?;
+        file.rewind()?;
+        let mut chunk = [0u8; 65536];
+        let mut total = 0;
+        loop {
+            let n = file.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            if chunk[..n].iter().any(|b| *b != 7) {
+                return Err(std::io::Error::other("содержимое I/O-нагрузки изменилось"));
+            }
+            total += n as u64;
+        }
+        if total != mib * (1 << 20) {
+            return Err(std::io::Error::other("I/O-нагрузка прочитана не полностью"));
+        }
+        Ok(())
+    })();
+    drop(file);
+    let cleanup = fs::remove_file(path);
+    result.and(cleanup)
 }
 
 fn main() {
@@ -167,6 +211,14 @@ fn main() {
                 child.args(rest);
                 #[allow(clippy::zombie_processes)]
                 child.spawn().unwrap_or_else(|_| usage());
+            }
+            "--file-io" => {
+                let path = PathBuf::from(args.next().unwrap_or_else(|| usage()));
+                let mib = number(args.next());
+                file_io(path, mib).unwrap_or_else(|error| {
+                    eprintln!("I/O-нагрузка: {error}");
+                    std::process::exit(3)
+                });
             }
             "--write-bytes" => {
                 let path = PathBuf::from(args.next().unwrap_or_else(|| usage()));

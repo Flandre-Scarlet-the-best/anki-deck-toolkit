@@ -43,6 +43,13 @@ class DocumentationI18nTests(unittest.TestCase):
         self.group("README.md", target="[Инструмент](tools/thing/README.md)")
         self.assertEqual(validate_repository(self.root), [])
 
+    def test_module_performance_pages_remain_managed(self):
+        self.group("README.md")
+        self.group("tools/thing/performance.md")
+        self.assertEqual(validate_repository(self.root), [])
+        translation(self.root / "tools/thing/performance.md", "en").unlink()
+        self.assertTrue(any("performance.en.md" in error for error in validate_repository(self.root)))
+
     def test_all_languages_required_once_activated(self):
         self.group("README.md")
         (self.root / "README.zh-CN.md").unlink()

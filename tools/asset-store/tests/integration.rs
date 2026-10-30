@@ -5,6 +5,8 @@
 
 #[path = "asset_store_contract.rs"]
 mod asset_store_contract;
+#[path = "bench_workload_contract.rs"]
+mod bench_workload_contract;
 #[path = "browser_acquisition_diagnostics_contract.rs"]
 mod browser_acquisition_diagnostics_contract;
 #[path = "cli_contract.rs"]

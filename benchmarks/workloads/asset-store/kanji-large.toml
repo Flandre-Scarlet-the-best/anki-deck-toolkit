@@ -1,0 +1,15 @@
+# Большой корпус kanji: 2400 символов, каждый четвёртый также в PNG; reads как у
+# kanji-medium, чтобы пара отделяла влияние размера манифеста от числа чтений.
+# Контракт полей — tools/asset-store/README.md, раздел о нагрузке бенчмарков;
+# SHA-256 этого файла — идентичность нагрузки сценариев asset-store.
+generator = 1
+domain = "kanji"
+seed = 1
+assets = 2400
+png_every = 4
+image_side = 48
+reads = 1250
+ingest = 100
+batch_entries = 4000
+batch_blobs = 1000
+blob_bytes = 4096

@@ -3210,3 +3210,387 @@ fn snapshot_pages_stay_consistent_when_a_write_fails() {
     }
     assert!(after[0].contains("профиль `cold`") && after[0].contains("профиль `warm`"));
 }
+
+/// Параметр, влияющий на сопоставимость (например, число писателей), — часть
+/// определения нагрузки снимка: блок его показывает, а результат с другим
+/// значением прежний снимок молча не заменяет.
+#[test]
+fn snapshot_shows_and_guards_comparability_parameters() {
+    let f = fixture();
+    let scenario_body = SCENARIO
+        .split_once("[[scenario]]")
+        .map(|(_, body)| body)
+        .unwrap();
+    let parametrized = format!(
+        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = true\nrecord = true\naffects_comparability = true\n",
+        scenario_body.replace("id = \"fixture.cli\"", "id = \"fixture.param\"")
+    );
+    fs::write(f.catalog_dir().join("scenarios/fixture.toml"), parametrized).unwrap();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.param").unwrap().scenario;
+    let pages = snapshot_pages(&f, "fixture");
+    let ru = &pages[0];
+    let with = |writers: &str, recorded_at: &'static str| {
+        let mut result = result(&Spec {
+            recorded_at,
+            ..Spec::default()
+        });
+        result.scenario.id = "fixture.param".into();
+        result.parameters = BTreeMap::from([("writers".to_owned(), writers.to_owned())]);
+        result
+    };
+    let first = with("a|b", "2026-10-03T10:00:00Z");
+    let history = vec![snapshot::Recorded::of(scenario, &first)];
+    let options = Options {
+        history: history.clone(),
+        ..Options::default()
+    };
+    let plan = snapshot::plan(ru, scenario, &first, &options).unwrap();
+    snapshot::apply(&plan).unwrap();
+    let text = fs::read_to_string(ru).unwrap();
+    assert!(text.contains(r#""parameters":{"writers":"a|b"}"#), "{text}");
+    let escaped = "| параметр `writers` | `a\\|b` |".to_owned();
+    assert!(text.contains(&escaped), "{text}");
+    let en = fs::read_to_string(&pages[1]).unwrap();
+    let escaped_en = "| parameter `writers` | `a\\|b` |".to_owned();
+    assert!(en.contains(&escaped_en), "{en}");
+
+    // Тот же объём и та же нагрузка, но другое значение параметра: несопоставимо.
+    let other = with("1", "2026-10-04T10:00:00Z");
+    let refused = snapshot::plan(ru, scenario, &other, &options).unwrap_err();
+    assert!(
+        refused.contains("writers=a|b")
+            && refused.contains("writers=1")
+            && refused.contains("--replace-workload"),
+        "{refused}"
+    );
+    // Тот же параметр и нагрузка, доказанная историей, заменяются без флага.
+    let same = with("a|b", "2026-10-05T10:00:00Z");
+    let plan = snapshot::plan(ru, scenario, &same, &options).unwrap();
+    assert_eq!(plan.workload, snapshot::WorkloadBasis::ProvenByHistory);
+    // Подтверждённая смена параметра разрешена флагом.
+    let confirmed = Options {
+        replace_workload: true,
+        ..options
+    };
+    let plan = snapshot::plan(ru, scenario, &other, &confirmed).unwrap();
+    assert_eq!(plan.workload, snapshot::WorkloadBasis::ConfirmedReplacement);
+    for value in ["a`b|c\\d\nnext", "\r\n", " a ", "`*x*<&amp;>_[]"] {
+        let arbitrary = with(value, "2026-10-06T10:00:00Z");
+        let plan = snapshot::plan(ru, scenario, &arbitrary, &confirmed).unwrap();
+        snapshot::apply(&plan).unwrap();
+        for page in &pages {
+            let text = fs::read_to_string(page).unwrap();
+            let encoded = serde_json::to_string(value).unwrap();
+            assert!(text.contains(&format!("\"writers\":{encoded}")), "{text}");
+            let row = text
+                .lines()
+                .find(|line| line.starts_with("| ") && line.contains("`writers`"))
+                .unwrap();
+            assert_eq!(row.matches('|').count(), 3, "{row}");
+            assert!(row.contains("<code>"), "{row}");
+        }
+    }
+}
+
+#[test]
+fn snapshot_materializes_optional_default_comparability_parameter() {
+    let f = fixture();
+    let scenario_body = SCENARIO
+        .split_once("[[scenario]]")
+        .map(|(_, body)| body)
+        .unwrap();
+    let parametrized = format!(
+        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = false\ndefault = \"4\"\nchoices = [\"4\", \"8\"]\nrecord = true\naffects_comparability = true\n",
+        scenario_body.replace("id = \"fixture.cli\"", "id = \"fixture.default\"")
+    );
+    fs::write(f.catalog_dir().join("scenarios/fixture.toml"), parametrized).unwrap();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.default").unwrap().scenario;
+    let pages = snapshot_pages(&f, "fixture");
+    let ru = &pages[0];
+
+    let mut implicit = result(&Spec {
+        recorded_at: "2026-10-06T10:00:00Z",
+        ..Spec::default()
+    });
+    implicit.scenario.id = "fixture.default".into();
+    implicit.parameters.clear();
+    let mut explicit = result(&Spec {
+        recorded_at: "2026-10-07T10:00:00Z",
+        ..Spec::default()
+    });
+    explicit.scenario.id = "fixture.default".into();
+    explicit.parameters = BTreeMap::from([("writers".to_owned(), "4".to_owned())]);
+
+    let effective = BTreeMap::from([("writers".to_owned(), "4".to_owned())]);
+    assert_eq!(
+        snapshot::comparability_parameters(scenario, &implicit),
+        effective
+    );
+    assert_eq!(
+        snapshot::comparability_parameters(scenario, &explicit),
+        effective
+    );
+    assert!(benchmark_contract::comparability::compare(scenario, &implicit, &explicit).comparable);
+
+    let options = Options {
+        history: vec![snapshot::Recorded::of(scenario, &implicit)],
+        ..Options::default()
+    };
+    let initial = snapshot::plan(ru, scenario, &implicit, &options).unwrap();
+    snapshot::apply(&initial).unwrap();
+    let text = fs::read_to_string(ru).unwrap();
+    assert!(text.contains(r#""parameters":{"writers":"4"}"#), "{text}");
+
+    let update = snapshot::plan(ru, scenario, &explicit, &options).unwrap();
+    assert_eq!(update.workload, snapshot::WorkloadBasis::ProvenByHistory);
+}
+
+#[test]
+fn snapshot_cli_publishes_next_to_the_module() {
+    let f = fixture();
+    let dir = f.root.join("workspace/tools/fixture");
+    fs::create_dir_all(&dir).unwrap();
+    let source = PAGE_RU
+        .replace("fixture.en.md", "performance.en.md")
+        .replace("fixture.zh-CN.md", "performance.zh-CN.md");
+    fs::write(dir.join("performance.md"), &source).unwrap();
+    let sha = snapshot::git_blob_sha(source.as_bytes());
+    for lang in ["en", "zh-CN"] {
+        let text = page(if lang == "en" { "en" } else { "zh" }, &sha)
+            .replace("fixture.md", "performance.md")
+            .replace("fixture.en.md", "performance.en.md")
+            .replace("fixture.zh-CN.md", "performance.zh-CN.md");
+        fs::write(dir.join(format!("performance.{lang}.md")), text).unwrap();
+    }
+    let mut store = f.open();
+    let id = f.import(&mut store, &result(&Spec::default()));
+    drop(store);
+    let (code, out, err) = f.cli(&[
+        "snapshot",
+        &id,
+        "--page",
+        dir.join("performance.md").to_str().unwrap(),
+        "--apply",
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    for name in [
+        "performance.md",
+        "performance.en.md",
+        "performance.zh-CN.md",
+    ] {
+        assert!(
+            fs::read_to_string(dir.join(name))
+                .unwrap()
+                .contains("benchmark-snapshot: {")
+        );
+    }
+}
+
+/// Страница в HTML по правилам GFM: таблицы, автоссылки, зачёркивание,
+/// формулы; встроенный HTML разрешён, как на GitHub.
+fn gfm_html(markdown: &str) -> String {
+    let mut options = comrak::Options::default();
+    options.extension.table = true;
+    options.extension.autolink = true;
+    options.extension.strikethrough = true;
+    options.extension.math_dollars = true;
+    options.render.r#unsafe = true;
+    comrak::markdown_to_html(markdown, &options)
+}
+
+/// Строки всех таблиц HTML: внутренний HTML ячеек по порядку.
+fn table_rows(html: &str) -> Vec<Vec<String>> {
+    html.split("<tr>")
+        .skip(1)
+        .map(|row| {
+            let row = &row[..row.find("</tr>").unwrap()];
+            let mut cells = Vec::new();
+            let mut rest = row;
+            while let Some(start) = rest.find("<td>").or_else(|| rest.find("<th>")) {
+                rest = &rest[start + 4..];
+                let end = rest.find("</td>").or_else(|| rest.find("</th>")).unwrap();
+                cells.push(rest[..end].to_owned());
+                rest = &rest[end + 5..];
+            }
+            cells
+        })
+        .collect()
+}
+
+/// Видимый текст фрагмента HTML и имена встретившихся в нём тегов.
+fn visible(html: &str) -> (String, Vec<String>) {
+    let mut text = String::new();
+    let mut tags = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        text.push_str(&rest[..start]);
+        let end = rest[start..].find('>').unwrap() + start;
+        tags.push(rest[start + 1..end].to_owned());
+        rest = &rest[end + 1..];
+    }
+    text.push_str(rest);
+    let mut decoded = String::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find('&') {
+        decoded.push_str(&rest[..start]);
+        let end = rest[start..].find(';').unwrap() + start;
+        let entity = &rest[start + 1..end];
+        decoded.push(match entity {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            _ => {
+                let number = entity.strip_prefix('#').unwrap();
+                let code = match number.strip_prefix(['x', 'X']) {
+                    Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+                    None => number.parse().unwrap(),
+                };
+                char::from_u32(code).unwrap()
+            }
+        });
+        rest = &rest[end + 1..];
+    }
+    decoded.push_str(rest);
+    (decoded, tags)
+}
+
+/// Значения, которые контракт результата допускает в факте окружения и
+/// параметре, но которые Markdown иначе прочитал бы как разметку или как
+/// границу ячейки, строки или блока; рядом — обычные значения, которые
+/// остаются прежним текстом.
+const MARKDOWN_HOSTILE: &[&str] = &[
+    "a\\|b",
+    "a\\",
+    "a`b",
+    "``",
+    "line1\nline2",
+    "a\r\n",
+    "x\u{7}y\u{1b}[0m",
+    " a ",
+    "*em* _u_ ~~s~~",
+    "<img src=x onerror=alert(1)>",
+    "<script>alert(1)</script>",
+    "[l](https://example.com)",
+    "www.example.com",
+    "https://example.com",
+    ":smile:",
+    "$x^2$",
+    "&amp; &#124;",
+    "<!-- /benchmark-snapshot -->",
+    "# h",
+];
+const MARKDOWN_PLAIN: &[&str] = &[
+    "x86_64",
+    "a|b",
+    "AMD Ryzen 7 5800X3D 8-Core Processor",
+    "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "6.18.54.1-microsoft-standard-WSL2",
+    "a|b c",
+    "| --- |",
+    "Ядро: 4",
+];
+
+#[test]
+fn snapshot_tables_keep_every_allowed_value_in_one_exact_cell() {
+    let f = fixture();
+    let scenario_body = SCENARIO
+        .split_once("[[scenario]]")
+        .map(|(_, body)| body)
+        .unwrap();
+    let parametrized = format!(
+        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = true\nrecord = true\naffects_comparability = true\n",
+        scenario_body.replace("id = \"fixture.cli\"", "id = \"fixture.param\"")
+    );
+    fs::write(f.catalog_dir().join("scenarios/fixture.toml"), parametrized).unwrap();
+    let catalog = f.catalog();
+    let scenario = &catalog.scenario("fixture.param").unwrap().scenario;
+    let reason =
+        "строка 1\n\n<!-- /benchmark-snapshot -->\n# `код` *x* [l](u) <b>b</b> | perf_event";
+    for (value, plain) in MARKDOWN_HOSTILE
+        .iter()
+        .map(|v| (*v, false))
+        .chain(MARKDOWN_PLAIN.iter().map(|v| (*v, true)))
+    {
+        let mut result = result(&Spec {
+            memory: None,
+            ..Spec::default()
+        });
+        result.scenario.id = "fixture.param".into();
+        result.parameters = BTreeMap::from([("writers".to_owned(), value.to_owned())]);
+        result.environment.insert(
+            "cpu_model".into(),
+            Fact::Known {
+                value: value.to_owned(),
+            },
+        );
+        result.metrics[1].reason = Some(reason.into());
+        assert_valid(&f, &result);
+        let pages = snapshot_pages(&f, "fixture");
+        let options = Options {
+            replace_workload: true,
+            ..Options::default()
+        };
+        let plan = snapshot::plan(&pages[0], scenario, &result, &options).unwrap();
+        snapshot::apply(&plan).unwrap();
+        let expected = if plain {
+            value.to_owned()
+        } else {
+            serde_json::to_string(value).unwrap()
+        };
+        for page in &pages {
+            let text = fs::read_to_string(page).unwrap();
+            // Маркеры блока целы: ровно одно начало и один конец на своих строках.
+            assert_eq!(
+                text.lines()
+                    .filter(|l| l.starts_with("<!-- benchmark-snapshot: "))
+                    .count(),
+                1,
+                "{text}"
+            );
+            assert_eq!(
+                text.lines()
+                    .filter(|l| *l == "<!-- /benchmark-snapshot -->")
+                    .count(),
+                1,
+                "{text}"
+            );
+            let html = gfm_html(&text);
+            let rows = table_rows(&html);
+            // Окружение: заголовок и семь фактов; нагрузка: заголовок, параметр
+            // и объём входа; метрики: заголовок и измеренное время.
+            assert_eq!(rows.len(), 8 + 3 + 2, "{value:?}\n{html}");
+            for row in &rows[..11] {
+                assert_eq!(row.len(), 2, "{value:?}: {row:?}\n{html}");
+            }
+            let find = |name: &str| {
+                rows.iter()
+                    .find(|row| row[0].contains(&format!("<code>{name}</code>")))
+                    .unwrap_or_else(|| panic!("{name}: {html}"))
+            };
+            let (shown, tags) = visible(&find("cpu_model")[1]);
+            assert_eq!(shown, expected, "{value:?}\n{html}");
+            let allowed: &[&str] = if plain { &[] } else { &["code", "/code"] };
+            assert_eq!(tags, allowed, "{value:?}\n{html}");
+            let (shown, tags) = visible(&find("writers")[1]);
+            assert_eq!(shown, expected, "{value:?}\n{html}");
+            assert_eq!(tags, ["code", "/code"], "{value:?}\n{html}");
+            // Причина отсутствия — одна строка абзаца без разметки.
+            let missing = html
+                .split("<p>")
+                .find(|p| p.contains("memory_peak_resident"))
+                .unwrap_or_else(|| panic!("{html}"));
+            let missing = &missing[..missing.find("</p>").unwrap()];
+            let (shown, tags) = visible(missing);
+            assert!(
+                shown.contains(
+                    "строка 1  <!-- /benchmark-snapshot --> # `код` *x* [l](u) <b>b</b> | perf_event"
+                ),
+                "{shown}"
+            );
+            assert!(tags.iter().all(|t| t == "code" || t == "/code"), "{tags:?}");
+        }
+    }
+}

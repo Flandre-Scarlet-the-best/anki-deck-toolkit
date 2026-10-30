@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 0d2e43aa4d38bf51cdfbe66b9e6b117d86b57620 -->
+<!-- i18n-source-git-blob: 8651721f404d755fdd4679bdef2a498e8a9f47af -->
 
 `anki-repo` is a toolkit for deterministic analysis of CrowdAnki exports and strictly constrained edits to their contents in the `Anki-decks` repository. It gives agents fast, predictable access to the structure of `deck.json` without requiring them to read a multi-megabyte JSON file manually.
 
@@ -1261,3 +1261,5 @@ The test suite includes:
 - Concurrent publication tests: unit tests deterministically reproduce the compare-to-rename window with two writers from one snapshot (only one publishes; the other sees `source_changed`); a control demonstrates lost updates without the critical section; another verifies that publication waits for the lock; `tests/edit_source_preservation.rs` also runs two real concurrent `edit --apply` processes and checks the canonical result without lost edits.
 
 The original race is guarded by three observable properties: `replace_atomically` leaves the winning update and rejects the losing writer with `source_changed`; the unlocked control demonstrates a lost update; and the lock test verifies that publication waits. The internal race window in `write_and_publish` cannot be triggered externally without adding a test seam, so the tests assert those properties rather than faking a “just about to publish” signal.
+
+Module measurements and methodology: [performance](performance.en.md).

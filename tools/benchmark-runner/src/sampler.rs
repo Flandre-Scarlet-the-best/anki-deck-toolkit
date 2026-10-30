@@ -34,6 +34,7 @@ pub struct GroupSample {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub host: bool,
+    pub io: bool,
     pub tick: Duration,
     pub group: GroupSource,
 }
@@ -138,7 +139,7 @@ fn run(plan: Plan, clock: Instant, stop: &AtomicBool, root: &AtomicI32, shared: 
         match &plan.group {
             GroupSource::None => {}
             GroupSource::Own(dir) => {
-                if let Some(counters) = cgroup::read(dir) {
+                if let Some(counters) = cgroup::read(dir, plan.io) {
                     lock(shared).group.push(GroupSample {
                         at: clock.elapsed().as_secs_f64(),
                         counters,
@@ -147,7 +148,7 @@ fn run(plan: Plan, clock: Instant, stop: &AtomicBool, root: &AtomicI32, shared: 
             }
             GroupSource::Container(query) => {
                 if let Some((_, dir)) = &container {
-                    match cgroup::read(dir) {
+                    match cgroup::read(dir, plan.io) {
                         Some(counters) => lock(shared).group.push(GroupSample {
                             at: clock.elapsed().as_secs_f64(),
                             counters,

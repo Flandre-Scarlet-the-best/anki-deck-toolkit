@@ -13,7 +13,7 @@ JSON, в котором исполнитель записывает измере
 системные метрики Linux. Он использует этот контракт, а не создаёт свой.
 Локальную историю результатов, выбор базы и отчёты ведёт
 [`benchmark-history`](../../tools/benchmark-history/README.md); в репозитории
-истории прогонов и порогов нет. Снимки модулей (`docs/performance/<модуль>.md`)
+истории прогонов и порогов нет. Снимки модулей (`tools/<модуль>/performance.md`)
 остаются свидетельствами конкретных окружений.
 
 ## Где что лежит
@@ -38,6 +38,19 @@ JSON, в котором исполнитель записывает измере
 | `anki-e2e.smoke` | `long-e2e` | `warm`, `offline-warm` |
 | `anki-repo.validate` | `short-cli` | `warm`, `offline-warm` |
 | `anki-repo.stats` | `short-cli` | `warm` |
+| `asset-store.verify-integrity` | `short-cli` | `warm` |
+| `asset-store.read-batch` | `short-cli` | `warm` |
+| `asset-store.read-single` | `short-cli` | `warm` |
+| `asset-store.ingest` | `short-cli` | `warm` |
+| `asset-store.ingest-contention` | `short-cli` | `warm` |
+| `asset-store.batch-reopen` | `short-cli` | `warm` |
+| `asset-store.batch-checkpoint` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-noop` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-io` | `short-cli` | `warm` |
 
 ## Как зарегистрировать сценарий нового модуля
 
@@ -212,13 +225,15 @@ argv, а не строкой shell: `sh`, `bash`, `env`, `sudo`, `rm`, `dd`, о�
 |---|---|---|
 | прогрев | ≤ 100 | ≤ 3 |
 | прогонов | ≤ 1000 | ≤ 10 |
+| таймаут шага | 1…1800 с | 1…14 400 с |
 | таймаут прогона | 1…600 с | 1…14 400 с |
 | бюджет серии | ≤ 3600 с | ≤ 86 400 с |
 | одиночный прогон | запрещён | допустим (`single_run_allowed`) |
 
 Без `single_run_allowed` нужно `min_runs ≥ 2`. Сценарий с тёплым профилем требует
 `min_runs ≥ 2` всегда: тёплое состояние измеряется минимум дважды. Бюджет обязан вмещать хотя бы
-один прогон. Пределы выводит `benchmark-contract vocabulary`.
+один прогон. Пределы выводит `benchmark-contract vocabulary`. Таймаут шага действует для
+`setup`, `prepare`/`conclude`, `cleanup` и пробы входа; таймаут прогона ограничивает измеряемую цель.
 
 ## Входы и объём нагрузки
 
@@ -263,8 +278,8 @@ argv, а не строкой shell: `sh`, `bash`, `env`, `sudo`, `rm`, `dd`, о�
 | `memory_peak_resident` | byte | `largest-process-in-tree` / `hyperfine`; `process` / `procfs` | пиковый RSS **одного** процесса, не сумма дерева |
 | `memory_peak_cgroup` | byte | `cgroup` / `cgroup-v2` | одновременный пик всей группы (`memory.peak`) |
 | `cpu_time_cgroup` | second | `cgroup` / `cgroup-v2` | процессорное время всей группы (`usage_usec`) |
-| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | наблюдаемая загрузка; пик — нижняя оценка за интервал |
-| `memory_host_peak_increase` | byte | `host` / `procfs` | снижение `MemAvailable`: верхняя оценка по всей системе |
+| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`; `host` / `procfs` | наблюдаемая загрузка; пик — нижняя оценка за интервал; среднее собственной подгруппы прогона — её процессорное время за время её жизни (весь вызов Hyperfine) |
+| `memory_host_peak_increase` | byte | `host` / `procfs` | наибольшее снижение `MemAvailable` за прогон по всей системе: включает чужие выделения и смещается одновременными освобождениями (в том числе отложенным возвратом памяти прошлого прогона), поэтому это наблюдение хоста, а не граница |
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | счётчики процессора; нужен `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | фаза внутри цели по журналу модуля; нужны метка и `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | счётчик из машинного отчёта модуля; нужна метка |
@@ -456,3 +471,38 @@ cargo run -p benchmark-contract -- --json vocabulary
 Здесь нет хранилища истории, расчёта регрессий и порогов CI: история и отчёты —
 в [`benchmark-history`](../../tools/benchmark-history/README.md), без порогов.
 Числа снимков модулей не становятся порогами.
+
+## Блочный ввод-вывод
+
+`io_read_bytes`/`io_write_bytes` (byte) и `io_read_operations`/`io_write_operations`
+(count) имеют scope `cgroup` и source `cgroup-v2`. Это сумма `rbytes`/`wbytes`/
+`rios`/`wios` по устройствам из `io.stat`, согласно
+[документации ядра Linux](https://docs.kernel.org/admin-guide/cgroup-v2.html#io-interface-files).
+Собственная новая группа учитывает цель, её потомков и Hyperfine от входа в группу
+до итогового чтения перед её удалением; setup/prepare/conclude/cleanup и сэмплер
+находятся вне группы. Для контейнера нужны обнаруженная группа и доступный итоговый
+снимок; исчезнувшая группа даёт `unavailable`, а не последний неполный итог.
+
+Контроллер `io` включается только в собственной делегированной группе и только по
+запросу этих метрик. Включение проверяется действием: после записи `+io` контроллер
+должен появиться в `cgroup.subtree_control`, а делегирование через `systemd-run`
+проверяется той же активацией в одноразовой группе. Отказ или отсутствие `io` не
+отключает CPU/RAM: `check` сообщает причину, результат сохраняет `unsupported` с
+ней, а обязательная I/O-метрика даёт итог `unsupported` без прогонов. Пустой, успешно прочитанный
+`io.stat` означает ноль **учтённых** операций. Ошибка чтения, неполная строка,
+повтор устройства или переполнение не превращаются в ноль.
+
+Это учёт на блочном уровне ядра, а не логические байты `read`/`write`, не число
+системных вызовов, не `disk_usage` и не измерение физического носителя за VM/WSL.
+Попадания в page cache не требуют дискового чтения. Writeback после конца интервала
+не учтён; для завершённой записи нужен `fsync` в самой цели. Поддержка атрибуции
+writeback зависит от файловой системы и владения inode; общие файлы могут
+начисляться другой группе. Многослойные устройства могут учитывать один I/O
+повторно: сумма не является числом уникальных байтов носителя. Пропускная способность
+и IOPS здесь не публикуются: делить эти итоги на время одной цели Hyperfine нельзя,
+поскольку области времени и I/O различаются.
+
+Сценарии с добавленными метриками имеют новую ревизию. Прежние JSON остаются
+валидными самостоятельными результатами своей ревизии и доступны в локальной
+истории; их нельзя проверять как результаты новой декларации. Сохранённые снимки
+прежних измерений не получают вымышленных столбцов I/O.

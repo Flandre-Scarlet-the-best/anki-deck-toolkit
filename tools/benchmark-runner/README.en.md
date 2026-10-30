@@ -1,7 +1,7 @@
 # Benchmark runner: `benchmark-runner`
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: df674dc00203e7451f1a7e5bfb6e01f61eeec110 -->
+<!-- i18n-source-git-blob: 926d1abd926410fce7cde1065e3db16a1b6ffc39 -->
 
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
@@ -14,7 +14,7 @@ The meaning of scenario fields, profiles and metrics is in the [catalog
 guide](../../docs/performance/benchmarks.en.md); the catalog and result
 schemas are owned by [`benchmark-contract`](../benchmark-contract/README.en.md);
 general measurement rules are in the [methodology](../../docs/performance/README.en.md);
-measurements of the runner itself are on its [performance page](../../docs/performance/benchmark-runner.en.md);
+measurements of the runner itself are on its [performance page](performance.en.md);
 the local result history is [`benchmark-history`](../benchmark-history/README.en.md).
 
 The runner does not change user exports or Anki profiles, does not read
@@ -176,8 +176,8 @@ overwritten.
 | Source | How it is collected | Scope |
 |---|---|---|
 | `hyperfine` | Hyperfine export of each run | the target process and waited-for descendants |
-| `procfs` / `host` | polling `/proc/stat` and `MemAvailable` during a run | the whole system: an upper bound |
-| `cgroup-v2` / `cgroup` without a container | an own subgroup per run, `cpu.stat`, `memory.peak` | the target, all its descendants and the Hyperfine process itself |
+| `procfs` / `host` | polling `/proc/stat` and `MemAvailable` during a run | the whole system: a host observation, not a bound — it includes other allocations and is offset by concurrent releases |
+| `cgroup-v2` / `cgroup` without a container | an own subgroup per run, `cpu.stat`, `memory.peak` | the target, all its descendants and the Hyperfine process itself; mean load is the group's CPU time over its lifetime |
 | `cgroup-v2` / `cgroup` with `container` | the Docker container's cgroup found during the run | the container's processes |
 | `module-report` | the module's machine-readable report that appeared during this run | values at the declared JSON Pointer |
 | `filesystem` | path size after the run | only the named path |
@@ -244,7 +244,7 @@ namespaces the outcome is also `unsupported`.
 
 `/proc` and cgroup are polled only during a measured run, once per
 `sample_interval`. Measurements of the impact on target time are in the
-[runner page](../../docs/performance/benchmark-runner.en.md); `--no-sampling`
+[runner page](performance.en.md); `--no-sampling`
 turns polling off completely.
 
 ## What is published
@@ -310,3 +310,16 @@ when all successful runs agree, and storing in the local history, including
 disabling it and its failure. Without Hyperfine 2.x they are skipped locally and fail in CI. The
 tests do not read `decks/**`. The suite is part of
 `cargo test --workspace --locked`.
+
+## Block I/O
+
+`io_read_bytes`, `io_write_bytes`, `io_read_operations` and `io_write_operations`
+come from `io.stat` of an own delegated cgroup or a discovered container.
+Missing or refused `io` leaves CPU/RAM available: enabling is verified through
+`cgroup.subtree_control`, and a refusal is `unsupported` with its reason. Scope, units, writeback attribution,
+stacked/virtual-device limits and declaration revisions are defined by the
+[metric contract](../../docs/performance/benchmarks.en.md#block-io).
+`benchmark-runner.calibration-io` performs a controlled file cycle with `fsync`
+and eviction advice for its own clean pages only. Existing files are never overwritten;
+forced process termination may leave the file behind, causing the next run to fail
+until the owner explicitly removes it.

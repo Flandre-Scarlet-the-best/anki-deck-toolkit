@@ -1,4 +1,4 @@
-//! Снимок последнего подтверждённого измерения на странице `docs/performance/`.
+//! Снимок последнего подтверждённого измерения на странице модуля `tools/<модуль>/performance.md`.
 //!
 //! Страница модуля хранит по одному блоку на пару «сценарий × профиль» в
 //! явно названном эталонном окружении. Блок генерируется из выбранного
@@ -12,6 +12,7 @@
 //! другим результатом, а не публикуемым, который даёт в точности тот же блок.
 
 use crate::format;
+use crate::reason;
 use benchmark_contract::result::{
     Aggregate, Availability, BenchmarkResult, Fact, Identity, OutcomeStatus, Quantity, RunStatus,
 };
@@ -69,6 +70,12 @@ pub struct Meta {
     /// и её смену подтверждает только `--replace-workload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<BTreeMap<String, BTreeMap<String, Quantity>>>,
+    /// Записанные параметры, влияющие на сопоставимость (например, число
+    /// писателей): результаты с разными значениями несопоставимы, поэтому
+    /// смену параметров снимка, как и смену нагрузки, подтверждает только
+    /// `--replace-workload`. Пустой набор в маркер не пишется.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +190,26 @@ pub fn workload_identities(result: &BenchmarkResult) -> BTreeMap<String, Identit
         .collect()
 }
 
+/// Действующие значения параметров, объявленных влияющими на сопоставимость;
+/// отсутствующее значение берётся из `default` сценария.
+pub fn comparability_parameters(
+    scenario: &Scenario,
+    result: &BenchmarkResult,
+) -> BTreeMap<String, String> {
+    scenario
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.affects_comparability)
+        .filter_map(|parameter| {
+            result
+                .parameters
+                .get(&parameter.name)
+                .or(parameter.default.as_ref())
+                .map(|value| (parameter.name.clone(), value.clone()))
+        })
+        .collect()
+}
+
 /// Машинная часть маркера, которую результат даёт снимку.
 fn meta_of(scenario: &Scenario, result: &BenchmarkResult) -> Result<Meta, String> {
     Ok(Meta {
@@ -191,6 +218,7 @@ fn meta_of(scenario: &Scenario, result: &BenchmarkResult) -> Result<Meta, String
         recorded_at: result.provenance.recorded_at.clone(),
         environment: reference_environment(scenario, result)?,
         workload: Some(reference_workload(result)),
+        parameters: comparability_parameters(scenario, result),
     })
 }
 
@@ -510,6 +538,13 @@ fn workload_basis(
             "в маркере снимка {pair} эталонная нагрузка не записана: совпадение с новой нагрузкой не доказано — {confirm}"
         ));
     };
+    if old.parameters != new.meta.parameters {
+        return refuse(format!(
+            "снимок {pair} получен с другими параметрами, влияющими на сопоставимость ({}); новые параметры ({}) его молча не заменяют — {confirm}",
+            describe(&old.parameters),
+            describe(&new.meta.parameters)
+        ));
+    }
     if Some(old_workload) != new.meta.workload.as_ref() {
         return refuse(format!(
             "снимок {pair} получен на нагрузке другого объёма; новая нагрузка его молча не заменяет — {confirm}"
@@ -747,6 +782,7 @@ struct Labels {
     environment: &'static str,
     value: &'static str,
     workload: &'static str,
+    parameter: &'static str,
     no_workload: &'static str,
     metric: &'static str,
     scope: &'static str,
@@ -773,6 +809,7 @@ fn labels(lang: Lang) -> Labels {
             environment: "Факт окружения",
             value: "Значение",
             workload: "Нагрузка",
+            parameter: "параметр",
             no_workload: "Сценарий не объявляет входов.",
             metric: "Метрика",
             scope: "Scope / источник",
@@ -789,12 +826,14 @@ fn labels(lang: Lang) -> Labels {
             heading: "profile",
             confirmed: "Last confirmed measurement",
             outcome: |ok, all, warmup| {
-                format!("outcome `success`: {ok} of {all} runs successful, {warmup} warmup runs")
+                let unit = if warmup == 1 { "run" } else { "runs" };
+                format!("outcome `success`: {ok} of {all} runs successful, {warmup} warmup {unit}")
             },
             dirty: "a working copy with changes was measured",
             environment: "Environment fact",
             value: "Value",
             workload: "Workload",
+            parameter: "parameter",
             no_workload: "The scenario declares no inputs.",
             metric: "Metric",
             scope: "Scope / source",
@@ -817,6 +856,7 @@ fn labels(lang: Lang) -> Labels {
             environment: "环境事实",
             value: "值",
             workload: "负载",
+            parameter: "参数",
             no_workload: "该场景未声明输入。",
             metric: "指标",
             scope: "范围 / 来源",
@@ -836,7 +876,82 @@ fn marker(meta: &Meta) -> String {
     format!("{BEGIN}{} -->", json.replace("--", "-\\u002d"))
 }
 
-/// Блок снимка на одном языке.
+/// Текст, который GFM покажет буквально: без управляющих символов и краевых
+/// пробелов (их съедает ячейка), без экранирования, кода, выделения, ссылок,
+/// HTML, сущностей, формул, автоссылок и эмодзи-кодов. `|` допустим: в ячейке
+/// он экранируется на уровне таблицы, в том числе внутри кода.
+fn literal_in_markdown(value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    let alphanumeric = |index: Option<usize>| {
+        index
+            .and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphanumeric())
+    };
+    !value.is_empty()
+        && value.trim() == value
+        && !value.to_lowercase().contains("www.")
+        && chars.iter().enumerate().all(|(i, &c)| match c {
+            c if c.is_alphanumeric() => true,
+            ' ' | '.' | ',' | ';' | '-' | '+' | '=' | '/' | '(' | ')' | '%' | '\'' | '"' | '|' => {
+                true
+            }
+            // Внутри слова `_` не открывает выделение (`x86_64`).
+            '_' => alphanumeric(i.checked_sub(1)) && alphanumeric(Some(i + 1)),
+            // `:` перед пробелом или в конце не начинает ни схему ссылки, ни эмодзи-код.
+            ':' => chars.get(i + 1).is_none_or(|n| *n == ' '),
+            _ => false,
+        })
+}
+
+/// Значение в ячейке таблицы. Обычное остаётся прежним: текстом или, для
+/// `code`, в обратных кавычках. Иное — точная JSON-строка в `<code>`, где всё,
+/// кроме букв и цифр, записано числовыми ссылками: Markdown не видит в ней ни
+/// разделителей ячеек и строк, ни разметки, а управляющие символы, краевые
+/// пробелы и обратные кавычки остаются видимыми и однозначными.
+fn markdown_cell(value: &str, code: bool) -> String {
+    if literal_in_markdown(value) {
+        let text = value.replace('|', "\\|");
+        return if code { format!("`{text}`") } else { text };
+    }
+    let json = serde_json::to_string(value).expect("строка JSON");
+    let escaped: String = json
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_string()
+            } else {
+                format!("&#{};", u32::from(c))
+            }
+        })
+        .collect();
+    format!("<code>{escaped}</code>")
+}
+
+/// Причина в абзаце «Не измерено»: ASCII-знаки разметки экранируются обратной
+/// косой чертой (CommonMark показывает их буквально), `_` внутри слова
+/// остаётся как есть, управляющие символы, включая переводы строк, заменяются
+/// пробелом: причина остаётся одной строкой абзаца и не закрывает блок снимка.
+fn markdown_text(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let intraword = c == '_'
+            && i > 0
+            && chars[i - 1].is_alphanumeric()
+            && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+        match c {
+            c if c.is_control() => out.push(' '),
+            '\\' | '`' | '*' | '[' | ']' | '<' | '>' | '&' | '~' | '|' | '!' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '_' if !intraword => out.push_str("\\_"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
     let l = labels(lang);
     let show = |value: f64, unit| format::quantity_in(value, unit, l.cores);
@@ -889,12 +1004,24 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
             } else {
                 ""
             };
-            let _ = writeln!(out, "| `{name}`{mark} | {} |", value.replace('|', "\\|"));
+            let _ = writeln!(out, "| `{name}`{mark} | {} |", markdown_cell(value, false));
         }
     }
     out.push('\n');
 
-    let sizes: Vec<(String, String)> = result
+    // Параметры, влияющие на сопоставимость, — часть определения нагрузки
+    // снимка: без них блок не говорит, что именно измерено.
+    let mut sizes: Vec<(String, String)> = meta
+        .parameters
+        .iter()
+        .map(|(name, value)| {
+            (
+                format!("{} `{name}`", l.parameter),
+                markdown_cell(value, true),
+            )
+        })
+        .collect();
+    let input_sizes: Vec<(String, String)> = result
         .inputs
         .iter()
         .flat_map(|input| {
@@ -904,6 +1031,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
                 .map(move |(name, q)| (format!("`{}` · `{name}`", input.id), show(q.value, q.unit)))
         })
         .collect();
+    sizes.extend(input_sizes);
     if sizes.is_empty() {
         let _ = writeln!(out, "{}\n", l.no_workload);
     } else {
@@ -955,7 +1083,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
                 metric
                     .reason
                     .as_deref()
-                    .map(|r| format!(": {r}"))
+                    .map(|r| format!(": {}", markdown_text(&reason::localize(r, lang))))
                     .unwrap_or_default()
             )),
         }
@@ -981,6 +1109,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_values_keep_their_published_form() {
+        for value in ["x86_64", "rustc 1.99.1 (58cf8f9c3 2026-10-13)", "Ядро: 4"] {
+            assert_eq!(markdown_cell(value, false), value);
+            assert_eq!(markdown_cell(value, true), format!("`{value}`"));
+        }
+        assert_eq!(markdown_cell("a|b", false), r"a\|b");
+        assert_eq!(markdown_cell("a|b", true), r"`a\|b`");
+        assert_eq!(
+            markdown_cell("a`b", false),
+            "<code>&#34;a&#96;b&#34;</code>"
+        );
+        assert_eq!(
+            markdown_text("perf_event /proc/stat"),
+            "perf_event /proc/stat"
+        );
+        assert_eq!(markdown_text("_x_ <b>\n"), r"\_x\_ \<b\> ");
+    }
+
+    #[test]
     fn marker_never_contains_comment_terminator() {
         let meta = Meta {
             scenario: "a.b".into(),
@@ -988,9 +1135,16 @@ mod tests {
             recorded_at: "2026-10-28T00:00:00Z".into(),
             environment: BTreeMap::from([("cpu_model".into(), "X -- Y --- Z".into())]),
             workload: None,
+            parameters: BTreeMap::from([("writers".into(), "4 -- 8".into())]),
         };
         let text = marker(&meta);
         assert!(!text[4..text.len() - 3].contains("--"), "{text}");
+        // Пустые параметры в маркер не пишутся: маркеры сценариев без них не меняются.
+        let plain = Meta {
+            parameters: BTreeMap::new(),
+            ..meta.clone()
+        };
+        assert!(!marker(&plain).contains("parameters"));
         let parsed = blocks(&format!("{text}\nbody\n{END}\n")).unwrap();
         assert_eq!(parsed[0].meta, meta);
     }

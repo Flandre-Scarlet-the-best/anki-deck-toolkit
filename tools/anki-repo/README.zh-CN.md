@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 0d2e43aa4d38bf51cdfbe66b9e6b117d86b57620 -->
+<!-- i18n-source-git-blob: 8651721f404d755fdd4679bdef2a498e8a9f47af -->
 
 `anki-repo` 是一套用于确定性分析 CrowdAnki 导出数据、并对其内容实施严格受限修改的工具。它使智能体能够快速、可预测地了解 `deck.json` 的结构，而无需人工通读数 MB 的 JSON 文件。
 
@@ -1258,3 +1258,5 @@ cargo "+$MSRV" check --workspace --all-targets --locked
 - 并发发布测试：单元测试确定性地重现两个写入进程从同一快照比较到 `rename` 的窗口（只有一个发布，另一个得到 `source_changed`），对照测试证明缺少临界区会丢失更新，锁测试确认发布确实等待解锁；`tests/edit_source_preservation.rs` 还并行运行两个真实的 `edit --apply` 进程，确认最后仍是规范导出且没有丢失修改。
 
 针对最初竞态问题，还通过三个可观察性质进行回归保护：`replace_atomically` 保留胜出者的更新并让落后者收到 `source_changed`；无锁对照证明会丢失更新；锁测试确认发布必须等待。由于没有引入测试专用接口就无法从外部直接触发 `write_and_publish` 内部的准确竞态窗口，所以测试验证这些真实性质，而不是伪造“马上发布”的信号。
+
+模块测量结果与方法：[性能](performance.zh-CN.md)。

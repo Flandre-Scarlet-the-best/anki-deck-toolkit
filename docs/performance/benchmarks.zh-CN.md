@@ -1,7 +1,7 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: da52bba6cdf2d0237e9c3f82136695004f9db5a2 -->
+<!-- i18n-source-git-blob: 9aa0b2a7b0e59177d2747befbb40927ecc1d262c -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
@@ -12,7 +12,7 @@
 [`benchmark-runner`](../../tools/benchmark-runner/README.zh-CN.md) 执行：Hyperfine 2.0
 与 Linux 系统指标。它使用本契约，而不是另起一套。本地结果历史、基线选择和报告由
 [`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 负责；仓库中没有运行历史
-和阈值。模块快照（`docs/performance/<模块>.md`）仍然是特定环境的证据。
+和阈值。模块快照（`tools/<模块>/performance.md`）仍然是特定环境的证据。
 
 ## 文件位置
 
@@ -35,6 +35,19 @@
 | `anki-e2e.smoke` | `long-e2e` | `warm`, `offline-warm` |
 | `anki-repo.validate` | `short-cli` | `warm`, `offline-warm` |
 | `anki-repo.stats` | `short-cli` | `warm` |
+| `asset-store.verify-integrity` | `short-cli` | `warm` |
+| `asset-store.read-batch` | `short-cli` | `warm` |
+| `asset-store.read-single` | `short-cli` | `warm` |
+| `asset-store.ingest` | `short-cli` | `warm` |
+| `asset-store.ingest-contention` | `short-cli` | `warm` |
+| `asset-store.batch-reopen` | `short-cli` | `warm` |
+| `asset-store.batch-checkpoint` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-noop` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-io` | `short-cli` | `warm` |
 
 ## 为新模块注册场景
 
@@ -197,12 +210,14 @@ comparable = ["os", "arch", "cpu_model"]
 |---|---|---|
 | 预热 | ≤ 100 | ≤ 3 |
 | 运行次数 | ≤ 1000 | ≤ 10 |
+| 步骤超时 | 1…1800 秒 | 1…14 400 秒 |
 | 单次运行超时 | 1…600 秒 | 1…14 400 秒 |
 | 系列预算 | ≤ 3600 秒 | ≤ 86 400 秒 |
 | 单次运行 | 禁止 | 允许（`single_run_allowed`） |
 
 未设置 `single_run_allowed` 时要求 `min_runs ≥ 2`。带有热配置的场景始终要求 `min_runs ≥ 2`：热状态至少测量两次。预算至少要容纳一次运行。
-`benchmark-contract vocabulary` 输出这些限制。
+`benchmark-contract vocabulary` 输出这些限制。步骤超时适用于 `setup`、`prepare`/`conclude`、
+`cleanup` 和输入探测；单次运行超时适用于被测目标。
 
 ## 输入与负载规模
 
@@ -241,8 +256,8 @@ comparable = ["os", "arch", "cpu_model"]
 | `memory_peak_resident` | byte | `largest-process-in-tree` / `hyperfine`；`process` / `procfs` | **单个**进程的峰值 RSS，不是进程树总和 |
 | `memory_peak_cgroup` | byte | `cgroup` / `cgroup-v2` | 整个组的同时峰值（`memory.peak`） |
 | `cpu_time_cgroup` | second | `cgroup` / `cgroup-v2` | 整个组的 CPU 时间（`usage_usec`） |
-| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`；`host` / `procfs` | 观测到的负载；峰值是区间内的下界 |
-| `memory_host_peak_increase` | byte | `host` / `procfs` | `MemAvailable` 的下降：整个系统的上界 |
+| `cpu_utilization_mean`, `cpu_utilization_peak` | core | `cgroup` / `cgroup-v2`；`host` / `procfs` | 观测到的负载；峰值是区间内的下界；运行自有子组的平均值是其 CPU 时间除以其存活时间（整个 Hyperfine 调用） |
+| `memory_host_peak_increase` | byte | `host` / `procfs` | 运行期间整个系统 `MemAvailable` 的最大下降：包含其他进程的分配，并会被同时发生的释放（包括上一轮内存的延迟归还）抵消，因此是主机观测值而不是界限 |
 | `cpu_cycles`, `instructions`, `cache_references`, `cache_misses`, `branch_misses` | count | `process-tree-waited` / `hyperfine` | CPU 计数器；需要 `perf_event` |
 | `phase_duration` | second | `phase` / `module-log` | 依据模块日志得到的目标内部阶段；需要标签和 `resolution` |
 | `module_counter` | count | `module-report` / `module-report` | 模块机器报告中的计数器；需要标签 |
@@ -400,3 +415,29 @@ cargo run -p benchmark-contract -- --json vocabulary
 这里没有历史存储、没有回归计算，也没有 CI 阈值：历史和报告在
 [`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 中，且没有阈值。模块快照中的
 数字不会成为阈值。
+
+## 块 I/O
+
+`io_read_bytes`/`io_write_bytes`（byte）和 `io_read_operations`/`io_write_operations`
+（count）的 scope 为 `cgroup`，source 为 `cgroup-v2`：按
+[Linux 内核文档](https://docs.kernel.org/admin-guide/cgroup-v2.html#io-interface-files)，
+汇总 `io.stat` 各设备的 `rbytes`/`wbytes`/`rios`/`wios`。
+新的自有组包含目标、其子进程和 Hyperfine，从进入组到删除组前的最终读取；
+setup/prepare/conclude/cleanup 与采样器在组外。容器必须已发现且能获得最终组快照；
+组消失时返回 `unavailable`，不把最后一次不完整采样当作总量。
+
+仅在请求这些指标时，才在执行器自己获委派的组启用可选 `io` 控制器。
+启用通过实际操作验证：写入 `+io` 后，控制器必须出现在 `cgroup.subtree_control` 中；
+经 `systemd-run` 的委派也在一次性组中以同样的激活验证。
+`io` 被拒绝或缺失不影响 CPU/RAM：`check` 显示原因，结果以该原因保留 `unsupported`，
+必需的 I/O 指标使结果为 `unsupported` 且不执行运行。
+可读且为空的 `io.stat` 表示零次**已记账**操作；读取失败、不完整行、重复设备或溢出不能变为零。
+
+这是内核块层记账，不是逻辑读写字节、系统调用、`disk_usage`，也不是 VM/WSL 后面的物理介质。
+page cache 命中无需读盘。区间结束后的 writeback 不计入，完成写入要求目标自身执行 `fsync`。
+writeback 归属依赖文件系统支持和 inode 所有权；共享文件可能计入其他组。
+多层设备可能重复记账，所以总量不代表唯一物理介质字节。此处不发布吞吐量或 IOPS：
+不能用 Hyperfine 单个目标的时间去除覆盖范围不同的组计数。
+
+增加指标的场景使用新修订。旧 JSON 仍是原修订的有效独立结果，可从本地历史读取，
+但不能按新声明验证；现有快照不会补上虚构的 I/O 列。

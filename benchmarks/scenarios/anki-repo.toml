@@ -7,7 +7,7 @@ module = "anki-repo"
 [[scenario]]
 id = "anki-repo.validate"
 title = "Структурная проверка экспорта"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "`anki-repo --json validate` над одним локальным CrowdAnki-экспортом: чтение deck.json, разрешение моделей и проверка структурных инвариантов. Команда не пишет в экспорт и не ходит в сеть."
@@ -96,6 +96,34 @@ source = "hyperfine"
 required = false
 description = "Устойчивее времени к шуму системы; без доступа к perf_event метрика будет unavailable."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -103,7 +131,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "anki-repo.stats"
 title = "Агрегированная статистика экспорта"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "`anki-repo --json stats` над одним локальным CrowdAnki-экспортом: типизированная загрузка и агрегирование по всему дереву колод. Команда не пишет в экспорт и не ходит в сеть."
@@ -176,6 +204,34 @@ scope = "largest-process-in-tree"
 source = "hyperfine"
 required = false
 description = "Пик RSS процесса anki-repo. Для очень малого пика Hyperfine на Linux может сообщить унаследованное от себя значение."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]

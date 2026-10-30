@@ -184,7 +184,7 @@ cargo run -p benchmark-history -- compare <ID-база> <ID-после>
 
 ### 8. Снимок документации — только явно
 
-`benchmark-history snapshot <ID> --page docs/performance/<модуль>.md` без
+`benchmark-history snapshot <ID> --page tools/<модуль>/performance.md` без
 `--apply` показывает план и основание нагрузки. Записывай `--apply` только
 когда пользователь просит обновить публичный снимок или это входит в задачу, и
 только из успешной серии закоммиченного кода в эталонном окружении. Флаги

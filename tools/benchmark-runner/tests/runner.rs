@@ -11,11 +11,15 @@
 //! Возможности, которых может не быть у окружения (делегированная cgroup,
 //! сетевое пространство имён), проверяются обеими ветвями: измерением там, где
 //! они есть, и честной причиной отсутствия там, где их нет; вторая ветвь
-//! печатает, что метрика здесь не доказана.
+//! печатает, что метрика здесь не доказана. Ветвь выбирает оценка готовности
+//! (`check`), а не само отсутствие значения: подтверждённая возможность
+//! обязана дать измерение.
 
 use benchmark_contract::catalog;
 use benchmark_contract::result::{self, BenchmarkResult, MetricValue, OutcomeStatus, RunStatus};
+use benchmark_history::reason;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -197,8 +201,77 @@ impl Fixture {
         Run::from(self.command(&args).output().unwrap(), self)
     }
 
+    /// План метрик по `check`: `measure` значит, что оценка готовности
+    /// действием подтвердила источник; иначе — причина отсутствия.
+    fn plan(&self, id: &str, profile: &str, extra: &[&str]) -> BTreeMap<String, Planned> {
+        let mut args = vec!["check", id, "--profile", profile];
+        args.extend_from_slice(extra);
+        let output = self.command(&args).output().unwrap();
+        let summary: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+            panic!(
+                "check: stdout не JSON ({e}): {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        summary["metrics"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{summary}"))
+            .iter()
+            .map(|m| {
+                (
+                    m["key"].as_str().unwrap().to_owned(),
+                    Planned {
+                        measure: m["plan"] == "measure",
+                        reason: m["reason"].as_str().map(str::to_owned),
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn read(&self, relative: &str) -> String {
         fs::read_to_string(self.workspace().join(relative)).unwrap_or_default()
+    }
+}
+
+/// Причина отсутствия значения; у измеренного её нет.
+fn absence(value: &MetricValue) -> Option<&str> {
+    match value {
+        MetricValue::Measured { .. } => None,
+        MetricValue::Unavailable { reason }
+        | MetricValue::Unsupported { reason }
+        | MetricValue::Failed { reason } => Some(reason),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Planned {
+    measure: bool,
+    reason: Option<String>,
+}
+
+/// Файловая система каталога пишет на блочное устройство, чей учёт видит
+/// `io.stat`: tmpfs, сетевые и гостевые ФС его не дают, и ноль там — честный.
+fn block_backed(path: &Path) -> Result<(), String> {
+    let path = fs::canonicalize(path).unwrap();
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap();
+    let (point, fstype) = mountinfo
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let point = left.split(' ').nth(4)?;
+            let fstype = right.split(' ').next()?;
+            path.starts_with(point)
+                .then(|| (point.to_owned(), fstype.to_owned()))
+        })
+        .max_by_key(|(point, _)| point.len())
+        .unwrap();
+    const BLOCK: &[&str] = &["ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "bcachefs"];
+    if BLOCK.contains(&fstype.as_str()) {
+        Ok(())
+    } else {
+        Err(format!("{} на {point} ({fstype})", path.display()))
     }
 }
 
@@ -800,14 +873,21 @@ scope = "cgroup"
 source = "cgroup-v2"
 required = false
 sample_interval_seconds = 0.1
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
 "#
         ),
     );
     let fixture = fixture(&body);
+    let planned = fixture.plan("fixture.cgroup", "warm", &[])["memory_peak_cgroup@cgroup"].clone();
     let run = fixture.run("fixture.cgroup", "warm", &[]);
     assert_eq!(run.code, 0, "{}\n{}", run.summary, run.stderr);
     let peak = run.values("memory_peak_cgroup@cgroup");
-    if peak.iter().all(|v| v.measured().is_some()) {
+    if planned.measure {
         for value in run.measured("memory_peak_cgroup@cgroup") {
             assert!(value >= 96.0 * 1024.0 * 1024.0, "пик группы {value}");
         }
@@ -819,6 +899,22 @@ sample_interval_seconds = 0.1
         }
         for value in run.measured("cpu_utilization_peak@cgroup") {
             assert!(value > 1.0, "пик загрузки двух потоков {value}");
+        }
+        // Средняя загрузка группы — её процессорное время за время её жизни:
+        // два потока не дают больше двух ядер.
+        let cpu = run.values("cpu_time_cgroup@cgroup");
+        let mean = run.values("cpu_utilization_mean@cgroup");
+        assert_eq!(cpu.len(), mean.len());
+        for (time, value) in cpu.iter().zip(&mean) {
+            if time.measured().is_some() {
+                let value = value
+                    .measured()
+                    .expect("при измеренном CPU средняя загрузка есть");
+                assert!(
+                    value > 0.0 && value <= 2.2,
+                    "средняя загрузка двух потоков {value}"
+                );
+            }
         }
         // Без сэмплирования группа читается только после прогона: пик
         // загрузки отсутствует, итоговые значения остаются.
@@ -834,18 +930,58 @@ sample_interval_seconds = 0.1
             assert!(value.measured().is_some(), "{value:?}");
         }
     } else {
+        let reason = planned.reason.unwrap();
         for value in peak {
-            assert!(
-                matches!(
-                    value,
-                    MetricValue::Unsupported { .. } | MetricValue::Unavailable { .. }
-                ),
-                "{value:?}"
-            );
+            assert_eq!(absence(value), Some(reason.as_str()), "{value:?}");
         }
         eprintln!(
-            "ОГРАНИЧЕНИЕ: делегированная cgroup здесь недоступна, метрики группы не доказаны: {:?}",
-            run.result().metrics[2].reason
+            "ОГРАНИЧЕНИЕ: делегированная cgroup здесь недоступна, метрики группы не доказаны: {reason}"
+        );
+    }
+}
+
+/// Регрессия: процессорное время подгруппы включает Hyperfine за всё время
+/// его жизни, поэтому делить его на время одной короткой цели нельзя —
+/// пустая однопоточная цель получала загрузку в несколько ядер.
+#[test]
+fn own_cgroup_mean_utilization_of_short_target_stays_physical() {
+    if !hyperfine_ready() {
+        return;
+    }
+    let body = scenario(
+        "short-mean",
+        r#""--exit", "0""#,
+        RUNS,
+        &format!(
+            r#"{WARM}{WALL}
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+"#
+        ),
+    );
+    let fixture = fixture(&body);
+    let key = "cpu_utilization_mean@cgroup";
+    let planned = fixture.plan("fixture.short-mean", "warm", &[])[key].clone();
+    let run = fixture.run("fixture.short-mean", "warm", &[]);
+    assert_eq!(run.code, 0, "{}\n{}", run.summary, run.stderr);
+    if !planned.measure {
+        // Отсутствие объясняет оценка готовности, а не пустой набор значений.
+        let reason = planned.reason.unwrap();
+        for value in run.values(key) {
+            assert_eq!(absence(value), Some(reason.as_str()), "{value:?}");
+        }
+        eprintln!("ОГРАНИЧЕНИЕ: загрузка группы не проверена: {reason}");
+        return;
+    }
+    let values = run.measured(key);
+    assert!(values.len() >= 2, "{values:?}");
+    for value in values {
+        assert!(
+            value > 0.0 && value <= 1.5,
+            "однопоточная цель и Hyperfine не занимают {value} ядра в среднем"
         );
     }
 }
@@ -1931,6 +2067,12 @@ scope = "cgroup"
 source = "cgroup-v2"
 required = true
 
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = true
+
 [[scenario.requires]]
 kind = "linux-cgroup-v2"
 "#
@@ -2123,4 +2265,121 @@ fn docker_readiness_uses_the_target_environment_only() {
         !seen.is_empty() && seen.iter().all(|h| h == dead),
         "{seen:?}"
     );
+}
+
+#[test]
+fn block_io_counts_real_file_work_and_survives_no_sampling() {
+    if !hyperfine_ready() {
+        return;
+    }
+    const IO: [&str; 4] = [
+        "io_read_bytes@cgroup",
+        "io_write_bytes@cgroup",
+        "io_read_operations@cgroup",
+        "io_write_operations@cgroup",
+    ];
+    let mut metrics = format!("{WARM}{WALL}");
+    for name in [
+        "io_read_bytes",
+        "io_write_bytes",
+        "io_read_operations",
+        "io_write_operations",
+        "cpu_time_cgroup",
+    ] {
+        metrics.push_str(&format!("\n[[scenario.metric]]\nmetric = \"{name}\"\nscope = \"cgroup\"\nsource = \"cgroup-v2\"\nrequired = false\n"));
+    }
+    let fixture = fixture(&scenario(
+        "io",
+        r#""--file-io", "io.bin", "8""#,
+        RUNS,
+        &metrics,
+    ));
+    for extra in [vec![], vec!["--no-sampling"]] {
+        let planned = fixture.plan("fixture.io", "warm", &extra);
+        let run = fixture.run("fixture.io", "warm", &extra);
+        assert_eq!(run.code, 0, "{} {}", run.summary, run.stderr);
+        assert!(!fixture.workspace().join("io.bin").exists());
+        if !planned["cpu_time_cgroup@cgroup"].measure {
+            // Без собственной группы нет и её I/O: обе причины — из оценки готовности.
+            for key in IO.iter().chain(&["cpu_time_cgroup@cgroup"]) {
+                let reason = planned[*key].reason.clone().unwrap();
+                for value in run.values(key) {
+                    assert_eq!(absence(value), Some(reason.as_str()), "{key}: {value:?}");
+                }
+            }
+            eprintln!(
+                "ОГРАНИЧЕНИЕ: делегированная cgroup здесь недоступна, блочный I/O не проверен: {:?}",
+                planned["cpu_time_cgroup@cgroup"].reason
+            );
+            continue;
+        }
+        // Процессорное время группы не зависит от судьбы контроллера io.
+        for value in run.measured("cpu_time_cgroup@cgroup") {
+            assert!(value > 0.0, "{value}");
+        }
+        let write = &planned["io_write_bytes@cgroup"];
+        if !write.measure {
+            let reason = write.reason.clone().unwrap();
+            assert!(
+                reason::IO_NOT_DELEGATED.matches(&reason)
+                    || reason::IO_NOT_ENABLED.matches(&reason)
+                    || reason::IO_NOT_CONFIRMED.matches(&reason),
+                "{reason}"
+            );
+            for key in IO {
+                for value in run.values(key) {
+                    assert!(
+                        matches!(value, MetricValue::Unsupported { .. }),
+                        "{key}: {value:?}"
+                    );
+                    assert_eq!(absence(value), Some(reason.as_str()), "{key}: {value:?}");
+                }
+            }
+            eprintln!("ОГРАНИЧЕНИЕ: блочный I/O подгрупп здесь не учитывается: {reason}");
+            continue;
+        }
+        // Готовность подтвердила io. Прямо доступная группа узнаёт о
+        // включении только при активации: её отказ — явная причина
+        // окружения, а не отсутствие значения.
+        let first = run.values("io_write_bytes@cgroup")[0].clone();
+        if let Some(reason) = absence(&first)
+            && (reason::IO_NOT_ENABLED.matches(reason) || reason::IO_NOT_CONFIRMED.matches(reason))
+        {
+            for key in IO {
+                for value in run.values(key) {
+                    assert!(
+                        matches!(value, MetricValue::Unsupported { .. }),
+                        "{key}: {value:?}"
+                    );
+                    assert_eq!(absence(value), Some(reason), "{key}: {value:?}");
+                }
+            }
+            eprintln!("ОГРАНИЧЕНИЕ: активация io отказала: {reason}");
+            continue;
+        }
+        // Включённый контроллер обязан дать валидно прочитанные счётчики в
+        // каждом прогоне; ошибка чтения io.stat — регрессия, а не ноль.
+        let writes = run.measured("io_write_bytes@cgroup");
+        let operations = run.measured("io_write_operations@cgroup");
+        for key in ["io_read_bytes@cgroup", "io_read_operations@cgroup"] {
+            run.measured(key);
+        }
+        match block_backed(&fixture.workspace()) {
+            Ok(()) => {
+                assert!(
+                    writes.iter().all(|n| *n >= 8.0 * 1024.0 * 1024.0),
+                    "{writes:?}"
+                );
+                assert!(operations.iter().all(|n| *n > 0.0), "{operations:?}");
+            }
+            Err(place) => eprintln!(
+                "ОГРАНИЧЕНИЕ: каталог нагрузки не на блочном устройстве ({place}), объём записи не проверен: {writes:?}"
+            ),
+        }
+    }
+    // Чужой файл никогда не перезаписывается и не удаляется этой нагрузкой.
+    fs::write(fixture.workspace().join("io.bin"), "keep").unwrap();
+    let run = fixture.run("fixture.io", "warm", &[]);
+    assert_ne!(run.code, 0);
+    assert_eq!(fixture.read("io.bin"), "keep");
 }

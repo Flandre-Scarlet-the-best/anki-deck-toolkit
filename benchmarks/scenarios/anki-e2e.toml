@@ -1,12 +1,12 @@
 # Сценарии E2E-стенда Anki Desktop. Контракт стенда — tools/anki-e2e/README.md,
-# журнал замеров — docs/performance/anki-e2e.md.
+# журнал замеров — tools/anki-e2e/performance.md.
 schema_version = 1
 module = "anki-e2e"
 
 [[scenario]]
 id = "anki-e2e.full"
 title = "Полный набор E2E-сценариев стенда"
-revision = 1
+revision = 2
 kind = "long-e2e"
 status = "executable"
 description = "Штатный полный прогон стенда: smoke, addons, patch, crowdanki, process, errors в одном изолированном контейнере с официальной Linux Anki Desktop."
@@ -119,7 +119,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 1.0
-description = "Сборка образов идёт вне cgroup прогона, поэтому её стоимость видна только по хосту целиком: верхняя оценка."
+description = "Сборка образов идёт вне cgroup прогона. /proc/stat показывает выборочное наблюдение всего хоста и не является верхней границей загрузки сборки."
 
 [[scenario.metric]]
 metric = "memory_host_peak_increase"
@@ -127,7 +127,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 1.0
-description = "Наибольшее снижение MemAvailable за прогон: верхняя оценка памяти сборки образов."
+description = "Выборочное наблюдение снижения MemAvailable по всему хосту; это не верхняя граница памяти сборки образов."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -136,7 +136,7 @@ source = "module-log"
 label = "release"
 required = false
 resolution = 1.0
-description = "Выбор релиза и получение архива по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -145,7 +145,7 @@ source = "module-log"
 label = "anki-image"
 required = false
 resolution = 1.0
-description = "Сборка образа Anki по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -154,7 +154,7 @@ source = "module-log"
 label = "run-image"
 required = false
 resolution = 1.0
-description = "Сборка образа запуска (cargo build в Docker) по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -163,7 +163,7 @@ source = "module-log"
 label = "scenarios"
 required = false
 resolution = 1.0
-description = "Исполнение сценариев в контейнере по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "module_counter"
@@ -201,6 +201,34 @@ kind = "network"
 purpose = "GitHub Releases API и архив Anki, AnkiWeb для сценариев аддонов, Docker Hub и зеркала Ubuntu для сборки образов"
 profiles = ["cold", "warm"]
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "docker_version", "hyperfine_version", "anki_version", "container_limits"]
 comparable = ["os", "arch", "virtualization", "logical_cpus", "docker_version", "anki_version", "container_limits"]
@@ -218,7 +246,7 @@ report = ["/isolation/nano_cpus", "/isolation/memory", "/isolation/pids_limit"]
 [[scenario]]
 id = "anki-e2e.smoke"
 title = "Сценарий smoke стенда"
-revision = 1
+revision = 2
 kind = "long-e2e"
 status = "executable"
 description = "Обнаружение Anki, первый запуск, doctor остановленной и запущенной Anki, launch и отказы stop без аддонов. Сценарий не устанавливает аддоны из AnkiWeb."
@@ -311,7 +339,7 @@ source = "module-log"
 label = "scenarios"
 required = false
 resolution = 1.0
-description = "Исполнение сценария в контейнере по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [scenario.module_report]
 runs_dir = "target/anki-e2e/runs"
@@ -330,6 +358,34 @@ kind = "docker"
 kind = "network"
 purpose = "GitHub Releases API и архив Anki при выборе релиза, Docker Hub и зеркала Ubuntu при сборке образов"
 profiles = ["warm"]
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "docker_version", "hyperfine_version", "anki_version", "container_limits"]

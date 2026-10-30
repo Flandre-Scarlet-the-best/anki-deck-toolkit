@@ -1,9 +1,9 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: ed22df35b27de7b06bf87bbf49953f22329c8562 -->
+<!-- i18n-source-git-blob: 7e8844b595691a300c8dbf05b20bfd00ecd4148f -->
 
-This directory holds the **last confirmed figures** for the performance and
+This directory provides the common methodology and links to the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
 module has its own page with its method, metric definitions and snapshots per
 scenario and profile in an explicitly named reference environment. This page
@@ -20,7 +20,7 @@ different values.
 |---|---|---|
 | The full history of every measurement | the local [`benchmark-history`](../../tools/benchmark-history/README.en.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
 | The public historical record | the `## Производительность` (performance) section of the PR description: real results, baseline, comparability, conditions and conclusions | everyone, through the PR history |
-| The current snapshot | the pages of this directory: the last confirmed measurement of each scenario × profile pair | everyone |
+| The current snapshot | the `tools/<module>/performance.md` pages: the last confirmed measurement of each scenario × profile pair | everyone |
 
 The pages do not accumulate entries from every PR: a new confirmed measurement
 replaces the snapshot of the same pair, while earlier values remain in the Git
@@ -34,11 +34,12 @@ explicit confirmation.
 
 | Module | Page | Snapshots from JSON results |
 |---|---|---|
-| `anki-repo` | [anki-repo.en.md](anki-repo.en.md) | `anki-repo.validate` · `warm` |
-| `anki-e2e` | [anki-e2e.en.md](anki-e2e.en.md) | none yet; a manual observation without original JSON |
-| `benchmark-runner` | [benchmark-runner.en.md](benchmark-runner.en.md) | none yet; a manual observation without original JSON |
+| `anki-repo` | [anki-repo/performance.en.md](../../tools/anki-repo/performance.en.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store/performance.en.md](../../tools/asset-store/performance.en.md) | `asset-store.*` · `warm` (`kanji-medium`) |
+| `anki-e2e` | [anki-e2e/performance.en.md](../../tools/anki-e2e/performance.en.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; a manual observation without original JSON for the other states |
+| `benchmark-runner` | [benchmark-runner/performance.en.md](../../tools/benchmark-runner/performance.en.md) | `benchmark-runner.calibration-*` · `warm` |
 
-A new module gets its own page `docs/performance/<module>.md` with
+A new module gets its own page `tools/<module>/performance.md` with
 translations, a `<!-- benchmark-snapshot:anchor -->` line where snapshots go and
 a row in this table.
 
@@ -103,7 +104,7 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
 | Container memory peak | cgroup v2 `memory.peak` | exact peak tracked by the kernel |
 | Container CPU | `usage_usec` in the cgroup `cpu.stat` | exact for the total; average and peak cores come from differences between samples |
 | Peak cores over 1 s | difference of `usage_usec` between adjacent samples | lower bound: bursts shorter than the interval are smoothed out |
-| Host load and memory | `/proc/stat`, `MemAvailable` in `/proc/meminfo` | the whole system: an upper bound when the process has no cgroup of its own |
+| Host load and memory | `/proc/stat`, `MemAvailable` in `/proc/meminfo` | the whole system: a host observation, not a bound — it includes other allocations and is offset by concurrent releases |
 | Disk | `du -sb`, `docker image ls`, `docker system df -v` | sizes of images with shared layers are not summed |
 
 ## How to update a snapshot
@@ -113,7 +114,7 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
 2. Find the result (`benchmark-history list`) and check its outcome, runs,
    environment and unavailable metrics (`benchmark-history show`).
 3. Preview the page change without writing:
-   `benchmark-history snapshot <ID> --page docs/performance/<module>.md`, then
+   `benchmark-history snapshot <ID> --page tools/<module>/performance.md`, then
    write it with `--apply`. The tool updates the pair's block in all three
    languages at once and refuses if the series is incomplete, the working copy
    has changes, the environment differs from the reference one or the page holds

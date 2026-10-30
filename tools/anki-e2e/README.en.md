@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: dd5dc88e75c8122f15b9edd5496a554b1ff704b3 -->
+<!-- i18n-source-git-blob: e27c55c68fc36811d7c07499e65daab60c0238d8 -->
 
 `anki-e2e` is a permanent local E2E stand for the `anki-repo anki` group
 ([contract](../anki-repo/desktop.md)). A Rust runner on the host builds a
@@ -242,13 +242,13 @@ aarch64, network access to GitHub, AnkiWeb, Docker Hub and Ubuntu mirrors, and
 by default 4 CPUs and 6 GB of memory per container. In the measured environment,
 the stand's images, Cargo caches and archive occupied about 6.6 GB of disk;
 Docker base images, temporary build data and room for cache growth require
-additional space ([measurement details](../../docs/performance/anki-e2e.en.md)).
+additional space ([measurement details](performance.en.md)).
 The first run builds the images; later runs use the cache.
 
 ## Performance
 
 Phase timings, CPU, memory and disk of the stand, together with the measurement
-method, are on the [performance page](../../docs/performance/anki-e2e.en.md);
+method, are on the [performance page](performance.en.md);
 the general measurement rules are in the [methodology](../../docs/performance/README.en.md).
 
 ## Boundaries
