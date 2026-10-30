@@ -293,7 +293,7 @@ def validate_performance(content: str) -> list[str]:
                 if len(values) != 1 or any(placeholder(v) for v in values):
                     errors.append(prefix + f"для измерения нужна строка «{name}:» с фактическими сведениями{where}")
             result = block_fields.get("Результат", [])
-            if not any(re.search(r"\d[\d.,\s]*\s*(?:ms|µs|ns|s|%|KiB|MiB|GiB|bytes|count|инструкц|мс|с)\b|\d\s*%", without_inline_code(value)) and not placeholder(value) for value in result):
+            if not any(re.search(r"\d[\d.,\s]*\s*(?:ms|µs|ns|s|%|KiB|MiB|GiB|bytes|count|инструкц\w*|мс|с)\b|\d\s*%", value) and not placeholder(value) for value in result):
                 errors.append(prefix + "«Результат» требует числового значения с единицей")
             if re.search(r"(?m)^\s*\|\s*Метрика\s*\|", block):
                 errors.append(prefix + "полную таблицу benchmark-history report перенесите в Gist")

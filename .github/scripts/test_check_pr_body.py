@@ -493,6 +493,11 @@ class PrBodyContractTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("максимум 6000", errors[0])
 
+    def test_measured_result_accepts_instruction_units_and_inline_code(self):
+        for value in ("1 200 000 инструкций → 1 100 000 инструкций", "`100 ms` → `80 ms`"):
+            body = body_with(MEASURED.replace("wall-clock 100 ms → 80 ms, −20 %, n=10.", value))
+            self.assertEqual(validate(body), [], value)
+
     def test_full_benchmark_report_must_move_to_gist(self):
         table = "\n| Метрика | После: среднее |\n|---|---|\n| wall | 80 ms |"
         self.assertTrue(any("полную таблицу" in e for e in validate(body_with(MEASURED + table))))

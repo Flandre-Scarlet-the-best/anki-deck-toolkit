@@ -207,14 +207,19 @@ fi
 ## Создание и обновление
 
 Публикуй только после проверки приватности и подготовки полного Markdown-исходника.
-Без `--public` Gist остаётся Secret. Для первого создания имя файла берётся из
-его basename:
+Без `--public` Gist остаётся Secret. Для первого создания передай обязательные
+`details.md` и `manifest.md` и, если итерации ревью уже завершены, журнал и
+прочие необходимые отчёты. Имена файлов берутся из их basename:
 
 ```bash
-REVIEW_FILE=".codex/local/pr/<task>/coderabbit-review.md"
-GIST_URL="$(gh gist create "$REVIEW_FILE" --desc "Журнал CodeRabbit")"
+TASK_DIR=".codex/local/pr/<task>"
+GIST_URL="$(gh gist create "$TASK_DIR/details.md" "$TASK_DIR/manifest.md" --desc "Подробный отчёт задачи")"
 printf 'Gist создан: %s\n' "$GIST_URL"
 ```
+
+При нуле итераций `coderabbit-review.md` не создаётся. Если итерации или
+измерения уже есть, добавь соответствующие подготовленные Markdown-файлы в
+тот же вызов создания, чтобы manifest описывал фактический состав.
 
 Сразу проверь файлы и повторно прочитай их по процедуре выше. Сохрани реальный ID/URL в заметках задачи; не публикуй PR со ссылкой до
 подтверждённого сравнения.
