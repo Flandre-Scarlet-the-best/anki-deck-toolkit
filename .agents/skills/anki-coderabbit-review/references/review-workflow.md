@@ -1,20 +1,20 @@
-# Пошаговый CodeRabbit review workflow
+# Порядок цикла ревью CodeRabbit
 
-Этот файл владеет механикой CodeRabbit review cycle: разбор текущего checkout,
-discovery фактического provider interface, invocation, triage findings,
-verification, commit/push, накопительное обновление PR body, rate-limit handling
-и отчёт.
+Этот файл описывает выполнение цикла ревью: проверку текущей рабочей копии и
+интерфейса CodeRabbit, запуск и разбор результата, независимую оценку замечаний,
+ограничения провайдера и итоговый отчёт. Общие операции Git/GitHub принадлежат
+`anki-git-workflow`.
 
-Контракт и границы (trigger, `target_iterations`, определение completed
-iteration, clean iteration, инварианты) задаёт `SKILL.md`. Здесь — только порядок
-действий.
+Контракт и границы (условия активации, `target_iterations`, определения
+завершённой и чистой итерации, инварианты) задаёт `SKILL.md`. Здесь — только
+порядок действий.
 
-Общую процедуру публикации — staging, commit, push, exact remote verification,
-PR create/edit и read-back — владеет repository skill `anki-git-workflow`.
-Содержательную структуру body и cumulative CodeRabbit table задаёт его
-`references/pr-body.md`. Этот файл не дублирует механику Git/GitHub: он только
-определяет CodeRabbit-specific данные, которые каждая completed iteration обязана
-опубликовать через этого владельца.
+Общий порядок публикации задаёт `anki-git-workflow`: подготовка индекса, commit,
+push, точная проверка удалённого состояния, создание/изменение PR и повторное
+чтение. Структуру сводки PR задаёт его `references/pr-body.md`,
+формат журнала и работу с Gist — `references/pr-gist.md`.
+Этот файл не дублирует механику Git/GitHub, а определяет данные CodeRabbit,
+которые каждая завершённая итерация обязана опубликовать через владельца процесса.
 
 ## 1. Установить candidate текущего checkout
 
@@ -94,7 +94,7 @@ coderabbit review --help
 coderabbit review findings --help
 coderabbit auth status
 coderabbit usage
-coderabbit config validate
+check-jsonschema --no-cache --schemafile https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json .coderabbit.yaml
 ```
 
 Установи фактом минимум следующее:
@@ -102,7 +102,7 @@ coderabbit config validate
 - какая версия установлена и является ли она latest;
 - какие review-flags реально доступны, включая наличие и форму deep;
 - какова доступность включённых review прямо сейчас (`usage`);
-- валиден ли repository config (`config validate`).
+- валиден ли repository config по официальной JSON Schema (`check-jsonschema`).
 
 Latest-версию не угадывай по внешним источникам и не считай закреплённой:
 официальный способ проверки — сам CLI.
@@ -127,26 +127,24 @@ curl -s https://cli.coderabbit.ai/releases/latest/VERSION
 Так безопаснее: при наличии новой версии `coderabbit update` не ограничивается
 проверкой, а сразу её ставит.
 
-Repository `.coderabbit.yaml` проверяй штатным для текущей версии способом,
-например:
+Repository `.coderabbit.yaml` проверяй через официальную JSON Schema командой
+из discovery выше. Не используй `coderabbit config validate`: официальная
+валидация CLI не работает на стороне CodeRabbit. `--no-cache` позволяет получать
+актуальную schema, а не использовать сохранённую копию.
 
-```bash
-coderabbit config validate
-```
-
-`coderabbit config validate` возвращает `0`, если файл валиден против актуальной
-официальной schema, и `1`, если файл отсутствует, нечитаем, невалиден, либо
-schema не удалось загрузить. Если repository config невалиден — это отдельная
-задача про конфигурацию, а не побочный эффект review: не правь `.coderabbit.yaml`
-ради того, чтобы cycle поехал.
+Проверка требует установленного `check-jsonschema` и доступа к URL schema.
+Ненулевой код не доказывает сам по себе невалидность конфигурации: различай
+ошибки файла и схемы, отсутствие инструмента и сетевую ошибку по выводу команды.
+Если проверка недоступна, сообщи конкретное препятствие и не выдавай конфигурацию
+за проверенную. Если repository config невалиден — это отдельная задача про
+конфигурацию, а не побочный эффект review: не правь `.coderabbit.yaml` ради того,
+чтобы cycle поехал.
 
 `coderabbit config` **не является** read-only командой начиная с 0.8.x: вызов
 без подкоманды запускает guided setup и может записать `.coderabbit.yaml`, а
 `coderabbit config apply` применяет готовое YAML-предложение (с `--dry-run`
-для preview и `--yes` для применения без подтверждения). В рамках review cycle
-допустим только `config validate`; генерация и применение конфигурации
-остаются отдельной задачей про repository configuration и не входят в этот
-workflow.
+для preview и `--yes` для применения без подтверждения). Генерация и применение
+конфигурации остаются отдельной задачей и не входят в этот workflow.
 
 `coderabbit doctor` возвращает `1`, если хотя бы одна проверка провалена;
 warnings не дают ненулевой код возврата. Неспособность CLI работать не из-за
@@ -525,48 +523,35 @@ branch, переключение на другой PR, изменение base P
 несвязанных локальных изменений.
 
 
-### 4.8 Обновление PR body после iteration
+### 4.8 Передача результатов на публикацию
 
-После подтверждённого push и exact remote verification **до перехода к следующей
-iteration** опубликуй disposition текущего CodeRabbit review в body текущего PR.
+После commit/push и exact remote verification текущая итерация ещё не завершена.
+До следующей итерации передай полный журнал и компактную сводку владельцу общей
+публикации — `anki-git-workflow`; не дублируй здесь команды и детали read-back.
 
-Порядок:
+CodeRabbit-specific требования к передаваемым данным:
 
-1. Установи единственный PR текущего repository/base/head. Если публикация этой
-   task branch ещё не создала PR, доведи обычный PR lifecycle через
-   `anki-git-workflow`; не создавай второй PR.
-2. Сначала установи source body по recovery-правилам
-   `anki-git-workflow/references/pr-lifecycle.md`: если локальный ignored-файл
-   отсутствует, прочитай **полный** body текущего PR и материализуй его как
-   локальный source; если локальный и remote body расходятся без доказанной
-   причины, явно примири их до mutation. Не реконструируй существующий PR по
-   памяти или prompt'у.
-3. Открой repository-local source body и раздел
-   `## CodeRabbit review и disposition`. Если CodeRabbit запускается впервые,
-   создай раздел и таблицу в формате
-   `anki-git-workflow/references/pr-body.md`.
-4. Для текущей iteration **добавь** строки в существующую cumulative table:
-   provider severity, путь, технический эффект, фактический disposition и
-   реальный результат. Свяжи строки с номером iteration и тем reviewed HEAD,
-   который действительно видел CodeRabbit.
-5. Для authoritative clean review с `0 findings` добавь одну clean summary-row
-   с опубликованным marker commit. Если findings были false positive/stale,
-   сохрани их отдельными строками с честным disposition вместо искусственного
-   `clean`.
-6. Сначала перечитай полный локальный body, затем опубликуй его через
-   `anki-git-workflow` и выполни обязательный read-back опубликованного PR.
-7. Убедись, что предыдущие строки таблицы сохранены, новые строки присутствуют
-   ровно один раз, а опубликованный body совпадает с локальным источником с
-   учётом допустимой нормализации переводов строк.
+1. Сохрани в одном `coderabbit-review.md` все findings текущей итерации и прежнюю
+   историю в исходном порядке: severity, путь, эффект, независимое disposition и
+   фактическое исправление/отказ с commit. Для `0 findings` запиши отдельную
+   `clean`-строку; rejected/repeated findings не превращай в `clean`.
+2. Если PR существует, его полный body и прежняя legacy-таблица — исходная база.
+   Если PR ещё нет, это нормальный промежуточный этап: не создавай его заранее
+   ради URL и не подставляй фиктивную ссылку.
+3. Следуй единому порядку `pr-lifecycle.md`: подготовь и проверь локальные исходники,
+   создай/обнови Gist и подтверди каждый файл по `pr-gist.md`, затем опубликуй
+   новый или обновлённый PR с реальным URL. При миграции сначала сохрани и
+   проверь все старые строки Gist, потом заменяй таблицу body компактной сводкой.
+4. В PR оставь только четыре поля компактной сводки по
+   `anki-git-workflow/references/pr-body.md`; не копируй таблицу. После публикации
+   подтверди read-back обоих источников, base/head и Draft/Ready по владельцу
+   GitHub-операций.
 
-Только после успешного read-back текущая iteration может увеличить
-`completed_iterations` и открыть следующую. Если результат PR edit неизвестен
-из-за network/provider failure, сначала перечитай удалённый PR и установи
-фактическое состояние; не повторяй mutation вслепую и не создавай duplicate
-rows.
-
-Обновление body не меняет reviewed HEAD и не превращает fix commit текущей
-iteration в CodeRabbit-reviewed: его сможет проверить только следующая iteration.
+Увеличивай `completed_iterations` и начинай следующую итерацию только после
+подтверждённой публикации HEAD, полного Gist и body PR. При неизвестном результате
+сначала восстанови удалённое состояние; при недоступности Gist сохрани исходник и
+сообщи о препятствии. Ссылка-заглушка, потерянные findings и фиктивное завершение
+запрещены. Fix commit этой итерации не становится CodeRabbit-reviewed до следующей.
 
 ## 5. Rate limit handling
 
@@ -686,7 +671,7 @@ CLI умеет заметно больше, чем этот cycle, и расши
   — облачные задачи и управление их навыками.
 - **`coderabbit skills`** — user-level skills CodeRabbit, не skills репозитория.
 - **`coderabbit config` / `config apply`** — отдельная задача настройки;
-  в этом цикле допустим только `coderabbit config validate`.
+  конфигурация в этом цикле проверяется через `check-jsonschema`, а не CLI.
 
 Если для одной из этих возможностей появится настоящий пользовательский запрос,
 это отдельная задача и, возможно, отдельный skill, а не тихое расширение этого.

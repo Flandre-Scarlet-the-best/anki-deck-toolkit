@@ -1,13 +1,14 @@
-"""Negative and positive contract tests for PR body formatting."""
+"""Позитивные и негативные тесты контракта форматирования описания PR."""
 
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from itertools import product
 from pathlib import Path
 
-from check_pr_body import is_automation_pr, validate
+from check_pr_body import is_automation_pr, validate, without_inline_code
 
 HEADINGS = (
     "Цель",
@@ -64,6 +65,22 @@ def body_with(performance: str) -> str:
 
 def valid_body() -> str:
     return body_with(NOT_APPLICABLE)
+
+
+
+COMPACT_CODERABBIT = """## CodeRabbit review и disposition
+
+- **Прогресс:** 3 завершённые итерации; последнее ревью \x60abcdef012345\x60
+  (итерация 3), опубликован \x601234567abcde\x60 (этот HEAD ещё не проверен).
+- **Итог:** confirmed 4 исправлены, false positive 1, stale/repeated 2, clean 1; нерешённых блокирующих нет.
+- **Существенное:** исправлена гонка в \x60src/example.rs\x60, commit \x601234567abcde\x60.
+- **Полный журнал:** [все результаты ревью](https://gist.github.com/example/0123456789abcdef0123456789abcdef).
+"""
+
+LEGACY_CODERABBIT = """| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |
+| --- | --- | --- | --- | --- | --- |
+| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |
+"""
 
 
 class PrBodyContractTests(unittest.TestCase):
@@ -126,7 +143,7 @@ class PrBodyContractTests(unittest.TestCase):
 
     def test_coderabbit_table_in_fence_is_not_accepted(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\n```markdown\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| 1 · x | — | — | 0 | clean | x |\n```"
-        self.assertTrue(any("таблицы" in e for e in validate(body)))
+        self.assertTrue(any("CodeRabbit" in e for e in validate(body)))
 
     def test_duplicate_and_reordered_headings(self):
         body = valid_body() + "\n\n## Цель\nПовторный раздел."
@@ -140,7 +157,7 @@ class PrBodyContractTests(unittest.TestCase):
 
     def test_conditional_coderabbit_table(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\nПроверено."
-        self.assertTrue(any("таблицы" in e for e in validate(body)))
+        self.assertTrue(any("CodeRabbit" in e for e in validate(body)))
         body += "\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 findings | clean | `def` |"
         self.assertEqual(validate(body), [])
 
@@ -152,7 +169,301 @@ class PrBodyContractTests(unittest.TestCase):
         # Строка из одних разделителей не является записью disposition.
         table = "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n"
         self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
-        self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"), [])
+        valid_row = "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"
+        partial_row = "| 2 · `abcdef1` | | | | | |"
+        self.assertEqual(validate(valid_body() + table + valid_row), [])
+        invalid_table = validate(valid_body() + table + valid_row + "\n" + partial_row)
+        self.assertTrue(any("корректная строка" in error for error in invalid_table), invalid_table)
+        dangling_table = (
+            valid_body()
+            + table
+            + valid_row
+            + "\n\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n"
+            + "| --- | --- | --- | --- | --- | --- |"
+        )
+        self.assertTrue(
+            any("корректная строка" in error for error in validate(dangling_table))
+        )
+
+    def test_coderabbit_compact_summary_with_gist(self):
+        self.assertEqual(validate(valid_body() + "\n\n" + COMPACT_CODERABBIT), [])
+
+    def test_coderabbit_compact_summary_with_measurements(self):
+        self.assertEqual(validate(body_with(MEASURED) + "\n\n" + COMPACT_CODERABBIT), [])
+
+    def test_coderabbit_compact_summary_requires_valid_gist_url(self):
+        invalid = COMPACT_CODERABBIT.replace(
+            "https://gist.github.com/example/0123456789abcdef0123456789abcdef",
+            "https://example.com/not-a-gist",
+        )
+        self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + invalid)))
+
+    def test_coderabbit_compact_summary_requires_both_head_shas(self):
+        invalid = COMPACT_CODERABBIT.replace(
+            "\x601234567abcde\x60 (этот HEAD ещё не проверен)", "неизвестный HEAD"
+        )
+        self.assertTrue(any("HEAD" in e for e in validate(valid_body() + "\n\n" + invalid)))
+
+    def test_coderabbit_summary_requires_quantitative_result(self):
+        line = next(line for line in COMPACT_CODERABBIT.splitlines() if line.startswith("- **Итог:**"))
+        for result in ("Подтверждённые замечания исправлены, блокирующих рисков нет.",
+                       "Все замечания рассмотрены, оставшихся проблем не обнаружено."):
+            with self.subTest(result=result):
+                summary = COMPACT_CODERABBIT.replace(line, f"- **Итог:** {result}")
+                self.assertTrue(any("количественные" in e for e in validate(valid_body() + "\n\n" + summary)))
+        for result in ("Подтверждено 2 замечания, исправлены оба.",
+                       "Найдено 0 замечаний; блокирующих рисков нет.",
+                       "Подтверждено:\n  2 исправленных замечания, блокирующих нет."):
+            with self.subTest(result=result):
+                summary = COMPACT_CODERABBIT.replace(line, f"- **Итог:** {result}")
+                self.assertEqual(validate(valid_body() + "\n\n" + summary), [])
+
+    def test_coderabbit_progress_binds_shas_to_roles(self):
+        original = ("3 завершённые итерации; последнее ревью `abcdef012345`\n"
+                    "  (итерация 3), опубликован `1234567abcde` (этот HEAD ещё не проверен).")
+        for progress in (
+            "3 итерации; reviewed HEAD неизвестен, опубликованный HEAD неизвестен; `abcdef012345` и `1234567abcde`.",
+            "3 итерации; reviewed HEAD `abcdef012345`, другой SHA `1234567abcde`.",
+            "3 итерации; опубликован `abcdef012345`, другой SHA `1234567abcde`.",
+            "3 итерации; reviewed HEAD `abcdef012345`, опубликован `abcdef012345`, другой `1234567abcde`.",
+        ):
+            with self.subTest(progress=progress):
+                summary = COMPACT_CODERABBIT.replace(original, progress)
+                self.assertTrue(any("HEAD" in e for e in validate(valid_body() + "\n\n" + summary)))
+        for progress in (
+            "3 итерации; reviewed HEAD: `abcdef012345`; опубликованный HEAD:\n  `1234567abcde`.",
+            "3 итерации; `abcdef012345` — reviewed HEAD; `1234567abcde` — published HEAD.",
+            "3 завершённые итерации; последнее ревью: `abcdef012345`\n  (итерация 3); опубликован `1234567abcde`.",
+        ):
+            with self.subTest(progress=progress):
+                summary = COMPACT_CODERABBIT.replace(original, progress)
+                self.assertEqual(validate(valid_body() + "\n\n" + summary), [])
+
+    def test_coderabbit_compact_summary_requires_all_fields(self):
+        for label in ("Прогресс", "Итог", "Существенное", "Полный журнал"):
+            invalid = COMPACT_CODERABBIT.replace(f"**{label}:**", f"**Пропущено_{label}:**")
+            self.assertTrue(
+                any(f"«{label}»" in e for e in validate(valid_body() + "\n\n" + invalid)),
+                label,
+            )
+
+    def test_legacy_coderabbit_table_remains_supported(self):
+        body = valid_body() + "\n\n## CodeRabbit review и disposition\n" + LEGACY_CODERABBIT
+        self.assertEqual(validate(body), [])
+
+    def test_mixed_legacy_table_does_not_mask_partial_or_invalid_summary(self):
+        incomplete = COMPACT_CODERABBIT.replace("**Итог:**", "**Сводный итог:**")
+        invalid_link = COMPACT_CODERABBIT.replace(
+            "https://gist.github.com/example/0123456789abcdef0123456789abcdef",
+            "https://example.com/not-a-gist",
+        )
+        malformed_label = COMPACT_CODERABBIT.replace("**Итог:**", "Итог:")
+        missing_colon = COMPACT_CODERABBIT.replace("**Итог:**", "**Итог**")
+        for summary in (incomplete, invalid_link, malformed_label, missing_colon):
+            with self.subTest(summary=summary):
+                compact_fields = summary.split("\n", 1)[1]
+                body = (
+                    valid_body()
+                    + "\n\n## CodeRabbit review и disposition\n"
+                    + LEGACY_CODERABBIT
+                    + "\n"
+                    + compact_fields
+                )
+                errors = validate(body)
+                self.assertTrue(any("сосуществовать" in error for error in errors), errors)
+                self.assertTrue(any("Итог" in error or "Gist" in error for error in errors), errors)
+
+    def test_legacy_table_and_complete_compact_summary_cannot_coexist(self):
+        compact_fields = COMPACT_CODERABBIT.split("\n", 1)[1]
+        body = (
+            valid_body()
+            + "\n\n## CodeRabbit review и disposition\n"
+            + LEGACY_CODERABBIT
+            + "\n"
+            + compact_fields
+        )
+        self.assertTrue(any("сосуществовать" in error for error in validate(body)))
+
+    def test_coderabbit_compact_summary_rejects_duplicate_fields(self):
+        cases = (
+            ("Прогресс", "TBD"),
+            ("Итог", "подтверждённых находок 4, блокирующих нет."),
+        )
+        for label, value in cases:
+            duplicate = COMPACT_CODERABBIT.replace(
+                f"- **{label}:**", f"- **{label}:** {value}\n- **{label}:**", 1
+            )
+            with self.subTest(label=label):
+                errors = validate(valid_body() + "\n\n" + duplicate)
+                self.assertTrue(
+                    any("ровно один раз" in error and label in error for error in errors), errors
+                )
+
+        for malformed_label in ("- **Прогресс**:", "- **Прогресс2:**", "- Прогресс:"):
+            malformed_duplicate = COMPACT_CODERABBIT.replace(
+                "- **Прогресс:**",
+                f"- **Прогресс:** duplicate\n{malformed_label}",
+                1,
+            )
+            with self.subTest(malformed_label=malformed_label):
+                errors = validate(valid_body() + "\n\n" + malformed_duplicate)
+                self.assertTrue(any("точный формат" in error for error in errors), errors)
+
+    def test_coderabbit_compact_summary_rejects_placeholder_and_vague_values(self):
+        invalid_progress = COMPACT_CODERABBIT.replace(
+            "- **Прогресс:** 3 завершённые итерации; последнее ревью `abcdef012345`\n"
+            "  (итерация 3), опубликован `1234567abcde` (этот HEAD ещё не проверен).",
+            "- **Прогресс:** TBD",
+        )
+        invalid_result = COMPACT_CODERABBIT.replace(
+            "- **Итог:** confirmed 4 исправлены, false positive 1, stale/repeated 2, clean 1; нерешённых блокирующих нет.",
+            "- **Итог:** ok",
+        )
+        for summary, field in ((invalid_progress, "Прогресс"), (invalid_result, "Итог")):
+            with self.subTest(field=field):
+                errors = validate(valid_body() + "\n\n" + summary)
+                self.assertTrue(any(field in error for error in errors), errors)
+
+    def test_empty_summary_field_cannot_borrow_next_list_item(self):
+        for field in ("Итог", "Существенное"):
+            line = next(line for line in COMPACT_CODERABBIT.splitlines() if line.startswith(f"- **{field}:**"))
+            invalid = COMPACT_CODERABBIT.replace(line, f"- **{field}:**\n- Посторонний пункт содержит текст")
+            with self.subTest(field=field):
+                self.assertTrue(any(field in error for error in validate(valid_body() + "\n\n" + invalid)))
+
+    def test_coderabbit_gist_link_must_be_in_full_log_field(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        misplaced = COMPACT_CODERABBIT.replace(
+            f"- **Полный журнал:** [все результаты ревью]({url}).",
+            "- **Полный журнал:** подробности в поле Итог.",
+        ).replace(
+            "- **Итог:** confirmed", f"- **Итог:** [журнал]({url}); confirmed"
+        )
+        self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + misplaced)))
+
+    def test_coderabbit_log_link_respects_list_item_boundary(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        link = f"[журнал]({url})"
+        prefix = COMPACT_CODERABBIT.replace(f"[все результаты ревью]({url}).", "см. ниже.").rstrip()
+        for suffix in (f"\n\n{link}", f"\n- Другое: {link}"):
+            with self.subTest(suffix=suffix):
+                self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + prefix + suffix)))
+        for suffix in (f"\n  {link}", f"\n\n  {link}", f"\n{link}", f"\n\n\t{link}"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(validate(valid_body() + "\n\n" + prefix + suffix), [])
+        with_link = COMPACT_CODERABBIT.rstrip() + f"\n\n{link}"
+        self.assertEqual(validate(valid_body() + "\n\n" + with_link), [])
+
+    def test_indented_code_is_not_coderabbit_summary_or_table(self):
+        heading = "\n\n## CodeRabbit review и disposition\n\n"
+        compact = COMPACT_CODERABBIT.split("\n", 1)[1].strip("\n")
+        for source in (compact, LEGACY_CODERABBIT.strip("\n")):
+            for indent in ("    ", "\t", "  \t"):
+                with self.subTest(source=source[:20], indent=indent):
+                    code = "\n".join(indent + line for line in source.splitlines())
+                    self.assertTrue(validate(valid_body() + heading + code))
+        # Отступленная строка без пустой строки — продолжение абзаца, не код.
+        continued = COMPACT_CODERABBIT.replace("  (итерация 3)", "    (итерация 3)")
+        self.assertEqual(validate(valid_body() + "\n\n" + continued), [])
+
+    def test_coderabbit_gist_link_inside_inline_code_is_not_accepted(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        inline_code = COMPACT_CODERABBIT.replace(
+            f"[все результаты ревью]({url})", f"`[все результаты ревью]({url})`"
+        )
+        self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + inline_code)))
+
+    def test_coderabbit_image_is_not_a_gist_link(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        image = COMPACT_CODERABBIT.replace(
+            f"[все результаты ревью]({url})", f"![все результаты ревью]({url})"
+        )
+        self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + image)))
+        escaped_bang = image.replace("![все результаты", "\\![все результаты")
+        self.assertEqual(validate(valid_body() + "\n\n" + escaped_bang), [])
+
+    def test_coderabbit_escaped_gist_link_is_not_accepted(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        escaped = COMPACT_CODERABBIT.replace(
+            f"[все результаты ревью]({url})", f"\\[все результаты ревью]({url})"
+        )
+        self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + escaped)))
+
+    def test_coderabbit_gist_link_with_inline_code_label_remains_clickable(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        formatted_label = COMPACT_CODERABBIT.replace(
+            f"[все результаты ревью]({url})", f"[`все результаты ревью`]({url})"
+        )
+        self.assertEqual(validate(valid_body() + "\n\n" + formatted_label), [])
+
+    def test_inline_code_masking_preserves_shape_and_is_idempotent(self):
+        alphabet = ("`", "\\", "x", "\n")
+        for length in range(6):
+            for symbols in product(alphabet, repeat=length):
+                content = "".join(symbols)
+                masked = without_inline_code(content)
+                message = f"input={content!r}"
+                self.assertEqual(len(masked), len(content), message)
+                self.assertEqual(
+                    [index for index, char in enumerate(masked) if char == "\n"],
+                    [index for index, char in enumerate(content) if char == "\n"],
+                    message,
+                )
+                self.assertEqual(without_inline_code(masked), masked, message)
+
+    def test_coderabbit_gist_link_in_html_comment_is_not_accepted(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        commented = COMPACT_CODERABBIT.replace(
+            f"[все результаты ревью]({url})", f"<!-- [все результаты ревью]({url}) --> ссылка отсутствует"
+        )
+        self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + commented)))
+
+    def test_coderabbit_gist_link_in_fence_is_not_accepted(self):
+        fake = (
+            "## CodeRabbit review и disposition\n"
+            "- **Прогресс:** 1 итерация, ревью \x60abcdef012345\x60, опубликован \x601234567abcde\x60.\n"
+            "- **Итог:** 0 findings, clean 1, блокирующих нет.\n"
+            "- **Существенное:** важных ошибок нет.\n"
+            "- **Полный журнал:** пример, фактической ссылки нет.\n"
+            "\x60\x60\x60markdown\n"
+            "[журнал](https://gist.github.com/example/0123456789abcdef0123456789abcdef)\n"
+            "\x60\x60\x60"
+        )
+        self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + fake)))
+
+    def test_nested_list_fences_do_not_supply_coderabbit_evidence(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        original = f"[все результаты ревью]({url})."
+        for marker in ("~~~", "```", "~~~~"):
+            for indent in ("    ", "     ", "\t"):
+                with self.subTest(marker=marker, indent=indent):
+                    # Внутренние обратные кавычки и комментарий — литералы кода.
+                    example = (f"нет ссылки\n{indent}{marker}md\n"
+                               f"{indent}<!-- `пример`\n{indent}[журнал]({url})\n"
+                               f"{indent}{marker}")
+                    body = COMPACT_CODERABBIT.replace(original, example)
+                    self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + body)))
+
+        compact = COMPACT_CODERABBIT.split("\n", 1)[1].strip("\n")
+        for source in (compact, LEGACY_CODERABBIT.strip("\n")):
+            for opener in ("- пример\n    ~~~~md", "1. пример\n     ~~~~md", "- ~~~~md"):
+                # Короткая граница не закрывает четырёхсимвольный блок.
+                code = "\n".join("    " + line for line in source.splitlines())
+                nested = f"{opener}\n    ~~~\n{code}\n    ~~~~"
+                with self.subTest(opener=opener, source=source[:20]):
+                    body = valid_body() + "\n\n## CodeRabbit review и disposition\n" + nested
+                    self.assertTrue(any("CodeRabbit" in e for e in validate(body)))
+        # Настоящая ссылка после закрытия блока остаётся видимой.
+        body = COMPACT_CODERABBIT.replace(original, f"\n    ~~~\n    пример\n    ~~~\n  {original}")
+        self.assertEqual(validate(valid_body() + "\n\n" + body), [])
+        # Незакрытый блок прекращается при выходе из пункта списка.
+        body = COMPACT_CODERABBIT.replace("- **Итог:**", "    ~~~\n    пример\n- **Итог:**")
+        self.assertEqual(validate(valid_body() + "\n\n" + body), [])
+        # Маркер внутри комментария не скрывает видимую сводку после него.
+        comment = "<!--\n- пример\n    ~~~\n-->\n"
+        self.assertEqual(validate(valid_body() + "\n\n" + comment + COMPACT_CODERABBIT), [])
+        # Обычный кодовый блок не должен менять состояние внешнего списка.
+        self.assertEqual(validate(valid_body() + "\n\n```md\n- пример\n```\n" + COMPACT_CODERABBIT), [])
 
     def test_performance_decisions_are_accepted(self):
         for performance in (NOT_APPLICABLE, MEASURED, NOT_MEASURED, "**Статус:** не применимо\n- **Причина:** перевод README на английский, код и сборка не меняются."):
