@@ -330,7 +330,7 @@ cargo run --quiet --locked -p asset-store --bin kanji-corpus-gate
 
 AGPL-3.0 不会自动适用于用户牌组、下载的第三方素材或程序输出（例如 HTML 报告和处理后的图片）。本项目不主张拥有第三方素材的版权，也不会自动为输出文件附加新许可证。其权利及使用限制取决于输入内容、原权利人及原始许可条款。用户数据不会通过 Git 发布。
 
-[查看 AGPL-3.0 正文 →](LICENSE) · [查看许可范围与素材权利 →](LICENSING.md)
+[查看 AGPL-3.0 正文 →](LICENSE) · [查看许可范围与素材权利 →](LICENSING.zh-CN.md)
 
 ---
 
