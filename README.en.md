@@ -4,7 +4,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: c4ea06c46fe17c66a7fdb69a526b570a92fb8845 -->
+<!-- i18n-source-git-blob: 590024888e66c950f1c732607a9b5ddd94b6c876 -->
 
 **Rust CLI tools for inspecting and validating CrowdAnki JSON exports, making targeted edits, and visually comparing exports.**
 
@@ -12,6 +12,7 @@
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
 ![Linux platform](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Views](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.svg?label=Views&color=blue)](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
 
 A toolkit for Anki deck maintainers and developers: inspect exports, validate structure and media references, review note quality, perform safe edits with `dry-run`, create notes using existing note models, and generate HTML before/after reports. The tools do not call LLM APIs but support a verifiable workflow with external AI agents.
