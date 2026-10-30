@@ -4,7 +4,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: c4ea06c46fe17c66a7fdb69a526b570a92fb8845 -->
+<!-- i18n-source-git-blob: 590024888e66c950f1c732607a9b5ddd94b6c876 -->
 
 **基于 Rust 的命令行工具，用于检查、验证、定向修改和可视化对比 CrowdAnki JSON 导出数据。**
 
@@ -12,6 +12,7 @@
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
 ![Linux 平台](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
 [![AGPL-3.0 许可证](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![浏览量](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.svg?label=%E6%B5%8F%E8%A7%88%E9%87%8F&color=blue)](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
 
 这套工具面向 Anki 牌组维护者和开发者：查看导出数据、验证结构和媒体引用、检查笔记质量、通过 `dry-run` 安全地进行修改、使用现有笔记类型创建笔记，并生成“修改前 / 修改后”的 HTML 对比报告。工具本身不会调用 LLM API，但支持与外部 AI 智能体配合，形成可核查的工作流程。
