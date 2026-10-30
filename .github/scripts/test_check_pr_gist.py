@@ -24,11 +24,32 @@ EXPECTED = {"repository": REPOSITORY, "pr_number": 7, "head_sha": HEAD,
             "base_ref": "main", "head_ref": "fix/contract"}
 
 
+def manifest_text(m):
+    """Читаемый Markdown для синтетического публичного индекса."""
+    def table(title, columns, rows):
+        return (f"\n## {title}\n\n| " + " | ".join(columns) + " |\n| "
+                + " | ".join("---" for _ in columns) + " |\n"
+                + "".join("| " + " | ".join(str(v) for v in row) + " |\n" for row in rows))
+    text = (f"# Индекс подтверждений\n\nСхема: 2\nРепозиторий: {m['repository']}\n"
+            f"PR: {m['pr_number'] if m['pr_number'] is not None else 'не создан'}\nHEAD: {m['head_sha']}\n"
+            f"База: {m['base_ref']}\nВетка: {m['head_ref']}\nЗадача: {m['task']}\n")
+    text += table("Файлы", ["Файл", "Тип", "Commit", "SHA-256"],
+                  [[a[k] for k in ('file','kind','commit_sha','sha256')] for a in m['artifacts']])
+    text += table("Проверки", ["Проверка", "Commit", "Код", "SHA-256 локального подтверждения"],
+                  [[c[k] for k in ('name','commit_sha','exit_code','output_sha256')] for c in m['checks']])
+    text += table("Измерения", ["Файл", "Сценарий", "База", "Кандидат", "Результат", "Регрессии"],
+                  [[b['report_file'],b['scenario'],b['baseline_sha'] or 'нет',b['candidate_sha'],b['result'],
+                    '; '.join(b['regressions']) or 'нет'] for b in m['benchmarks']])
+    text += table("CodeRabbit", ["Итерация", "Reviewed commit", "Published commit", "Строк журнала"],
+                  [[r[k] for k in ('iteration','reviewed_sha','published_sha','findings')] for r in m['reviews']])
+    return text
+
+
 def fixture(measured=False, reviews=False):
     body = body_with(MEASURED) if measured else valid_body()
     body = body.replace("Фактическая информация для раздела CI.", f"Текущий HEAD: `{HEAD}`; CI ещё не запускался.")
-    manifest = {"schema_version": 1, **EXPECTED, "task": "Проверка инженерного контракта",
-                "artifacts": [], "benchmarks": [], "reviews": []}
+    manifest = {"schema_version": 2, **EXPECTED, "task": "Проверка инженерного контракта",
+                "artifacts": [], "checks": [{"name": "unit tests", "commit_sha": HEAD, "exit_code": 0, "output_sha256": sha256("25 tests passed")}], "benchmarks": [], "reviews": []}
     details = (f"{manifest['task']}\n{REPOSITORY}\nHEAD: {HEAD}\n"
                f"https://github.com/{REPOSITORY}/pull/7\n\n"
                + "\n\n".join(f"## {h}\n{t}" for h, t in (
@@ -36,21 +57,20 @@ def fixture(measured=False, reviews=False):
                    ("Технические результаты", "Форматная проверка отделена от сетевой; полученные файлы сверяются с инвентарём."),
                    ("Проверки и источники", "tests.txt фиксирует запуск синтетических проверок текущей реализации и результат."),
                    ("Ограничения", "Инвентарь не доказывает истинность выводов; смысл проверяет человек по источникам."))))
-    files = {"details.md": details, "tests.txt": "python3 -m unittest: 25 проверок успешно; синтетические независимые fixtures.\n"}
+    files = {"details.md": details}
 
     def add(name, content, kind, commit=HEAD):
         files[name] = content
         manifest["artifacts"].append({"file": name, "sha256": sha256(content), "kind": kind,
-                                      "commit_sha": commit, "source": "локальный исходный отчёт проверки"})
+                                      "commit_sha": commit})
 
     add("details.md", details, "details")
-    add("tests.txt", files["tests.txt"], "test-log")
     if measured:
         report = "anki-repo.validate: исходная серия 100 ms → 80 ms, n=10; ухудшений не выявлено."
         add("benchmark.md", report, "benchmark-report")
         manifest["benchmarks"].append({"scenario": "anki-repo.validate", "candidate_sha": HEAD,
                                         "baseline_sha": BASE, "report_file": "benchmark.md",
-                                        "summary": MEASURED.split("### validation warm\n", 1)[1].strip(), "regressions": []})
+                                        "result": "wall-clock 100 ms → 80 ms, −20 %, n=10.", "regressions": []})
     if reviews:
         body = body.replace(REPORT, "") + "\n\n" + COMPACT_CODERABBIT.replace(
             "3 завершённые итерации", "1 завершённая итерация").replace(
@@ -60,8 +80,8 @@ def fixture(measured=False, reviews=False):
                "| --- | --- | --- | --- | --- | --- |\n"
                f"| 1 · `{reviewed}` | major | src/run.rs | Ошибка проверки | confirmed | `{HEAD}` |\n")
         add("coderabbit-review.md", log, "review-log")
-        manifest["reviews"] = [{"iteration": 1, "reviewed_sha": reviewed, "published_sha": HEAD, "rows": [log.splitlines()[-1]]}]
-    files["manifest.json"] = json.dumps(manifest, ensure_ascii=False)
+        manifest["reviews"] = [{"iteration": 1, "reviewed_sha": reviewed, "published_sha": HEAD, "findings": 1}]
+    files["manifest.md"] = manifest_text(manifest)
     return body, files, manifest
 
 
@@ -144,7 +164,7 @@ class GistContractTests(unittest.TestCase):
 
     def test_missing_empty_unrelated_or_copy_details(self):
         body, files, _ = fixture()
-        for name in ("details.md", "manifest.json", "tests.txt"):
+        for name in ("details.md", "manifest.md"):
             with self.subTest(name=name):
                 broken = dict(files)
                 del broken[name]
@@ -161,7 +181,7 @@ class GistContractTests(unittest.TestCase):
             with self.subTest(key=key):
                 broken = {**manifest, key: value}
                 with self.assertRaises(ContractError):
-                    validate_evidence(body, {**files, "manifest.json": json.dumps(broken)}, EXPECTED)
+                    validate_evidence(body, {**files, "manifest.md": manifest_text(broken)}, EXPECTED)
         with self.assertRaisesRegex(ContractError, "локального инвентаря"):
             validate_evidence(body, files, EXPECTED, {**manifest, "task": "other"})
 
@@ -172,21 +192,45 @@ class GistContractTests(unittest.TestCase):
             for name, text in files.items():
                 (root / name).write_bytes(text.encode())
             validate_evidence(body, files, EXPECTED, manifest, root)
-            (root / "tests.txt").write_text("другой вывод")
+            (root / "details.md").write_text("другой вывод")
             with self.assertRaisesRegex(ContractError, "локального исходника"):
                 validate_evidence(body, files, EXPECTED, manifest, root)
+        with self.assertRaisesRegex(ContractError, "Markdown"):
+            validate_evidence(body, {**files, "tests.txt": "служебный вывод"}, EXPECTED)
         with self.assertRaisesRegex(ContractError, "SHA-256"):
-            validate_evidence(body, {**files, "tests.txt": "повреждение"}, EXPECTED)
+            validate_evidence(body, {**files, "details.md": files["details.md"] + "повреждение"}, EXPECTED)
 
     def test_body_cannot_claim_stale_ci_head(self):
         body, files, manifest = fixture()
         with self.assertRaisesRegex(ContractError, "CI не привязан"):
             validate_evidence(body.replace(HEAD, BASE), files, EXPECTED)
 
+    def test_only_markdown_and_no_service_artifact_kinds(self):
+        body, files, manifest = fixture()
+        for name in ("python-tests.txt", "manifest.json", "build.log"):
+            with self.subTest(name=name), self.assertRaisesRegex(ContractError, "Markdown"):
+                validate_evidence(body, {**files, name: "service output"}, EXPECTED)
+        for kind in ("test-log", "diagnostic", "archive"):
+            m = copy.deepcopy(manifest)
+            m["artifacts"][0]["kind"] = kind
+            with self.subTest(kind=kind), self.assertRaisesRegex(ContractError, "kind"):
+                validate_evidence(body, {**files, "manifest.md": manifest_text(m)}, EXPECTED)
+
+    def test_check_output_remains_local_but_its_hash_is_verified(self):
+        body, files, manifest = fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "private-output.log"
+            output.write_text("25 tests passed")
+            sources = {"unit tests": str(output)}
+            validate_evidence(body, files, EXPECTED, manifest, check_sources=sources)
+            output.write_text("different output")
+            with self.assertRaisesRegex(ContractError, "хеш локального"):
+                validate_evidence(body, files, EXPECTED, manifest, check_sources=sources)
+
     def test_no_current_head_evidence(self):
         body, files, manifest = fixture()
-        manifest["artifacts"][1]["commit_sha"] = BASE
-        files["manifest.json"] = json.dumps(manifest)
+        manifest["checks"][0]["commit_sha"] = BASE
+        files["manifest.md"] = manifest_text(manifest)
         with self.assertRaisesRegex(ContractError, "текущего HEAD"):
             validate_evidence(body, files, EXPECTED)
 
@@ -196,7 +240,7 @@ class GistContractTests(unittest.TestCase):
             artifact = {**manifest["artifacts"][-1], "file": f"benchmark-{number}.md"}
             manifest["artifacts"].append(artifact)
             manifest["benchmarks"].append({**manifest["benchmarks"][0], "report_file": artifact["file"]})
-        files["manifest.json"] = json.dumps(manifest)
+        files["manifest.md"] = manifest_text(manifest)
         with self.assertRaisesRegex(ContractError, "отсутствующий"):
             validate_evidence(body, files, EXPECTED, manifest)
 
@@ -204,12 +248,12 @@ class GistContractTests(unittest.TestCase):
         body, files, manifest = fixture(True)
         regression = "RSS +15 % (наблюдаемое ухудшение)"
         manifest["benchmarks"][0]["regressions"] = [regression]
-        files["manifest.json"] = json.dumps(manifest)
+        files["manifest.md"] = manifest_text(manifest)
         with self.assertRaisesRegex(ContractError, "регрессия"):
             validate_evidence(body, files, EXPECTED)
         body, files, manifest = fixture(True)
         manifest["benchmarks"] = []
-        files["manifest.json"] = json.dumps(manifest)
+        files["manifest.md"] = manifest_text(manifest)
         with self.assertRaises(ContractError):
             validate_evidence(body, files, EXPECTED)
         body, files, manifest = fixture(True)
@@ -223,7 +267,7 @@ class GistContractTests(unittest.TestCase):
                 broken = {**files, "coderabbit-review.md": missing}
                 m = copy.deepcopy(manifest)
                 m["artifacts"][-1]["sha256"] = sha256(missing)
-                broken["manifest.json"] = json.dumps(m)
+                broken["manifest.md"] = manifest_text(m)
                 with self.assertRaises(ContractError):
                     validate_evidence(body, broken, EXPECTED)
         with self.assertRaises(ContractError):
@@ -276,7 +320,7 @@ class GistContractTests(unittest.TestCase):
     def test_new_pr_preflight_without_fictitious_pr_number(self):
         body, files, manifest = fixture()
         manifest["pr_number"] = None
-        files["manifest.json"] = json.dumps(manifest)
+        files["manifest.md"] = manifest_text(manifest)
         expected = {**EXPECTED, "pr_number": None}
         branch = {"commit": {"sha": HEAD}}
         api = FakeAPI([branch, snapshot(files), snapshot(files), branch])
@@ -290,16 +334,14 @@ class GistContractTests(unittest.TestCase):
         review = manifest["reviews"][0]
         short_log = files["coderabbit-review.md"].replace(review["reviewed_sha"], review["reviewed_sha"][:7]).replace(HEAD, HEAD[:12])
         files["coderabbit-review.md"] = short_log
-        review["rows"] = [short_log.splitlines()[-1]]
         manifest["artifacts"][-1]["sha256"] = sha256(short_log)
-        files["manifest.json"] = json.dumps(manifest)
+        files["manifest.md"] = manifest_text(manifest)
         validate_evidence(body, files, EXPECTED)
 
     def test_review_cannot_drop_a_finding_within_an_iteration(self):
         body, files, manifest = fixture(reviews=True)
-        extra = manifest["reviews"][0]["rows"][0].replace("Ошибка проверки", "Вторая ошибка")
-        manifest["reviews"][0]["rows"].append(extra)
-        files["manifest.json"] = json.dumps(manifest)
+        manifest["reviews"][0]["findings"] += 1
+        files["manifest.md"] = manifest_text(manifest)
         with self.assertRaisesRegex(ContractError, "потеряны строки"):
             validate_evidence(body, files, EXPECTED)
 
@@ -308,11 +350,10 @@ class GistContractTests(unittest.TestCase):
         regression = "RSS +15 %"
         body = body.replace("существенных ухудшений не обнаружено по проверенным метрикам.", regression)
         benchmark = manifest["benchmarks"][0]
-        benchmark["summary"] = benchmark["summary"].replace("существенных ухудшений не обнаружено по проверенным метрикам.", regression)
         benchmark["regressions"] = [regression]
         files["benchmark.md"] += " " + regression
         manifest["artifacts"][-1]["sha256"] = sha256(files["benchmark.md"])
-        files["manifest.json"] = json.dumps(manifest)
+        files["manifest.md"] = manifest_text(manifest)
         validate_evidence(body, files, EXPECTED)
         with self.assertRaisesRegex(ContractError, "регрессия|сводки"):
             validate_evidence(body.replace(regression, "улучшение"), files, EXPECTED)

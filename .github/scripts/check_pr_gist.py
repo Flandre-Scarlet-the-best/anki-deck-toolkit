@@ -22,7 +22,7 @@ FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,150}\Z")
 DETAIL_HEADINGS = ("Назначение", "Технические результаты", "Проверки и источники", "Ограничения")
-KINDS = {"details", "benchmark-report", "test-log", "diagnostic", "review-log", "archive"}
+KINDS = {"details", "benchmark-report", "review-log"}
 
 
 class ContractError(ValueError):
@@ -98,16 +98,47 @@ def gist_files(snapshot: dict, url: str) -> tuple[dict[str, str], str]:
     return result, history[0]["version"]
 
 
+def read_manifest(text: str) -> dict:
+    """Читаемый Markdown-индекс: метаданные и обычные таблицы, без JSON-вложения."""
+    prefix = fields(text.split("## ", 1)[0])
+    def value(name):
+        values = prefix.get(name, [])
+        require(len(values) == 1, f"Индекс: нужно поле {name}")
+        return values[0].strip("`")
+    require(value("Схема") == "2", "Индекс: неизвестная схема")
+    parts = dict(sections(text))
+    def rows(heading, columns):
+        require(heading in parts, f"Индекс: нет раздела {heading}")
+        lines = [line for line in parts[heading].splitlines() if line.startswith("|")]
+        require(len(lines) >= 2 and table_cells(lines[0]) == columns, f"Индекс: неверная таблица {heading}")
+        result = [table_cells(line) for line in lines[2:]]
+        require(all(len(row) == len(columns) for row in result), f"Индекс: неполная строка {heading}")
+        return result
+    artifacts = [{"file": r[0], "kind": r[1], "commit_sha": r[2].strip("`"), "sha256": r[3].strip("`")}
+                 for r in rows("Файлы", ["Файл", "Тип", "Commit", "SHA-256"])]
+    checks = [{"name": r[0], "commit_sha": r[1].strip("`"), "exit_code": int(r[2]), "output_sha256": r[3].strip("`")}
+              for r in rows("Проверки", ["Проверка", "Commit", "Код", "SHA-256 локального подтверждения"])]
+    benchmarks = [{"report_file": r[0], "scenario": r[1], "baseline_sha": None if r[2] == "нет" else r[2].strip("`"),
+                   "candidate_sha": r[3].strip("`"), "result": r[4],
+                   "regressions": [] if r[5] == "нет" else r[5].split("; ")}
+                  for r in rows("Измерения", ["Файл", "Сценарий", "База", "Кандидат", "Результат", "Регрессии"])]
+    reviews = [{"iteration": int(r[0]), "reviewed_sha": r[1].strip("`"), "published_sha": r[2].strip("`"), "findings": int(r[3])}
+               for r in rows("CodeRabbit", ["Итерация", "Reviewed commit", "Published commit", "Строк журнала"])]
+    return {"schema_version": 2, "repository": value("Репозиторий"),
+            "pr_number": None if value("PR") == "не создан" else int(value("PR")),
+            "head_sha": value("HEAD"), "base_ref": value("База"), "head_ref": value("Ветка"),
+            "task": value("Задача"), "artifacts": artifacts, "checks": checks,
+            "benchmarks": benchmarks, "reviews": reviews}
+
+
 def validate_evidence(body: str, files: dict[str, str], expected: dict,
-                      expected_manifest: dict | None = None, source_dir: Path | None = None) -> None:
+                      expected_manifest: dict | None = None, source_dir: Path | None = None,
+                      check_sources: dict | None = None) -> None:
     """Проверяемый инвентарь, не доказательство истинности семантики и полноты мира."""
     require(not validate(body), "PR body не соответствует локальному контракту")
-    require("manifest.json" in files and "details.md" in files, "Gist: нужны manifest.json и содержательный details.md")
-    try:
-        manifest = json.loads(files["manifest.json"])
-    except ValueError:
-        raise ContractError("Gist: повреждён manifest.json") from None
-    require(isinstance(manifest, dict) and manifest.get("schema_version") == 1, "Gist: неизвестная схема manifest")
+    require(all(name.endswith(".md") for name in files), "Gist: разрешены только Markdown-файлы; служебные вложения запрещены")
+    require("manifest.md" in files and "details.md" in files, "Gist: нужны manifest.md и содержательный details.md")
+    manifest = read_manifest(files["manifest.md"])
     for key in ("repository", "pr_number", "head_sha", "base_ref", "head_ref"):
         require(manifest.get(key) == expected.get(key), f"Gist: устаревшая или чужая привязка {key}")
     require(bool(FULL_SHA.fullmatch(str(manifest.get("head_sha", "")))), "Gist: нужен полный head_sha")
@@ -136,24 +167,38 @@ def validate_evidence(body: str, files: dict[str, str], expected: dict,
     for item in artifacts:
         require(isinstance(item, dict), "Gist: повреждена запись artifacts")
         name = item.get("file")
-        require(isinstance(name, str) and name in files and name != "manifest.json" and name not in inventory,
+        require(isinstance(name, str) and name in files and name != "manifest.md" and name not in inventory,
                 "Gist: отсутствующий/повторный файл инвентаря")
         require(item.get("kind") in KINDS, f"Gist: неизвестный kind {name}")
         require(bool(DIGEST.fullmatch(str(item.get("sha256", "")))) and sha256(files[name]) == item["sha256"],
                 f"Gist: не совпал SHA-256 {name}")
         require(bool(FULL_SHA.fullmatch(str(item.get("commit_sha", "")))), f"Gist: нет проверенного SHA {name}")
-        require(isinstance(item.get("source"), str) and len(item["source"]) >= 10
-                and not placeholder(item["source"]), f"Gist: нет источника {name}")
         require(bool(files[name].strip()) and not placeholder(files[name]), f"Gist: пустой артефакт {name}")
         if source_dir is not None:
             require(FILENAME.fullmatch(name) is not None, "Недопустимый локальный путь")
             require((source_dir / name).read_bytes() == files[name].encode("utf-8"),
                     f"Gist: {name} отличается от локального исходника")
         inventory[name] = item
-    require(set(inventory) == set(files) - {"manifest.json"}, "Gist: файлы не перечислены в manifest")
+    require(set(inventory) == set(files) - {"manifest.md"}, "Gist: файлы не перечислены в manifest")
     require(inventory["details.md"]["kind"] == "details", "Gist: неверный kind details.md")
-    require(any(a["kind"] in {"test-log", "diagnostic"} and a["commit_sha"] == manifest["head_sha"]
-                for a in artifacts), "Gist: нет отдельного подтверждения проверок текущего HEAD")
+    require(all(a["kind"] != "details" or a["file"] == "details.md" for a in artifacts),
+            "Gist: служебные файлы нельзя маскировать как details")
+    checks = manifest.get("checks")
+    require(isinstance(checks, list) and bool(checks), "Индекс: нет результатов проверок")
+    names = set()
+    for check in checks:
+        require(isinstance(check, dict) and isinstance(check.get("name"), str)
+                and check["name"] not in names and not placeholder(check["name"]), "Индекс: неверное имя проверки")
+        names.add(check["name"])
+        require(bool(FULL_SHA.fullmatch(str(check.get("commit_sha", ""))))
+                and type(check.get("exit_code")) is int
+                and bool(DIGEST.fullmatch(str(check.get("output_sha256", "")))), "Индекс: неполный результат проверки")
+        if check_sources is not None:
+            require(check["name"] in check_sources, "Нет локального источника проверки")
+            digest = hashlib.sha256(Path(check_sources[check["name"]]).read_bytes()).hexdigest()
+            require(digest == check["output_sha256"], "Не совпал хеш локального подтверждения проверки")
+    require(any(c["commit_sha"] == manifest["head_sha"] for c in checks),
+            "Gist: нет подтверждения проверок текущего HEAD")
 
     benchmarks = manifest.get("benchmarks")
     reviews = manifest.get("reviews")
@@ -163,7 +208,7 @@ def validate_evidence(body: str, files: dict[str, str], expected: dict,
     require(bool(benchmarks) == measured, "Gist: измерения manifest не соответствуют статусу PR")
     blocks = scenario_blocks(performance) or [("", performance)]
     actual_summaries = [b.strip() for h, b in blocks if not h.endswith("— не измерено")] if measured else []
-    expected_summaries = []
+    expected_results = []
     reports = set()
     for benchmark in benchmarks:
         require(isinstance(benchmark, dict), "Gist: повреждена запись benchmark")
@@ -175,9 +220,12 @@ def validate_evidence(body: str, files: dict[str, str], expected: dict,
         require("baseline_sha" in benchmark and (benchmark["baseline_sha"] is None
                 or bool(FULL_SHA.fullmatch(str(benchmark["baseline_sha"])))),
                 "Gist: неверный baseline SHA")
-        summary = benchmark.get("summary")
-        require(isinstance(summary, str) and summary.strip(), "Gist: нет компактной сводки benchmark")
-        expected_summaries.append(summary.strip())
+        result = benchmark.get("result")
+        require(isinstance(result, str) and result.strip(), "Индекс: нет результата benchmark")
+        expected_results.append(result)
+        matching_summaries = [text for text in actual_summaries if fields(text).get("Результат") == [result]]
+        require(len(matching_summaries) == 1, "Gist: сводки PR не совпадают с индексом измерений")
+        summary = matching_summaries[0]
         summary_fields = fields(summary)
         for field, key in (("Кандидат", "candidate_sha"), ("База", "baseline_sha")):
             if benchmark[key] is not None:
@@ -192,7 +240,8 @@ def validate_evidence(body: str, files: dict[str, str], expected: dict,
             require(isinstance(regression, str) and len(regression) >= 3 and not placeholder(regression)
                     and regression in summary_fields.get("Регрессии", [""])[0]
                     and regression in files[report], "Gist: существенная регрессия потеряна в PR/отчёте")
-    require(sorted(actual_summaries) == sorted(expected_summaries), "Gist: сводки PR не совпадают с инвентарём измерений")
+    actual_results = [fields(text).get("Результат", [""])[0] for text in actual_summaries]
+    require(sorted(actual_results) == sorted(expected_results), "Gist: сводки PR не совпадают с инвентарём измерений")
     require(reports == {a["file"] for a in artifacts if a["kind"] == "benchmark-report"}, "Gist: потеряна benchmark-серия в manifest")
 
     review_sections = [text for name, text in sections(body) if name == REVIEW_SECTION]
@@ -215,16 +264,15 @@ def validate_evidence(body: str, files: dict[str, str], expected: dict,
                 row = re.match(rf"\|\s*{number}\s*·\s*`([0-9a-f]{{7,40}})`\s*\|", line)
                 if row and review["reviewed_sha"].startswith(row[1]):
                     matching.append(line)
-            expected_rows = review.get("rows")
-            require(isinstance(expected_rows, list) and bool(expected_rows) and matching == expected_rows,
-                    "Gist: потеряны строки накопительной истории итерации")
+            require(type(review.get("findings")) is int and review["findings"] > 0
+                    and len(matching) == review["findings"], "Gist: потеряны строки накопительной истории итерации")
             require(all(len(table_cells(row)) == 6 and all(table_cells(row)) for row in matching),
                     "Gist: неполная строка журнала CodeRabbit")
             fixes = [s for row in matching for s in re.findall(r"`([0-9a-f]{7,40})`", table_cells(row)[-1])]
             require(any(review["published_sha"].startswith(s) for s in fixes),
                     "Gist: нет опубликованного исправления/маркера итерации")
         all_rows = [line for line in log.splitlines() if re.match(r"\|\s*[1-9]\d*\s*·", line)]
-        require(all_rows == [row for review in reviews for row in review["rows"]],
+        require(len(all_rows) == sum(review["findings"] for review in reviews),
                 "Gist: строки журнала не соответствуют полному инвентарю итераций")
         require(any(reviews[-1]["reviewed_sha"].startswith(s) for s in role_shas(progress, REVIEW_ROLE))
                 and any(manifest["head_sha"].startswith(s) for s in role_shas(progress, PUBLISHED_ROLE)),
@@ -240,17 +288,17 @@ def pr_identity(pr: dict, repository: str) -> dict:
             "base_ref": pr["base"].get("ref"), "head_ref": pr["head"].get("ref")}
 
 
-def check_gist(body: str, expected: dict, api, expected_manifest=None, source_dir=None) -> None:
+def check_gist(body: str, expected: dict, api, expected_manifest=None, source_dir=None, check_sources=None) -> None:
     url = canonical_gist(body)
     gist_path = "/gists/" + url.rsplit("/", 1)[1]
     snapshot = api.get(gist_path)
     files, version = gist_files(snapshot, url)
-    validate_evidence(body, files, expected, expected_manifest, source_dir)
+    validate_evidence(body, files, expected, expected_manifest, source_dir, check_sources)
     reread_files, reread_version = gist_files(api.get(gist_path), url)
     require((files, version) == (reread_files, reread_version), "Gist: гонка, версия/файлы изменились при проверке")
 
 
-def check_unpublished(body: str, expected: dict, api=None, expected_manifest=None, source_dir=None) -> None:
+def check_unpublished(body: str, expected: dict, api=None, expected_manifest=None, source_dir=None, check_sources=None) -> None:
     """До создания PR проверяем реальную опубликованную ветку; номер ещё неизвестен."""
     require(expected.get("pr_number") is None, "Новый PR ещё не имеет номера")
     require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", expected["repository"]))
@@ -260,13 +308,13 @@ def check_unpublished(body: str, expected: dict, api=None, expected_manifest=Non
     path = f"/repos/{expected['repository']}/branches/{quote(expected['head_ref'], safe='')}"
     before = api.get(path)
     require((before.get("commit") or {}).get("sha") == expected["head_sha"], "Ветка не соответствует ожидаемому HEAD")
-    check_gist(body, expected, api, expected_manifest, source_dir)
+    check_gist(body, expected, api, expected_manifest, source_dir, check_sources)
     require(api.get(path) == before, "Ветка изменилась во время preflight")
 
 
 def check_remote(body: str | None, repository: str, number: int, api=None,
                  expected_manifest: dict | None = None, source_dir: Path | None = None,
-                 event_head: str | None = None) -> None:
+                 event_head: str | None = None, check_sources: dict | None = None) -> None:
     require(bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)) and number > 0, "PR: неверный repository/number")
     api = api or GitHubAPI()
     path = f"/repos/{repository}/pulls/{number}"
@@ -280,7 +328,7 @@ def check_remote(body: str | None, repository: str, number: int, api=None,
     checking_body = published_body if body is None else body
     errors = validate(checking_body)
     require(not errors, "; ".join(errors))
-    check_gist(checking_body, expected, api, expected_manifest, source_dir)
+    check_gist(checking_body, expected, api, expected_manifest, source_dir, check_sources)
     after = api.get(path)
     require(pr_identity(after, repository) == expected and after.get("body") == before.get("body")
             and after.get("draft") == before.get("draft"), "PR: HEAD/body/refs/state изменились при проверке")
@@ -298,6 +346,7 @@ def main() -> int:
     parser.add_argument("--head-ref")
     parser.add_argument("--expected-manifest", type=Path)
     parser.add_argument("--source-dir", type=Path)
+    parser.add_argument("--check-sources", type=Path)
     args = parser.parse_args()
     try:
         event_head = None
@@ -311,16 +360,17 @@ def main() -> int:
             require(bool(args.repository), "Нужен --repository")
             repository, number = args.repository, args.pr_number
             body = args.body_file.read_text(encoding="utf-8")
-        manifest = json.loads(args.expected_manifest.read_text(encoding="utf-8")) if args.expected_manifest else None
+        manifest = read_manifest(args.expected_manifest.read_text(encoding="utf-8")) if args.expected_manifest else None
+        check_sources = json.loads(args.check_sources.read_text(encoding="utf-8")) if args.check_sources else None
         if number is None:
             require(bool(args.head_sha and args.base_ref and args.head_ref),
                     "До создания PR нужны --head-sha, --base-ref и --head-ref")
             expected = {"repository": repository, "pr_number": None, "head_sha": args.head_sha,
                         "base_ref": args.base_ref, "head_ref": args.head_ref}
-            check_unpublished(body, expected, expected_manifest=manifest, source_dir=args.source_dir)
+            check_unpublished(body, expected, expected_manifest=manifest, source_dir=args.source_dir, check_sources=check_sources)
         else:
             check_remote(body, repository, number, expected_manifest=manifest,
-                         source_dir=args.source_dir, event_head=event_head)
+                         source_dir=args.source_dir, event_head=event_head, check_sources=check_sources)
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError) as exc:
         # Не выводим произвольное содержимое ответа в workflow commands.
         print("PR/Gist: " + str(exc).replace("\n", " ").replace("\r", " "), file=sys.stderr)
