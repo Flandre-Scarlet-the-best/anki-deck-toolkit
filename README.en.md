@@ -4,13 +4,12 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 6ac9eb831d9e0917839cf6acbbf565d144462f89 -->
+<!-- i18n-source-git-blob: c4ea06c46fe17c66a7fdb69a526b570a92fb8845 -->
 
 **Rust CLI tools for inspecting and validating CrowdAnki JSON exports, making targeted edits, and visually comparing exports.**
 
-[![Repository checks](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml)
+[![Repository checks](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
-![CrowdAnki JSON](https://img.shields.io/badge/CrowdAnki-JSON-2f81f7)
 ![Linux platform](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
