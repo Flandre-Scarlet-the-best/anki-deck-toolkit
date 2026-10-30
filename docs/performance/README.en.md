@@ -1,7 +1,7 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 2e5f913a8580c8888d732c52a09dbfbee2ce7065 -->
+<!-- i18n-source-git-blob: 171a1e5f9d8c106babcac42beb9ace95055c4f97 -->
 
 This directory provides the common methodology and links to the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
@@ -19,7 +19,8 @@ different values.
 | What | Where | Who sees it |
 |---|---|---|
 | The full history of every measurement | the local [`benchmark-history`](../../tools/benchmark-history/README.en.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
-| The public historical record | the `## Производительность` (performance) section of the PR description: real results, baseline, comparability, conditions and conclusions | everyone, through the PR history |
+| The full task report | the unchanged `benchmark-history report` in the task Gist with its manifest | everyone, via the PR link |
+| The public historical record | the PR's `## Производительность` (performance) section: a compact summary of the scenario, baseline, candidate, results, conclusions and significant regressions | everyone, through the PR history |
 | The current snapshot | the `tools/<module>/performance.md` pages: the last confirmed measurement of each scenario × profile pair | everyone |
 
 The pages do not accumulate entries from every PR: a new confirmed measurement

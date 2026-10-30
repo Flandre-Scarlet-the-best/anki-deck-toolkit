@@ -74,7 +74,7 @@ class GitHubAPI:
 
 def gist_files(snapshot: dict, url: str) -> tuple[dict[str, str], str]:
     owner, gist_id = url.rsplit("/", 2)[-2:]
-    require(snapshot.get("id") == gist_id and snapshot.get("html_url") == url,
+    require(snapshot.get("id") == gist_id and snapshot.get("html_url") in (url, f"https://gist.github.com/{gist_id}"),
             "Gist: ID/URL не соответствует канонической ссылке")
     require((snapshot.get("owner") or {}).get("login", "").casefold() == owner.casefold(),
             "Gist: владелец не соответствует ссылке")

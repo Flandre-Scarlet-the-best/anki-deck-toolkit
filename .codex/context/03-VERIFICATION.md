@@ -378,8 +378,10 @@ workspace-набор; живой Anki и пользовательский `decks
 он не публикует артефакты, не использует секреты и ничего не пишет в репозиторий.
 
 Обязательные контексты ruleset — «Форматирование и Clippy», «Код и тесты»,
-«Заявленная MSRV» (`ci.yml`) и «Структура PR» (`pr-body.yml`); доверенная «Пара PR и Gist»
-(`pr-gist-trusted.yml`) добавляется в фактический ruleset по git-workflow. Их имена — часть
+«Заявленная MSRV» (`ci.yml`) и «Структура PR» (`pr-body.yml`). Порядок активации
+доверенной «Пары PR и Gist» (`pr-gist-trusted.yml`) описан в
+[`anki-git-workflow`](../../.agents/skills/anki-git-workflow/references/pr-lifecycle.md#доверенная-проверка-ci).
+Имена обязательных заданий — часть
 контракта ruleset: переименование или удаление задания оставит PR в вечном
 ожидании контекста. Точные команды и флаги определяет сам workflow.
 
@@ -454,8 +456,8 @@ rustfmt и actionlint и на имя упавшего теста. Вывод т�
 Отдельный `.github/workflows/pr-body.yml` владеет только той проверкой, которой
 нужно событие PR: валидацией опубликованных body и Gist. Независимый
 `pr-gist-trusted.yml` использует только валидатор из base SHA на
-`pull_request_target`, без выполнения кода head и write permissions. Новый
-trusted workflow доступен после попадания в base; состояние required contexts
+`pull_request_target`, без выполнения кода head и write permissions; его права —
+`contents: read` и `pull-requests: read`. Состояние required contexts
 проверяется по реальному ruleset. Тесты скриптов и метаданные
 Agent Skills здесь намеренно не дублируются — их выполняет `ci.yml`, который
 покрывает и push в основную ветку. Единственный владелец версии MSRV —

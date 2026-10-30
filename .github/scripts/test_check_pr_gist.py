@@ -273,6 +273,12 @@ class GistContractTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_evidence(body.replace("1 завершённая", "3 завершённые"), files, EXPECTED)
 
+    def test_gist_html_url_accepts_owner_and_id_only_forms(self):
+        _, files, _ = fixture()
+        good = snapshot(files)
+        gist_files(good, GIST)
+        gist_files({**good, "html_url": "https://gist.github.com/" + good["id"]}, GIST)
+
     def test_truncated_partial_wrong_identity_and_version_fail_closed(self):
         _, files, _ = fixture()
         good = snapshot(files)
@@ -343,6 +349,20 @@ class GistContractTests(unittest.TestCase):
         manifest["reviews"][0]["findings"] += 1
         files["manifest.md"] = manifest_text(manifest)
         with self.assertRaisesRegex(ContractError, "потеряны строки"):
+            validate_evidence(body, files, EXPECTED)
+
+    def test_rejected_finding_iteration_records_published_marker(self):
+        body, files, manifest = fixture(reviews=True)
+        log = files["coderabbit-review.md"].replace("confirmed", "false positive").replace(
+            f"| `{HEAD}` |", f"| Маркер `{HEAD}` |")
+        files["coderabbit-review.md"] = log
+        manifest["artifacts"][-1]["sha256"] = sha256(log)
+        files["manifest.md"] = manifest_text(manifest)
+        validate_evidence(body, files, EXPECTED)
+        files["coderabbit-review.md"] = log.replace(HEAD, BASE)
+        manifest["artifacts"][-1]["sha256"] = sha256(files["coderabbit-review.md"])
+        files["manifest.md"] = manifest_text(manifest)
+        with self.assertRaisesRegex(ContractError, "маркера"):
             validate_evidence(body, files, EXPECTED)
 
     def test_declared_regression_must_remain_in_both_artifacts(self):
