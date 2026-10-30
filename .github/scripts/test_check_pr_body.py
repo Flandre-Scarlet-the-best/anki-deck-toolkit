@@ -289,6 +289,13 @@ class PrBodyContractTests(unittest.TestCase):
                 errors = validate(valid_body() + "\n\n" + summary)
                 self.assertTrue(any(field in error for error in errors), errors)
 
+    def test_empty_summary_field_cannot_borrow_next_list_item(self):
+        for field in ("Итог", "Существенное"):
+            line = next(line for line in COMPACT_CODERABBIT.splitlines() if line.startswith(f"- **{field}:**"))
+            invalid = COMPACT_CODERABBIT.replace(line, f"- **{field}:**\n- Посторонний пункт содержит текст")
+            with self.subTest(field=field):
+                self.assertTrue(any(field in error for error in validate(valid_body() + "\n\n" + invalid)))
+
     def test_coderabbit_gist_link_must_be_in_full_log_field(self):
         url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
         misplaced = COMPACT_CODERABBIT.replace(

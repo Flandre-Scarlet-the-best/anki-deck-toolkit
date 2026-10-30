@@ -490,8 +490,8 @@ def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> l
     """Проверить четыре поля компактной сводки и видимую ссылку на Gist."""
     errors: list[str] = []
     captured: dict[str, list[str]] = {name: [] for name in CODERABBIT_FIELDS}
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+    for match in matches:
+        end = list_item_end(content, match)
         captured[match.group("name")].append(content[match.end():end].strip())
 
     for name, values in captured.items():
