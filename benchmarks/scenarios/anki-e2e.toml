@@ -136,7 +136,7 @@ source = "module-log"
 label = "release"
 required = false
 resolution = 1.0
-description = "Сейчас unsupported: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -145,7 +145,7 @@ source = "module-log"
 label = "anki-image"
 required = false
 resolution = 1.0
-description = "Сейчас unsupported: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -154,7 +154,7 @@ source = "module-log"
 label = "run-image"
 required = false
 resolution = 1.0
-description = "Сейчас unsupported: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -163,7 +163,7 @@ source = "module-log"
 label = "scenarios"
 required = false
 resolution = 1.0
-description = "Сейчас unsupported: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "module_counter"
@@ -311,7 +311,7 @@ source = "module-log"
 label = "scenarios"
 required = false
 resolution = 1.0
-description = "Сейчас unsupported: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [scenario.module_report]
 runs_dir = "target/anki-e2e/runs"

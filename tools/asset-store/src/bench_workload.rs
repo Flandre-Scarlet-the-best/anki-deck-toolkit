@@ -537,6 +537,9 @@ struct Marker {
     /// SHA-256 исполняемого файла, построившего эталон: эталон другой сборки
     /// кода не переиспользуется.
     executable_sha256: String,
+    /// Фиксируется из результата построения, а не из повторно читаемого файла.
+    #[serde(default)]
+    expected_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -687,6 +690,13 @@ fn read_expected(workdir: &Path) -> Result<Expected, BenchError> {
     let path = workdir.join(TEMPLATE_DIR).join(EXPECTED_FILE);
     let bytes =
         fs::read(path).map_err(|error| io_failed("ожидаемое состояние не читается", error))?;
+    let marker = read_marker(workdir)?
+        .ok_or_else(|| BenchError::failed("нет маркера построения эталона"))?;
+    if marker.expected_sha256.is_empty() || sha256_hex(&bytes) != marker.expected_sha256 {
+        return Err(BenchError::failed(
+            "ожидаемое состояние не совпадает с результатом построения: повторите setup",
+        ));
+    }
     serde_json::from_slice(&bytes)
         .map_err(|error| BenchError::failed(format!("ожидаемое состояние повреждено: {error}")))
 }
@@ -836,11 +846,12 @@ pub fn setup(spec_path: &Path, workdir: &Path) -> Result<Summary, BenchError> {
     remove_owned(workdir)?;
     fs::create_dir_all(workdir)
         .map_err(|error| io_failed("рабочий каталог не создаётся", error))?;
-    let marker = Marker {
+    let mut marker = Marker {
         tool: MARKER_TOOL.into(),
         generator: GENERATOR_VERSION,
         spec_sha256: spec_sha256(spec_path)?,
         executable_sha256: executable_sha256()?,
+        expected_sha256: String::new(),
     };
     // Маркер пишется первым: даже прерванный setup оставляет каталог, который
     // clean признаёт своим.
@@ -918,11 +929,16 @@ pub fn setup(spec_path: &Path, workdir: &Path) -> Result<Summary, BenchError> {
         store_digest: tree_digest(&store_root)?,
         batch_revision: state.revision,
     };
-    write_synced(
-        &template.join(EXPECTED_FILE),
-        &serde_json::to_vec(&expected).expect("ожидаемое состояние сериализуется"),
-    )?;
+    let expected_bytes = serde_json::to_vec(&expected).expect("ожидаемое состояние сериализуется");
+    write_synced(&template.join(EXPECTED_FILE), &expected_bytes)?;
     sync_dir(&template)?;
+    // Завершаем маркер только после успешного построения из спецификации.
+    // Старый или прерванный setup не имеет этой привязки и будет пересобран.
+    marker.expected_sha256 = sha256_hex(&expected_bytes);
+    write_synced(
+        &workdir.join(MARKER_FILE),
+        &serde_json::to_vec_pretty(&marker).expect("маркер сериализуется"),
+    )?;
     sync_dir(workdir)?;
     Ok(Summary::new(
         "setup",
@@ -942,6 +958,7 @@ fn remove_run_copy(workdir: &Path) -> Result<(), BenchError> {
 /// Восстанавливает рабочую копию хранилища из эталона.
 pub fn prepare(spec_path: &Path, workdir: &Path) -> Result<Summary, BenchError> {
     checked_marker(workdir, spec_path, true)?;
+    read_expected(workdir)?;
     let run = workdir.join(RUN_DIR);
     remove_run_copy(workdir)?;
     fs::create_dir(&run).map_err(|error| io_failed("рабочая копия не создаётся", error))?;
@@ -1021,6 +1038,14 @@ fn load_batch(runtime: &mut SafeBatchRuntime) -> Result<BenchBatchState, BenchEr
 /// Измеряемая операция.
 pub fn run(spec_path: &Path, workdir: &Path, operation: Operation) -> Result<Summary, BenchError> {
     let spec = WorkloadSpec::load(spec_path)?;
+    if let Operation::IngestContention { writers } = operation
+        && (writers == 0 || writers > spec.ingest)
+    {
+        return Err(BenchError::usage(format!(
+            "writers должен быть от 1 до ingest ({}): каждый писатель должен публиковать хотя бы одну запись",
+            spec.ingest
+        )));
+    }
     checked_marker(workdir, spec_path, false)?;
     let expected = read_expected(workdir)?;
     let root = operation_store(workdir, operation);

@@ -2,7 +2,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 892c6a37ee42441a76f751a8ee3bc280133a5d98 -->
+<!-- i18n-source-git-blob: 997718a793cc17ae350719b101fc23f5f48fbac6 -->
 
 `asset-store` 是用于程序管理资源的公共 Rust 库，负责清单、校验和、完整性及生命周期。领域专用 CLI `kanji-assets` 负责查找 Yarxi 条目、验证汉字图片，并把通过验证的文件发布到规范资源库。本工具不读取 `decks/**/media/`，不更改 `media_files`，也不会把图片复制到牌组中。
 
@@ -912,6 +912,11 @@ cargo run -p benchmark-runner -- run asset-store.ingest --profile warm --param w
 cargo run --release -p asset-store --bin asset-store-bench -- describe --spec benchmarks/workloads/asset-store/kanji-medium.toml
 cargo run --release -p asset-store --bin asset-store-bench -- clean --workdir target/benchmark-workloads/asset-store
 ```
+
+`writers` 不得超过 `ingest`，每个写入者至少执行一次发布。`expected.json`
+须与根据规格成功构建后写入标记的摘要一致；操作描述被修改时拒绝执行，
+再次 `setup` 会重建模板。缺少该摘要的旧标记同样需要重建。这是本地状态完整性检查，
+不防止同一用户同时伪造标记与模板。
 
 ## 检查
 

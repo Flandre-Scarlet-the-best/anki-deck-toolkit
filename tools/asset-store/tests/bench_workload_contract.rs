@@ -393,6 +393,47 @@ fn declared_scenarios() -> Vec<DeclaredSteps> {
         .collect()
 }
 
+/// Циклическое покрытие: max(число choices) запусков вместо произведения.
+/// Это покрывает значения каждого параметра, но не обещает все сочетания.
+fn covering_variants(choices: &[(String, Vec<String>)]) -> Vec<Vec<(String, String)>> {
+    let count = choices
+        .iter()
+        .map(|(_, values)| values.len())
+        .max()
+        .unwrap_or(1);
+    (0..count)
+        .map(|index| {
+            choices
+                .iter()
+                .map(|(name, values)| {
+                    assert!(!values.is_empty(), "choices не пусты");
+                    (name.clone(), values[index % values.len()].clone())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn multiple_choices_have_bounded_complete_value_coverage() {
+    let choices = vec![
+        ("first".into(), vec!["1".into(), "2".into()]),
+        ("second".into(), vec!["a".into(), "b".into(), "c".into()]),
+    ];
+    let variants = covering_variants(&choices);
+    assert_eq!(variants.len(), 3);
+    for (name, values) in &choices {
+        for value in values {
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| variant.contains(&(name.clone(), value.clone())))
+            );
+        }
+    }
+    assert_eq!(covering_variants(&[]), vec![vec![]]);
+}
+
 /// Декларации каталога исполнимы настоящим исполнителем: каждая подстановка,
 /// каждое значение `choices` и каждый шаг жизненного цикла в том порядке, в
 /// котором их выполняет `benchmark-runner`, на крошечной спецификации. Рабочий
@@ -400,22 +441,67 @@ fn declared_scenarios() -> Vec<DeclaredSteps> {
 #[test]
 fn catalog_declarations_run_end_to_end_with_the_real_executor() {
     let fixture = Fixture::new("catalog");
-    let spec = fixture.spec("spec.toml", &spec_text("kanji", 3, 2));
+    let spec = fixture.spec(
+        "spec.toml",
+        &spec_text("kanji", 3, 2).replace("ingest = 3", "ingest = 8"),
+    );
     let workdir = fixture.workdir();
-    let scenarios = declared_scenarios();
+    let mut scenarios = declared_scenarios();
+    // Два независимых перечисления с настоящими подстановками и CLI-шагами.
+    // Второе выбирает допустимые алиасы одной и той же спецификации.
+    let mut multiple = DeclaredSteps {
+        id: "multiple-choices".into(),
+        choices: vec![
+            (
+                "operation".into(),
+                vec!["read-batch".into(), "read-single".into()],
+            ),
+            (
+                "spec".into(),
+                vec!["a.toml".into(), "b.toml".into(), "c.toml".into()],
+            ),
+        ],
+        steps: vec![],
+    };
+    for name in ["a.toml", "b.toml", "c.toml"] {
+        fixture.spec(name, &fs::read_to_string(&spec).unwrap());
+    }
+    for (phase, command) in [
+        ("probe", "describe"),
+        ("setup", "setup"),
+        ("prepare", "prepare"),
+        ("target", "run"),
+        ("conclude", "verify"),
+        ("cleanup", "clean"),
+    ] {
+        let mut args = vec![command.to_owned()];
+        if matches!(command, "run" | "verify") {
+            args.push("{param.operation}".into());
+        }
+        if command != "clean" {
+            args.extend([
+                "--spec".into(),
+                fixture
+                    .workspace
+                    .path()
+                    .join("{param.spec}")
+                    .to_str()
+                    .unwrap()
+                    .into(),
+            ]);
+        }
+        if command != "describe" {
+            args.extend(["--workdir".into(), workdir.to_str().unwrap().into()]);
+        }
+        multiple.steps.push((phase, args));
+    }
+    scenarios.push(multiple);
     assert!(
         scenarios.len() >= 5,
         "сценарии asset-store зарегистрированы"
     );
     for scenario in scenarios {
-        let variants: Vec<Vec<(String, String)>> = match scenario.choices.as_slice() {
-            [] => vec![Vec::new()],
-            [(name, values)] => values
-                .iter()
-                .map(|value| vec![(name.clone(), value.clone())])
-                .collect(),
-            _ => panic!("{}: больше одного перечислимого параметра", scenario.id),
-        };
+        let variants = covering_variants(&scenario.choices);
         for variant in variants {
             for (phase, args) in &scenario.steps {
                 let args: Vec<String> = args
@@ -447,4 +533,80 @@ fn catalog_declarations_run_end_to_end_with_the_real_executor() {
         }
     }
     bench_workload::clean(&workdir, false).unwrap();
+}
+
+#[test]
+fn expected_metadata_is_bound_to_completed_setup() {
+    let fixture = Fixture::new("expected-tampering");
+    let spec = fixture.spec("spec.toml", &spec_text("kanji", 1, 2));
+    let workdir = fixture.workdir();
+    bench_workload::setup(&spec, &workdir).unwrap();
+    for field in [
+        "reads",
+        "ingest",
+        "records",
+        "store_digest",
+        "batch_revision",
+    ] {
+        let path = workdir.join("template/expected.json");
+        let mut expected: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        match field {
+            "reads" | "ingest" => {
+                expected[field].as_array_mut().unwrap().pop();
+            }
+            "store_digest" => expected[field] = "changed".into(),
+            _ => expected[field] = 0.into(),
+        }
+        fs::write(&path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        assert!(
+            bench_workload::run(&spec, &workdir, op("read-batch")).is_err(),
+            "{field}"
+        );
+        assert!(bench_workload::prepare(&spec, &workdir).is_err(), "{field}");
+        assert!(
+            !bench_workload::setup(&spec, &workdir).unwrap().reused,
+            "{field}"
+        );
+        assert_eq!(run_and_verify(&spec, &workdir, op("read-batch")), 6);
+        assert_eq!(run_and_verify(&spec, &workdir, op("ingest")), 3);
+        assert!(bench_workload::setup(&spec, &workdir).unwrap().reused);
+    }
+    // Маркер прежнего формата остаётся своим для cleanup, но не подтверждает эталон.
+    let path = workdir.join(MARKER_FILE);
+    let mut marker: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    marker.as_object_mut().unwrap().remove("expected_sha256");
+    fs::write(path, serde_json::to_vec(&marker).unwrap()).unwrap();
+    assert!(!bench_workload::setup(&spec, &workdir).unwrap().reused);
+}
+
+#[test]
+fn every_contention_writer_must_have_work() {
+    let fixture = Fixture::new("active-writers");
+    let small = fixture.spec(
+        "small.toml",
+        &spec_text("generic", 1, 0).replace("ingest = 3", "ingest = 1"),
+    );
+    let workdir = fixture.workdir();
+    bench_workload::setup(&small, &workdir).unwrap();
+    bench_workload::prepare(&small, &workdir).unwrap();
+    let error = bench_workload::run(&small, &workdir, Operation::IngestContention { writers: 8 })
+        .unwrap_err();
+    assert!(error.usage && error.message.contains("ingest"), "{error}");
+    // Отказ до публикации: один писатель всё ещё может опубликовать запись.
+    assert_eq!(
+        run_and_verify(&small, &workdir, Operation::IngestContention { writers: 1 }),
+        1
+    );
+    let spec = fixture.spec(
+        "spec.toml",
+        &spec_text("generic", 1, 0).replace("ingest = 3", "ingest = 8"),
+    );
+    bench_workload::setup(&spec, &workdir).unwrap();
+    for writers in [1, 2, 4, 8] {
+        assert_eq!(
+            run_and_verify(&spec, &workdir, Operation::IngestContention { writers }),
+            8
+        );
+    }
 }

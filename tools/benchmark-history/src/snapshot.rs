@@ -880,6 +880,32 @@ fn markdown_table_cell(value: &str) -> String {
     value.replace('\\', "\\\\").replace('|', "\\|")
 }
 
+/// Обычные значения сохраняют прежний вид. Произвольный текст представляем
+/// JSON-строкой в HTML-коде: видны пробелы и управляющие символы, а Markdown
+/// не интерпретирует обратные кавычки и разделители таблицы.
+fn markdown_parameter(value: &str) -> String {
+    if !value.is_empty()
+        && value.trim() == value
+        && !value
+            .chars()
+            .any(|c| c == '`' || c == '\\' || c.is_control())
+    {
+        return format!("`{}`", markdown_table_cell(value));
+    }
+    let json = serde_json::to_string(value).expect("строка JSON");
+    let escaped: String = json
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_string()
+            } else {
+                format!("&#{};", u32::from(c))
+            }
+        })
+        .collect();
+    format!("<code>{escaped}</code>")
+}
+
 pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
     let l = labels(lang);
     let show = |value: f64, unit| format::quantity_in(value, unit, l.cores);
@@ -945,7 +971,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
         .map(|(name, value)| {
             (
                 format!("{} `{name}`", l.parameter),
-                format!("`{}`", markdown_table_cell(value)),
+                markdown_parameter(value),
             )
         })
         .collect();
@@ -1039,6 +1065,41 @@ mod tests {
     #[test]
     fn markdown_table_cell_escapes_backslashes_before_pipes() {
         assert_eq!(markdown_table_cell(r"a\|b"), r"a\\\|b");
+    }
+
+    #[test]
+    fn arbitrary_parameter_text_stays_in_one_table_cell() {
+        assert_eq!(markdown_parameter("4"), "`4`");
+        assert_eq!(markdown_parameter("a|b"), r"`a\|b`");
+        for value in [
+            "a`b|c\\d\nnext",
+            "a\\|b",
+            "\r\n",
+            "",
+            " a ",
+            "`*x*<&amp;>_[]",
+        ] {
+            let rendered = markdown_parameter(value);
+            assert!(rendered.starts_with("<code>"), "{rendered}");
+            assert!(!rendered.contains(['|', '`', '\n', '\r', '\\', '*', '_', '[', ']']));
+            let encoded = rendered
+                .strip_prefix("<code>")
+                .unwrap()
+                .strip_suffix("</code>")
+                .unwrap();
+            // Видимое содержимое — точная JSON-строка, включая escapes переводов строк.
+            let mut decoded = String::new();
+            let mut rest = encoded;
+            while let Some(pos) = rest.find("&#") {
+                decoded.push_str(&rest[..pos]);
+                rest = &rest[pos + 2..];
+                let end = rest.find(';').unwrap();
+                decoded.push(char::from_u32(rest[..end].parse().unwrap()).unwrap());
+                rest = &rest[end + 1..];
+            }
+            decoded.push_str(rest);
+            assert_eq!(serde_json::from_str::<String>(&decoded).unwrap(), value);
+        }
     }
 
     #[test]

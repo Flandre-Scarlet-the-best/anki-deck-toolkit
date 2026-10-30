@@ -2,7 +2,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 892c6a37ee42441a76f751a8ee3bc280133a5d98 -->
+<!-- i18n-source-git-blob: 997718a793cc17ae350719b101fc23f5f48fbac6 -->
 
 `asset-store` is the shared Rust library for program-managed assets, responsible for manifests, checksums, integrity, and lifecycle. The domain-specific `kanji-assets` CLI provides Yarxi entry discovery, kanji image validation, and publication of approved files to the canonical corpus. The tool does not read `decks/**/media/`, does not modify `media_files`, and does not copy images into decks.
 
@@ -950,12 +950,18 @@ Boundaries:
   checks on read run through regular code without shortcuts;
 - `ingest-contention` runs writers as threads of one process with independent
   store handles: exclusion is the same `flock` as between processes, but
-  process start-up is not measured;
+  process start-up is not measured. `writers` must not exceed `ingest`: every
+  writer receives at least one publication;
 - the working directory is `target/benchmark-workloads/asset-store` of the
   working copy (ignored by Git). The executor never removes a non-empty directory
   without the `.asset-store-bench.json` marker (an empty directory may be removed); a template is reused only if the same
   executable (SHA-256) built it from the same spec and the template tree matches
-  the digest recorded when it was built.
+  the digest recorded when it was built. `expected.json` is checked against the
+  digest committed to the marker after successful construction from the spec.
+  Altered operation metadata is rejected; another `setup` rebuilds the template.
+  Old markers without this digest also require rebuilding. This checks local
+  state integrity; it does not protect against the same user forging both the
+  marker and the template.
 
 ```bash
 cargo run -p benchmark-runner -- check asset-store.ingest --profile warm --param workload_spec=benchmarks/workloads/asset-store/kanji-medium.toml

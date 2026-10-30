@@ -122,7 +122,7 @@ metric = "instructions"
 scope = "process-tree-waited"
 source = "hyperfine"
 required = false
-description = "Без доступа к perf_event — unsupported с причиной."
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
 
 [[scenario.metric]]
 metric = "cpu_time_cgroup"
@@ -260,7 +260,7 @@ metric = "instructions"
 scope = "process-tree-waited"
 source = "hyperfine"
 required = false
-description = "Без доступа к perf_event — unsupported с причиной."
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
 
 [[scenario.metric]]
 metric = "cpu_time_cgroup"
@@ -390,7 +390,7 @@ metric = "instructions"
 scope = "process-tree-waited"
 source = "hyperfine"
 required = false
-description = "Без доступа к perf_event — unsupported с причиной."
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
 
 [[scenario.metric]]
 metric = "cpu_time_cgroup"
@@ -528,7 +528,7 @@ metric = "instructions"
 scope = "process-tree-waited"
 source = "hyperfine"
 required = false
-description = "Без доступа к perf_event — unsupported с причиной."
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
 
 [[scenario.metric]]
 metric = "cpu_time_cgroup"
@@ -683,7 +683,7 @@ metric = "instructions"
 scope = "process-tree-waited"
 source = "hyperfine"
 required = false
-description = "Без доступа к perf_event — unsupported с причиной."
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
 
 [[scenario.metric]]
 metric = "cpu_time_cgroup"
@@ -829,7 +829,7 @@ metric = "instructions"
 scope = "process-tree-waited"
 source = "hyperfine"
 required = false
-description = "Без доступа к perf_event — unsupported с причиной."
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
 
 [[scenario.metric]]
 metric = "cpu_time_cgroup"
@@ -974,7 +974,7 @@ metric = "instructions"
 scope = "process-tree-waited"
 source = "hyperfine"
 required = false
-description = "Без доступа к perf_event — unsupported с причиной."
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
 
 [[scenario.metric]]
 metric = "cpu_time_cgroup"

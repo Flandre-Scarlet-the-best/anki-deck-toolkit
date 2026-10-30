@@ -3222,7 +3222,7 @@ fn snapshot_shows_and_guards_comparability_parameters() {
         .map(|(_, body)| body)
         .unwrap();
     let parametrized = format!(
-        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = true\nchoices = [\"1\", \"4\", \"a|b\"]\nrecord = true\naffects_comparability = true\n",
+        "{SCENARIO}\n[[scenario]]{}\n[[scenario.parameter]]\nname = \"writers\"\ndescription = \"Число писателей.\"\nrequired = true\nrecord = true\naffects_comparability = true\n",
         scenario_body.replace("id = \"fixture.cli\"", "id = \"fixture.param\"")
     );
     fs::write(f.catalog_dir().join("scenarios/fixture.toml"), parametrized).unwrap();
@@ -3275,6 +3275,22 @@ fn snapshot_shows_and_guards_comparability_parameters() {
     };
     let plan = snapshot::plan(ru, scenario, &other, &confirmed).unwrap();
     assert_eq!(plan.workload, snapshot::WorkloadBasis::ConfirmedReplacement);
+    for value in ["a`b|c\\d\nnext", "\r\n", " a ", "`*x*<&amp;>_[]"] {
+        let arbitrary = with(value, "2026-10-06T10:00:00Z");
+        let plan = snapshot::plan(ru, scenario, &arbitrary, &confirmed).unwrap();
+        snapshot::apply(&plan).unwrap();
+        for page in &pages {
+            let text = fs::read_to_string(page).unwrap();
+            let encoded = serde_json::to_string(value).unwrap();
+            assert!(text.contains(&format!("\"writers\":{encoded}")), "{text}");
+            let row = text
+                .lines()
+                .find(|line| line.starts_with("| ") && line.contains("`writers`"))
+                .unwrap();
+            assert_eq!(row.matches('|').count(), 3, "{row}");
+            assert!(row.contains("<code>"), "{row}");
+        }
+    }
 }
 
 #[test]
