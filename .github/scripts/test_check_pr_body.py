@@ -299,6 +299,31 @@ class PrBodyContractTests(unittest.TestCase):
         )
         self.assertTrue(any("Gist" in error for error in validate(valid_body() + "\n\n" + misplaced)))
 
+    def test_coderabbit_log_link_respects_list_item_boundary(self):
+        url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
+        link = f"[журнал]({url})"
+        prefix = COMPACT_CODERABBIT.replace(f"[все результаты ревью]({url}).", "см. ниже.").rstrip()
+        for suffix in (f"\n\n{link}", f"\n- Другое: {link}"):
+            with self.subTest(suffix=suffix):
+                self.assertTrue(any("Gist" in e for e in validate(valid_body() + "\n\n" + prefix + suffix)))
+        for suffix in (f"\n  {link}", f"\n\n  {link}", f"\n{link}", f"\n\n\t{link}"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(validate(valid_body() + "\n\n" + prefix + suffix), [])
+        with_link = COMPACT_CODERABBIT.rstrip() + f"\n\n{link}"
+        self.assertEqual(validate(valid_body() + "\n\n" + with_link), [])
+
+    def test_indented_code_is_not_coderabbit_summary_or_table(self):
+        heading = "\n\n## CodeRabbit review и disposition\n\n"
+        compact = COMPACT_CODERABBIT.split("\n", 1)[1].strip("\n")
+        for source in (compact, LEGACY_CODERABBIT.strip("\n")):
+            for indent in ("    ", "\t", "  \t"):
+                with self.subTest(source=source[:20], indent=indent):
+                    code = "\n".join(indent + line for line in source.splitlines())
+                    self.assertTrue(validate(valid_body() + heading + code))
+        # Отступленная строка без пустой строки — продолжение абзаца, не код.
+        continued = COMPACT_CODERABBIT.replace("  (итерация 3)", "    (итерация 3)")
+        self.assertEqual(validate(valid_body() + "\n\n" + continued), [])
+
     def test_coderabbit_gist_link_inside_inline_code_is_not_accepted(self):
         url = "https://gist.github.com/example/0123456789abcdef0123456789abcdef"
         inline_code = COMPACT_CODERABBIT.replace(

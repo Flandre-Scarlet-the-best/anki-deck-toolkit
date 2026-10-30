@@ -308,6 +308,43 @@ def without_inline_code(content: str) -> str:
     return "".join(chars)
 
 
+def mask_indented_code(content: str) -> str:
+    """Скрыть код с отступом, учитывая абзацы и отступ содержимого списка.
+
+    Код не прерывает абзац; после пустой строки отступ отсчитывается от
+    начала содержимого текущего пункта, а табуляция занимает до четырёх колонок.
+    """
+    result = []
+    item_indent = 0
+    paragraph = False
+    code = False
+    for line in content.splitlines(keepends=True):
+        text = line.rstrip("\n")
+        expanded = text.expandtabs(4)
+        if not expanded.strip():
+            paragraph = False
+            result.append(line)
+            continue
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        if item_indent and indent < item_indent and not paragraph:
+            item_indent = 0
+        relative = indent - item_indent if item_indent and indent >= item_indent else indent
+        if relative >= 4 and (code or not paragraph):
+            code = True
+            result.append(" " * len(text) + line[len(text):])
+            continue
+        code = False
+        marker = re.match(r"^ {0,3}[-*+][ \t]+", expanded[item_indent:] if item_indent and indent >= item_indent else expanded)
+        if marker:
+            base = item_indent if item_indent and indent >= item_indent else 0
+            item_indent = base + marker.end()
+            paragraph = True
+        else:
+            paragraph = True
+        result.append(line)
+    return "".join(result)
+
+
 def has_legacy_coderabbit_row(content: str) -> bool:
     """Проверить заголовок, разделитель и заполненную строку старой таблицы."""
     lines = content.splitlines()
@@ -346,6 +383,30 @@ def has_legacy_coderabbit_row(content: str) -> bool:
     return found_table
 
 
+def list_item_end(content: str, match: re.Match[str]) -> int:
+    """Конец пункта списка: после пустой строки нужен отступ содержимого."""
+    marker = re.match(r"[ \t]*[-*+][ \t]+", match.group())
+    assert marker is not None
+    indent = len(marker.group().expandtabs(4))
+    position = content.find("\n", match.end())
+    if position < 0:
+        return len(content)
+    blank = False
+    position += 1
+    for line in content[position:].splitlines(keepends=True):
+        text = line.rstrip("\n")
+        expanded = text.expandtabs(4)
+        if not expanded.strip():
+            blank = True
+        else:
+            leading = len(expanded) - len(expanded.lstrip(" "))
+            if leading < indent and (blank or re.match(r" {0,3}(?:[-*+]\s+|#{1,6}\s|>)", expanded)):
+                return position
+            blank = False
+        position += len(line)
+    return len(content)
+
+
 def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> list[str]:
     """Проверить четыре поля компактной сводки и видимую ссылку на Gist."""
     errors: list[str] = []
@@ -378,7 +439,7 @@ def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> l
     for index, match in enumerate(fields_visible):
         if match.group("name") != "Полный журнал":
             continue
-        end = fields_visible[index + 1].start() if index + 1 < len(fields_visible) else len(visible)
+        end = list_item_end(visible, match)
         field_text = visible[match.end():end]
         links = [
             link for link in CODERABBIT_GIST.finditer(field_text)
@@ -403,6 +464,7 @@ def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> l
 
 def validate_coderabbit(content: str) -> list[str]:
     """Проверить старую таблицу либо полную компактную сводку CodeRabbit."""
+    content = mask_indented_code(content)
     visible = without_inline_code(content)
     legacy_present = any(
         line.lstrip().startswith("|") and table_cells(line) == list(LEGACY_HEADER)
