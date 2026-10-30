@@ -278,12 +278,20 @@ Draft PR. Результат передаётся пользователю на 
 секреты и write permissions запрещены. Body и Gist читаются только как данные.
 Изменение валидатора в PR не изменяет доверенный gate до merge в base.
 
-Проверь фактический ruleset/branch protection и required contexts. При наличии
-полномочий добавь «Пара PR и Gist», сохранив все остальные rules и bypass actors;
-перечитай результат. Без прав укажи точную оставшуюся настройку. Не называй gate
-обязательным, пока это не подтверждено. Новый trusted workflow активируется лишь
-после попадания в base: для PR, вводящего его, честно зафиксируй bootstrap-границу
-и выполни локальный remote-preflight/read-back, не обходя required checks.
+Проверь фактический ruleset/branch protection и required contexts. Новый check
+делай обязательным **только после** появления workflow в base и подтверждённого
+успешного запуска именно этого workflow из доверенной base на PR. Наличие YAML
+в head, локальный preflight и успешная кандидатная «Структура PR» этого условия
+не заменяют. Нельзя создавать циклическую зависимость, в которой PR требует
+статус workflow, впервые вводимого этим же PR.
+
+Порядок ввода: подготовить workflow в PR → выполнить preflight/read-back →
+после отдельно разрешённого merge убедиться в наличии workflow в base → получить
+успешный запуск на подходящем PR → при наличии полномочий добавить required
+context, сохранив все остальные rules и bypass actors → перечитать ruleset.
+До подтверждённого запуска сохраняй действующие required checks и явно указывай,
+что независимый check подготовлен, но ещё не активирован. Без полномочий назови
+точную оставшуюся настройку. Не выдавай отсутствующий статус за ожидающий запуск.
 
 GitHub допускает `pull_request_target` как источник required check, см.
 [диагностику обязательных проверок](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
