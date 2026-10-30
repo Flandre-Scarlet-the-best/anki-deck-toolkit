@@ -1,18 +1,18 @@
 # 本地基准历史：`benchmark-history`
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: b996ce4f27be0f41ce0d0601bbdb3001688ac5e3 -->
+<!-- i18n-source-git-blob: cca7043f7d6d97e0937c68b137b061e7c979c1cc -->
 
 `benchmark-history` 为每个用户保存其自己的已验证基准结果历史，在其中查找比较基线，
-对比“之前”与“之后”，并把结果生成为 PR 描述中的 `## Производительность`（性能）章节以及
+对比“之前”与“之后”，生成以 `## Производительность`（性能）为标题的完整报告供 Gist 和 PR 摘要使用，以及
 `tools/<模块>/performance.md` 模块性能页面和其翻译的快照。它不做任何测量：
 系列由 [`benchmark-runner`](../benchmark-runner/README.zh-CN.md) 执行，结果模型、校验和
 可比性规则属于 [`benchmark-contract`](../benchmark-contract/README.zh-CN.md)。这里没有第二种
 结果格式，也没有第二个测量引擎。
 
 它完全在本地工作：不联网、不需要 GitHub 令牌、没有服务器也没有共享数据库。一个克隆的
-历史不会与他人的同步，任何测量都不会被自动发布：PR 章节通过常规的
-[`anki-git-workflow`](../../.agents/skills/anki-git-workflow/SKILL.md) 流程粘贴到 PR 描述中，
+历史不会与他人的同步，任何测量都不会被自动发布：通过常规的
+[`anki-git-workflow`](../../.agents/skills/anki-git-workflow/SKILL.md) 流程将完整报告保存到 Gist、将简洁摘要放到 PR 中，
 文档快照只在显式 `--apply` 时写入。
 
 ## 历史存放位置
@@ -87,7 +87,7 @@ cargo run -p benchmark-history -- restore /path/to/backup
 | `show <ID>` | 记录摘要；`--raw` 输出归档副本的原始 JSON |
 | `baseline <ID>` | 每个基线候选及其适合或不适合的原因，以及选中的基线；`--commit` 缩小选择范围 |
 | `compare <基线> <结果>` | `benchmark-contract` 的结论、之前/之后、差值以及相对离散度的评估 |
-| `report <ID>...` | PR 的 Markdown `## Производительность` 章节；`--baseline ID`（每个场景 × 配置一对一个）、`--first` 或 `--commit` |
+| `report <ID>...` | 供 Gist 和 PR 摘要使用的完整 Markdown 报告；`--baseline ID`（每个场景 × 配置一对一个）、`--first` 或 `--commit` |
 | `snapshot <ID> --page P` | 为 `tools/<模块>/performance.md` 模块页面及 `performance.en.md`、`performance.zh-CN.md` 翻译生成快照；没有 `--apply` 时只显示 |
 | `verify` | 按标识和契约检查每个归档副本，并将索引与归档投影比对；不修改归档，也不创建存储（存储不存在时返回代码 3）；打开时索引同步在比对前修复的内容会被报告，并返回代码 1 |
 | `reindex` | 从归档重建索引 |
@@ -153,15 +153,16 @@ ID 可以完整给出，也可以给出不少于六个字符的前缀。全局�
   这**不是**统计显著性检验，契约中的 `statistically_supported` 仅表示测量次数足以估计离散度。
 - 不可比的结果不得出结论；`unavailable`、`unsupported`、`failed` 以带原因的状态显示，而不是零。
 
-## PR 章节
+## Gist 报告与 PR 摘要
 
-`report` 按 [`pr-body.md`](../../.agents/skills/anki-git-workflow/references/pr-body.md) 构建
-章节：`Статус: измерено`，包含字段 «Сценарий»、«Измеренный код»（提交、修改标记、源代码树）、
+`report` 为必需的 Gist 生成完整报告。格式如下：`Статус: измерено`，包含字段 «Сценарий»、«Измеренный код»（提交、修改标记、源代码树）、
 «Нагрузка»（输入标识和规模）、«Окружение»、«Прогоны»、«База»、«Сопоставимость»、指标表、
 «Вывод»、«Ограничения» 和 «Источники»（完整的记录 ID）。没有基线时，章节区分新功能（`--first`：
 不存在“之前”）与缺少可用基线。`failure` 或 `unsupported` 结果给出 `Статус: не измерено`，附带原因、
-诊断以及 «Доказательство производительности: отсутствует» 一行。章节输出到 stdout，并手动粘贴到
-PR 描述中；工具本身从不写入 GitHub。
+诊断以及 «Доказательство производительности: отсутствует» 一行。完整报告输出到 stdout，原样保存为 Gist 文件，并在 manifest 中记录哈希。
+PR 正文按照 [`pr-body.md`](../../.agents/skills/anki-git-workflow/references/pr-body.md)
+保留场景、测量的基线与候选、关键数值、结论及所有显著回退的简洁摘要；完整表格留在 Gist。
+工具本身从不写入 GitHub。
 
 ## 文档快照
 

@@ -1178,8 +1178,8 @@ fn comparison_respects_units_zero_base_and_spread() {
     assert!(c.rows.iter().all(|r| r.delta.is_none()));
 }
 
-/// Тело PR с разделом производительности проходит проверку репозитория.
-fn check_pr_body(section: &str) -> (bool, String) {
+/// Полный отчёт проверяется отдельно от компактной сводки PR.
+fn check_pr_body(section: &str) -> Option<(bool, String)> {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/check_pr_body.py");
     let body = ["Цель", "Область изменений", "Реализация", "Проверки"]
@@ -1191,6 +1191,9 @@ fn check_pr_body(section: &str) -> (bool, String) {
                 .iter()
                 .map(|h| format!("## {h}\nФактическое содержание раздела {h}.\n")),
         )
+        .chain(std::iter::once(
+            "## Подробный отчёт\n[Полные результаты](https://gist.github.com/example/0123456789abcdef0123456789abcdef)\n".to_owned(),
+        ))
         .collect::<Vec<_>>()
         .join("\n");
     static BODY: AtomicUsize = AtomicUsize::new(0);
@@ -1216,13 +1219,13 @@ fn check_pr_body(section: &str) -> (bool, String) {
                 "в CI нужен python3 для check_pr_body.py: {e}"
             );
             eprintln!("ПРОПУСК: python3 недоступен ({e}), проверка PR body не выполнена");
-            return (true, String::new());
+            return None;
         }
     };
-    (
+    Some((
         output.status.success(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    ))
 }
 
 #[test]
@@ -1344,11 +1347,15 @@ fn pr_reports_cover_first_comparable_missing_incomparable_and_unmeasured() {
     assert!(unmeasured.contains(report::NO_EVIDENCE));
 
     for section in [&first, &comparable, &incomparable, &missing, &unmeasured] {
-        let (ok, stderr) = check_pr_body(section);
-        assert!(
-            ok,
-            "сгенерированный раздел отвергнут проверкой PR body: {stderr}\n{section}"
-        );
+        let Some((ok, stderr)) = check_pr_body(section) else {
+            continue;
+        };
+        if section == &unmeasured {
+            assert!(ok, "неизмеренный статус остаётся допустим: {stderr}");
+        } else {
+            assert!(!ok, "полный отчёт должен публиковаться в Gist");
+            assert!(stderr.contains("полную таблицу"), "{stderr}");
+        }
     }
 }
 
@@ -1693,8 +1700,10 @@ fn cli_end_to_end_with_isolated_store() {
         out.contains("выбрана автоматически") && out.contains("−20 %"),
         "{out}"
     );
-    let (ok, stderr) = check_pr_body(&out);
-    assert!(ok, "{stderr}");
+    if let Some((ok, stderr)) = check_pr_body(&out) {
+        assert!(!ok, "полный отчёт не является компактным body");
+        assert!(stderr.contains("полную таблицу"), "{stderr}");
+    }
     // Подходящая база, отсечённая только `--commit`, называется с причиной.
     let (_, out, _) = f.cli(&["report", &target_id[..8], "--commit", "ccc"]);
     assert!(

@@ -1,7 +1,7 @@
 # 性能与资源消耗
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 7e8844b595691a300c8dbf05b20bfd00ecd4148f -->
+<!-- i18n-source-git-blob: 2e5f913a8580c8888d732c52a09dbfbee2ce7065 -->
 
 本目录提供通用方法及指向各模块页面的链接，展示仓库各模块性能与资源消耗的**最近确认指标**：时间、CPU、内存、磁盘。每个模块有
 自己的页面，包含测量方法、指标定义，以及在明确命名的参考环境中按场景和配置划分的快照。
@@ -91,11 +91,11 @@ skill [`performance-benchmarking`](../../.agents/skills/performance-benchmarking
    `benchmark-history snapshot <ID> --page tools/<模块>/performance.md`，然后用 `--apply` 写入。
    工具会同时更新三种语言中该对的块；若系列不完整、工作副本有修改、环境与参考环境不同或页面
    上有更新的测量，则拒绝。
-4. 将同一结果的 `benchmark-history report` 章节粘贴到 PR 描述中：确切的代码状态和记录 ID
-   写在那里。
+4. 将同一结果完整且未经修改的 `benchmark-history report` 保存到必需的任务 Gist，并附上 manifest。
+   PR 正文保留简洁摘要：场景、测量的基线和候选提交、关键数值、结论及所有显著回退。
 
 永久文档中不包含提交 SHA、PR 编号、本地绝对路径、输入标识和作者姓名
-（[`AGENTS.md`](../../AGENTS.md) 的规则）；这些细节属于 PR 描述和本地历史。`benchmark-snapshot`
+（[`AGENTS.md`](../../AGENTS.md) 的规则）；这些细节属于任务 Gist、PR 摘要和本地历史。`benchmark-snapshot`
 标记内的快照不手动编辑。
 
 在历史出现之前记录的手动观测保留在模块页面上，并明确标注其没有原始 JSON 结果：不得将其当作

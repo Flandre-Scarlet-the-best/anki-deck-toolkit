@@ -1,7 +1,7 @@
 # Performance and resource usage
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 7e8844b595691a300c8dbf05b20bfd00ecd4148f -->
+<!-- i18n-source-git-blob: 2e5f913a8580c8888d732c52a09dbfbee2ce7065 -->
 
 This directory provides the common methodology and links to the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
@@ -119,12 +119,14 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
    languages at once and refuses if the series is incomplete, the working copy
    has changes, the environment differs from the reference one or the page holds
    a newer measurement.
-4. Paste the `benchmark-history report` section for the same result into the PR
-   description: the exact code state and record IDs are given there.
+4. Save the complete unchanged `benchmark-history report` for the same result
+   in the mandatory task Gist with its manifest. Keep a compact PR summary of
+   the scenario, measured baseline/candidate, key numbers, conclusion and all
+   material regressions.
 
 Permanent documentation contains no commit SHAs, PR numbers, absolute local
 paths, input identities or author names (a rule of
-[`AGENTS.md`](../../AGENTS.md)); those details belong in the PR description and
+[`AGENTS.md`](../../AGENTS.md)); those details belong in the task Gist, PR summary and
 in the local history. Snapshots inside `benchmark-snapshot` markers are not
 edited by hand.
 

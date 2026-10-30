@@ -33,14 +33,20 @@ PLACEHOLDERS = {
     "", "-", "—", "–", "n/a", "na", "none", "нет", "todo", "tbd", "...", "…",
     "не применимо", "заполнить", "уточнить", "см. ниже", "см. выше", "?",
 }
-# Поля отчёта `benchmark-history report` для каждого измеренного сценария.
-MEASURED_FIELDS = (
-    "Сценарий", "Измеренный код", "Нагрузка", "Окружение", "Прогоны",
-    "База", "Сопоставимость", "Вывод", "Ограничения", "Источники",
-)
+# Поля компактной сводки; полный benchmark-history report хранится в Gist.
+MEASURED_FIELDS = ("Сценарий", "База", "Кандидат", "Результат", "Вывод", "Регрессии")
+MAX_BODY_LENGTH = 6000
+REPORT_SECTION = "Подробный отчёт"
+REVIEW_SECTION = "CodeRabbit review и disposition"
+
+
+def normalize_body(body: str) -> str:
+    """Unicode code points после единственной нормализации CRLF/CR → LF."""
+    return body.replace("\r\n", "\n").replace("\r", "\n")
+
 NO_EVIDENCE = ("Доказательство производительности", "отсутствует")
 PERFORMANCE_HINT = (
-    "добавьте после ## Проверки раздел ## Производительность: отчёт `benchmark-history report` "
+    "добавьте после ## Проверки раздел ## Производительность: компактную сводку измерений "
     "из проверенных результатов, «Статус: не применимо» с конкретной причиной или "
     "«Статус: не измерено» с причиной, диагностикой и строкой "
     "«Доказательство производительности: отсутствует»"
@@ -224,41 +230,9 @@ def substantive(values: list[str], minimum: int) -> bool:
     return any(not placeholder(v) and len(v.strip()) >= minimum and len(v.split()) >= 3 for v in values)
 
 
-# Колонки значений проверяемого результата в таблицах `benchmark-history report`:
-# с базой — «После: …», без базы — «Значение: …», «Медиана», «Мин–макс».
-# Название метрики, scope/источник, состояние «до», разности, оценка и
-# пояснения измерением не являются.
-MEASUREMENT_COLUMNS = ("После:", "Значение:", "Медиана", "Мин–макс")
-# Измеренное значение начинается с числа: «54.41 ms ± 1.26 ms (n=10)», «20 000».
-MEASURED_VALUE = re.compile(r"^[-−+]?\d")
-
-
 def table_cells(row: str) -> list[str]:
-    """Ячейки строки таблицы Markdown: делит только неэкранированная «|»."""
+    """Ячейки Markdown-таблицы с неэкранированной границей."""
     return [c.strip() for c in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
-
-
-def metric_table(content: str) -> bool:
-    """Есть таблица с заголовком «Метрика» и хотя бы одним измеренным значением.
-
-    Значение засчитывается только в колонке значения проверяемого результата
-    (`MEASUREMENT_COLUMNS`) и только если оно начинается с числа: цифры в
-    названии метрики, scope, версии инструмента, оценке или пояснении вроде
-    «n=0: данных нет» строку из прочерков измерением не делают.
-    """
-    lines = [line.strip() for line in content.split("\n")]
-    for n, row in enumerate(lines):
-        cells = table_cells(row) if row.startswith("|") else []
-        if cells and cells[0] == "Метрика" and n + 1 < len(lines) and lines[n + 1].startswith("|") and set(lines[n + 1]) <= set("|-: "):
-            measured = [i for i, c in enumerate(cells) if c.startswith(MEASUREMENT_COLUMNS)]
-            # Только строки этой же таблицы: она кончается первой строкой без «|».
-            for data in lines[n + 2:]:
-                if not data.startswith("|"):
-                    break
-                values = table_cells(data)
-                if any(i < len(values) and not placeholder(values[i]) and MEASURED_VALUE.match(values[i]) for i in measured):
-                    return True
-    return False
 
 
 def scenario_blocks(content: str) -> list[tuple[str, str]]:
@@ -316,15 +290,19 @@ def validate_performance(content: str) -> list[str]:
             block_fields = fields(block)
             for name in MEASURED_FIELDS:
                 values = block_fields.get(name, [])
-                if not values or all(placeholder(v) for v in values):
+                if len(values) != 1 or any(placeholder(v) for v in values):
                     errors.append(prefix + f"для измерения нужна строка «{name}:» с фактическими сведениями{where}")
-            if not metric_table(block):
-                errors.append(prefix + f"для измерения нужна таблица с заголовком «| Метрика |» и строкой значений{where}")
+            result = block_fields.get("Результат", [])
+            if not any(re.search(r"\d[\d.,\s]*\s*(?:ms|µs|ns|s|%|KiB|MiB|GiB|bytes|count|инструкц|мс|с)\b|\d\s*%", without_inline_code(value)) and not placeholder(value) for value in result):
+                errors.append(prefix + "«Результат» требует числового значения с единицей")
+            if re.search(r"(?m)^\s*\|\s*Метрика\s*\|", block):
+                errors.append(prefix + "полную таблицу benchmark-history report перенесите в Gist")
+
     return errors
 
 
 
-# Полный журнал хранится в Gist; старые PR могут сохранить прежнюю таблицу.
+# Полный журнал хранится в Gist; legacy-таблица не обходит новый контракт.
 CODERABBIT_FIELDS = ("Прогресс", "Итог", "Существенное", "Полный журнал")
 COMPACT_NAMES = "|".join(map(re.escape, CODERABBIT_FIELDS))
 COMPACT_FIELD = re.compile(
@@ -334,8 +312,6 @@ COMPACT_CANDIDATE = re.compile(
     rf"(?m)^[ \t]*[-*+][ \t]+(?:\*\*)?(?:{COMPACT_NAMES})"
 )
 LEGACY_HEADER = ("Итерация / reviewed HEAD", "Уровень", "Путь", "Влияние", "Решение", "Исправление")
-LEGACY_SEPARATOR = re.compile(r":?-{3,}:?\Z")
-LEGACY_ROW_ID = re.compile(r"[1-9]\d*\s*·\s*`[0-9a-f]{7,40}`\Z")
 # Роль должна непосредственно относиться к SHA, а не просто встречаться рядом
 # с двумя произвольными идентификаторами. Перенос строки внутри пункта допустим.
 SHA = r"`([0-9a-f]{7,40})`"
@@ -352,7 +328,7 @@ def role_shas(text: str, role: str) -> set[str]:
 
 CODERABBIT_GIST = re.compile(
     r"\[(?P<label>[^\[\]\n]+?)\]\(https://gist\.github\.com/"
-    r"[A-Za-z0-9-]+/[0-9a-f]{20,64}(?:#[a-zA-Z0-9-]+)?\)"
+    r"(?P<owner>[A-Za-z0-9-]+)/(?P<id>[0-9a-f]{32})\)"
 )
 
 
@@ -436,44 +412,6 @@ def mask_indented_code(content: str) -> str:
             paragraph = True
         result.append(line)
     return "".join(result)
-
-
-def has_legacy_coderabbit_row(content: str) -> bool:
-    """Проверить заголовок, разделитель и заполненную строку старой таблицы."""
-    lines = content.splitlines()
-    visible_lines = without_inline_code(content).splitlines()
-    found_table = False
-    for index, line in enumerate(visible_lines):
-        if not line.lstrip().startswith("|") or table_cells(line) != list(LEGACY_HEADER):
-            continue
-        found_table = True
-        if index + 2 >= len(visible_lines):
-            return False
-        separator = visible_lines[index + 1]
-        if not separator.lstrip().startswith("|"):
-            return False
-        separator_cells = table_cells(separator)
-        if len(separator_cells) != len(LEGACY_HEADER) or not all(
-            LEGACY_SEPARATOR.fullmatch(cell.replace(" ", "")) for cell in separator_cells
-        ):
-            return False
-        found_row = False
-        for row_index in range(index + 2, len(visible_lines)):
-            row = visible_lines[row_index]
-            if not row.lstrip().startswith("|"):
-                break
-            cells = table_cells(lines[row_index])
-            if not (
-                len(cells) == len(LEGACY_HEADER)
-                and LEGACY_ROW_ID.fullmatch(cells[0])
-                and all(cell.strip() for cell in cells[1:])
-                and len(table_cells(row)) == len(LEGACY_HEADER)
-            ):
-                return False
-            found_row = True
-        if not found_row:
-            return False
-    return found_table
 
 
 def list_item_end(content: str, match: re.Match[str]) -> int:
@@ -583,25 +521,66 @@ def validate_coderabbit(content: str) -> list[str]:
         errors.extend(validate_compact_coderabbit(content, compact_matches))
         return errors
     if legacy_present:
-        if has_legacy_coderabbit_row(content):
-            return []
-        return ["В старой таблице CodeRabbit отсутствует корректная строка завершённой итерации"]
+        return ["CodeRabbit: перенесите старую таблицу в coderabbit-review.md и оставьте компактную сводку с Gist"]
     if not compact_candidates:
-        return ["CodeRabbit: нужна накопительная таблица либо полноценная сводка с Gist"]
+        return ["CodeRabbit: нужна полноценная сводка с Gist"]
 
     errors = validate_compact_coderabbit(content, compact_matches)
     errors.extend(format_errors)
     if errors:
-        return ["CodeRabbit: нужна накопительная таблица либо полноценная сводка с Gist"] + errors
+        return ["CodeRabbit: нужна полноценная сводка с Gist"] + errors
     return []
 
 
 
+def gist_links(content: str) -> list[re.Match[str]]:
+    """Только канонические видимые ссылки, без code, изображений и escaping."""
+    visible = without_inline_code(mask_indented_code(content))
+    return [
+        link for link in CODERABBIT_GIST.finditer(visible)
+        if not is_escaped(visible, link.start())
+        and not (link.start() and visible[link.start() - 1] == "!"
+                 and not is_escaped(visible, link.start() - 1))
+        and content[link.start("label"):link.end("label")].strip()
+        and not placeholder(content[link.start("label"):link.end("label")])
+        and len(set(link.group("id"))) > 1
+    ]
+
+
+def visible_body(body: str) -> str:
+    """Включить преамбулу при поиске ссылок; комментарии/fences уже скрыты."""
+    return "\n".join(text for _, text in sections("## __preamble__\n" + body))
+
+
+def canonical_gist(body: str) -> str:
+    """URL проверенной локальной структурой единственной ссылки."""
+    links = gist_links(visible_body(body))
+    if len(links) != 1:
+        raise ValueError("Нужна ровно одна видимая каноническая Markdown-ссылка на Gist")
+    return f"https://gist.github.com/{links[0].group('owner')}/{links[0].group('id')}"
+
+
+def validate_gist_link(body: str, blocks: list[tuple[str, str]]) -> list[str]:
+    links = gist_links(visible_body(body))
+    target = REVIEW_SECTION if any(name == REVIEW_SECTION for name, _ in blocks) else REPORT_SECTION
+    errors = []
+    if len(links) != 1:
+        errors.append("PR: нужна ровно одна видимая каноническая Markdown-ссылка на Gist")
+    targets = [text for name, text in blocks if name == target]
+    if len(targets) != 1 or len(gist_links(targets[0])) != 1:
+        errors.append(f"Gist: единственную ссылку разместите в ## {target}")
+    return errors
+
+
 def validate(body: str) -> list[str]:
     """Вернуть детерминированные ошибки; пустой список означает верную структуру."""
+    body = normalize_body(body)
     blocks = sections(body)
     names = [heading for heading, _ in blocks]
     errors: list[str] = []
+    if len(body) > MAX_BODY_LENGTH:
+        errors.append(f"PR body: {len(body)} символов, максимум {MAX_BODY_LENGTH}")
+    errors.extend(validate_gist_link(body, blocks))
     for name in REQUIRED:
         count = names.count(name)
         if count == 0 and name == PERFORMANCE:
