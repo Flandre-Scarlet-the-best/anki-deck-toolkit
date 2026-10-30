@@ -10,6 +10,7 @@
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
 ![Платформа Linux](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
 [![Лицензия: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Просмотры](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.svg?label=%D0%9F%D1%80%D0%BE%D1%81%D0%BC%D0%BE%D1%82%D1%80%D1%8B&color=blue)](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
 
 Набор инструментов для владельцев и разработчиков Anki-колод: исследование экспорта, проверка структуры и медиассылок, контроль качества заметок, безопасные правки с `dry-run`, создание заметок в существующих моделях и HTML-отчёт «до / после». Инструменты не вызывают LLM API, но поддерживают проверяемый рабочий процесс с внешними ИИ-агентами.
