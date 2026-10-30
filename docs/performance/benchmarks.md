@@ -50,6 +50,7 @@ JSON, в котором исполнитель записывает измере
 | `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-io` | `short-cli` | `warm` |
 
 ## Как зарегистрировать сценарий нового модуля
 

@@ -1,7 +1,7 @@
 # 基准目录与结果契约
 
 [Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: e0cc3970e68c4911c288e83ad93759dc3dc09c03 -->
+<!-- i18n-source-git-blob: 134363313dd5ec7fcb5dd2a1828a33be9a453571 -->
 
 目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
@@ -47,6 +47,7 @@
 | `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-io` | `short-cli` | `warm` |
 
 ## 为新模块注册场景
 

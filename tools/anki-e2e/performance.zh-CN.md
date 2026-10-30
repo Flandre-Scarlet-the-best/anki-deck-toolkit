@@ -1,7 +1,7 @@
 # 性能：`anki-e2e`
 
 [Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 1b95a367d50948ebc9cc1be9282c9f87bf9e8082 -->
+<!-- i18n-source-git-blob: 7ae58c29ea5d715eb0bdc08409e7939bdff7caaf -->
 
 Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](README.zh-CN.md)）。
 通用测量规则和来源精度见[方法说明](../../docs/performance/README.zh-CN.md)。
@@ -149,9 +149,8 @@ BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配
 ## 无原始 JSON 的手动观测
 
 下面的观测是在本地历史出现之前手动记录的。它没有原始 JSON 结果：不是已确认的快照，其数值
-不与 `benchmark-history` 的结果比较，也不作为基线。它在出现相同条件的首个确认快照之前保留
-背景信息。温态 `full` 现在由上面的快照描述，包含主机 CPU、内存观测值及 `work-cache` 大小；
-冷态和增量状态以及按阶段的分解尚未被确认快照覆盖。
+不与 `benchmark-history` 的结果比较，也不作为基线。温态 `full` 的汇总结果现在只在上面的
+确认快照中报告。这里保留冷态和增量状态，以及快照未提供的手动阶段与场景分解。
 
 ### 2026-10-26 · `anki-e2e` 0.1.0 · Anki 26.09.3 · `full`
 
@@ -174,7 +173,7 @@ BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配
 | Anki 镜像 | 16 | 0 | 0 | 0 |
 | 运行镜像（`cargo build`） | 155 | 1 | 0 | 30 |
 | 场景 | 222 | 221 | 227 | 220 |
-| **合计** | **406.7** | **230.0** | **236.5** | **259.3** |
+| **合计** | **406.7** | — | — | **259.3** |
 
 场景（四次运行的范围）：
 
@@ -191,16 +190,9 @@ BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配
 
 | 指标 | 值 | 来源 |
 |---|---|---|
-| 容器：内存峰值 | 499–505 MiB，限制 6 GiB | `memory.peak` |
-| 容器：每次运行的 CPU | 203–212 秒 | `usage_usec` |
-| 容器：平均负载 | 0.92–0.94 核，限制 4 核 | `usage_usec` / 时间 |
-| 容器：1 秒内峰值 | 1.80–1.88 核 | 采样差值 |
-| 场景期间的主机 | 平均约 1.1 核，242–251 核·秒（比容器多约 40 秒：dockerd、`docker exec`、WSL） | `/proc/stat` |
 | 冷镜像构建（主机） | 471 核·秒，平均 2.75 核，峰值 15.5/16；主机内存最多 +2.9 GiB | `/proc/stat`、`MemAvailable` |
 | 增量构建（主机） | 40 核·秒，峰值 4.6 核；主机内存最多 +0.9 GiB | `/proc/stat`、`MemAvailable` |
 | 构建期间的 dockerd | 0.9–1.0 GiB，约 0.05 核（不含 BuildKit 步骤） | `docker.service` cgroup |
-| runner：RSS 峰值 | 27–28 MiB | `VmHWM` |
-| runner：CPU | 自身 5.3–6.7 秒 + 已等待子进程 0.7–3.5 秒 | `/proc/<pid>/stat` |
 | 单元测试 `cargo test -p anki-e2e` | 64 个测试 0.63–0.65 秒（已构建） | 运行时间 |
 
 磁盘：
@@ -216,17 +208,10 @@ BuildKit，无法保证负载没有网络。`anki-e2e.full` 场景的 `cold` 配
 
 结论：
 
-- 热状态下约 96% 的 `full` 时间花在场景本身。runner 准备不到 10 秒，几乎全部是版本选择；
-  其中 GitHub 请求与 SHA-256 重新校验的占比没有测量。
-- 热运行之间的差异约为 3%（230.0 和 236.5 秒）。
-- 容器限制留有很大余量：内存峰值约 0.5 GiB/6 GiB，CPU 不超过 1.9/4 核。这只是一个环境
-  中的观察，不是修改默认值的理由。
 - 冷构建运行镜像是 CPU 和内存代价最高的阶段。`--cpus`/`--memory` 对它不起作用：Cargo
   占用主机所有核心（峰值 15.5/16）和最多 2.9 GiB 主机内存。这与测试台 README 一致。
 - cache mount `anki-e2e-cargo-target` 在一次增量重建后增长了 0.24 GB。一次观察不足以
   得出无限增长的结论：应在下一条记录中通过多次快照变更的系列来检查。清理方法是
   `clean --cache`。
-- `full` 启动 101–103 个 `anki-repo` 进程；`doctor` 和 `job` 的等待每秒最多启动一次。
-
 未测量：没有层缓存和基础镜像的完全冷系统；Anki 归档以外的网络流量；磁盘 I/O；其他环境
 （普通 Linux、Docker Desktop、aarch64）；与系统其余部分分开的 BuildKit 步骤资源。

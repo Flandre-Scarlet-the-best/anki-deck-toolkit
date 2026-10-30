@@ -1,7 +1,7 @@
 # Performance: `anki-e2e`
 
 [Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: 1b95a367d50948ebc9cc1be9282c9f87bf9e8082 -->
+<!-- i18n-source-git-blob: 7ae58c29ea5d715eb0bdc08409e7939bdff7caaf -->
 
 Performance and resource usage of the Anki Desktop E2E stand: the last
 confirmed snapshot and an earlier manual observation
@@ -164,11 +164,10 @@ Not measured: `phase_duration@phase/release` — `unsupported`: module does not 
 
 The observation below was recorded by hand before the local history existed. It
 has no original JSON results: it is not a confirmed snapshot, its values are not
-compared with `benchmark-history` results and do not serve as a baseline. It keeps
-the context until the first confirmed snapshot of the same conditions. The warm
-`full` run is now described by the snapshot above, including host CPU and
-memory observations and the size of `work-cache`. The cold and incremental
-states and the per-phase breakdown are not yet covered by a confirmed snapshot.
+compared with `benchmark-history` results and do not serve as a baseline. The
+aggregate warm `full` results are now reported only in the confirmed snapshot
+above. This section keeps the cold and incremental observations, along with the
+manual phase and scenario breakdowns that the snapshot does not provide.
 
 ### 2026-10-26 · `anki-e2e` 0.1.0 · Anki 26.09.3 · `full`
 
@@ -196,7 +195,7 @@ Time per phase, seconds:
 | Anki image | 16 | 0 | 0 | 0 |
 | Run image (`cargo build`) | 155 | 1 | 0 | 30 |
 | Scenarios | 222 | 221 | 227 | 220 |
-| **Total** | **406.7** | **230.0** | **236.5** | **259.3** |
+| **Total** | **406.7** | — | — | **259.3** |
 
 Scenarios (range over the four runs):
 
@@ -213,16 +212,9 @@ Resources:
 
 | Metric | Value | Source |
 |---|---|---|
-| Container: memory peak | 499–505 MiB with a 6 GiB limit | `memory.peak` |
-| Container: CPU per run | 203–212 s | `usage_usec` |
-| Container: average load | 0.92–0.94 cores with a limit of 4 | `usage_usec` / time |
-| Container: peak over 1 s | 1.80–1.88 cores | sample difference |
-| Host during scenarios | ≈1.1 cores on average, 242–251 core·s (≈40 s above the container: dockerd, `docker exec`, WSL) | `/proc/stat` |
 | Cold image build, host | 471 core·s, 2.75 cores on average, peak 15.5 of 16; host memory up to +2.9 GiB | `/proc/stat`, `MemAvailable` |
 | Incremental build, host | 40 core·s, peak 4.6 cores; host memory up to +0.9 GiB | `/proc/stat`, `MemAvailable` |
 | dockerd during the build | 0.9–1.0 GiB, ≈0.05 cores (BuildKit steps are not included) | `docker.service` cgroup |
-| Runner: RSS peak | 27–28 MiB | `VmHWM` |
-| Runner: CPU | 5.3–6.7 s own + 0.7–3.5 s of waited-for children | `/proc/<pid>/stat` |
 | Unit tests `cargo test -p anki-e2e` | 0.63–0.65 s for 64 tests (already built) | run time |
 
 Disk:
@@ -238,14 +230,6 @@ Disk:
 
 Conclusions:
 
-- In the warm state ≈96 % of the `full` time is spent in the scenarios
-  themselves. Runner preparation takes under 10 s, almost all of it release
-  selection; its split into the GitHub request and the SHA-256 re-verification
-  was not measured.
-- The spread between warm runs is about 3 % (230.0 and 236.5 s).
-- The container limits are respected with a large margin: memory peak ≈0.5 GiB
-  of 6, CPU at most 1.9 of 4 cores. This is an observation from one
-  environment, not a reason to change the defaults.
 - The cold run image build is the most expensive phase in CPU and memory.
   `--cpus`/`--memory` do not apply to it: Cargo uses every host core (peak 15.5
   of 16) and up to 2.9 GiB of host memory. This matches the stand README.
@@ -253,9 +237,6 @@ Conclusions:
   rebuild. One observation is not enough to conclude unbounded growth: check it
   in the next entry with a series of several snapshot changes. Cleanup is
   `clean --cache`.
-- `full` starts 101–103 `anki-repo` processes; the `doctor` and `job` waits do
-  so at most once per second.
-
 Not measured: a fully cold system without the layer cache and base images;
 network traffic other than the Anki archive; disk I/O; other environments
 (plain Linux, Docker Desktop, aarch64); BuildKit step resources separately from

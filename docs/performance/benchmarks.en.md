@@ -1,7 +1,7 @@
 # Benchmark catalog and result contract
 
 [Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: e0cc3970e68c4911c288e83ad93759dc3dc09c03 -->
+<!-- i18n-source-git-blob: 134363313dd5ec7fcb5dd2a1828a33be9a453571 -->
 
 The catalog is the machine-readable form of what the [methodology](README.en.md)
 describes in words: which scenarios are measured, under which conditions, what
@@ -52,6 +52,7 @@ Scenarios as of today (the declarations themselves are the source of truth; the 
 | `benchmark-runner.calibration-cpu-plain` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
+| `benchmark-runner.calibration-io` | `short-cli` | `warm` |
 
 ## Registering a scenario for a new module
 
