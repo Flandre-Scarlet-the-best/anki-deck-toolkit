@@ -592,7 +592,7 @@ pub fn qa(result: &QaResult) -> String {
     out.line(format!("Экспорт: {}", result.export_dir));
     out.line(format!("Заметок всего: {}", result.notes_total));
     out.line(format!(
-        "Findings: всего {}, показано {}, усечено: {} (предел {} на код)",
+        "Замечания: всего {}, показано {}, усечено: {} (предел {} на код)",
         result.findings_total,
         result.findings_returned,
         yes_no(result.truncated),
@@ -600,7 +600,7 @@ pub fn qa(result: &QaResult) -> String {
     ));
     if result.unaddressable_findings > 0 {
         out.line(format!(
-            "Неадресуемых findings: {} (нет guid, guid не уникален или модель не разрешается; \
+            "Неадресуемых замечаний: {} (нет guid, guid не уникален или модель не разрешается; \
              это диагностика содержимого, структурные причины — в validate)",
             result.unaddressable_findings
         ));
@@ -629,7 +629,7 @@ pub fn qa(result: &QaResult) -> String {
     }
 
     out.blank();
-    out.line("Findings:");
+    out.line("Замечания:");
     if result.findings.is_empty() {
         out.line("  —");
     }
@@ -678,7 +678,7 @@ pub fn qa(result: &QaResult) -> String {
     }
     if result.truncated {
         out.line(format!(
-            "  … показано не более {} findings на код: остальные не выводятся ни здесь, ни в --json; \
+            "  … показано не более {} замечаний на код: остальные не выводятся ни здесь, ни в --json; \
              увеличьте --max-per-code (или сузьте выборку через --code)",
             result.max_per_code
         ));
@@ -688,7 +688,7 @@ pub fn qa(result: &QaResult) -> String {
     out.line(format!("Правила ({}):", result.rules.len()));
     for rule in &result.rules {
         out.line(format!(
-            "  {} [{}] применимо: {}, findings: {}",
+            "  {} [{}] применимо: {}, замечаний: {}",
             rule.code,
             rule.severity.as_str(),
             yes_no(rule.applicable),
@@ -789,7 +789,7 @@ pub fn review(result: &ReviewResult) -> String {
                 }
             }
             if item.qa_findings_truncated {
-                out.line("      … список findings обрезан");
+                out.line("      … список замечаний обрезан");
             }
         }
     }

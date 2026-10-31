@@ -1,0 +1,28 @@
+name: Доверенный контракт описания PR
+# Независимая проверка опубликованного описания PR. На `pull_request_target`
+# GitHub берёт этот workflow из base, а валидатор скачивается из точного base SHA:
+# head PR не скачивается и не исполняется, поэтому PR не может подменить правила,
+# по которым проверяется его собственное описание. Body и метаданные PR читаются
+# из файла события только как данные. Секреты, запись и токен в рабочей копии не
+# нужны. Изменение валидатора в PR действует на эту проверку только после merge.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+
+jobs:
+  pr-body-trusted:
+    # Имя — контекст для ruleset; порядок его активации описан в
+    # `.agents/skills/anki-git-workflow/references/pr-lifecycle.md`.
+    name: Доверенная структура PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Получить доверенный валидатор из base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Проверить опубликованное описание PR валидатором base
+        run: python3 .github/scripts/check_pr_body.py --event-path "$GITHUB_EVENT_PATH"

@@ -9,8 +9,8 @@
 //!
 //! Ни одно ожидаемое число не зашито в тест: counts по каждому коду
 //! пересчитываются из сырого `deck.json` независимым oracle'ом
-//! ([`common::raw_qa_counts`]), число показанных findings и признак усечения
-//! выводятся из этих counts, а адрес каждого показанного finding'а проверяется
+//! ([`common::raw_qa_counts`]), число показанных замечаний и признак усечения
+//! выводятся из этих counts, а адрес каждого показанного замечания проверяется
 //! по сырым заметкам, а не по выводу tool'а.
 
 use crate::common;
@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 /// Предел печати, который тесты передают явно.
 ///
-/// Это аргумент теста, а не факт об экспорте: сколько findings вернётся и была
+/// Это аргумент теста, а не факт об экспорте: сколько замечаний вернётся и была
 /// ли выборка обрезана, всегда считается из oracle'а.
 const PRINT_LIMIT: usize = 200;
 
@@ -68,7 +68,7 @@ fn rich_export() -> Value {
     })
 }
 
-/// Насыщенный findings экспорт другой формы.
+/// Насыщенный замечаниями экспорт другой формы.
 ///
 /// Второй независимый пример: другое дерево колод, другие имена моделей и
 /// полей, `flds` объявлены не в порядке `ord`, у одной модели одно поле. Набор
@@ -86,7 +86,7 @@ fn mixed_rich_export() -> Value {
     value
 }
 
-/// Форма findings, не зависящая от имён: код, позиция заметки и `ord` поля.
+/// Форма замечания, не зависящая от имён: код, позиция заметки и `ord` поля.
 fn finding_shape(parsed: &Value) -> Vec<(String, u64, Option<i64>)> {
     parsed["result"]["findings"]
         .as_array()
@@ -169,7 +169,7 @@ fn qa_reports_error_severity_findings_without_failing() {
     assert_eq!(
         parsed["result"]["findings_total"],
         raw_qa_counts(&raw)["forbidden_white_span"],
-        "число findings правила берётся из независимого пересчёта"
+        "число замечаний правила берётся из независимого пересчёта"
     );
     let finding = &parsed["result"]["findings"][0];
     assert_eq!(finding["severity"], "error");
@@ -343,7 +343,7 @@ fn human_mode_lists_every_rule_and_keeps_stdout_only() {
     assert!(stderr.is_empty());
     let mut needles = vec![
         "По кодам:".to_string(),
-        "Findings:".to_string(),
+        "Замечания:".to_string(),
         format!("Правила ({}):", QA_CODES.len()),
         "усечено".to_string(),
     ];
@@ -360,12 +360,12 @@ fn human_mode_lists_every_rule_and_keeps_stdout_only() {
     );
 }
 
-/// Counts и адреса findings на synthetic-экспортах пересчитываются независимо.
+/// Counts и адреса замечаний на synthetic-экспортах пересчитываются независимо.
 ///
 /// Тест не утверждает ни одного зашитого числа: ожидаемые counts берутся из
-/// [`raw_qa_counts`], признак усечения и число показанных findings выводятся из
-/// них, а каждый показанный finding проверяется по сырым заметкам. Насыщенность
-/// (findings есть у каждого кода реестра) тоже проверяется через oracle.
+/// [`raw_qa_counts`], признак усечения и число показанных замечаний выводятся из
+/// них, а каждое показанное замечание проверяется по сырым заметкам. Насыщенность
+/// (замечания есть у каждого кода реестра) тоже проверяется через oracle.
 #[test]
 fn synthetic_exports_report_independently_recomputed_counts() {
     let exports = [("rich", rich_export()), ("mixed", mixed_rich_export())];
@@ -381,7 +381,7 @@ fn synthetic_exports_report_independently_recomputed_counts() {
         for code in QA_CODES {
             assert!(
                 expected[code] > 0,
-                "{label}: фикстура обязана давать findings кода {code}"
+                "{label}: фикстура обязана давать замечания кода {code}"
             );
         }
 
@@ -423,8 +423,8 @@ fn synthetic_exports_report_independently_recomputed_counts() {
             "{label}"
         );
 
-        // Печать ограничена кодом, у которого findings больше предела; адрес
-        // каждого показанного finding проверяется прямо по сырым заметкам.
+        // Печать ограничена кодом, у которого замечаний больше предела; адрес
+        // каждого показанного замечания проверяется прямо по сырым заметкам.
         let widest = QA_CODES
             .iter()
             .map(|code| expected[code])
@@ -436,7 +436,7 @@ fn synthetic_exports_report_independently_recomputed_counts() {
             "{label}: признак усечения следует из oracle'а"
         );
         // Предел применяется к каждому коду отдельно, поэтому ожидание — сумма
-        // урезанных по коду счётчиков, а не урезанная сумма всех findings.
+        // урезанных по коду счётчиков, а не урезанная сумма всех замечаний.
         assert_eq!(
             parsed["result"]["findings_returned"],
             QA_CODES
@@ -494,7 +494,7 @@ fn oversized_group_is_reported_as_truncated() {
     );
 
     let findings = parsed["result"]["findings"].as_array().expect("findings");
-    assert_eq!(findings.len(), 1, "группа описывается одним finding'ом");
+    assert_eq!(findings.len(), 1, "группа описывается одним замечанием");
     let finding = &findings[0];
     assert_eq!(finding["related_truncated"], true);
     assert_eq!(
@@ -514,7 +514,7 @@ fn oversized_group_is_reported_as_truncated() {
     assert_finding_matches_raw_labelled(&raw, finding, "группа сверх предела");
 }
 
-/// Проверяет один finding по сырому `deck.json`.
+/// Проверяет одно замечание по сырому `deck.json`.
 ///
 /// Проверка идёт от адреса (`note_index` → заметка в сыром порядке обхода) и от
 /// свойства правила, а не от сообщения tool'а: тест не повторяет формулировки,
@@ -655,7 +655,7 @@ fn empty_field_findings_point_at_a_real_empty_value() {
     assert_eq!(
         findings.len(),
         expected.min(PRINT_LIMIT),
-        "показаны ровно те findings правила, что помещаются в предел печати"
+        "показаны ровно те замечания правила, что помещаются в предел печати"
     );
     assert_eq!(
         parsed["result"]["truncated"],
@@ -663,7 +663,7 @@ fn empty_field_findings_point_at_a_real_empty_value() {
         "признак усечения следует из oracle'а"
     );
 
-    // Адрес каждого finding разрешается по сырому deck.json: заметка берётся из
+    // Адрес каждого замечания разрешается по сырому deck.json: заметка берётся из
     // preorder-обхода (а не из корневого массива), а имя поля — из модели этой
     // заметки, а не из исторического содержимого колоды.
     for finding in findings {
@@ -677,12 +677,12 @@ fn empty_field_findings_point_at_a_real_empty_value() {
             .find(|(_, model_ord)| usize::try_from(*model_ord).ok() == Some(ord))
             .expect("поле модели с таким ord");
 
-        assert_eq!(finding["field"], name, "finding называет поле модели");
+        assert_eq!(finding["field"], name, "замечание называет поле модели");
         assert_eq!(declared_ord, i64::try_from(ord).expect("i64"));
         assert_eq!(finding["severity"], "warning");
         assert_eq!(
             note["fields"][ord], "",
-            "finding должен указывать на пустое значение"
+            "замечание должно указывать на пустое значение"
         );
         assert_eq!(finding["evidence"]["value_chars"], 0);
     }
@@ -727,7 +727,7 @@ fn findings_on_unaddressable_notes_are_marked_and_counted() {
     assert_eq!(
         findings.len(),
         raw_qa_counts(&raw)["empty_field_value"],
-        "counts findings пересчитываются из сырого JSON"
+        "counts замечаний пересчитываются из сырого JSON"
     );
 
     let mut unaddressable = 0;
@@ -749,7 +749,7 @@ fn findings_on_unaddressable_notes_are_marked_and_counted() {
     }
     assert_eq!(
         parsed["result"]["unaddressable_findings"], unaddressable,
-        "счётчик неадресуемых findings выводится из сырых guid, а не из вывода"
+        "счётчик неадресуемых замечаний выводится из сырых guid, а не из вывода"
     );
     assert!(
         unaddressable > 0 && addressable > 0,
@@ -800,7 +800,7 @@ fn qa_summarizes_the_full_group_for_grouped_findings() {
     assert_eq!(
         findings.len(),
         raw_qa_counts(&raw)["duplicate_note_content"],
-        "группа описывается одним finding'ом"
+        "группа описывается одним замечанием"
     );
     let finding = &findings[0];
     assert_eq!(finding["group_size"], members.len());
@@ -854,7 +854,7 @@ fn human_truncation_message_names_the_real_way_to_see_the_rest() {
 /// QA судит о значениях, а не об именах полей, моделей и колод.
 ///
 /// Один и тот же набор значений под полностью другими именами обязан дать тот
-/// же набор findings — те же коды в тех же позициях. `ord` при этом не меняется,
+/// же набор замечаний — те же коды в тех же позициях. `ord` при этом не меняется,
 /// а объявление `flds` намеренно идёт не по порядку: адрес поля задаётся `ord`
 /// модели, поэтому ни имя, ни позиция объявления на результат не влияют.
 #[test]
@@ -896,12 +896,12 @@ fn rules_are_independent_of_field_and_model_names() {
     let shape = finding_shape(&base_parsed);
     assert!(
         !shape.is_empty(),
-        "фикстура обязана давать findings, иначе равенство пусто"
+        "фикстура обязана давать замечания, иначе равенство пусто"
     );
     assert_eq!(
         shape,
         finding_shape(&renamed_parsed),
-        "переименование полей, моделей и колоды не меняет набор findings"
+        "переименование полей, моделей и колоды не меняет набор замечаний"
     );
     assert_eq!(
         base_parsed["result"]["by_code"], renamed_parsed["result"]["by_code"],
@@ -960,7 +960,7 @@ fn qa_error_severity_neither_invalidates_the_export_nor_blocks_edit() {
         "--request",
         &path.to_string_lossy(),
     ]);
-    assert_eq!(code, 0, "QA findings не блокируют edit");
+    assert_eq!(code, 0, "QA замечания не блокируют edit");
     let planned = parse_json(&stdout);
     assert_eq!(planned["result"]["effective_edits"], 1);
     assert_eq!(planned["result"]["applied"], false);

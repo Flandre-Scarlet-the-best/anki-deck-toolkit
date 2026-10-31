@@ -4,7 +4,7 @@
 //! Все три правила работают только со строковыми значениями. Нестроковое
 //! значение или отсутствующая позиция — структурная проблема, и её владелец —
 //! [`crate::ops::validate`]; QA не дублирует структурную диагностику и не
-//! превращает её в content-finding.
+//! превращает её в content-замечание.
 
 use serde_json::json;
 
@@ -309,7 +309,7 @@ mod tests {
                 .filter(|finding| finding.note_position == 0)
                 .count(),
             0,
-            "неразрешённая модель — не content-finding"
+            "неразрешённая модель — не content-замечание"
         );
     }
 
@@ -320,7 +320,7 @@ mod tests {
             value["notes"][0]["fields"][1] = json!("");
         });
         // Правило описывает содержимое, а не адресуемость: заметка без guid
-        // по-прежнему даёт finding, но он честно помечен как неисполнимый.
+        // по-прежнему даёт замечание, но оно честно помечено как неисполнимое.
         let found = findings_for(&json, "empty_field_value");
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].note_position, 0);
@@ -356,7 +356,11 @@ mod tests {
                 json!(r#"<span style="color: #fff">a</span><span style="color: #ffffff">b</span>"#);
         });
         let found = findings_for(&json, "forbidden_white_span");
-        assert_eq!(found.len(), 1, "finding адресуется полю, а не каждому span");
+        assert_eq!(
+            found.len(),
+            1,
+            "замечание адресуется полю, а не каждому span"
+        );
         assert_eq!(found[0].evidence["occurrences"], 2);
     }
 }
