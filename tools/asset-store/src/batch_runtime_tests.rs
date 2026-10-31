@@ -628,8 +628,16 @@ fn missing_corrupted_or_replaced_state_is_never_a_silent_no_op() {
     assert_eq!(counts, CONFIRM);
     assert_eq!(inode(&path), replaced_inode);
 
-    // Перезапись на месте теми же байтами меняет ctime: снова подтверждение.
+    // Перезапись на месте теми же байтами: снова подтверждение. Метки времени
+    // ФС грубые, поэтому mtime задаётся явно, иначе запись в пределах одного
+    // тика могла бы оставить отпечаток прежним.
     fs::write(&path, &expected).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
     let (result, counts) = counted(|| runtime.save(&state));
     result.unwrap();
     assert_eq!(counts, CONFIRM);
