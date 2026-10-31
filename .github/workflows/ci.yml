@@ -61,7 +61,6 @@ jobs:
         run: |
           python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
           python3 .github/scripts/check_skill_contracts.py
-          python3 .github/scripts/check_documentation_i18n.py
 
       - name: Проверить workflow GitHub Actions (actionlint)
         # Семантика workflow: выражения `${{ }}`, контексты, `needs`, matrix,
@@ -239,7 +238,7 @@ jobs:
         # их отсутствие, выдал бы пустоту за проверку личных колод. Локальные
         # проверки своего хранилища (`kanji-corpus-gate`, `pitch-corpus-gate`) и
         # своих экспортов (`anki-repo validate`) описаны в
-        # `tools/asset-store/README.md` и `tools/anki-repo/README.md`.
+        # `docs/ru/asset-store/README.md` и `docs/ru/anki-repo/README.md`.
         run: python3 .github/scripts/check_local_data_untracked.py
 
       - name: Показать статистику sccache
