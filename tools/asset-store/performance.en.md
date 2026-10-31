@@ -1,7 +1,7 @@
 # Performance: `asset-store`
 
 [Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: 99af1fa4fde5348941f03cd12fec04d0767a2f18 -->
+<!-- i18n-source-git-blob: af9cd6304860930b33f974c4619d4529060f19b0 -->
 
 Performance of the asset store's file core
 ([store contract and workload executor](README.en.md)):

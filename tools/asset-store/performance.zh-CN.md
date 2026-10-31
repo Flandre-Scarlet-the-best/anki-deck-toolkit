@@ -1,7 +1,7 @@
 # 性能：`asset-store`
 
 [Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 99af1fa4fde5348941f03cd12fec04d0767a2f18 -->
+<!-- i18n-source-git-blob: af9cd6304860930b33f974c4619d4529060f19b0 -->
 
 资源存储文件核心的性能（[存储契约与负载执行器](README.zh-CN.md)）：方法、
 测量边界、合成负载特征以及目录场景最近一次已确认的快照。通用测量规则见[方法论](../../docs/performance/README.zh-CN.md)，
