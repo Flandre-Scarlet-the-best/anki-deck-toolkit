@@ -3,6 +3,7 @@
 [Русский](../../ru/benchmark-runner/performance.md) · [English](../../en/benchmark-runner/performance.md) · **简体中文**
 
 > **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/benchmark-runner/performance.md)为准。欢迎提交翻译和校对改进。
+
 基准执行器自身的测量（[接口与语义](README.md)）：它对已知开销的
 负载测得有多准确、每个指标究竟包含什么，以及轮询 `/proc` 和运行自有 cgroup 的代价。通用测量规则见
 [方法论](../performance/README.md)。

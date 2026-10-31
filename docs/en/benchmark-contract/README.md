@@ -3,6 +3,7 @@
 [Русский](../../ru/benchmark-contract/README.md) · **English** · [简体中文](../../zh-CN/benchmark-contract/README.md)
 
 > **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/benchmark-contract/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
+
 `benchmark-contract` is a library and CLI that load the `benchmarks/`
 benchmark scenario catalog, validate declarations and measurement results,
 import Hyperfine 2.0 exports and answer whether two results are comparable.

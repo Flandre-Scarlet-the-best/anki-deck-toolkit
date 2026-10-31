@@ -86,6 +86,25 @@ class MarkdownLinkTests(unittest.TestCase):
         self.assertEqual(len(errors), 1, errors)
         self.assertIn(":2: цель ссылки не существует: gone.md", errors[0])
 
+    def test_escaped_bracket_is_not_a_link(self):
+        text = "\\[пример](missing.md) и \\\\[нет](gone.md)\n\n\\[r]: lost.md\n"
+        errors = self.errors("docs/ru/module/page.md", text)
+        # Удвоенная косая черта экранирует саму себя, и ссылка остаётся ссылкой.
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(":1: цель ссылки не существует: gone.md", errors[0])
+
+    def test_indented_code_block_is_not_a_link(self):
+        text = (
+            "Пример:\n\n    [x](missing.md)\n\n    [y](missing.md)\nТекст [нет](gone.md).\n\n"
+            "1. Пункт.\n\n    [продолжение](lost.md)\n\n"
+            "Абзац\n    [продолжение абзаца](absent.md)\n"
+        )
+        errors = self.errors("docs/ru/module/page.md", text)
+        self.assertEqual(len(errors), 3, errors)
+        self.assertIn(":6: цель ссылки не существует: gone.md", errors[0])
+        self.assertIn(":10: цель ссылки не существует: lost.md", errors[1])
+        self.assertIn(":13: цель ссылки не существует: absent.md", errors[2])
+
     def test_repository_check_reads_only_tracked_markdown(self):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         (self.root / "docs/ru/module/README.md").write_text("[битая](gone.md)\n", encoding="utf-8")

@@ -7,8 +7,9 @@
 переводы необязательны, а ссылка на русский оригинал — допустимая цель.
 
 Внешние адреса (`https:`, `mailto:` и любые другие схемы), чистые якоря
-`#раздел`, fenced-блоки и встроенный код пропускаются. Фрагмент и строка
-запроса отбрасываются, процентное кодирование раскрывается.
+`#раздел`, блоки кода, встроенный код и экранированная скобка `\\[`
+пропускаются. Фрагмент и строка запроса отбрасываются, процентное кодирование
+раскрывается.
 """
 
 import argparse
@@ -19,6 +20,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+INDENTED = re.compile(r"^(?: {4}| {0,3}\t)")
+LIST_ITEM = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)")
 # Встроенный код может переноситься на следующую строку, но не через пустую.
 CODE_SPAN = re.compile(r"(`+)(?:(?!\1)(?:[^\n]|\n(?![ \t]*\n)))+?\1")
 # Текст ссылки может переноситься на следующую строку, но не через пустую.
@@ -28,9 +31,17 @@ REFERENCE = re.compile(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(?:\n[ \t]*)?(<[^<>\n]*>|\S+)
 
 
 def visible_text(text: str) -> str:
-    """Текст без fenced-блоков и встроенного кода; номера строк сохраняются."""
+    """Текст без блоков кода и встроенного кода; номера строк сохраняются.
+
+    Строка с отступом в четыре пробела начинает блок кода только после пустой
+    строки и вне списка: в пункте списка это продолжение пункта, а без пустой
+    строки — продолжение абзаца, и ссылки в них проверяются.
+    """
     lines = []
     fence = ""
+    indented = False
+    previous_blank = True
+    in_list = False
     for line in text.splitlines():
         match = FENCE.match(line)
         if fence:
@@ -41,11 +52,34 @@ def visible_text(text: str) -> str:
         if match and not (match.group(1)[0] == "`" and "`" in match.group(2)):
             fence = match.group(1)
             lines.append("")
+            previous_blank = True
             continue
+        blank = not line.strip()
+        if indented and (blank or INDENTED.match(line)):
+            lines.append("")
+            continue
+        indented = False
+        if not blank and INDENTED.match(line) and previous_blank and not in_list:
+            indented = True
+            lines.append("")
+            continue
+        if LIST_ITEM.match(line):
+            in_list = True
+        elif previous_blank and line[:1] not in ("", " ", "\t"):
+            in_list = False
+        previous_blank = blank
         lines.append(line)
     # Код убирается после склейки строк, чтобы скрыть и многострочный фрагмент;
     # переводы строк внутри него сохраняются ради номеров строк.
     return CODE_SPAN.sub(lambda match: "\n" * match.group(0).count("\n"), "\n".join(lines))
+
+
+def escaped(text: str, index: int) -> bool:
+    """Символ экранирован нечётным числом обратных косых черт перед ним."""
+    count = 0
+    while index - count > 0 and text[index - count - 1] == "\\":
+        count += 1
+    return count % 2 == 1
 
 
 def destinations(text: str) -> list[tuple[int, str]]:
@@ -54,6 +88,9 @@ def destinations(text: str) -> list[tuple[int, str]]:
     found = []
     for pattern in (INLINE, REFERENCE):
         for match in pattern.finditer(visible):
+            bracket = match.start() + match.group(0).index("[")
+            if escaped(visible, bracket):
+                continue
             number = visible.count("\n", 0, match.start(1)) + 1
             found.append((number, match.group(1).removeprefix("<").removesuffix(">")))
     return sorted(found)

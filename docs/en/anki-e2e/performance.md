@@ -3,6 +3,7 @@
 [Русский](../../ru/anki-e2e/performance.md) · **English** · [简体中文](../../zh-CN/anki-e2e/performance.md)
 
 > **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/anki-e2e/performance.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
+
 Performance and resource usage of the Anki Desktop E2E stand: the last
 confirmed snapshot and an earlier manual observation
 ([stand contract](README.md)). The general measurement

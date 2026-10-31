@@ -3,6 +3,7 @@
 [Русский](../../ru/benchmark-runner/README.md) · **English** · [简体中文](../../zh-CN/benchmark-runner/README.md)
 
 > **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/benchmark-runner/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
+
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
 system metrics (cgroup v2, `/proc`, the module's machine-readable report, the

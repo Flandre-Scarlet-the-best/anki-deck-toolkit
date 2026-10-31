@@ -3,6 +3,7 @@
 [Русский](../../ru/asset-store/performance.md) · **English** · [简体中文](../../zh-CN/asset-store/performance.md)
 
 > **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/asset-store/performance.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
+
 Performance of the asset store's file core
 ([store contract and workload executor](README.md)):
 method, measurement boundary, synthetic workload characteristics and the last

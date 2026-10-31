@@ -3,6 +3,7 @@
 [Русский](../../ru/anki-repo/performance.md) · [English](../../en/anki-repo/performance.md) · **简体中文**
 
 > **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/anki-repo/performance.md)为准。欢迎提交翻译和校对改进。
+
 CrowdAnki 导出分析短命令的性能（[命令契约](README.md)）：按目录场景
 给出的最近确认快照。通用测量规则见[测量方法](../performance/README.md)，场景字段见
 [基准目录](../performance/benchmarks.md)。

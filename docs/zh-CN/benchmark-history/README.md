@@ -3,6 +3,7 @@
 [Русский](../../ru/benchmark-history/README.md) · [English](../../en/benchmark-history/README.md) · **简体中文**
 
 > **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/benchmark-history/README.md)为准。欢迎提交翻译和校对改进。
+
 `benchmark-history` 为每个用户保存其自己的已验证基准结果历史，在其中查找比较基线，
 对比“之前”与“之后”，生成以 `## Производительность`（性能）为标题的完整报告供 PR 摘要准备使用，以及
 `docs/ru/<模块>/performance.md` 模块俄语性能页面的快照；不会自动更新其他翻译。它不做任何测量：

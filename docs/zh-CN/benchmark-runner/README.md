@@ -3,6 +3,7 @@
 [Русский](../../ru/benchmark-runner/README.md) · [English](../../en/benchmark-runner/README.md) · **简体中文**
 
 > **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/benchmark-runner/README.md)为准。欢迎提交翻译和校对改进。
+
 `benchmark-runner` 是一个 Linux CLI：按 ID 和配置运行 `benchmarks/` 目录中的场景，用
 Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、模块的机器可读报告、
 文件系统），并以 `benchmark-contract` 格式写出结果。结果在被接受之前由

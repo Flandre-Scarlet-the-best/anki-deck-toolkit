@@ -3,6 +3,7 @@
 [Русский](../../ru/benchmark-contract/README.md) · [English](../../en/benchmark-contract/README.md) · **简体中文**
 
 > **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/benchmark-contract/README.md)为准。欢迎提交翻译和校对改进。
+
 `benchmark-contract` 是一个库和 CLI：加载基准场景目录 `benchmarks/`，校验声明和测量
 结果，导入 Hyperfine 2.0 导出，并回答两个结果是否可比较。字段、配置、指标的含义以及
 注册场景的规则见[目录指南](../performance/benchmarks.md)；通用测量规则见

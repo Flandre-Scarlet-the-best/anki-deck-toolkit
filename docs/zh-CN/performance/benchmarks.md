@@ -3,6 +3,7 @@
 [Русский](../../ru/performance/benchmarks.md) · [English](../../en/performance/benchmarks.md) · **简体中文**
 
 > **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/performance/benchmarks.md)为准。欢迎提交翻译和校对改进。
+
 目录是[测量方法](README.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
 执行器在其中记录测量值。两个契约都由 `benchmark-contract` 校验
