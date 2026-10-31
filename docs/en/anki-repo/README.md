@@ -1,12 +1,13 @@
 # anki-repo
 
-[Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
+[Русский](../../ru/anki-repo/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/anki-repo/docs/ru/README.md)
 
-<!-- i18n-source-git-blob: 8651721f404d755fdd4679bdef2a498e8a9f47af -->
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/anki-repo/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
+
 
 `anki-repo` is a toolkit for deterministic analysis of CrowdAnki exports and strictly constrained edits to their contents in the `Anki-decks` repository. It gives agents fast, predictable access to the structure of `deck.json` without requiring them to read a multi-megabyte JSON file manually.
 
-The [`anki_repo::exchange`](exchange.md) library API provides profile/deck identities,
+The [`anki_repo::exchange`](../../ru/anki-repo/exchange.md) library API provides profile/deck identities,
 semantic A/C/B comparison, persistent revisions, and preconditions for future
 programmatic exchange with Anki. It accepts confirmed input in memory, does not read
 `decks/input/` or move exports, and adds no CLI bypass for that protected area.
@@ -36,14 +37,14 @@ and profile. Add-on setup uses official packages and Anki's native interactive
 installer. Namespaced actions extend the existing AnkiConnect and invoke the
 original CrowdAnki; readiness requires real operations after loading. This is a
 separate network adapter: local export commands remain offline and `decks/input/`
-stays protected. See the [Desktop integration contract](desktop.md) for compatibility,
+stays protected. See the [Desktop integration contract](../../ru/anki-repo/desktop.md) for compatibility,
 backups, cancellation, and restart limits.
 
 The independent `pronunciation_audio` domain provides local MP3 assets and the read-only
 `asset_store::pronunciation::read_trusted` API, but `create` and `migrate-media` do not yet
 handle this domain. It requires both technical MP3 validation and explicit human approval of
 surface/reading; decoding does not prove pronunciation. The contract belongs to
-[asset-store](../asset-store/pronunciation.md).
+[asset-store](../../ru/asset-store/pronunciation.md).
 
 ## Purpose
 
@@ -93,7 +94,7 @@ anki-repo maintenance disable
 
 `maintenance disable` does not report success until disablement has been verified: if the checkout binding is unverified, it retains unit files and returns `write_failed`. For a verified checkout, autostart, timer activity, and service shutdown are checked under one lock; `no` is not recorded if any check fails. Thus, saved `no` cannot mean “automatic cleanup is off” while cleanup is still active.
 
-The policy and cleanup implementation belong to `repository-maintenance`. See [`repository-maintenance` documentation](../repository-maintenance/README.en.md): `/tmp` and other users' data are not part of the measured size of managed artifacts.
+The policy and cleanup implementation belong to `repository-maintenance`. See [`repository-maintenance` documentation](../repository-maintenance/docs/ru/README.md): `/tmp` and other users' data are not part of the measured size of managed artifacts.
 
 ## Commands
 
@@ -1229,7 +1230,7 @@ cargo test --workspace --locked
 
 CI (`.github/workflows/ci.yml`) runs the same checks independently of local setup on `pull_request`, push to the default branch, and manual dispatch. It also verifies user-data boundaries: no path under the fully ignored `decks/` or `.asset-store/` may be tracked, and ignore rules must exist without re-inclusion (`.github/scripts/check_local_data_untracked.py`). It inspects the actual Git index because `.gitignore` cannot untrack already indexed files and can be bypassed by `git add -f`.
 
-CI deliberately does not validate user-owned content: those areas are absent in a clean checkout, and asserting their absence would not amount to testing private decks. Validate a real export locally with `anki-repo validate decks/output/<export_name>`, or a local corpus using `kanji-corpus-gate` / `pitch-corpus-gate` (see [`asset-store` documentation](../asset-store/README.en.md)). CI only reads the repository; adding or changing decks does not require CI changes.
+CI deliberately does not validate user-owned content: those areas are absent in a clean checkout, and asserting their absence would not amount to testing private decks. Validate a real export locally with `anki-repo validate decks/output/<export_name>`, or a local corpus using `kanji-corpus-gate` / `pitch-corpus-gate` (see [`asset-store` documentation](../asset-store/docs/ru/README.md)). CI only reads the repository; adding or changing decks does not require CI changes.
 
 Ordinary toolkit tests create synthetic exports and never read `decks/**`.
 
@@ -1262,4 +1263,4 @@ The test suite includes:
 
 The original race is guarded by three observable properties: `replace_atomically` leaves the winning update and rejects the losing writer with `source_changed`; the unlocked control demonstrates a lost update; and the lock test verifies that publication waits. The internal race window in `write_and_publish` cannot be triggered externally without adding a test seam, so the tests assert those properties rather than faking a “just about to publish” signal.
 
-Module measurements and methodology: [performance](performance.en.md).
+Module measurements and methodology: [performance](performance.md).

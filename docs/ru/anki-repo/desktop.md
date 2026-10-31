@@ -79,7 +79,7 @@ Anki и поддержку адаптером; `loaded` по диску оста
 Поддержка адаптера намеренно ограничена проверенными исходниками: Anki
 26.09.2 и 26.09.3 (числовые эквиваленты 26.9.2 и 26.9.3), AnkiConnect API 6
 из AnkiWeb с `mod` 1792032779 и CrowdAnki с `mod` 1789725370. Обе версии Anki
-подтверждены живым прогоном [E2E-стенда](../anki-e2e/README.md) на Linux Anki. Точный allowlist Python-файлов с
+подтверждены живым прогоном [E2E-стенда](../anki-e2e/docs/ru/README.md) на Linux Anki. Точный allowlist Python-файлов с
 SHA-256 находится в `src/desktop/compatibility.json`. Неизвестные изменения,
 включая добавленный Python-файл, приводят к `unsupported`/`incompatible`.
 Настройки `meta.json`, конфигурация и пользовательские файлы не заменяются

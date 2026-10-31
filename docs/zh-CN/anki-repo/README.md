@@ -1,12 +1,13 @@
 # anki-repo
 
-[Русский](README.md) · [English](README.en.md) · **简体中文**
+[Русский](../../ru/anki-repo/docs/ru/README.md) · [English](../../en/anki-repo/docs/ru/README.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 8651721f404d755fdd4679bdef2a498e8a9f47af -->
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/anki-repo/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
+
 
 `anki-repo` 是一套用于确定性分析 CrowdAnki 导出数据、并对其内容实施严格受限修改的工具。它使智能体能够快速、可预测地了解 `deck.json` 的结构，而无需人工通读数 MB 的 JSON 文件。
 
-[`anki_repo::exchange`](exchange.md) 库 API 提供配置档案与牌组身份、A/C/B 语义比较、
+[`anki_repo::exchange`](../../ru/anki-repo/exchange.md) 库 API 提供配置档案与牌组身份、A/C/B 语义比较、
 持久化修订状态，以及未来与 Anki 进行程序化交换所需的前置条件。
 它在内存中接收已确认的输入，不读取 `decks/input/`，不搬移导出数据，
 也不提供绕过该受保护区域限制的 CLI 接口。元数据存放在 Git 忽略的
@@ -35,12 +36,12 @@
 安装程序。命名空间 actions 扩展现有 AnkiConnect 并调用原始 CrowdAnki；只有加载后
 执行真实操作才能确认就绪。这是单独的网络适配器：本地导出命令仍为离线操作，
 `decks/input/` 仍受保护。兼容性、备份、取消和重启限制见
-[Desktop 集成契约](desktop.md)。
+[Desktop 集成契约](../../ru/anki-repo/desktop.md)。
 
 独立的 `pronunciation_audio` 域提供本地 MP3 资源和只读
 `asset_store::pronunciation::read_trusted` API；`create` 和 `migrate-media` 目前尚不处理该域。
 它既要求 MP3 技术验证，也要求人工明确确认 surface/reading；解码不能证明发音。完整契约见
-[asset-store](../asset-store/pronunciation.md)。
+[asset-store](../../ru/asset-store/pronunciation.md)。
 
 ## 用途
 
@@ -90,7 +91,7 @@ anki-repo maintenance disable
 
 在确认禁用操作确实成功之前，`maintenance disable` 不会宣称成功。如果不能证实定时器归属于当前工作副本，它会保留 unit 文件并返回 `write_failed`。对于已经验证的工作副本，自动启动、定时器活动状态以及服务停止状态都在同一把锁下检查；失败时不会保存 `no`。因此，不能在自动清理仍然运行时错误地将保存的 `no` 解释为已关闭。
 
-策略和清理操作的权威来源是 `repository-maintenance`。参见[磁盘维护工具文档](../repository-maintenance/README.zh-CN.md)：`/tmp` 和其他用户的数据不计入受管理资源占用量。
+策略和清理操作的权威来源是 `repository-maintenance`。参见[磁盘维护工具文档](../repository-maintenance/docs/ru/README.md)：`/tmp` 和其他用户的数据不计入受管理资源占用量。
 
 ## 命令
 
@@ -1226,7 +1227,7 @@ cargo test --workspace --locked
 
 CI（`.github/workflows/ci.yml`）在 `pull_request`、推送到默认分支及手动触发时独立执行相同检查。另会验证用户数据边界：Git 不得跟踪被整体忽略的 `decks/` 或 `.asset-store/` 下任何路径，且忽略规则必须存在，不能通过再次纳入跟踪来削弱（`.github/scripts/check_local_data_untracked.py`）。检查读取真实 Git 索引，因为 `.gitignore` 不能自动取消已跟踪文件，也可能被 `git add -f` 绕过。
 
-CI 有意不验证用户自身的牌组和资源：这些区域在干净克隆中不存在，把“没有私人文件”当作测试成功并没有意义。应在本地通过 `anki-repo validate decks/output/<导出名称>` 检查具体导出，或通过 `kanji-corpus-gate`、`pitch-corpus-gate` 检查本地资源库（参见 [`asset-store` 文档](../asset-store/README.zh-CN.md)）。CI 只读取仓库，改变用户牌组的组成不要求修改 CI 流程。
+CI 有意不验证用户自身的牌组和资源：这些区域在干净克隆中不存在，把“没有私人文件”当作测试成功并没有意义。应在本地通过 `anki-repo validate decks/output/<导出名称>` 检查具体导出，或通过 `kanji-corpus-gate`、`pitch-corpus-gate` 检查本地资源库（参见 [`asset-store` 文档](../asset-store/docs/ru/README.md)）。CI 只读取仓库，改变用户牌组的组成不要求修改 CI 流程。
 
 常规工具测试自行构造合成导出，绝不读取 `decks/**`。
 
@@ -1259,4 +1260,4 @@ cargo "+$MSRV" check --workspace --all-targets --locked
 
 针对最初竞态问题，还通过三个可观察性质进行回归保护：`replace_atomically` 保留胜出者的更新并让落后者收到 `source_changed`；无锁对照证明会丢失更新；锁测试确认发布必须等待。由于没有引入测试专用接口就无法从外部直接触发 `write_and_publish` 内部的准确竞态窗口，所以测试验证这些真实性质，而不是伪造“马上发布”的信号。
 
-模块测量结果与方法：[性能](performance.zh-CN.md)。
+模块测量结果与方法：[性能](performance.md)。

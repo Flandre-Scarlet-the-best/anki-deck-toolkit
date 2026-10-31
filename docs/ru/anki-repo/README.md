@@ -1,6 +1,6 @@
 # anki-repo
 
-**Русский** · [English](README.en.md) · [简体中文](README.zh-CN.md)
+**Русский** · [English](../../en/anki-repo/docs/ru/README.md) · [简体中文](../../zh-CN/anki-repo/docs/ru/README.md)
 
 `anki-repo` — набор инструментов для детерминированного анализа CrowdAnki-экспортов,
 строго ограниченных правок их содержимого в репозитории `Anki-decks`. Он даёт агенту быстрый и предсказуемый доступ к структуре
@@ -186,7 +186,7 @@ anki-repo maintenance disable
 означать «автоочистка выключена», пока она фактически работает.
 
 Владельцем политики и очистки остаётся `repository-maintenance`.
-См. `tools/repository-maintenance/README.md`: `/tmp` и чужие данные
+См. `tools/repository-maintenance/docs/ru/README.md`: `/tmp` и чужие данные
 не входят в измеренный размер управляемых артефактов.
 
 ## Команды
@@ -2215,7 +2215,7 @@ warnings` и `cargo test --workspace --locked`. Дополнительно CI п
 областей не существует, и шаг, который «проверил» бы их отсутствие, выдал бы пустоту
 за проверку личных колод. Свой экспорт проверяют локально — `anki-repo validate` по
 конкретному каталогу `decks/output/<имя_экспорта>`; свой корпус ресурсов — локальные
-`kanji-corpus-gate` и `pitch-corpus-gate` (см. `tools/asset-store/README.md`). CI
+`kanji-corpus-gate` и `pitch-corpus-gate` (см. `tools/asset-store/docs/ru/README.md`). CI
 только читает репозиторий, поэтому изменение состава колод не требует правки процесса
 CI.
 

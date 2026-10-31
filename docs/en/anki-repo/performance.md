@@ -1,13 +1,14 @@
 # Performance: `anki-repo`
 
-[Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: 0d5fdbc634a412f5aef6fe14b606374bf5854f9b -->
+[Русский](../../ru/anki-repo/performance.md) · **English** · [简体中文](../../zh-CN/anki-repo/performance.md)
+
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/anki-repo/performance.md) is authoritative. Corrections and translation contributions are welcome.
 
 Performance of the short CrowdAnki export analysis commands
-([command contract](README.en.md)): the last confirmed
+([command contract](docs/ru/README.md)): the last confirmed
 snapshot per catalog scenario. The general measurement rules are in the
-[methodology](../../docs/performance/README.en.md), scenario fields in the
-[benchmark catalog](../../docs/performance/benchmarks.en.md).
+[methodology](../performance/docs/ru/README.md), scenario fields in the
+[benchmark catalog](../performance/benchmarks.md).
 
 ## What is measured
 
@@ -37,7 +38,7 @@ identity and size can be compared.
 cargo run -p benchmark-runner -- check anki-repo.validate --profile warm --param export_dir=/path/to/export
 cargo run -p benchmark-runner -- run anki-repo.validate --profile warm --param export_dir=/path/to/export --runs 20
 cargo run -p benchmark-history -- list --scenario anki-repo.validate
-cargo run -p benchmark-history -- snapshot <ID> --page tools/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot <ID> --page docs/ru/anki-repo/performance.md
 ```
 
 ## Snapshots
