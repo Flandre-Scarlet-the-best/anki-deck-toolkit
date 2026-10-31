@@ -116,7 +116,7 @@ reviews:
         номер PR, commit SHA, разовый план, transient review result или факт,
         который уже расходится с кодом/JSON. Изменения структуры CrowdAnki и
         verification workflow должны оставаться согласованными с AGENTS.md и
-        tools/anki-repo/README.md.
+        docs/ru/anki-repo/README.md.
 
     - path: "AGENTS.md"
       instructions: >-
@@ -177,7 +177,7 @@ knowledge_base:
         applyTo: "tools/anki-repo/**/*"
       - files: .codex/context/03-VERIFICATION.md
         applyTo: "tools/anki-repo/**/*"
-      - files: tools/anki-repo/README.md
+      - files: docs/ru/anki-repo/README.md
         applyTo: "tools/anki-repo/**/*"
   learnings:
     scope: local

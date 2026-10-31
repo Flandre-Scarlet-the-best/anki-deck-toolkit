@@ -4,7 +4,7 @@
 # метрик, а пары серий с опросом и без него (--no-sampling) и сценарий без
 # дополнительных метрик — накладные расходы сборщика. Эти сценарии не
 # описывают производительность asset-store, anki-repo или Anki. Методика и
-# снимки — tools/benchmark-runner/performance.md.
+# снимки — docs/ru/benchmark-runner/performance.md.
 schema_version = 1
 module = "benchmark-runner"
 

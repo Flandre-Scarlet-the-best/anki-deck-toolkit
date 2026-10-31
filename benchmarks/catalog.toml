@@ -2,7 +2,7 @@
 #
 # Здесь объявлен общий словарь профилей условий выполнения. Сценарии модулей
 # лежат в scenarios/<модуль>.toml; новый модуль подключается новым файлом без
-# правок этого файла и кода. Контракт и правила — docs/performance/benchmarks.md,
+# правок этого файла и кода. Контракт и правила — docs/ru/performance/benchmarks.md,
 # проверка — `cargo run -p benchmark-contract -- validate`.
 schema_version = 1
 repository_root = ".."

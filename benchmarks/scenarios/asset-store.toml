@@ -1,8 +1,8 @@
 # Сценарии файлового ядра asset-store: настоящие операции AssetStore и
 # SafeBatchRuntime над детерминированным синтетическим корпусом. Исполнитель
-# нагрузки — asset-store-bench (tools/asset-store/README.md), спецификации
+# нагрузки — asset-store-bench (docs/ru/asset-store/README.md), спецификации
 # объёмов — benchmarks/workloads/asset-store/*.toml, методика и снимки —
-# tools/asset-store/performance.md.
+# docs/ru/asset-store/performance.md.
 #
 # Эталон строится шагом setup штатной публикацией ingest_verified в
 # игнорируемом Git каталоге target/benchmark-workloads/asset-store; cleanup

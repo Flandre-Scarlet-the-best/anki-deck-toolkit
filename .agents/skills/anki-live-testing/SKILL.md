@@ -23,7 +23,7 @@ description: >-
 
 Это не универсальный навык тестирования и не замена владельцам: требования к колодам —
 `.codex/context/03-VERIFICATION.md`; команды и данные —
-`tools/anki-repo/README.md`, `tools/asset-store/README.md`; обычные проверки —
+`docs/ru/anki-repo/README.md`, `docs/ru/asset-store/README.md`; обычные проверки —
 `AGENTS.md`; Git/PR — `anki-git-workflow`. Независимое код-ревью только для чтения
 по-прежнему использует отдельный `anki-code-review` со **своим** системным
 временным каталогом, а не этот маршрут. Сравнительный или нагрузочный прогон,
@@ -84,7 +84,7 @@ description: >-
 
 **Исключение для штатных архивов:** `yarxi_dark_acceptance` и
 `jpdb_pitch_acceptance` принимают для `--output` только пути **вне рабочей
-копии**, как определено в `tools/asset-store/README.md`. Оставляй проверяемый
+копии**, как определено в `docs/ru/asset-store/README.md`. Оставляй проверяемый
 ZIP в разрешённом внешнем каталоге; в `.codex/local/reports/<task>/` записывай
 его путь, SHA-256, размер, проверку целостности и итоговый статус. Не меняй
 ограничения владельца и не перенаправляй ZIP внутрь `.codex/local/`.
