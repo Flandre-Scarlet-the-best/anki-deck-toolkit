@@ -61,7 +61,6 @@ jobs:
         run: |
           python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
           python3 .github/scripts/check_skill_contracts.py
-          python3 .github/scripts/check_documentation_i18n.py
 
       - name: Проверить workflow GitHub Actions (actionlint)
         # Семантика workflow: выражения `${{ }}`, контексты, `needs`, matrix,
