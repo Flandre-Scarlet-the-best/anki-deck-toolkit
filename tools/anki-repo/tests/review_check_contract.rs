@@ -682,7 +682,7 @@ fn full_pipeline_applies_exactly_one_reviewed_change() {
         "замена не попала в строку"
     );
 
-    // 6. Экспорт остаётся валидным, а QA-finding по правленой заметке исчезает.
+    // 6. Экспорт остаётся валидным, а QA-замечание по правленой заметке исчезает.
     let (code, stdout, _) = run_cli(&["--json", "validate", &export]);
     assert_eq!(code, 0, "валидность сохраняется: {stdout}");
     assert_eq!(parse_json(&stdout)["result"]["valid"], true);

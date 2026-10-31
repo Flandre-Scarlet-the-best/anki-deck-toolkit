@@ -61,7 +61,7 @@ def valid_body() -> str:
 
 CR_HEADER = "| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |"
 CR_DELIMITER = "| --- | --- | --- | --- | --- | --- |"
-CR_ROW = "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"
+CR_ROW = "| 1 · `abcdef0` | — | — | 0 замечаний | clean | `abcdef0` |"
 
 
 def coderabbit(*lines: str) -> str:
@@ -143,18 +143,18 @@ class PrBodyContractTests(unittest.TestCase):
     def test_conditional_coderabbit_table(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\nПроверено."
         self.assertTrue(any("таблицы" in e for e in validate(body)))
-        body += "\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 findings | clean | `def` |"
+        body += "\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 замечаний | clean | `def` |"
         self.assertEqual(validate(body), [])
 
     def test_coderabbit_row_requires_reviewed_sha(self):
-        body = valid_body() + "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 | — | — | 0 findings | clean | unknown |"
+        body = valid_body() + "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 | — | — | 0 замечаний | clean | unknown |"
         self.assertTrue(any("строка" in e for e in validate(body)))
 
     def test_coderabbit_row_requires_filled_cells(self):
         # Строка из одних разделителей не является записью disposition.
         table = "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n"
         self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
-        self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"), [])
+        self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 замечаний | clean | `abcdef0` |"), [])
 
     def test_coderabbit_table_requires_delimiter_row(self):
         # Без строки-разделителя GitHub показывает две строки текста, а не таблицу.
@@ -277,7 +277,7 @@ class PrBodyContractTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
 
     def test_performance_section_coexists_with_coderabbit_table(self):
-        body = body_with(MEASURED) + "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"
+        body = body_with(MEASURED) + "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 замечаний | clean | `abcdef0` |"
         self.assertEqual(validate(body), [])
 
     def test_bot_exception_is_limited_to_account_and_branch(self):

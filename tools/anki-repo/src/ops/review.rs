@@ -24,9 +24,9 @@
 //! выбросить её нельзя. Структурные причины такой заметки остаются предметом
 //! [`crate::ops::validate`], `review` их не диагностирует.
 //!
-//! Третий контракт — контекст группы. Для групповых QA-finding'ов
+//! Третий контракт — контекст группы. Для групповых QA-замечаний
 //! (например, `duplicate_note_content`) в batch попадают все
-//! участники группы, а не только та заметка, к которой приписан finding: иначе
+//! участники группы, а не только та заметка, к которой приписано замечание: иначе
 //! агент не может судить о дубликате, не прочитав `deck.json`. Участники берутся
 //! из domain-результата ([`qa::Finding::related`]), а не собираются здесь
 //! повторно; границы списка сообщаются полями `group_size` и
@@ -42,7 +42,7 @@ use crate::ops::NoteSummary;
 use crate::qa::{self, QaSeverity, RuleContext};
 use crate::selection::{self, MatchMode};
 
-/// Максимум QA-findings, приложенных к одной карточке batch'а.
+/// Максимум QA-замечаний, приложенных к одной карточке batch'а.
 pub const MAX_FINDINGS_PER_ITEM: usize = 20;
 
 /// Критерий выбора заметок для review.
@@ -64,7 +64,7 @@ pub enum ReviewCriteria {
         /// Режим сопоставления.
         mode: MatchMode,
     },
-    /// Заметки, у которых есть QA-finding указанного кода.
+    /// Заметки, у которых есть QA-замечание указанного кода.
     QaCode {
         /// Код правила.
         code: String,
@@ -103,7 +103,7 @@ pub struct SelectionSummary {
     pub deck: Option<String>,
 }
 
-/// Другой участник группы в контексте finding'а.
+/// Другой участник группы в контексте замечания.
 #[derive(Debug, Clone)]
 pub struct RelatedNote {
     /// Позиция заметки в порядке экспорта.
@@ -112,18 +112,18 @@ pub struct RelatedNote {
     pub guid: Option<String>,
 }
 
-/// QA-finding в компактной форме для batch'а.
+/// QA-замечание в компактной форме для batch'а.
 #[derive(Debug, Clone)]
 pub struct FindingSummary {
     /// Код правила.
     pub code: &'static str,
     /// Серьёзность.
     pub severity: QaSeverity,
-    /// Имя поля, если finding относится к полю.
+    /// Имя поля, если замечание относится к полю.
     pub field: Option<String>,
     /// Человекочитаемое описание.
     pub message: String,
-    /// Размер группы целиком, если finding — про группу.
+    /// Размер группы целиком, если замечание — про группу.
     pub group_size: Option<usize>,
     /// Остальные участники группы, включая неадресуемых.
     pub related: Vec<RelatedNote>,
@@ -131,12 +131,12 @@ pub struct FindingSummary {
     pub related_truncated: bool,
 }
 
-/// Роль заметки в групповом finding'е, найденном в этом batch'е.
+/// Роль заметки в групповом замечании, найденном в этом batch'е.
 #[derive(Debug, Clone)]
 pub struct GroupMembership {
     /// Код правила группы.
     pub code: &'static str,
-    /// Позиция заметки, к которой приписан finding группы.
+    /// Позиция заметки, к которой приписано замечание группы.
     pub owner_note_index: usize,
     /// `guid` этой заметки.
     pub owner_guid: Option<String>,
@@ -151,9 +151,9 @@ pub struct ReviewItem {
     pub note_index: usize,
     /// Сводка заметки с именованными полями.
     pub note: NoteSummary,
-    /// QA-findings этой заметки.
+    /// QA-замечания этой заметки.
     pub qa_findings: Vec<FindingSummary>,
-    /// Есть ли findings, не попавшие в карточку.
+    /// Есть ли замечания, не попавшие в карточку.
     pub qa_findings_truncated: bool,
     /// Группы из этого batch'а, в которых заметка — участник, а не владелец.
     pub group_membership: Vec<GroupMembership>,
@@ -237,7 +237,7 @@ pub fn review(
                 related_truncated: finding.related_truncated,
             });
         // Участник группы тоже должен понимать, почему он в batch'е: сам
-        // finding приписан владельцу, и без этой ссылки batch выглядел бы
+        // замечание приписано владельцу, и без этой ссылки batch выглядел бы
         // набором несвязанных заметок.
         if finding.group_size.is_some() {
             for position in &finding.related {
@@ -299,7 +299,7 @@ fn guid_at(index: &ExportIndex<'_>, position: usize) -> Option<String> {
 
 /// Участники группы как адресуемые ссылки.
 ///
-/// Список включает саму заметку finding'а: это позиции всей группы, как их
+/// Список включает саму заметку замечания: это позиции всей группы, как их
 /// вычислило правило, и потребитель не должен досчитывать владельца сам.
 /// Неадресуемый участник остаётся в списке с `guid: None`: это контекст группы,
 /// а не editable target.
@@ -314,7 +314,7 @@ fn related_notes(index: &ExportIndex<'_>, related: &[usize], owner: usize) -> Ve
         .collect()
 }
 
-/// Собирает одну карточку batch'а с ограничением числа findings.
+/// Собирает одну карточку batch'а с ограничением числа замечания.
 fn build_item(
     index: &ExportIndex<'_>,
     position: usize,
@@ -387,7 +387,7 @@ fn select(
                     },
                 ));
             }
-            // Групповое finding отбирает всю группу: иначе агент не может
+            // Групповое замечание отбирает всю группу: иначе агент не может
             // судить о дубликате, не читая экспорт целиком. Список участников
             // приходит из domain-результата и уже ограничен правилом.
             let matching: BTreeSet<usize> = findings

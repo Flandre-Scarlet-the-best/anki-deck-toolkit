@@ -414,7 +414,7 @@ pub fn write_proposals(dir: &TempDir, name: &str, document: &Value) -> PathBuf {
 /// Все заметки сырого экспорта в порядке обхода дерева.
 ///
 /// Порядок совпадает с порядком `note_index` tool'а и не зависит от него: это
-/// независимый источник для проверки адресов findings.
+/// независимый источник для проверки адресов замечания.
 pub fn collect_notes<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
     if let Some(notes) = value.get("notes").and_then(Value::as_array) {
         out.extend(notes);
@@ -600,7 +600,7 @@ pub fn raw_qa_counts(value: &Value) -> BTreeMap<&'static str, usize> {
                 trailing += 1;
             }
             // Правило срабатывает на значение поля, а не на каждое
-            // совпадение внутри него: один finding на пару (заметка, поле).
+            // совпадение внутри него: одно замечание на пару (заметка, поле).
             if has_white_span(text) {
                 spans += 1;
             }
@@ -637,10 +637,10 @@ fn raw_content_duplicate_groups(notes: &[&&Value]) -> usize {
 ///
 /// Упрощённый независимый скан: теги обходятся как текст, а `style`
 /// разбирается по `;` и `:`. Этого достаточно, чтобы пересчитать ожидаемое
-/// число findings правила `forbidden_white_span`, не вызывая сам toolkit.
+/// число замечаний правила `forbidden_white_span`, не вызывая сам toolkit.
 ///
 /// Отвечает именно на вопрос правила — «есть ли в значении белый `<span>`», —
-/// потому что findings у этого правила по одному на пару (заметка, поле).
+/// потому что замечания у этого правила по одному на пару (заметка, поле).
 fn has_white_span(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let mut rest = lower.as_str();

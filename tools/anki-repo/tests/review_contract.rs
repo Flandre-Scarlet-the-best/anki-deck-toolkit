@@ -9,7 +9,7 @@
 //! `--field`/`--value`, `--qa-code`, `--deck`), ограниченность страницы
 //! (`--offset`/`--limit`) и адресуемость batch'а (`excluded_unaddressable`).
 //! Групповые правила добавляют четвёртый: в batch попадают все участники группы,
-//! а не только заметка, к которой приписан finding.
+//! а не только заметка, к которой приписан замечание.
 
 use crate::common;
 
@@ -211,7 +211,7 @@ fn review_batch_is_bounded_and_carries_qa_context() {
 fn item_findings_follow_registry_order() {
     let temp = TempDir::new("review-findings-order");
     temp.write_export(&export_with(|value| {
-        // Значение из одних пробелов даёт и leading, и trailing finding, а
+        // Значение из одних пробелов даёт и leading, и trailing замечание, а
         // одинаковая заметка рядом создаёт ещё и группу дубликатов содержимого.
         value["notes"][0]["fields"] = json!(["слово", "  ", ""]);
         value["notes"][1]["fields"] = json!(["слово", "  ", ""]);
@@ -225,7 +225,7 @@ fn item_findings_follow_registry_order() {
     let items = parsed["result"]["items"].as_array().expect("items");
     assert_eq!(items.len(), 2, "обе заметки отобраны по значению поля");
 
-    // Порядок findings — порядок реестра правил, а не порядок обнаружения.
+    // Порядок замечаний — порядок реестра правил, а не порядок обнаружения.
     let codes: Vec<&str> = items[0]["qa_findings"]
         .as_array()
         .expect("findings")
@@ -243,14 +243,14 @@ fn item_findings_follow_registry_order() {
     );
     assert_eq!(items[0]["qa_findings_truncated"], false);
 
-    // Групповое finding называет остальных участников, а сами участники знают,
+    // Групповое замечание называет остальных участников, а сами участники знают,
     // что попали в batch как члены группы, а не по своему критерию.
     let group = items[0]["qa_findings"]
         .as_array()
         .expect("findings")
         .iter()
         .find(|finding| finding["code"] == "duplicate_note_content")
-        .expect("finding группы");
+        .expect("замечание группы");
     assert_eq!(group["group_size"], 2);
     assert_eq!(group["related"][0]["guid"], "guid-2");
     assert_eq!(items[1]["group_membership"][0]["owner_guid"], "guid-1");
@@ -435,7 +435,7 @@ fn empty_field_export() -> Value {
             {"name": "Дополнение", "ord": 3}
         ]);
         value["notes"][0]["fields"] = json!(["偶然", "существительное", "случайность", ""]);
-        // Два пустых поля в одной заметке: findings два, item один.
+        // Два пустых поля в одной заметке: замечания два, item один.
         value["notes"][1]["fields"] = json!(["必然", "", "", "пример"]);
 
         let notes = value["notes"].as_array_mut().expect("notes");
@@ -463,8 +463,8 @@ fn batch_is_bounded_per_note_and_carries_model_fields() {
     temp.write_export(&fixture);
 
     // Ожидаемое число заметок с пустым полем пересчитывается из самого fixture.
-    // `review` выбирает заметки, а не findings: заметка с двумя пустыми полями
-    // даёт два finding и один item. Поэтому ожидание считается по заметкам.
+    // `review` выбирает заметки, а не замечания: заметка с двумя пустыми полями
+    // даёт два замечания и один item. Поэтому ожидание считается по заметкам.
     let mut notes = Vec::new();
     collect_notes(&fixture, &mut notes);
     let expected_selected = count_notes_with_empty_field(&fixture);
@@ -499,7 +499,7 @@ fn batch_is_bounded_per_note_and_carries_model_fields() {
             .expect("qa_findings")
             .iter()
             .any(|finding| finding["code"] == "empty_field_value"),
-        "item обязан нести finding, по которому выбран"
+        "item обязан нести замечание, по которому выбран"
     );
     // Значение поля берётся из fixture по адресу, разрешённому через `ord`
     // модели, а не сравнивается с историческим содержимым колоды.
@@ -604,7 +604,7 @@ fn grouped_qa_code_selection_brings_every_participant() {
     let result = &parsed["result"];
     assert_eq!(
         result["total_selected"], 4,
-        "в batch попадают все участники группы, а не только владелец finding'а"
+        "в batch попадают все участники группы, а не только владелец замечания"
     );
 
     let owner = &result["items"][0];
@@ -613,7 +613,7 @@ fn grouped_qa_code_selection_brings_every_participant() {
         .expect("qa_findings")
         .iter()
         .find(|finding| finding["code"] == "duplicate_note_content")
-        .expect("finding группы у владельца");
+        .expect("замечание группы у владельца");
     assert_eq!(finding["group_size"], 4);
     assert_eq!(finding["related_truncated"], false);
 
@@ -694,7 +694,7 @@ fn grouped_duplicate_selection_brings_every_group_participant() {
             .expect("qa_findings")
             .iter()
             .find(|finding| finding["code"] == code)
-            .unwrap_or_else(|| panic!("у владельца должен быть finding {code}"))
+            .unwrap_or_else(|| panic!("у владельца должно быть замечание {code}"))
             .clone()
     };
 
@@ -838,7 +838,7 @@ fn single_note_qa_code_does_not_pull_unrelated_notes() {
             .is_empty(),
         "у заметки вне группы нет group_membership"
     );
-    // Item несёт *все* findings заметки, а не только отобравший его код
+    // Item несёт *все* замечания заметки, а не только отобравший его код
     // (см. `item_findings_follow_registry_order`), поэтому здесь важно лишь то,
     // что причина попадания заметки в batch не потеряна.
     assert!(
@@ -847,7 +847,7 @@ fn single_note_qa_code_does_not_pull_unrelated_notes() {
             .expect("qa_findings")
             .iter()
             .any(|finding| finding["code"] == "empty_field_value"),
-        "item обязан нести finding, по которому выбран"
+        "item обязан нести замечание, по которому выбран"
     );
 }
 
