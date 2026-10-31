@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::batch_runtime::{
-    FS_OPERATIONS, FsOperationCounts, REFERENCED_BLOB_READS, RuntimeBatchState, RuntimeBlobRef,
-    SafeBatchRuntime, create_log_file,
+    FS_OPERATIONS, FaultPoint, FsOperationCounts, INJECTED_FAULTS, REFERENCED_BLOB_READS,
+    RuntimeBatchState, RuntimeBlobRef, SafeBatchRuntime, create_log_file,
 };
 use crate::error::{AssetError, ErrorCode};
 use crate::temp_workspace::TempWorkspace;
@@ -166,7 +166,7 @@ fn unlocking_invalidates_stale_save_and_reload_preserves_verified_blob_cache() {
     };
 
     runtime_a.reacquire_lock().unwrap();
-    // Даже большая revision stale snapshot не даёт права перезаписать чужое состояние.
+    // Даже большая ревизия устаревшего снимка не даёт права перезаписать чужое состояние.
     stale.revision = 10;
     let error = runtime_a.save(&stale).unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidTransition);
@@ -441,7 +441,7 @@ fn changed_bytes_are_written_even_with_the_same_revision() {
         before
     );
 
-    // Отказ не испортил право сохранять: те же байты — no-op, новые — запись.
+    // Отказ не испортил право сохранять: те же байты — без записи, новые — запись.
     let (result, unchanged) = counted(|| runtime.save(&state));
     result.unwrap();
     assert_eq!(unchanged, NOTHING);
@@ -673,29 +673,144 @@ fn symlinked_or_non_regular_state_is_rejected_even_with_identical_bytes() {
     assert_eq!(temporary_leftovers(temporary.path(), "boundary"), 0);
 }
 
+/// Выполняет `save` со взведёнными одноразовыми отказами и проверяет, что
+/// каждый из них действительно сработал на пути сохранения.
+fn save_with_faults(
+    runtime: &mut SafeBatchRuntime,
+    state: &PlainTextBatch,
+    faults: &[FaultPoint],
+) -> (Result<(), AssetError>, FsOperationCounts) {
+    INJECTED_FAULTS.with(|armed| *armed.borrow_mut() = faults.to_vec());
+    let outcome = counted(|| runtime.save(state));
+    let unused = INJECTED_FAULTS.with(|armed| std::mem::take(&mut *armed.borrow_mut()));
+    assert!(unused.is_empty(), "отказы не достигнуты: {unused:?}");
+    outcome
+}
+
+const WRITE_AFTER_FAILED_FILE_CONFIRMATION: FsOperationCounts = FsOperationCounts {
+    file_syncs: 2,
+    ..WRITE
+};
+const WRITE_AFTER_FAILED_DIRECTORY_CONFIRMATION: FsOperationCounts = FsOperationCounts {
+    file_syncs: 2,
+    directory_syncs: 2,
+    ..WRITE
+};
+
+#[test]
+fn compare_read_failure_is_never_success_without_publication() {
+    let temporary = TemporaryDirectory::new();
+    let mut runtime = SafeBatchRuntime::open(temporary.path(), "compare-fault").unwrap();
+    runtime.load::<PlainTextBatch>().unwrap();
+    let state = PlainTextBatch::new("compare-fault", 1, "сравниваемое состояние");
+    runtime.save(&state).unwrap();
+    let path = state_path(temporary.path(), "compare-fault");
+    let expected = fs::read(&path).unwrap();
+    let durable_inode = inode(&path);
+
+    // Даже при собственной надёжной публикации ошибка чтения ведёт к полной записи.
+    let (result, counts) = save_with_faults(&mut runtime, &state, &[FaultPoint::CompareRead]);
+    result.unwrap();
+    assert_eq!(counts, WRITE);
+    assert_ne!(
+        inode(&path),
+        durable_inode,
+        "назначение опубликовано заново"
+    );
+    assert_eq!(fs::read(&path).unwrap(), expected);
+    let (result, counts) = counted(|| runtime.save(&state));
+    result.unwrap();
+    assert_eq!(
+        counts, NOTHING,
+        "новая публикация надёжна и принадлежит объекту"
+    );
+
+    // Если и запись не удалась, save возвращает ошибку, прежнее содержимое цело.
+    let published_inode = inode(&path);
+    let (result, counts) = save_with_faults(
+        &mut runtime,
+        &state,
+        &[FaultPoint::CompareRead, FaultPoint::WriteFileSync],
+    );
+    assert_eq!(result.unwrap_err().code, ErrorCode::IoFailure);
+    assert_eq!(counts.renames, 0);
+    assert_eq!(inode(&path), published_inode);
+    assert_eq!(fs::read(&path).unwrap(), expected);
+    assert_eq!(temporary_leftovers(temporary.path(), "compare-fault"), 0);
+    let (result, counts) = counted(|| runtime.save(&state));
+    result.unwrap();
+    assert_eq!(
+        counts, CONFIRM,
+        "после отказа прежнее подтверждение не используется"
+    );
+}
+
+#[test]
+fn durability_confirmation_failure_is_never_success_without_publication() {
+    for (fault, fallback) in [
+        (
+            FaultPoint::ConfirmFileSync,
+            WRITE_AFTER_FAILED_FILE_CONFIRMATION,
+        ),
+        (
+            FaultPoint::ConfirmDirectorySync,
+            WRITE_AFTER_FAILED_DIRECTORY_CONFIRMATION,
+        ),
+    ] {
+        let temporary = TemporaryDirectory::new();
+        let state = PlainTextBatch::new("confirm-fault", 3, "сохранено прежним процессом");
+        {
+            let mut runtime = SafeBatchRuntime::open(temporary.path(), "confirm-fault").unwrap();
+            runtime.load::<PlainTextBatch>().unwrap();
+            runtime.save(&state).unwrap();
+        }
+        let path = state_path(temporary.path(), "confirm-fault");
+        let expected = fs::read(&path).unwrap();
+        let foreign_inode = inode(&path);
+
+        // Неподтверждённая чужая публикация заменяется полной атомарной записью.
+        let mut runtime = SafeBatchRuntime::open(temporary.path(), "confirm-fault").unwrap();
+        let loaded = runtime.load::<PlainTextBatch>().unwrap().unwrap();
+        let (result, counts) = save_with_faults(&mut runtime, &loaded, &[fault]);
+        result.unwrap();
+        assert_eq!(counts, fallback, "{fault:?}");
+        assert_ne!(inode(&path), foreign_inode, "{fault:?}");
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        let (result, counts) = counted(|| runtime.save(&loaded));
+        result.unwrap();
+        assert_eq!(counts, NOTHING, "{fault:?}");
+
+        // Чужая замена теми же байтами, подтверждение и запись не удались:
+        // ошибка, файл не тронут, собственное подтверждение сброшено.
+        let external = path.with_file_name("external.json");
+        fs::write(&external, &expected).unwrap();
+        fs::rename(&external, &path).unwrap();
+        let replaced_inode = inode(&path);
+        let (result, _) =
+            save_with_faults(&mut runtime, &loaded, &[fault, FaultPoint::WriteFileSync]);
+        assert_eq!(result.unwrap_err().code, ErrorCode::IoFailure, "{fault:?}");
+        assert_eq!(inode(&path), replaced_inode, "{fault:?}");
+        assert_eq!(fs::read(&path).unwrap(), expected);
+        assert_eq!(temporary_leftovers(temporary.path(), "confirm-fault"), 0);
+        let (result, counts) = counted(|| runtime.save(&loaded));
+        result.unwrap();
+        assert_eq!(counts, CONFIRM, "{fault:?}");
+    }
+}
+
 #[test]
 fn failed_real_write_keeps_old_state_and_drops_durability_record() {
-    use std::os::unix::fs::PermissionsExt;
-
     let temporary = TemporaryDirectory::new();
     let mut runtime = SafeBatchRuntime::open(temporary.path(), "failing").unwrap();
     runtime.load::<PlainTextBatch>().unwrap();
     let first = PlainTextBatch::new("failing", 1, "сохранено");
     runtime.save(&first).unwrap();
-    let directory = temporary.path().join(".runtime/batches/failing");
     let path = state_path(temporary.path(), "failing");
     let expected = fs::read(&path).unwrap();
 
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
-    if fs::File::create(directory.join("probe")).is_ok() {
-        // Под привилегированным пользователем права каталога не мешают записи.
-        fs::remove_file(directory.join("probe")).unwrap();
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
-        return;
-    }
+    // Отказ до атомарной замены: прежнее состояние и каталог не тронуты.
     let second = PlainTextBatch::new("failing", 2, "не будет записано");
-    let (result, counts) = counted(|| runtime.save(&second));
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let (result, counts) = save_with_faults(&mut runtime, &second, &[FaultPoint::WriteFileSync]);
     assert_eq!(result.unwrap_err().code, ErrorCode::IoFailure);
     assert_eq!(counts.renames, 0);
     assert_eq!(fs::read(&path).unwrap(), expected);
@@ -709,6 +824,18 @@ fn failed_real_write_keeps_old_state_and_drops_durability_record() {
     result.unwrap();
     assert_eq!(counts, WRITE);
     assert_eq!(saved(temporary.path(), "failing"), second);
+
+    // Отказ синхронизации каталога после замены: байты уже видны, но
+    // публикация не надёжна, и следующее сохранение её подтверждает.
+    let third = PlainTextBatch::new("failing", 3, "замена без подтверждения каталога");
+    let (result, counts) =
+        save_with_faults(&mut runtime, &third, &[FaultPoint::WriteDirectorySync]);
+    assert_eq!(result.unwrap_err().code, ErrorCode::IoFailure);
+    assert_eq!(counts, WRITE);
+    assert_eq!(saved(temporary.path(), "failing"), third);
+    let (result, counts) = counted(|| runtime.save(&third));
+    result.unwrap();
+    assert_eq!(counts, CONFIRM);
 }
 
 #[test]
