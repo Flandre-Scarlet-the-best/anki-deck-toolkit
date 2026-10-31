@@ -30,7 +30,6 @@ const BEGIN: &str = "<!-- benchmark-snapshot: ";
 const END: &str = "<!-- /benchmark-snapshot -->";
 pub const ANCHOR: &str = "<!-- benchmark-snapshot:anchor -->";
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Ru,

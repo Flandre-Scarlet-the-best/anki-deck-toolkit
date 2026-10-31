@@ -1421,7 +1421,10 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
     // Необязательные переводы остаются без изменений после публикации снимка.
     for lang in ["en", "zh-CN"] {
         let translated = fs::read_to_string(docs.join(format!("fixture.{lang}.md"))).unwrap();
-        assert!(!translated.contains("benchmark-snapshot: {"), "{lang}: {translated}");
+        assert!(
+            !translated.contains("benchmark-snapshot: {"),
+            "{lang}: {translated}"
+        );
     }
 
     // Повтор того же результата ничего не меняет, но сам результат своего
@@ -2737,8 +2740,16 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
     assert!(updated[0].contains("2026-10-04"));
     assert_eq!(updated[0].matches("benchmark-snapshot: {").count(), 1);
     assert_eq!(&updated[1..], &published[1..], "переводы не изменяются");
-    for forbidden in ["d".repeat(64), "e".repeat(64), "b".repeat(40), "b".repeat(64)] {
-        assert!(!updated[0].contains(&forbidden), "в снимок попал {forbidden}");
+    for forbidden in [
+        "d".repeat(64),
+        "e".repeat(64),
+        "b".repeat(40),
+        "b".repeat(64),
+    ] {
+        assert!(
+            !updated[0].contains(&forbidden),
+            "в снимок попал {forbidden}"
+        );
     }
     // CLI: доказательство берётся из локальной истории пользователя.
     for (path, text) in pages.iter().zip(&published) {
@@ -3095,7 +3106,11 @@ fn snapshot_of_a_scenario_without_workload_needs_no_identity_proof() {
     assert!(text.contains("2026-10-02"), "{text}");
     assert!(!text.contains(&"b".repeat(40)) && !text.contains(&"b".repeat(64)));
     for translated in &pages[1..] {
-        assert!(!fs::read_to_string(translated).unwrap().contains("benchmark-snapshot: {"));
+        assert!(
+            !fs::read_to_string(translated)
+                .unwrap()
+                .contains("benchmark-snapshot: {")
+        );
     }
 }
 
@@ -3112,18 +3127,29 @@ fn snapshot_russian_page_is_safe_on_failure_and_stale_write() {
     let plan = snapshot::plan(ru, scenario, &result(&Spec::default()), &options).unwrap();
     for fail in [snapshot::Step::Prepare(0), snapshot::Step::Commit(0)] {
         let err = snapshot::apply_with(&plan, &mut |step| {
-            if step == fail { Err(std::io::Error::other("внедрённый отказ")) }
-            else { Ok(()) }
-        }).unwrap_err();
+            if step == fail {
+                Err(std::io::Error::other("внедрённый отказ"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
         assert!(err.contains("страницы не изменены"), "{err}");
         assert_eq!(fs::read_to_string(ru).unwrap(), original);
     }
     fs::write(ru, format!("{original}\nизменена")).unwrap();
-    assert!(snapshot::apply(&plan).unwrap_err().contains("изменилась после подготовки"));
+    assert!(
+        snapshot::apply(&plan)
+            .unwrap_err()
+            .contains("изменилась после подготовки")
+    );
     fs::write(ru, &original).unwrap();
     snapshot::apply(&plan).unwrap();
     let updated = fs::read_to_string(ru).unwrap();
-    assert_eq!(updated.matches('\n').count(), updated.matches("\r\n").count());
+    assert_eq!(
+        updated.matches('\n').count(),
+        updated.matches("\r\n").count()
+    );
     assert!(updated.contains("benchmark-snapshot: {"));
     for translated in &pages[1..] {
         assert!(!fs::read_to_string(translated).unwrap().contains("benchmark-snapshot: {"));
@@ -3170,7 +3196,11 @@ fn snapshot_shows_and_guards_comparability_parameters() {
     assert!(text.contains(r#""parameters":{"writers":"a|b"}"#), "{text}");
     let escaped = "| параметр `writers` | `a\\|b` |".to_owned();
     assert!(text.contains(&escaped), "{text}");
-    assert!(!fs::read_to_string(&pages[1]).unwrap().contains("benchmark-snapshot: {"));
+    assert!(
+        !fs::read_to_string(&pages[1])
+            .unwrap()
+            .contains("benchmark-snapshot: {")
+    );
 
     // Тот же объём и та же нагрузка, но другое значение параметра: несопоставимо.
     let other = with("1", "2026-10-04T10:00:00Z");
@@ -3274,12 +3304,18 @@ fn snapshot_cli_publishes_only_russian_documentation() {
     let id = f.import(&mut store, &result(&Spec::default()));
     drop(store);
     let (code, out, err) = f.cli(&[
-        "snapshot", &id, "--page",
+        "snapshot",
+        &id,
+        "--page",
         dir.join("performance.md").to_str().unwrap(),
         "--apply",
     ]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(fs::read_to_string(dir.join("performance.md")).unwrap().contains("benchmark-snapshot: {"));
+    assert!(
+        fs::read_to_string(dir.join("performance.md"))
+            .unwrap()
+            .contains("benchmark-snapshot: {")
+    );
     assert!(!dir.join("performance.en.md").exists());
     assert!(!dir.join("performance.zh-CN.md").exists());
 }
