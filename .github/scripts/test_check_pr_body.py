@@ -169,7 +169,7 @@ class PrBodyContractTests(unittest.TestCase):
         for name in ("Сценарий", "База", "Кандидат", "Результат", "Вывод", "Регрессии"):
             missing = "\n".join(line for line in MEASURED.splitlines() if not line.startswith("- " + name + ":"))
             self.assertTrue(any(name in problem for problem in validate(body_with(missing))), name)
-        bad = MEASURED.replace("100 ms → 80 ms (−20 %)", "вроде быстрее")
+        bad = MEASURED.replace("- Результат: время 100 ms → 80 ms (−20 %); разброс ±2 ms", "- Результат: вроде быстрее")
         self.assertTrue(any("числового" in e for e in validate(body_with(bad))))
 
     def test_long_performance_is_rejected_without_gist_requirement(self):
