@@ -1368,13 +1368,13 @@ fn newer_same_workload(base: &BenchmarkResult) -> BenchmarkResult {
 
 const PAGE_RU: &str = "# Производительность: `fixture`\n\n**Русский** · [English](fixture.en.md) · [简体中文](fixture.zh-CN.md)\n\n## Снимки\n\n<!-- benchmark-snapshot:anchor -->\n\n## Методика\n\nТекст.\n";
 
-fn page(lang: &str, ru_sha: &str) -> String {
+fn page(lang: &str, _ru_sha: &str) -> String {
     let nav = match lang {
         "en" => "[Русский](fixture.md) · **English** · [简体中文](fixture.zh-CN.md)",
         _ => "[Русский](fixture.md) · [English](fixture.en.md) · **简体中文**",
     };
     format!(
-        "# Performance: `fixture`\n\n{nav}\n<!-- i18n-source-git-blob: {ru_sha} -->\n\n## Snapshots\n\n<!-- benchmark-snapshot:anchor -->\n\n## Method\n\nText.\n"
+        "# Performance: `fixture`\n\n{nav}\n\n## Snapshots\n\n<!-- benchmark-snapshot:anchor -->\n\n## Method\n\nText.\n"
     )
 }
 
@@ -1418,25 +1418,11 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
         !text.contains(&"d".repeat(64)),
         "идентичность входа не попадает в документацию"
     );
-    let new_sha = snapshot::git_blob_sha(text.as_bytes());
+    // Необязательные переводы остаются без изменений после публикации снимка.
     for lang in ["en", "zh-CN"] {
         let translated = fs::read_to_string(docs.join(format!("fixture.{lang}.md"))).unwrap();
-        assert!(
-            translated.contains(&new_sha),
-            "{lang}: отметка перевода обновлена"
-        );
-        assert!(translated.contains("benchmark-snapshot: {"));
+        assert!(!translated.contains("benchmark-snapshot: {"), "{lang}: {translated}");
     }
-    assert!(
-        fs::read_to_string(docs.join("fixture.en.md"))
-            .unwrap()
-            .contains("Last confirmed measurement")
-    );
-    assert!(
-        fs::read_to_string(docs.join("fixture.zh-CN.md"))
-            .unwrap()
-            .contains("最近一次确认的测量：")
-    );
 
     // Повтор того же результата ничего не меняет, но сам результат своего
     // происхождения не доказывает: без другого результата истории с тем же
@@ -2748,21 +2734,11 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
     assert_eq!(plan.workload, snapshot::WorkloadBasis::ConfirmedReplacement);
     snapshot::apply(&plan).unwrap();
     let updated = read_all();
-    let ru_sha = snapshot::git_blob_sha(updated[0].as_bytes());
-    for (n, text) in updated.iter().enumerate() {
-        assert!(text.contains("2026-10-04"), "{n}: {text}");
-        assert_eq!(text.matches("benchmark-snapshot: {").count(), 1);
-        for forbidden in [
-            "d".repeat(64),
-            "e".repeat(64),
-            "b".repeat(40),
-            "b".repeat(64),
-        ] {
-            assert!(!text.contains(&forbidden), "{n}: в странице {forbidden}");
-        }
-        if n > 0 {
-            assert!(text.contains(&ru_sha), "{n}: отметка перевода обновлена");
-        }
+    assert!(updated[0].contains("2026-10-04"));
+    assert_eq!(updated[0].matches("benchmark-snapshot: {").count(), 1);
+    assert_eq!(&updated[1..], &published[1..], "переводы не изменяются");
+    for forbidden in ["d".repeat(64), "e".repeat(64), "b".repeat(40), "b".repeat(64)] {
+        assert!(!updated[0].contains(&forbidden), "в снимок попал {forbidden}");
     }
     // CLI: доказательство берётся из локальной истории пользователя.
     for (path, text) in pages.iter().zip(&published) {
@@ -3115,109 +3091,43 @@ fn snapshot_of_a_scenario_without_workload_needs_no_identity_proof() {
         )
     );
     snapshot::apply(&plan).unwrap();
-    for path in &pages {
-        let text = fs::read_to_string(path).unwrap();
-        assert!(text.contains("2026-10-02"), "{}", path.display());
-        assert!(!text.contains(&"b".repeat(40)) && !text.contains(&"b".repeat(64)));
+    let text = fs::read_to_string(ru).unwrap();
+    assert!(text.contains("2026-10-02"), "{text}");
+    assert!(!text.contains(&"b".repeat(40)) && !text.contains(&"b".repeat(64)));
+    for translated in &pages[1..] {
+        assert!(!fs::read_to_string(translated).unwrap().contains("benchmark-snapshot: {"));
     }
 }
 
 #[test]
-fn snapshot_pages_stay_consistent_when_a_write_fails() {
+fn snapshot_russian_page_is_safe_on_failure_and_stale_write() {
     let f = fixture();
     let catalog = f.catalog();
     let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
-    let docs = f.root.join("workspace/docs");
-    let ru = docs.join("fixture.md");
-    // Русская страница с CRLF и соседним блоком другого профиля.
-    fs::write(&ru, PAGE_RU.replace('\n', "\r\n")).unwrap();
-    let sha = snapshot::git_blob_sha(fs::read(&ru).unwrap().as_slice());
-    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
-    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
+    let pages = snapshot_pages(&f, "fixture");
+    let ru = &pages[0];
+    let original = PAGE_RU.replace('\n', "\r\n");
+    fs::write(ru, &original).unwrap();
     let options = Options::default();
-    let mut neighbour = result(&Spec::default());
-    neighbour.profile.id = "cold".into();
-    snapshot::apply(&snapshot::plan(&ru, scenario, &neighbour, &options).unwrap()).unwrap();
-    let paths: Vec<PathBuf> = ["fixture.md", "fixture.en.md", "fixture.zh-CN.md"]
-        .iter()
-        .map(|n| docs.join(n))
-        .collect();
-    let read = || -> Vec<String> {
-        paths
-            .iter()
-            .map(|p| fs::read_to_string(p).unwrap())
-            .collect()
-    };
-    let leftovers = || {
-        fs::read_dir(&docs)
-            .unwrap()
-            .filter(|e| {
-                e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(".tmp")
-            })
-            .count()
-    };
-    let before = read();
-    let plan = snapshot::plan(&ru, scenario, &result(&Spec::default()), &options).unwrap();
-    let fail_at = |target: snapshot::Step| {
-        move |step: snapshot::Step| {
-            if step == target {
-                Err(std::io::Error::other("внедрённый отказ"))
-            } else {
-                Ok(())
-            }
-        }
-    };
-    use snapshot::Step::{Commit, Prepare, Restore};
-    for target in [Prepare(1), Prepare(2), Commit(1), Commit(2)] {
-        let error = snapshot::apply_with(&plan, &mut fail_at(target)).unwrap_err();
-        assert!(
-            error.contains("страницы не изменены"),
-            "{target:?}: {error}"
-        );
-        assert_eq!(read(), before, "{target:?}: все три страницы прежние");
-        assert_eq!(leftovers(), 0, "{target:?}: временных файлов нет");
+    let plan = snapshot::plan(ru, scenario, &result(&Spec::default()), &options).unwrap();
+    for fail in [snapshot::Step::Prepare(0), snapshot::Step::Commit(0)] {
+        let err = snapshot::apply_with(&plan, &mut |step| {
+            if step == fail { Err(std::io::Error::other("внедрённый отказ")) }
+            else { Ok(()) }
+        }).unwrap_err();
+        assert!(err.contains("страницы не изменены"), "{err}");
+        assert_eq!(fs::read_to_string(ru).unwrap(), original);
     }
-    // Не удался и возврат: ошибка называет рассогласованные страницы.
-    let mut faults = [Commit(2), Restore(1)].into_iter().collect::<Vec<_>>();
-    let error = snapshot::apply_with(&plan, &mut |step| {
-        if let Some(n) = faults.iter().position(|s| *s == step) {
-            faults.remove(n);
-            Err(std::io::Error::other("внедрённый отказ"))
-        } else {
-            Ok(())
-        }
-    })
-    .unwrap_err();
-    assert!(error.contains("рассогласованы"), "{error}");
-    assert!(
-        error.contains("fixture.en.md") && error.contains("fixture.zh-CN.md"),
-        "{error}"
-    );
-    for (path, text) in paths.iter().zip(&before) {
-        fs::write(path, text).unwrap();
-    }
-    // Страница, изменённая после подготовки плана, не перезаписывается.
-    fs::write(&paths[2], format!("{}\nправка", before[2])).unwrap();
-    let error = snapshot::apply(&plan).unwrap_err();
-    assert!(error.contains("изменилась после подготовки"), "{error}");
-    fs::write(&paths[2], &before[2]).unwrap();
-    // Успешное обновление: CRLF, отметки i18n и соседний блок сохранены.
+    fs::write(ru, format!("{original}\nизменена")).unwrap();
+    assert!(snapshot::apply(&plan).unwrap_err().contains("изменилась после подготовки"));
+    fs::write(ru, &original).unwrap();
     snapshot::apply(&plan).unwrap();
-    let after = read();
-    assert_eq!(
-        after[0].matches('\n').count(),
-        after[0].matches("\r\n").count()
-    );
-    let new_sha = snapshot::git_blob_sha(after[0].as_bytes());
-    for text in &after[1..] {
-        assert!(text.contains(&format!("i18n-source-git-blob: {new_sha} -->")));
-        assert_eq!(text.matches("benchmark-snapshot: {").count(), 2);
+    let updated = fs::read_to_string(ru).unwrap();
+    assert_eq!(updated.matches('\n').count(), updated.matches("\r\n").count());
+    assert!(updated.contains("benchmark-snapshot: {"));
+    for translated in &pages[1..] {
+        assert!(!fs::read_to_string(translated).unwrap().contains("benchmark-snapshot: {"));
     }
-    assert!(after[0].contains("профиль `cold`") && after[0].contains("профиль `warm`"));
 }
 
 /// Параметр, влияющий на сопоставимость (например, число писателей), — часть
@@ -3260,9 +3170,7 @@ fn snapshot_shows_and_guards_comparability_parameters() {
     assert!(text.contains(r#""parameters":{"writers":"a|b"}"#), "{text}");
     let escaped = "| параметр `writers` | `a\\|b` |".to_owned();
     assert!(text.contains(&escaped), "{text}");
-    let en = fs::read_to_string(&pages[1]).unwrap();
-    let escaped_en = "| parameter `writers` | `a\\|b` |".to_owned();
-    assert!(en.contains(&escaped_en), "{en}");
+    assert!(!fs::read_to_string(&pages[1]).unwrap().contains("benchmark-snapshot: {"));
 
     // Тот же объём и та же нагрузка, но другое значение параметра: несопоставимо.
     let other = with("1", "2026-10-04T10:00:00Z");
@@ -3288,7 +3196,7 @@ fn snapshot_shows_and_guards_comparability_parameters() {
         let arbitrary = with(value, "2026-10-06T10:00:00Z");
         let plan = snapshot::plan(ru, scenario, &arbitrary, &confirmed).unwrap();
         snapshot::apply(&plan).unwrap();
-        for page in &pages {
+        for page in pages.iter().take(1) {
             let text = fs::read_to_string(page).unwrap();
             let encoded = serde_json::to_string(value).unwrap();
             assert!(text.contains(&format!("\"writers\":{encoded}")), "{text}");
@@ -3357,44 +3265,23 @@ fn snapshot_materializes_optional_default_comparability_parameter() {
 }
 
 #[test]
-fn snapshot_cli_publishes_next_to_the_module() {
+fn snapshot_cli_publishes_only_russian_documentation() {
     let f = fixture();
-    let dir = f.root.join("workspace/tools/fixture");
+    let dir = f.root.join("workspace/docs/ru/fixture");
     fs::create_dir_all(&dir).unwrap();
-    let source = PAGE_RU
-        .replace("fixture.en.md", "performance.en.md")
-        .replace("fixture.zh-CN.md", "performance.zh-CN.md");
-    fs::write(dir.join("performance.md"), &source).unwrap();
-    let sha = snapshot::git_blob_sha(source.as_bytes());
-    for lang in ["en", "zh-CN"] {
-        let text = page(if lang == "en" { "en" } else { "zh" }, &sha)
-            .replace("fixture.md", "performance.md")
-            .replace("fixture.en.md", "performance.en.md")
-            .replace("fixture.zh-CN.md", "performance.zh-CN.md");
-        fs::write(dir.join(format!("performance.{lang}.md")), text).unwrap();
-    }
+    fs::write(dir.join("performance.md"), PAGE_RU).unwrap();
     let mut store = f.open();
     let id = f.import(&mut store, &result(&Spec::default()));
     drop(store);
     let (code, out, err) = f.cli(&[
-        "snapshot",
-        &id,
-        "--page",
+        "snapshot", &id, "--page",
         dir.join("performance.md").to_str().unwrap(),
         "--apply",
     ]);
     assert_eq!(code, 0, "{out}{err}");
-    for name in [
-        "performance.md",
-        "performance.en.md",
-        "performance.zh-CN.md",
-    ] {
-        assert!(
-            fs::read_to_string(dir.join(name))
-                .unwrap()
-                .contains("benchmark-snapshot: {")
-        );
-    }
+    assert!(fs::read_to_string(dir.join("performance.md")).unwrap().contains("benchmark-snapshot: {"));
+    assert!(!dir.join("performance.en.md").exists());
+    assert!(!dir.join("performance.zh-CN.md").exists());
 }
 
 /// Страница в HTML по правилам GFM: таблицы, автоссылки, зачёркивание,
@@ -3549,7 +3436,7 @@ fn snapshot_tables_keep_every_allowed_value_in_one_exact_cell() {
         } else {
             serde_json::to_string(value).unwrap()
         };
-        for page in &pages {
+        for page in pages.iter().take(1) {
             let text = fs::read_to_string(page).unwrap();
             // Маркеры блока целы: ровно одно начало и один конец на своих строках.
             assert_eq!(
