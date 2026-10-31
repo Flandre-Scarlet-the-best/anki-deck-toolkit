@@ -1350,10 +1350,16 @@ fn pr_reports_cover_first_comparable_missing_incomparable_and_unmeasured() {
         let Some((ok, stderr)) = check_pr_body(section) else {
             continue;
         };
+        // Полный отчёт остаётся локальным доказательством. В кратком PR
+        // публикуется отдельная сводка с лимитом длины, включая случаи
+        // без измерений: длинный исходник нельзя вставлять целиком.
+        assert!(
+            !ok,
+            "полный отчёт не должен проходить как компактное тело PR"
+        );
         if section == &unmeasured {
-            assert!(ok, "неизмеренный статус остаётся допустим: {stderr}");
+            assert!(stderr.contains("650"), "{stderr}");
         } else {
-            assert!(!ok, "полный отчёт должен публиковаться в Gist");
             assert!(stderr.contains("полную таблицу"), "{stderr}");
         }
     }
