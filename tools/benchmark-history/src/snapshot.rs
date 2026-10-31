@@ -1,9 +1,8 @@
-//! Снимок последнего подтверждённого измерения на странице модуля `tools/<модуль>/performance.md`.
+//! Снимок последнего подтверждённого измерения на русской странице `docs/ru/<модуль>/performance.md`.
 //!
 //! Страница модуля хранит по одному блоку на пару «сценарий × профиль» в
 //! явно названном эталонном окружении. Блок генерируется из выбранного
-//! проверенного результата на трёх языках документации одновременно и
-//! заменяет только блок той же пары. Другое окружение или оборудование,
+//! проверенного результата на русской странице и заменяет только блок той же пары. Другое окружение или оборудование,
 //! другой или неизвестный объём нагрузки, недоказанное тождество нагрузки,
 //! неполная серия, изменённая рабочая копия или более старый результат
 //! прежний снимок молча не заменяют. В постоянной документации нет коммитов,
@@ -30,7 +29,7 @@ use std::path::{Path, PathBuf};
 const BEGIN: &str = "<!-- benchmark-snapshot: ";
 const END: &str = "<!-- /benchmark-snapshot -->";
 pub const ANCHOR: &str = "<!-- benchmark-snapshot:anchor -->";
-const I18N_MARK: &str = "<!-- i18n-source-git-blob: ";
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -40,7 +39,7 @@ pub enum Lang {
 }
 
 impl Lang {
-    pub const ALL: [Lang; 3] = [Lang::Ru, Lang::En, Lang::ZhCn];
+    pub const ALL: [Lang; 1] = [Lang::Ru];
 
     fn page(self, ru: &Path) -> PathBuf {
         let stem = ru
@@ -237,7 +236,7 @@ pub struct Recorded {
     /// Маркер результата; `None`, если эталонное окружение не определено:
     /// такой результат не может быть источником опубликованного снимка.
     meta: Option<Meta>,
-    /// Блоки в порядке [`Lang::ALL`] без завершающего перевода строки.
+    /// Блоки для поддерживаемых страниц в порядке [`Lang::ALL`].
     blocks: Vec<String>,
     identities: BTreeMap<String, Identity>,
 }
@@ -351,7 +350,7 @@ pub struct PageChange {
     pub block: String,
 }
 
-/// Подготовить замену блока на всех трёх языках, ничего не записывая.
+/// Подготовить замену блока на русской странице, ничего не записывая.
 pub fn plan(
     page: &Path,
     scenario: &Scenario,
@@ -410,7 +409,7 @@ pub fn plan(
     }
     Ok(Plan {
         action,
-        workload: workload.expect("три страницы"),
+        workload: workload.expect("русскую страницу"),
         pages,
     })
 }
@@ -648,12 +647,9 @@ pub enum Step {
 /// подтверждён для прежнего русского текста: тогда изменение — тот же
 /// сгенерированный блок на всех языках, и синхронность сохраняется.
 ///
-/// Гарантия согласованности: пока любая страница не подготовлена, ни одна не
-/// меняется; страницы заменяются по одной переименованием в порядке RU, EN,
-/// zh-CN, и при отказе замены уже заменённые возвращаются к прежнему тексту.
-/// Если не удался и возврат, ошибка называет, какие страницы обновлены, а
-/// какие нет. Прерванный процесс между переименованиями оставляет переводы с
-/// отметкой i18n прежнего русского текста, и проверка документации это видит.
+/// Гарантия согласованности: страница готовится во временном файле и
+/// заменяется атомарным переименованием; после ошибки подготовки прежний
+/// документ остаётся без изменений. Конкурентную правку документа не перезаписываем.
 pub fn apply(plan: &Plan) -> Result<Vec<String>, String> {
     apply_with(plan, &mut |_| Ok(()))
 }
@@ -663,26 +659,10 @@ pub fn apply_with(
     plan: &Plan,
     fault: &mut dyn FnMut(Step) -> std::io::Result<()>,
 ) -> Result<Vec<String>, String> {
-    let mut notes = Vec::new();
-    let ru = &plan.pages[0];
-    let old_sha = git_blob_sha(ru.before.as_bytes());
-    let new_sha = git_blob_sha(ru.after.as_bytes());
     let mut changes: Vec<(usize, &PageChange, String)> = Vec::new();
     for (n, page) in plan.pages.iter().enumerate() {
-        let mut text = page.after.clone();
-        if n > 0 {
-            let old_mark = format!("{I18N_MARK}{old_sha} -->");
-            if text.contains(&old_mark) {
-                text = text.replacen(&old_mark, &format!("{I18N_MARK}{new_sha} -->"), 1);
-            } else if text != page.before {
-                notes.push(format!(
-                    "{}: перевод не был подтверждён для прежнего русского текста, отметка i18n не обновлена",
-                    page.path.display()
-                ));
-            }
-        }
-        if text != page.before {
-            changes.push((n, page, text));
+        if page.after != page.before {
+            changes.push((n, page, page.after.clone()));
         }
     }
     // Страница, изменённая после подготовки плана, не перезаписывается.
@@ -768,7 +748,7 @@ pub fn apply_with(
             untouched.join(", ")
         ));
     }
-    Ok(notes)
+    Ok(Vec::new())
 }
 
 struct Labels {
