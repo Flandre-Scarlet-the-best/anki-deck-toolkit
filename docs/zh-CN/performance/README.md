@@ -17,7 +17,7 @@
 | 每次测量的完整历史 | 本地 [`benchmark-history`](../benchmark-history/README.md) 历史：用户数据目录中原始 JSON 的不可变归档和 SQLite 索引 | 仅其所有者 |
 | 任务的完整报告 | 本地保留未经修改的 `benchmark-history report` | 执行者及获取报告的审阅者 |
 | 公开的历史记录 | PR 的 `## Производительность`（性能）章节：场景、基线、候选版本、结果、结论和显著退化的简要摘要 | 所有人，通过 PR 历史 |
-| 当前快照 | 本目录的页面：每个场景 × 配置对的最近确认测量 | 所有人 |
+| 当前快照 | `docs/ru/<模块>/performance.md` 页面：每个场景 × 配置对的最近确认测量 | 所有人 |
 
 页面不会累积所有 PR 的记录：新的确认测量会替换同一对的快照，而旧值保留在 Git 历史和 PR
 描述中。公开参考是项目所有者在快照所描述环境中的测量。其他用户有自己的本地结果；它们不会
@@ -29,7 +29,7 @@
 |---|---|---|
 | `anki-repo` | [anki-repo/performance.md](../anki-repo/performance.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
 | `asset-store` | [asset-store/performance.md](../asset-store/performance.md) | `asset-store.*` · `warm`（`kanji-medium`） |
-| `anki-e2e` | [anki-e2e/performance.zh-CN.md](../anki-e2e/performance.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
+| `anki-e2e` | [anki-e2e/performance.md](../anki-e2e/performance.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
 | `benchmark-runner` | [benchmark-runner/performance.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
 新模块需要俄语原文页面 `docs/ru/<模块>/performance.md`，在放置快照的位置加入
@@ -90,7 +90,7 @@ skill [`performance-benchmarking`](../../../.agents/skills/performance-benchmark
    （`benchmark-history show`）。
 3. 不写入地预览页面变更：
    `benchmark-history snapshot <ID> --page docs/ru/<模块>/performance.md`，然后用 `--apply` 写入。
-   工具会同时更新三种语言中该对的块；若系列不完整、工作副本有修改、环境与参考环境不同或页面
+   工具只更新俄语页面中该对的块，译文不变；若系列不完整、工作副本有修改、环境与参考环境不同或页面
    上有更新的测量，则拒绝。
 4. 将同一结果完整且未经修改的 `benchmark-history report` 保存在本地以供核查。
    PR 正文保留简洁摘要：场景、测量的基线和候选提交、关键数值、结论及所有显著回退。

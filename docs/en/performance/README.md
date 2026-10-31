@@ -37,7 +37,7 @@ explicit confirmation.
 |---|---|---|
 | `anki-repo` | [anki-repo/performance.md](../anki-repo/performance.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
 | `asset-store` | [asset-store/performance.md](../asset-store/performance.md) | `asset-store.*` · `warm` (`kanji-medium`) |
-| `anki-e2e` | [anki-e2e/performance.en.md](../anki-e2e/performance.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; a manual observation without original JSON for the other states |
+| `anki-e2e` | [anki-e2e/performance.md](../anki-e2e/performance.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; a manual observation without original JSON for the other states |
 | `benchmark-runner` | [benchmark-runner/performance.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
 A new module gets a Russian page `docs/ru/<module>/performance.md` with a `<!-- benchmark-snapshot:anchor -->` line where snapshots go and
