@@ -19,10 +19,12 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
+# Встроенный код может переноситься на следующую строку, но не через пустую.
+CODE_SPAN = re.compile(r"(`+)(?:(?!\1)(?:[^\n]|\n(?![ \t]*\n)))+?\1")
 # Текст ссылки может переноситься на следующую строку, но не через пустую.
 INLINE = re.compile(r"!?\[(?:[^\[\]\n]|\n(?![ \t]*\n)|\[[^\[\]\n]*\])*\]\(\s*(<[^<>\n]*>|[^\s()]+(?:\([^\s()]*\)[^\s()]*)*)")
-REFERENCE = re.compile(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(<[^<>\n]*>|\S+)", re.MULTILINE)
+# Адрес определения может стоять на следующей строке после метки.
+REFERENCE = re.compile(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(?:\n[ \t]*)?(<[^<>\n]*>|\S+)", re.MULTILINE)
 
 
 def visible_text(text: str) -> str:
@@ -40,8 +42,10 @@ def visible_text(text: str) -> str:
             fence = match.group(1)
             lines.append("")
             continue
-        lines.append(CODE_SPAN.sub("", line))
-    return "\n".join(lines)
+        lines.append(line)
+    # Код убирается после склейки строк, чтобы скрыть и многострочный фрагмент;
+    # переводы строк внутри него сохраняются ради номеров строк.
+    return CODE_SPAN.sub(lambda match: "\n" * match.group(0).count("\n"), "\n".join(lines))
 
 
 def destinations(text: str) -> list[tuple[int, str]]:

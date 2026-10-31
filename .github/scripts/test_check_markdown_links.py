@@ -73,6 +73,19 @@ class MarkdownLinkTests(unittest.TestCase):
         )
         self.assertEqual(self.errors("docs/ru/module/page.md", text), [])
 
+    def test_multiline_code_span_is_not_a_link_and_keeps_line_numbers(self):
+        text = "Пример `кода\n[x](missing.md)\n` здесь.\n[нет](gone.md)\n\nОдин `обратный\n\n[y](lost.md)\n"
+        errors = self.errors("docs/ru/module/page.md", text)
+        self.assertEqual(len(errors), 2, errors)
+        self.assertIn(":4: цель ссылки не существует: gone.md", errors[0])
+        # Пустая строка завершает абзац, поэтому одиночная кавычка не скрывает ссылку.
+        self.assertIn(":8: цель ссылки не существует: lost.md", errors[1])
+
+    def test_reference_definition_with_destination_on_next_line_is_checked(self):
+        errors = self.errors("docs/ru/module/page.md", "[r]:\n   gone.md\n\n[ok]:\n  notes.md\n")
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(":2: цель ссылки не существует: gone.md", errors[0])
+
     def test_repository_check_reads_only_tracked_markdown(self):
         subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         (self.root / "docs/ru/module/README.md").write_text("[битая](gone.md)\n", encoding="utf-8")
