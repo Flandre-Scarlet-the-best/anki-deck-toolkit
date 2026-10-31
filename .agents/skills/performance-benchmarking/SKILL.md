@@ -24,10 +24,10 @@ description: >-
 
 | Вопрос | Владелец |
 |---|---|
-| сценарии, профили, граница измерения, схема результата, сопоставимость | `docs/performance/benchmarks.md`, `tools/benchmark-contract/README.md` |
-| запуск серий, метрики Linux, `check`, коды возврата | `tools/benchmark-runner/README.md` |
-| история, выбор базы, сравнение, раздел PR, снимки страниц | `tools/benchmark-history/README.md` |
-| правила замера и публикации снимков | `docs/performance/README.md` |
+| сценарии, профили, граница измерения, схема результата, сопоставимость | `docs/ru/performance/benchmarks.md`, `docs/ru/benchmark-contract/README.md` |
+| запуск серий, метрики Linux, `check`, коды возврата | `docs/ru/benchmark-runner/README.md` |
+| история, выбор базы, сравнение, раздел PR, снимки страниц | `docs/ru/benchmark-history/README.md` |
+| правила замера и публикации снимков | `docs/ru/performance/README.md` |
 | ветка, commit, push, PR и проверка его описания | skill `anki-git-workflow` |
 | живая приёмка функциональности и временные помощники | skill `anki-live-testing` |
 | независимое ревью кода | skill `anki-code-review` |
@@ -100,7 +100,7 @@ description: >-
 Найди сценарий: `cargo run -p benchmark-contract -- list` и `show <id>`.
 Проверь, что его граница (`measured`), профиль кэша и метрики измеряют именно
 гипотезу и **одинаково** для старой и новой реализации. Подходящего сценария
-нет — регистрация нового сценария по `docs/performance/benchmarks.md` входит
+нет — регистрация нового сценария по `docs/ru/performance/benchmarks.md` входит
 в задачу; не измеряй вместо этого самодельным скриптом. Как подобрать сценарии
 к виду изменения — [выбор сценария](references/interpretation.md#выбор-сценария-и-бюджета).
 

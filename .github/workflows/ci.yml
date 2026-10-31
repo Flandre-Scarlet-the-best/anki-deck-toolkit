@@ -239,7 +239,7 @@ jobs:
         # их отсутствие, выдал бы пустоту за проверку личных колод. Локальные
         # проверки своего хранилища (`kanji-corpus-gate`, `pitch-corpus-gate`) и
         # своих экспортов (`anki-repo validate`) описаны в
-        # `tools/asset-store/README.md` и `tools/anki-repo/README.md`.
+        # `docs/ru/asset-store/README.md` и `docs/ru/anki-repo/README.md`.
         run: python3 .github/scripts/check_local_data_untracked.py
 
       - name: Показать статистику sccache
