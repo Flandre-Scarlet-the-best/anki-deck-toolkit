@@ -1358,7 +1358,10 @@ fn pr_reports_cover_first_comparable_missing_incomparable_and_unmeasured() {
             "полный отчёт не должен проходить как компактное тело PR"
         );
         if section == &unmeasured {
-            assert!(stderr.contains("650"), "{stderr}");
+            assert!(
+                stderr.contains("краткое решение занимает более 650 символов"),
+                "{stderr}"
+            );
         } else {
             assert!(stderr.contains("полную таблицу"), "{stderr}");
         }

@@ -156,6 +156,17 @@ class PrBodyContractTests(unittest.TestCase):
         self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
         self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 замечаний | clean | `abcdef0` |"), [])
 
+    def test_nested_list_fences_do_not_supply_evidence(self):
+        # Пример внутри пункта списка — код, а не разделы и не таблица body.
+        nested = "- ```markdown\n" + "\n".join("  " + line for line in valid_body().split("\n")) + "\n  ```"
+        self.assertTrue(any("Цель" in e for e in validate(nested)))
+        for marker in ("~~~", "```", "~~~~"):
+            for indent in ("    ", "     ", "\t"):
+                with self.subTest(marker=marker, indent=indent):
+                    rows = "\n".join(indent + line for line in (CR_HEADER, CR_DELIMITER, CR_ROW))
+                    errors = validate(coderabbit("- нет таблицы", f"{indent}{marker}md", f"{indent}<!-- `пример`", rows, f"{indent}{marker}"))
+                    self.assertTrue(any("заголовок" in e for e in errors), errors)
+
     def test_coderabbit_every_row_is_checked(self):
         # Некорректная строка не прячется за соседней корректной.
         for bad in ("| 2 | major | `a.rs` | x | confirmed | `abcdef0` |", "| 2 · `abcdef0` | major | | | | |"):

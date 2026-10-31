@@ -49,6 +49,83 @@ PERFORMANCE_HINT = (
 
 # GitHub скрывает HTML-комментарии, поэтому заголовки внутри них не являются
 # видимыми разделами body. Внутри код-блока `<!--` — литерал, а не комментарий.
+def mask_list_fences(lines: list[str]) -> list[str]:
+    """Скрыть fenced-блоки внутри пунктов списка до разбора комментариев.
+
+    Отступ маркера блока считается относительно содержимого пункта; при выходе
+    из списка незакрытый блок заканчивается вместе с контейнером.
+    """
+    result: list[str] = []
+    indents: list[int] = []
+    fence_char = ""
+    fence_len = 0
+    fence_indent = 0
+    outer_char = ""
+    outer_len = 0
+    in_comment = False
+    for line in lines:
+        expanded = line.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        if outer_char:
+            closing = FENCE_CLOSE.match(expanded)
+            if closing and closing.group(1)[0] == outer_char and len(closing.group(1)) >= outer_len:
+                outer_char = ""
+            result.append(line)
+            continue
+        if fence_char:
+            if expanded.strip() and indent < fence_indent:
+                fence_char = ""
+            else:
+                closing = FENCE_CLOSE.match(expanded[fence_indent:])
+                if closing and closing.group(1)[0] == fence_char and len(closing.group(1)) >= fence_len:
+                    fence_char = ""
+                result.append(" " * len(line))
+                continue
+        # Маркеры внутри комментария не открывают блоки. Сохраняем исходную
+        # строку: окончательное удаление комментариев выполняет strip_comments.
+        was_in_comment = in_comment
+        visible = ""
+        rest = expanded
+        while rest:
+            if in_comment:
+                end = rest.find("-->")
+                if end < 0:
+                    break
+                in_comment = False
+                rest = rest[end + 3:]
+            else:
+                start = rest.find("<!--")
+                if start < 0:
+                    visible += rest
+                    break
+                visible += rest[:start]
+                in_comment = True
+                rest = rest[start + 4:]
+        expanded = visible
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        if expanded.strip():
+            while indents and indent < indents[-1]:
+                indents.pop()
+        base = indents[-1] if indents else 0
+        relative = expanded[base:]
+        marker = re.match(r"^ {0,3}(?:[-*+]|\d{1,9}[.)]) +", relative)
+        if marker:
+            base += marker.end()
+            indents.append(base)
+            relative = expanded[base:]
+        opening = FENCE.match(relative)
+        if opening:
+            token = opening.group(1)
+            # У backtick-fence info string не может содержать обратную кавычку.
+            if token[0] != "`" or "`" not in relative[opening.end():]:
+                in_comment = was_in_comment
+                if indents:
+                    fence_char, fence_len, fence_indent = token[0], len(token), base
+                    result.append(" " * len(line))
+                    continue
+                outer_char, outer_len = token[0], len(token)
+        result.append(line)
+    return result
 
 
 def strip_comments(lines: list[str]) -> list[str]:
@@ -57,7 +134,7 @@ def strip_comments(lines: list[str]) -> list[str]:
     inside = False
     fence_char = ""
     fence_len = 0
-    for line in lines:
+    for line in mask_list_fences(lines):
         if fence_char:
             closing = FENCE_CLOSE.match(line)
             if closing and closing.group(1)[0] == fence_char and len(closing.group(1)) >= fence_len:
