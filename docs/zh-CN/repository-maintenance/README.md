@@ -35,7 +35,7 @@
 
 ## 清理策略
 
-默认参数的唯一受 Git 跟踪的来源是 [`policy.toml`](policy.toml)：
+默认参数的唯一受 Git 跟踪的来源是 [`policy.toml`](../../../tools/repository-maintenance/policy.toml)：
 
 | 项目 | 数值 | 操作 |
 |---|---:|---|

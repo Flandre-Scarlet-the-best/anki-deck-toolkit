@@ -21,7 +21,7 @@ different values.
 | The full history of every measurement | the local [`benchmark-history`](../benchmark-history/README.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
 | The full task report | the unchanged `benchmark-history report` in the task Gist with its manifest | everyone, via the PR link |
 | The public historical record | the PR's `## Производительность` (performance) section: a compact summary of the scenario, baseline, candidate, results, conclusions and significant regressions | everyone, through the PR history |
-| The current snapshot | the `tools/<module>/performance.md` pages: the last confirmed measurement of each scenario × profile pair | everyone |
+| The current snapshot | the `docs/ru/<module>/performance.md` pages: the last confirmed measurement of each scenario × profile pair | everyone |
 
 The pages do not accumulate entries from every PR: a new confirmed measurement
 replaces the snapshot of the same pair, while earlier values remain in the Git
@@ -40,8 +40,7 @@ explicit confirmation.
 | `anki-e2e` | [anki-e2e/performance.en.md](../anki-e2e/performance.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; a manual observation without original JSON for the other states |
 | `benchmark-runner` | [benchmark-runner/performance.en.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
-A new module gets its own page `tools/<module>/performance.md` with
-translations, a `<!-- benchmark-snapshot:anchor -->` line where snapshots go and
+A new module gets a Russian page `docs/ru/<module>/performance.md` with a `<!-- benchmark-snapshot:anchor -->` line where snapshots go and
 a row in this table.
 
 ## Scenario catalog and result contract
@@ -115,9 +114,8 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
 2. Find the result (`benchmark-history list`) and check its outcome, runs,
    environment and unavailable metrics (`benchmark-history show`).
 3. Preview the page change without writing:
-   `benchmark-history snapshot <ID> --page tools/<module>/performance.md`, then
-   write it with `--apply`. The tool updates the pair's block in all three
-   languages at once and refuses if the series is incomplete, the working copy
+   `benchmark-history snapshot <ID> --page docs/ru/<module>/performance.md`, then
+   write it with `--apply`. The tool updates the canonical Russian block and refuses if the series is incomplete, the working copy
    has changes, the environment differs from the reference one or the page holds
    a newer measurement.
 4. Save the complete unchanged `benchmark-history report` for the same result

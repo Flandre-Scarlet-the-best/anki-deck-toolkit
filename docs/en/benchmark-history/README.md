@@ -7,7 +7,7 @@
 results, finds a baseline in it, compares "before" and "after", and turns the
 results into a complete report headed `## Производительность` (performance)
 for the Gist and preparation of a compact PR summary, and into snapshots for module performance pages at
-`tools/<module>/performance.md` and their translations. It measures
+`docs/ru/<module>/performance.md` ; translations are not updated automatically. It measures
 nothing: series are run by [`benchmark-runner`](../benchmark-runner/README.md),
 while the result model, its validation and the comparability rules belong to
 [`benchmark-contract`](../benchmark-contract/README.md). There is no second
@@ -96,7 +96,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/ru/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup
@@ -111,7 +111,7 @@ cargo run -p benchmark-history -- restore /path/to/backup
 | `baseline <ID>` | every baseline candidate with reasons why it fits or not, and the chosen baseline; `--commit` narrows the choice |
 | `compare <base> <result>` | the `benchmark-contract` verdict, before/after, deltas and the assessment against the spread |
 | `report <ID>...` | Complete Markdown report for the Gist and PR summary; `--baseline ID` (one per scenario × profile pair), `--first` or `--commit` |
-| `snapshot <ID> --page P` | snapshot for a module page `tools/<module>/performance.md` and translations `performance.en.md`, `performance.zh-CN.md`; without `--apply` it only shows it |
+| `snapshot <ID> --page P` | snapshot for the canonical Russian module page `docs/ru/<module>/performance.md`; without `--apply` it only shows it |
 | `verify` | checks every archive copy against its identifier and the contract, and the index against the archive projection; does not change the archive or create a store (a missing store is code 3); whatever index reconciliation on opening fixed before the check is reported and gives code 1 |
 | `reindex` | rebuilds the index from the archive |
 | `backup <dir>` | copies the archive into a new or empty directory to move it to another Linux machine |
@@ -231,7 +231,7 @@ Full tables stay in the Gist; the tool never writes to GitHub.
 ## Documentation snapshot
 
 `snapshot` replaces the block of the same scenario × profile pair on a module
-page together with its translations (`performance.en.md`, `performance.zh-CN.md`); a
+Russian page only; a
 new pair is added before the `<!-- benchmark-snapshot:anchor -->` line. The block
 holds the date, versions, environment facts, workload size, recorded
 parameters that affect comparability (for example `writers`) and metrics, but
@@ -290,17 +290,7 @@ not become stricter. A fact absent from the previous marker and a marker
 without a recorded workload do not count as matching: the corresponding flag
 confirms the replacement.
 
-The three pages are written consistently: no page changes until temporary
-copies of all three are prepared; then they are replaced one by one by rename
-(RU, EN, zh-CN), and if a replacement fails, the pages already replaced are
-restored to their previous text. If restoring fails too, the error names the
-updated and the not updated pages. A page changed after the plan was prepared
-is not overwritten. A process interrupted between renames leaves translations
-with the `i18n-source-git-blob` mark of the previous Russian text, which the
-documentation check detects.
-
-The `i18n-source-git-blob` mark of the translations is updated only if the
-translation was confirmed for the previous Russian text.
+The snapshot command writes only the canonical Russian page, using a temporary file and atomic rename. Changes made after preparing a plan are not overwritten. Translated pages are not modified and may be updated independently.
 
 ## Exit codes
 

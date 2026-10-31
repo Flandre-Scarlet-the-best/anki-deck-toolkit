@@ -32,7 +32,7 @@
 | `anki-e2e` | [anki-e2e/performance.zh-CN.md](../anki-e2e/performance.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
 | `benchmark-runner` | [benchmark-runner/performance.zh-CN.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
-新模块需要单独的页面 `tools/<模块>/performance.md`（含翻译），在放置快照的位置加入
+新模块需要俄语原文页面 `docs/ru/<模块>/performance.md`，在放置快照的位置加入
 `<!-- benchmark-snapshot:anchor -->` 一行，并在此表中增加一行。
 
 ## 场景目录与结果契约
@@ -89,7 +89,7 @@ skill [`performance-benchmarking`](../../../.agents/skills/performance-benchmark
 2. 找到结果（`benchmark-history list`），检查其结果、运行、环境和不可用指标
    （`benchmark-history show`）。
 3. 不写入地预览页面变更：
-   `benchmark-history snapshot <ID> --page tools/<模块>/performance.md`，然后用 `--apply` 写入。
+   `benchmark-history snapshot <ID> --page docs/ru/<模块>/performance.md`，然后用 `--apply` 写入。
    工具会同时更新三种语言中该对的块；若系列不完整、工作副本有修改、环境与参考环境不同或页面
    上有更新的测量，则拒绝。
 4. 将同一结果完整且未经修改的 `benchmark-history report` 保存到必需的任务 Gist，并附上 manifest。

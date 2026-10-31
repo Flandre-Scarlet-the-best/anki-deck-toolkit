@@ -5,7 +5,7 @@
 > **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/benchmark-history/README.md)为准。欢迎提交翻译和校对改进。
 `benchmark-history` 为每个用户保存其自己的已验证基准结果历史，在其中查找比较基线，
 对比“之前”与“之后”，生成以 `## Производительность`（性能）为标题的完整报告供 Gist 和 PR 摘要使用，以及
-`tools/<模块>/performance.md` 模块性能页面和其翻译的快照。它不做任何测量：
+`docs/ru/<模块>/performance.md` 模块俄语性能页面的快照；不会自动更新其他翻译。它不做任何测量：
 系列由 [`benchmark-runner`](../benchmark-runner/README.md) 执行，结果模型、校验和
 可比性规则属于 [`benchmark-contract`](../benchmark-contract/README.md)。这里没有第二种
 结果格式，也没有第二个测量引擎。
@@ -73,7 +73,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/ru/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup
@@ -88,7 +88,7 @@ cargo run -p benchmark-history -- restore /path/to/backup
 | `baseline <ID>` | 每个基线候选及其适合或不适合的原因，以及选中的基线；`--commit` 缩小选择范围 |
 | `compare <基线> <结果>` | `benchmark-contract` 的结论、之前/之后、差值以及相对离散度的评估 |
 | `report <ID>...` | 供 Gist 和 PR 摘要使用的完整 Markdown 报告；`--baseline ID`（每个场景 × 配置一对一个）、`--first` 或 `--commit` |
-| `snapshot <ID> --page P` | 为 `tools/<模块>/performance.md` 模块页面及 `performance.en.md`、`performance.zh-CN.md` 翻译生成快照；没有 `--apply` 时只显示 |
+| `snapshot <ID> --page P` | 为 `docs/ru/<模块>/performance.md` 俄语模块页面生成快照，不自动更新翻译；没有 `--apply` 时只显示 |
 | `verify` | 按标识和契约检查每个归档副本，并将索引与归档投影比对；不修改归档，也不创建存储（存储不存在时返回代码 3）；打开时索引同步在比对前修复的内容会被报告，并返回代码 1 |
 | `reindex` | 从归档重建索引 |
 | `backup <目录>` | 将归档复制到新目录或空目录，以便迁移到另一台 Linux 机器 |
@@ -166,8 +166,7 @@ PR 正文按照 [`pr-body.md`](../../../.agents/skills/anki-git-workflow/referen
 
 ## 文档快照
 
-`snapshot` 替换模块页面上同一场景 × 配置对的块，同时替换其翻译（`performance.en.md`、
-`performance.zh-CN.md`）；新的一对添加在 `<!-- benchmark-snapshot:anchor -->` 行之前。块中包含日期、
+`snapshot` 替换模块页面上同一场景 × 配置对的块，翻译不会自动更新；新的一对添加在 `<!-- benchmark-snapshot:anchor -->` 行之前。块中包含日期、
 版本、环境事实、负载规模、记录的影响可比性的参数（例如 `writers`）和指标，但不包含提交、记录 ID、
 输入标识或路径。参数作为负载定义的一部分写入标记：参数值不同的快照不会在没有 `--replace-workload`
 的情况下替换先前的快照。Markdown 会将其读作标记或单元格边界的事实或参数值（换行、控制字符、反引号、
@@ -198,12 +197,7 @@ ID，从不列出标识。计划动作（`plan.action`：`added`、`replaced`、
 之间的比较并不会因此变得更严格。旧标记中没有的事实，以及未记录负载的标记，都不算作一致：替换由相应标志
 确认。
 
-三个页面一致地写入：在三份临时副本全部准备好之前，任何页面都不会改变；随后按 RU、EN、zh-CN 的顺序
-逐个通过重命名替换，若某次替换失败，已替换的页面会恢复为原文本。若恢复也失败，错误会列出已更新和
-未更新的页面。准备计划后被修改的页面不会被覆盖。在两次重命名之间被中断的进程会让翻译保留旧俄语
-文本的 `i18n-source-git-blob` 标记，文档检查会发现这一点。
-
-只有当翻译此前已针对旧的俄语文本确认时，才会更新翻译的 `i18n-source-git-blob` 标记。
+快照命令仅更新俄语原文页面，并通过临时文件和原子重命名发布。准备完成后发生的其他修改不会被覆盖。其他语言的翻译可以独立更新。
 
 ## 退出码
 
