@@ -4,7 +4,7 @@
 
 [Русский](README.md) · [English](README.en.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 590024888e66c950f1c732607a9b5ddd94b6c876 -->
+> **翻译提示：** 本译文可能未及时更新，技术内容以俄语原文为准。欢迎提交翻译和校对改进。
 
 **基于 Rust 的命令行工具，用于检查、验证、定向修改和可视化对比 CrowdAnki JSON 导出数据。**
 
@@ -116,13 +116,13 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 
 各工具的专门文档介绍了详细命令和机器可读契约：
 
-- [`anki-repo` — 检查、质量保证、受限修改与可视化报告](tools/anki-repo/README.zh-CN.md)
-- [`asset-store` 与 `kanji-assets` — 资源生命周期与验证](tools/asset-store/README.zh-CN.md)
-- [`repository-maintenance` — 磁盘内容盘点与安全垃圾回收](tools/repository-maintenance/README.zh-CN.md)
-- [`anki-e2e` — Docker 中隔离的本地 Anki Desktop E2E 测试台](tools/anki-e2e/README.zh-CN.md)
-- [`benchmark-contract` — 基准测试场景目录与测量结果契约](tools/benchmark-contract/README.zh-CN.md)
-- [`benchmark-runner` — 基准系列执行器：Hyperfine 2.0 与 Linux 指标](tools/benchmark-runner/README.zh-CN.md)
-- [`benchmark-history` — 本地基准历史、比较以及面向 PR 和文档的报告](tools/benchmark-history/README.zh-CN.md)
+- [`anki-repo` — 检查、质量保证、受限修改与可视化报告](docs/zh-CN/anki-repo/README.md)
+- [`asset-store` 与 `kanji-assets` — 资源生命周期与验证](docs/zh-CN/asset-store/README.md)
+- [`repository-maintenance` — 磁盘内容盘点与安全垃圾回收](docs/zh-CN/repository-maintenance/README.md)
+- [`anki-e2e` — Docker 中隔离的本地 Anki Desktop E2E 测试台](docs/zh-CN/anki-e2e/README.md)
+- [`benchmark-contract` — 基准测试场景目录与测量结果契约](docs/zh-CN/benchmark-contract/README.md)
+- [`benchmark-runner` — 基准系列执行器：Hyperfine 2.0 与 Linux 指标](docs/zh-CN/benchmark-runner/README.md)
+- [`benchmark-history` — 本地基准历史、比较以及面向 PR 和文档的报告](docs/zh-CN/benchmark-history/README.md)
 
 ## 工具
 
@@ -145,13 +145,13 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 
 所有修改命令默认以 `dry-run` 方式运行；只有通过验证并显式传入 `--apply` 才会写入数据。`edit` 和 `retire` 只修改 `deck.json`。`create` 只可将已配置资源域中经过验证的文件放入 `media/`，并添加必要的 `media_files` 声明。`migrate-media` 可重写现有笔记中已验证的引用、放置采用规范文件名的资源，并在发布 `deck.json` 后删除不再使用的旧名称文件。
 
-[查看完整的 `anki-repo` 契约 →](tools/anki-repo/README.zh-CN.md)
+[查看完整的 `anki-repo` 契约 →](docs/zh-CN/anki-repo/README.md)
 
 ### `repository-maintenance`
 
 专为 Linux/WSL 设计的独立工具，负责盘点 Cargo 的 `target` 目录、归项目所有的外部构建缓存，以及 `/tmp` 下的所有内容。`scan` 只统计占用情况；`clean` 默认使用 `dry-run`，实际写入必须传入 `--apply`。不属于本工具管理或来源不明的临时条目只会显示在报告中，不会被删除。
 
-[查看策略、来源审计、命令及限制 →](tools/repository-maintenance/README.zh-CN.md)
+[查看策略、来源审计、命令及限制 →](docs/zh-CN/repository-maintenance/README.md)
 
 ### `asset-store` / `kanji-assets`
 
@@ -169,7 +169,7 @@ Yarxi
 
 已验证资源库是工作副本中的可信本地状态：其中仅保存经过确认的资源及其来源信息，关键文件为 `manifest.json` 和 `.owner.json`。未经确认的候选文件不会进入资源库，资源库也不会通过 Git 发布。每个用户都有自己的本地资源库，新克隆仓库时不存在该资源库属于正常情况。`asset-store` 不会扫描 `decks/**/media/`，也不会将用户的媒体目录作为数据来源。
 
-[查看完整的 `asset-store` 契约 →](tools/asset-store/README.zh-CN.md)
+[查看完整的 `asset-store` 契约 →](docs/zh-CN/asset-store/README.md)
 
 ## 创建卡片并进行可视化验证
 
@@ -207,7 +207,7 @@ visual-report
 - 写入之前会重新解析并验证候选数据；
 - 定向操作会尽可能证明其只修改了获准修改的部分。
 
-详细保证以[工具集 README](tools/anki-repo/README.zh-CN.md) 为准，而不是本概览文档。
+详细保证以[工具集 README](docs/zh-CN/anki-repo/README.md) 为准，而不是本概览文档。
 
 </details>
 
@@ -330,7 +330,7 @@ cargo run --quiet --locked -p asset-store --bin kanji-corpus-gate
 
 AGPL-3.0 不会自动适用于用户牌组、下载的第三方素材或程序输出（例如 HTML 报告和处理后的图片）。本项目不主张拥有第三方素材的版权，也不会自动为输出文件附加新许可证。其权利及使用限制取决于输入内容、原权利人及原始许可条款。用户数据不会通过 Git 发布。
 
-[查看 AGPL-3.0 正文 →](LICENSE) · [查看许可范围与素材权利 →](LICENSING.zh-CN.md)
+[查看 AGPL-3.0 正文 →](LICENSE) · [查看许可范围与素材权利 →](docs/zh-CN/licensing/README.md)
 
 ---
 
