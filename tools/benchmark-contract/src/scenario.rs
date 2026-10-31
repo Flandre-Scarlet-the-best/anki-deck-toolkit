@@ -53,6 +53,35 @@ pub struct Scenario {
     pub environment: EnvironmentSpec,
     #[serde(default)]
     pub requires: Vec<Requirement>,
+    /// Машинный отчёт, который цель оставляет после каждого прогона.
+    #[serde(default)]
+    pub module_report: Option<ModuleReport>,
+    /// Контейнер, в котором цель исполняет нагрузку: его cgroup — охват
+    /// метрик `cgroup`, если они запрошены.
+    #[serde(default)]
+    pub container: Option<ContainerSpec>,
+}
+
+/// Где цель оставляет машинный отчёт прогона: новый каталог в `runs_dir`
+/// (относительно корня репозитория) с файлом `report`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleReport {
+    pub runs_dir: String,
+    pub report: String,
+    pub description: String,
+}
+
+/// Как опознать контейнер, созданный измеряемой целью.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerSpec {
+    /// Метка `<ключ>=<значение>`, которой цель помечает контейнер нагрузки.
+    pub label: String,
+    /// Метка с PID процесса, создавшего контейнер: контейнер принадлежит
+    /// прогону, только если этот PID — процесс самой серии.
+    pub owner_pid_label: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +188,25 @@ pub struct SizeMetric {
     pub name: String,
     pub unit: Unit,
     pub description: String,
+    /// Как исполнитель получает значение.
+    #[serde(default)]
+    pub measure: Option<SizeMeasure>,
+}
+
+/// Способ получить объём входа без собственного кода исполнителя для модуля.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SizeMeasure {
+    /// Байты файла внутри входа (`path` относительно входа).
+    FileBytes { path: String },
+    /// Сумма байт обычных файлов дерева входа без перехода по ссылкам.
+    TreeBytes,
+    /// Число обычных файлов дерева входа.
+    TreeFiles,
+    /// Значение из JSON, который печатает `probe` входа.
+    Probe { pointer: String },
+    /// Значение из машинного отчёта модуля (`module_report`) прогона.
+    Report { pointer: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +223,13 @@ pub struct Input {
     pub parameter: Option<String>,
     #[serde(default)]
     pub size: Vec<SizeMetric>,
+    /// Команда только для чтения, печатающая JSON с характеристиками входа.
+    /// Выполняется до серии и в измерение не входит.
+    #[serde(default)]
+    pub probe: Option<Step>,
+    /// Указатель на идентичность артефакта в машинном отчёте модуля.
+    #[serde(default)]
+    pub report_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +314,13 @@ pub struct MetricRequest {
     /// Разрешение значения в единицах метрики (для журналов модулей).
     #[serde(default)]
     pub resolution: Option<f64>,
+    /// Ресурс `disk_usage` относительно корня репозитория.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Значение `module_counter` в машинном отчёте модуля; несколько
+    /// выбранных значений (`*`) суммируются.
+    #[serde(default)]
+    pub pointer: Option<String>,
 }
 
 impl MetricRequest {
@@ -272,6 +334,10 @@ impl MetricRequest {
 pub struct CustomFact {
     pub name: String,
     pub description: String,
+    /// Указатели на значение в машинном отчёте модуля. Одно значение
+    /// записывается как есть, несколько — как `<имя>=<значение>` через запятую.
+    #[serde(default)]
+    pub report: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,6 +521,20 @@ table_shape!(Scenario {
     "metric": Vec<MetricRequest> = true,
     "environment": EnvironmentSpec = true,
     "requires": Vec<Requirement> = false,
+    "module_report": ModuleReport = false,
+    "container": ContainerSpec = false,
+});
+
+table_shape!(ModuleReport {
+    "runs_dir": String = true,
+    "report": String = true,
+    "description": String = true,
+});
+
+table_shape!(ContainerSpec {
+    "label": String = true,
+    "owner_pid_label": String = true,
+    "description": String = true,
 });
 
 table_shape!(EnvSpec {
@@ -484,6 +564,7 @@ table_shape!(SizeMetric {
     "name": String = true,
     "unit": Unit = true,
     "description": String = true,
+    "measure": SizeMeasure = false,
 });
 
 table_shape!(Input {
@@ -495,6 +576,8 @@ table_shape!(Input {
     "path": String = false,
     "parameter": String = false,
     "size": Vec<SizeMetric> = false,
+    "probe": Step = false,
+    "report_identity": String = false,
 });
 
 table_shape!(RunPolicy {
@@ -539,11 +622,14 @@ table_shape!(MetricRequest {
     "description": String = false,
     "sample_interval_seconds": f64 = false,
     "resolution": f64 = false,
+    "path": String = false,
+    "pointer": String = false,
 });
 
 table_shape!(CustomFact {
     "name": String = true,
     "description": String = true,
+    "report": Vec<String> = false,
 });
 
 table_shape!(EnvironmentSpec {
@@ -638,6 +724,23 @@ impl Shape for Program {
                     &[("package", true), ("bin", true), ("cargo_profile", false)],
                 ),
                 ("executable", &[("name", true)]),
+            ],
+        );
+    }
+}
+
+impl Shape for SizeMeasure {
+    fn check(value: &toml::Value, path: &str, out: &mut Vec<ShapeError>) {
+        tagged(
+            value,
+            path,
+            out,
+            &[
+                ("file-bytes", &[("path", true)]),
+                ("tree-bytes", &[]),
+                ("tree-files", &[]),
+                ("probe", &[("pointer", true)]),
+                ("report", &[("pointer", true)]),
             ],
         );
     }

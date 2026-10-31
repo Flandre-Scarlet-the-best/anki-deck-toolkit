@@ -11,9 +11,11 @@
 
 use crate::diagnostic::{Diagnostic, Diagnostics, Sink, field};
 use crate::placeholder::{self, Placeholder};
+use crate::pointer;
 use crate::scenario::{
     CatalogFile, EnvSpec, IdentityMethod, InputKind, InputRole, MetricRequest, Profile,
-    ProfileBinding, Program, Requirement, Scenario, ScenarioFile, Shape, Step, Touches,
+    ProfileBinding, Program, Requirement, Scenario, ScenarioFile, Shape, SizeMeasure, Step,
+    Touches,
 };
 use crate::sensitive;
 use crate::vocabulary::{
@@ -510,12 +512,13 @@ fn validate_scenario(ctx: &Context<'_>, module: &str, scenario: &Scenario, sink:
     for (list, name) in [(&scenario.setup, "setup"), (&scenario.cleanup, "cleanup")] {
         for (index, step) in list.iter().enumerate() {
             let at = format!("{name}[{index}]");
-            validate_step(ctx, step, &at, limits.max_run_timeout_seconds, sink);
+            validate_step(ctx, step, &at, limits.max_step_timeout_seconds, sink);
             refs.check_step(step, &at, &always, sink);
         }
     }
 
     validate_profile_bindings(ctx, scenario, &refs, sink);
+    validate_measurement_sources(ctx, scenario, &refs, sink);
     // Параметр без подстановки и без входа external-path не доходит до
     // команды: записанное значение противоречило бы фактическому прогону.
     let used = refs.used.into_inner();
@@ -1218,7 +1221,7 @@ fn validate_profile_bindings(
         ] {
             for (step_index, step) in list.iter().enumerate() {
                 let at = format!("profile[{index}].{name}[{step_index}]");
-                validate_step(ctx, step, &at, limits.max_run_timeout_seconds, sink);
+                validate_step(ctx, step, &at, limits.max_step_timeout_seconds, sink);
                 refs.check_step(step, &at, &guaranteed, sink);
             }
         }
@@ -1612,6 +1615,244 @@ fn validate_environment(scenario: &Scenario, sink: &mut Sink<'_>) {
                 "unused_fact",
                 field("environment.fact"),
                 format!("факт «{name}» объявлен, но не записывается"),
+            );
+        }
+    }
+}
+
+/// Откуда исполнитель берёт значения, которые не измеряет сам: отчёт модуля,
+/// контейнер, команда-проба входа, путь `disk_usage`. Каждое такое поле
+/// обязано ссылаться на объявленный источник, иначе значение было бы догадкой.
+fn validate_measurement_sources(
+    ctx: &Context<'_>,
+    scenario: &Scenario,
+    refs: &Refs<'_>,
+    sink: &mut Sink<'_>,
+) {
+    let has_report = scenario.module_report.is_some();
+    let check_pointer = |text: &str, at: String, sink: &mut Sink<'_>| {
+        if let Err(reason) = pointer::parse(text) {
+            sink.error("invalid_pointer", field(at.clone()), reason);
+        }
+        if !has_report {
+            sink.error(
+                "missing_module_report",
+                field(at),
+                "значение из отчёта модуля требует объявить module_report",
+            );
+        }
+    };
+    if let Some(report) = &scenario.module_report {
+        for (name, path) in [("runs_dir", &report.runs_dir), ("report", &report.report)] {
+            if let Some(reason) = unsafe_relative(path) {
+                sink.error(
+                    "invalid_path",
+                    field(format!("module_report.{name}")),
+                    reason,
+                );
+            }
+        }
+        if report.report.contains('/') {
+            sink.error(
+                "invalid_path",
+                field("module_report.report"),
+                "отчёт — имя файла внутри каталога прогона",
+            );
+        }
+        if report.description.trim().is_empty() {
+            sink.error(
+                "empty_text",
+                field("module_report.description"),
+                "опишите отчёт и как он связан с прогоном",
+            );
+        }
+    }
+    if let Some(container) = &scenario.container {
+        let valid_label = container
+            .label
+            .split_once('=')
+            .is_some_and(|(key, value)| !key.is_empty() && !value.is_empty());
+        if !valid_label {
+            sink.error(
+                "invalid_container",
+                field("container.label"),
+                "метка записывается как <ключ>=<значение>",
+            );
+        }
+        if container.owner_pid_label.trim().is_empty() || container.owner_pid_label.contains('=') {
+            sink.error(
+                "invalid_container",
+                field("container.owner_pid_label"),
+                "укажите ключ метки с PID создателя контейнера",
+            );
+        }
+        if container.description.trim().is_empty() {
+            sink.error(
+                "empty_text",
+                field("container.description"),
+                "опишите, какой контейнер измеряется",
+            );
+        }
+        if !scenario.requires.contains(&Requirement::Docker) {
+            sink.error(
+                "missing_requirement",
+                field("container"),
+                "контейнер нагрузки требует объявить requires kind = \"docker\"",
+            );
+        }
+    }
+
+    let limits = scenario.kind.limits();
+    for (index, input) in scenario.inputs.iter().enumerate() {
+        let at = |name: &str| format!("input[{index}].{name}");
+        if let Some(probe) = &input.probe {
+            validate_step(
+                ctx,
+                probe,
+                &at("probe"),
+                limits.max_step_timeout_seconds,
+                sink,
+            );
+            refs.check_step(probe, &at("probe"), &BTreeSet::new(), sink);
+            if probe.touches != Touches::ReadOnly {
+                sink.error(
+                    "probe_not_read_only",
+                    field(at("probe.touches")),
+                    "проба входа только читает: touches = \"read-only\"",
+                );
+            }
+        }
+        match (&input.report_identity, input.kind) {
+            (Some(text), InputKind::DownloadedArtifact) => {
+                check_pointer(text, at("report_identity"), sink)
+            }
+            (Some(_), _) => sink.error(
+                "contradictory_input",
+                field(at("report_identity")),
+                "идентичность из отчёта модуля бывает только у downloaded-artifact",
+            ),
+            (None, InputKind::DownloadedArtifact) => sink.warning(
+                "unresolvable_input",
+                field(at("report_identity")),
+                "исполнитель не сможет записать идентичность загруженного артефакта без report_identity",
+            ),
+            (None, _) => {}
+        }
+        let has_path = matches!(
+            input.kind,
+            InputKind::RepoFile | InputKind::ExternalPath | InputKind::RepoTree
+        );
+        for (size_index, size) in input.size.iter().enumerate() {
+            let at = |name: &str| format!("input[{index}].size[{size_index}].{name}");
+            let Some(measure) = &size.measure else {
+                sink.warning(
+                    "unresolvable_input",
+                    field(at("measure")),
+                    "без measure исполнитель не сможет записать эту характеристику объёма",
+                );
+                continue;
+            };
+            let unit = match measure {
+                SizeMeasure::FileBytes { path } => {
+                    if let Some(reason) = unsafe_relative(path) {
+                        sink.error("invalid_path", field(at("measure.path")), reason);
+                    }
+                    if input.kind == InputKind::RepoFile
+                        || input.identity == IdentityMethod::FileSha256
+                    {
+                        sink.error(
+                            "contradictory_input",
+                            field(at("measure")),
+                            "file-bytes называет файл внутри каталога входа; объём входа-файла — tree-bytes",
+                        );
+                    }
+                    Some(Unit::Byte)
+                }
+                SizeMeasure::TreeBytes => Some(Unit::Byte),
+                SizeMeasure::TreeFiles => Some(Unit::Count),
+                SizeMeasure::Probe { pointer: text } => {
+                    if let Err(reason) = pointer::parse(text) {
+                        sink.error("invalid_pointer", field(at("measure.pointer")), reason);
+                    }
+                    if input.probe.is_none() {
+                        sink.error(
+                            "missing_field",
+                            field(at("measure")),
+                            "значение пробы требует объявить probe входа",
+                        );
+                    }
+                    None
+                }
+                SizeMeasure::Report { pointer: text } => {
+                    check_pointer(text, at("measure.pointer"), sink);
+                    None
+                }
+            };
+            let needs_path = matches!(
+                measure,
+                SizeMeasure::FileBytes { .. } | SizeMeasure::TreeBytes | SizeMeasure::TreeFiles
+            );
+            if needs_path && !has_path {
+                sink.error(
+                    "contradictory_input",
+                    field(at("measure")),
+                    "размер по файловой системе считается только для входа с путём",
+                );
+            }
+            if let Some(unit) = unit
+                && unit != size.unit
+            {
+                sink.error(
+                    "unit_mismatch",
+                    field(at("unit")),
+                    format!("этот способ даёт {unit}"),
+                );
+            }
+        }
+    }
+
+    for (index, request) in scenario.metrics.iter().enumerate() {
+        let at = |name: &str| format!("metric[{index}].{name}");
+        match (&request.path, request.metric == MetricId::DiskUsage) {
+            (Some(path), true) => {
+                if let Some(reason) = unsafe_relative(path) {
+                    sink.error("invalid_path", field(at("path")), reason);
+                }
+            }
+            (None, true) => sink.error(
+                "missing_field",
+                field(at("path")),
+                "disk_usage обязан назвать путь ресурса относительно корня репозитория",
+            ),
+            (Some(_), false) => sink.error(
+                "unexpected_field",
+                field(at("path")),
+                "path задаётся только для disk_usage",
+            ),
+            (None, false) => {}
+        }
+        match (&request.pointer, request.source == Source::ModuleReport) {
+            (Some(text), true) => check_pointer(text, at("pointer"), sink),
+            (None, true) => sink.error(
+                "missing_field",
+                field(at("pointer")),
+                "метрика отчёта модуля обязана указать pointer",
+            ),
+            (Some(_), false) => sink.error(
+                "unexpected_field",
+                field(at("pointer")),
+                "pointer задаётся только для метрик отчёта модуля",
+            ),
+            (None, false) => {}
+        }
+    }
+
+    for (index, fact) in scenario.environment.facts.iter().enumerate() {
+        for (pointer_index, text) in fact.report.iter().enumerate() {
+            check_pointer(
+                text,
+                format!("environment.fact[{index}].report[{pointer_index}]"),
+                sink,
             );
         }
     }

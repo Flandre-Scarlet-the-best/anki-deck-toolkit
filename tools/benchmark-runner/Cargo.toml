@@ -1,0 +1,52 @@
+[package]
+name = "benchmark-runner"
+version = "0.1.0"
+# `edition` и MSRV наследуются из корневого `[workspace.package]`.
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Исполнитель бенчмарков Anki-decks: запуск сценариев каталога benchmarks/ через Hyperfine 2.0 и сбор системных метрик Linux по контракту benchmark-contract"
+publish = false
+autotests = false
+# Пакет собирает и синтетическую нагрузку `benchmark-workload` для тестов;
+# `cargo run -p benchmark-runner` запускает сам исполнитель.
+default-run = "benchmark-runner"
+
+[dependencies]
+benchmark-contract = { path = "../benchmark-contract" }
+benchmark-history = { path = "../benchmark-history" }
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = { version = "3.5", features = ["termination"] }
+rustix = { version = "1.1", features = ["fs", "param", "process", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
+toml = "1.0"
+
+[lib]
+name = "benchmark_runner"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "benchmark-runner"
+path = "src/main.rs"
+test = false
+
+# Управляемая синтетическая нагрузка: известные память, процессорное время,
+# коды завершения и процессы-потомки для проверки исполнителя и оценки
+# влияния сэмплера. Пользовательских данных не читает.
+[[bin]]
+name = "benchmark-workload"
+path = "src/bin/benchmark-workload.rs"
+test = false
+
+[[test]]
+name = "runner"
+path = "tests/runner.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

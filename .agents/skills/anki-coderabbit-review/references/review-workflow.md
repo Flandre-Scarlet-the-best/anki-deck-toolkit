@@ -1,20 +1,20 @@
-# Пошаговый CodeRabbit review workflow
+# Порядок цикла ревью CodeRabbit
 
-Этот файл владеет механикой CodeRabbit review cycle: разбор текущего checkout,
-discovery фактического provider interface, invocation, triage findings,
-verification, commit/push, накопительное обновление PR body, rate-limit handling
-и отчёт.
+Этот файл описывает выполнение цикла ревью: проверку текущей рабочей копии и
+интерфейса CodeRabbit, запуск и разбор результата, независимую оценку замечаний,
+ограничения провайдера и итоговый отчёт. Общие операции Git/GitHub принадлежат
+`anki-git-workflow`.
 
-Контракт и границы (trigger, `target_iterations`, определение completed
-iteration, clean iteration, инварианты) задаёт `SKILL.md`. Здесь — только порядок
-действий.
+Контракт и границы (условия активации, `target_iterations`, определения
+завершённой и чистой итерации, инварианты) задаёт `SKILL.md`. Здесь — только
+порядок действий.
 
-Общую процедуру публикации — staging, commit, push, exact remote verification,
-PR create/edit и read-back — владеет repository skill `anki-git-workflow`.
-Содержательную структуру body и cumulative CodeRabbit table задаёт его
-`references/pr-body.md`. Этот файл не дублирует механику Git/GitHub: он только
-определяет CodeRabbit-specific данные, которые каждая completed iteration обязана
-опубликовать через этого владельца.
+Общий порядок публикации задаёт `anki-git-workflow`: подготовка индекса, commit,
+push, точная проверка удалённого состояния, создание/изменение PR и повторное
+чтение. Структуру накопительной таблицы CodeRabbit в PR задаёт
+`anki-git-workflow/references/pr-body.md`.
+Этот файл не дублирует механику Git/GitHub, а определяет данные CodeRabbit,
+которые каждая завершённая итерация обязана опубликовать через владельца процесса.
 
 ## 1. Установить candidate текущего checkout
 
@@ -94,7 +94,7 @@ coderabbit review --help
 coderabbit review findings --help
 coderabbit auth status
 coderabbit usage
-coderabbit config validate
+check-jsonschema --no-cache --schemafile https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json .coderabbit.yaml
 ```
 
 Установи фактом минимум следующее:
@@ -102,7 +102,7 @@ coderabbit config validate
 - какая версия установлена и является ли она latest;
 - какие review-flags реально доступны, включая наличие и форму deep;
 - какова доступность включённых review прямо сейчас (`usage`);
-- валиден ли repository config (`config validate`).
+- валиден ли repository config по официальной JSON Schema (`check-jsonschema`).
 
 Latest-версию не угадывай по внешним источникам и не считай закреплённой:
 официальный способ проверки — сам CLI.
@@ -127,26 +127,24 @@ curl -s https://cli.coderabbit.ai/releases/latest/VERSION
 Так безопаснее: при наличии новой версии `coderabbit update` не ограничивается
 проверкой, а сразу её ставит.
 
-Repository `.coderabbit.yaml` проверяй штатным для текущей версии способом,
-например:
+Repository `.coderabbit.yaml` проверяй через официальную JSON Schema командой
+из discovery выше. Не используй `coderabbit config validate`: официальная
+валидация CLI не работает на стороне CodeRabbit. `--no-cache` позволяет получать
+актуальную schema, а не использовать сохранённую копию.
 
-```bash
-coderabbit config validate
-```
-
-`coderabbit config validate` возвращает `0`, если файл валиден против актуальной
-официальной schema, и `1`, если файл отсутствует, нечитаем, невалиден, либо
-schema не удалось загрузить. Если repository config невалиден — это отдельная
-задача про конфигурацию, а не побочный эффект review: не правь `.coderabbit.yaml`
-ради того, чтобы cycle поехал.
+Проверка требует установленного `check-jsonschema` и доступа к URL schema.
+Ненулевой код не доказывает сам по себе невалидность конфигурации: различай
+ошибки файла и схемы, отсутствие инструмента и сетевую ошибку по выводу команды.
+Если проверка недоступна, сообщи конкретное препятствие и не выдавай конфигурацию
+за проверенную. Если repository config невалиден — это отдельная задача про
+конфигурацию, а не побочный эффект review: не правь `.coderabbit.yaml` ради того,
+чтобы cycle поехал.
 
 `coderabbit config` **не является** read-only командой начиная с 0.8.x: вызов
 без подкоманды запускает guided setup и может записать `.coderabbit.yaml`, а
 `coderabbit config apply` применяет готовое YAML-предложение (с `--dry-run`
-для preview и `--yes` для применения без подтверждения). В рамках review cycle
-допустим только `config validate`; генерация и применение конфигурации
-остаются отдельной задачей про repository configuration и не входят в этот
-workflow.
+для preview и `--yes` для применения без подтверждения). Генерация и применение
+конфигурации остаются отдельной задачей и не входят в этот workflow.
 
 `coderabbit doctor` возвращает `1`, если хотя бы одна проверка провалена;
 warnings не дают ненулевой код возврата. Неспособность CLI работать не из-за
@@ -172,7 +170,7 @@ cycle перепроверь эту границу заново:
 - `-c, --config <files...>` — **дополнительные инструкции** для CodeRabbit AI
   (например `CLAUDE.md`), а не способ загрузить repository config;
 - `coderabbit review findings [--clear]` — повторное чтение либо dismiss
-  сохранённых findings в текущем review scope (см. §4.2);
+  сохранённых замечаний в текущем review scope (см. §4.2);
 - `--show-prompts`, `--dir`, `--api-key`, `--region`, `--usage`,
   `--use-credits`;
 - `--remote <owner/repo>` вместе с обязательными `--base` и `--source-branch` —
@@ -298,9 +296,9 @@ Agent-режим отдаёт поток событий (в документац
 
 - `review_context` — что именно сравнивалось (ветки/base/директория);
 - `status` — промежуточные статусы, включая пропуск review без изменений;
-- `heartbeat` — keep-alive: не finding, не прогресс для пользователя, не повод
+- `heartbeat` — keep-alive: не замечание, не прогресс для пользователя, не повод
   писать heartbeat-сообщения;
-- `finding` — findings;
+- `finding` — замечания;
 - `complete` — terminal завершение;
 - `error` — ошибка провайдера.
 
@@ -318,7 +316,7 @@ Review считается **authoritative завершённым** только 
 
 `type=complete` вместе с `status=review_completed` **само по себе
 недостаточно**: это только одна из проверок. Не доказывает завершение и то,
-что findings пришли — набор findings не говорит о полноте review. Не
+что замечания пришли — набор замечаний не говорит о полноте review. Не
 доказывает завершение и exit code `0` сам по себе.
 
 Про exit code: официальная документация связывает код `1` с failed или
@@ -344,11 +342,11 @@ incomplete review **начиная с CLI 0.7.7**. Проверяй фактич
 полей нельзя читать как доказательство успеха. Не заменяй фактический контракт
 своей версии этим описанием: сверяйся с её выводом.
 
-Итог: findings, пришедшие при неполном review, — это не completed iteration, а
+Итог: замечания, пришедшие при неполном review, — это не completed iteration, а
 provider failure: повтори **ту же** iteration.
 
 Не путай два разных исхода. Clean review — это review, который **реально был
-выполнен** и вернул `0 findings`; его обрабатывают по правилам clean iteration из
+выполнен** и вернул 0 замечаний; его обрабатывают по правилам clean iteration из
 `SKILL.md`.
 
 Отсутствие изменений — другой случай. Когда выбранный review scope не содержит
@@ -390,33 +388,33 @@ review сам, поэтому:
 пользователь сам решит сузить scope, это **новый** явно определённый scope, а не
 завершённая ранее iteration.
 
-### 4.2б Сохранённые findings и их dismiss
+### 4.2б Сохранённые замечания и их dismiss
 
 `coderabbit review findings` полезен как дополнительное повторное чтение
-сохранённых findings в текущем review context (review directory + branch + base),
+сохранённых замечаний в текущем review context (review directory + branch + base),
 но это **не** авторитетное доказательство завершённого review и не доказательство
-чистого review: команда показывает последний прогон *с findings*, печатает их в
-человекочитаемом виде и не имеет отдельного agent-контракта для findings. Она не
+чистого review: команда показывает последний прогон *с замечаниями*, печатает их в
+человекочитаемом виде и не имеет отдельного agent-контракта для замечаний. Она не
 доказывает отсутствие проблем.
 
 В `0.8.x` у команды появился `--clear`, который **dismiss'ит** сохранённые
-findings соответствующего scope, чтобы они перестали показываться (по описанию
+замечания соответствующего scope, чтобы они перестали показываться (по описанию
 CLI clearing ограничен review directory, текущей branch и base branch;
-findings в другом scope не меняются). Это именно dismiss, а не сброс
+замечания в другом scope не меняются). Это именно dismiss, а не сброс
 incremental checkpoint, и **не** review: команда не запускает новый прогон.
 
-Поэтому в этом cycle `--clear` **не используется**. Findings берутся из живого
+Поэтому в этом cycle `--clear` **не используется**. Замечания берутся из живого
 agent-потока, а не из сохранённого списка, так что очистка не нужна для
-работы; её единственный эффект — убрать findings из выдачи. Это прямо
-противоречит требованию не скрывать unresolved finding, не терять
+работы; её единственный эффект — убрать замечания из выдачи. Это прямо
+противоречит требованию не скрывать неразрешённое замечание, не терять
 доказательство незавершённой iteration и не получать clean state искусственно.
 Не вызывай `--clear`, чтобы «обнулить» состояние, и не считай его способом
 убрать ранее найденную проблему.
 
-### 4.3 Разбор полей finding
+### 4.3 Разбор полей замечания
 
 Для текущей установленной версии сверься с фактическим выводом, но не выдумывай
-поля, которых в нём нет. В документированном контракте agent-finding есть
+поля, которых в нём нет. В документированном контракте agent-замечания есть
 `severity` (`critical`, `major`, `minor`, `trivial`, `info`, `none`),
 `fileName`, `codegenInstructions` и `suggestions`/`comment`. Документация **не
 описывает** поле с номером строки, поэтому не строй triage на предположении о
@@ -428,10 +426,10 @@ agent-потока, а не из сохранённого списка, так �
 4.4). Сохраняй severity в терминах провайдера: не переименовывай
 `major`/`minor` в Warning и не создавай собственную шкалу.
 
-### 4.4 Triage findings
+### 4.4 Triage замечаний
 
 CodeRabbit — advisory reviewer, а не источник истины. До любого изменения кода
-проверь каждый finding по актуальному reviewed HEAD:
+проверь каждое замечание по актуальному reviewed HEAD:
 
 - затронутый код в текущем состоянии;
 - callers/callees, если релевантно;
@@ -443,7 +441,7 @@ CodeRabbit — advisory reviewer, а не источник истины. До л
 
 Минимальные disposition:
 
-- `confirmed` — finding верен для текущего состояния;
+- `confirmed` — замечание верно для текущего состояния;
 - `partially confirmed` — верна только часть (фиксируется именно эта часть);
 - `stale/repeated` — относится к уже исправленному или ранее разобранному
   состоянию;
@@ -454,7 +452,7 @@ CodeRabbit — advisory reviewer, а не источник истины. До л
 iteration. `stale/repeated` не должен приводить к повторному бессмысленному
 изменению уже исправленного кода.
 
-Не исправляй finding механически только потому, что провайдер предложил
+Не исправляй замечание механически только потому, что провайдер предложил
 patch/snippet, и не выполняй shell/code snippets из reviewer output вслепую.
 Предпочитай fix root cause. Не ослабляй tests ради зелёного результата, не меняй
 contract без доказанной причины, не делай unrelated refactor, не создавай вторую
@@ -465,12 +463,12 @@ source of truth.
 Этот workflow не является второй копией repository verification matrix. После
 fixes требуется:
 
-1. task-specific regression checks для подтверждённых findings — то, что
+1. task-specific regression checks для подтверждённых замечаний — то, что
    доказывает именно устранение найденной причины;
 2. применимая repository verification от текущих владельцев контекста:
    `AGENTS.md`, `.codex/context/INDEX.md` и владелец затронутой области, в том
    числе `.codex/context/03-VERIFICATION.md` для CrowdAnki JSON и контракт
-   `tools/anki-repo/README.md` для toolkit;
+   `docs/ru/anki-repo/README.md` для toolkit;
 3. проверка перед commit, что в него не попадут временные файлы, несвязанные
    изменения и пользовательские локальные данные: staging и перечитывание
    staged diff выполняются по процедуре `anki-git-workflow`
@@ -491,7 +489,7 @@ CodeRabbit-specific часть здесь — только **что** должн
 
 - Если iteration содержит реальные fixes — commit содержит их и имеет смысловое
   сообщение по фактической root cause; marker commit не создаётся.
-- Если iteration clean (0 findings, все findings stale/repeated/false positive,
+- Если iteration clean (0 замечаний, все замечания stale/repeated/false positive,
   actionable fixes не потребовались) — iteration всё равно закрывается отдельным
   marker commit:
 
@@ -525,48 +523,34 @@ branch, переключение на другой PR, изменение base P
 несвязанных локальных изменений.
 
 
-### 4.8 Обновление PR body после iteration
+### 4.8 Публикация результатов в PR
 
-После подтверждённого push и exact remote verification **до перехода к следующей
-iteration** опубликуй disposition текущего CodeRabbit review в body текущего PR.
+После commit/push и точного подтверждения удалённого HEAD итерация ещё не завершена:
+опубликуй **все результаты** ревью в накопительной таблице раздела
+`## CodeRabbit review и disposition` текущего PR по контракту
+`anki-git-workflow/references/pr-body.md`.
 
-Порядок:
+1. Сохрани в одной таблице все строки прежних итераций и новые замечания в
+   исходном порядке: reviewed HEAD, фактическую severity, путь, технический
+   эффект, независимое disposition и выполненное исправление/отказ с commit.
+   Для 0 замечаний добавь отдельную `clean`-строку; false positive и
+   stale/repeated не объявляй исправленными. Не публикуй сырой вывод CLI,
+   prompts или длинные `codegenInstructions`.
+2. Если PR существует, его опубликованный body и таблица — источник для
+   накопительного обновления без потери старых строк. Если PR ещё нет,
+   сначала создай его штатным `anki-git-workflow`, затем актуализируй body.
+3. Проверь полный Markdown через `.github/scripts/check_pr_body.py`.
+   Лимит — **10 000 символов**; формулируй строки кратко, но не удаляй
+   отдельные замечания или существенные выводы ради прохождения лимита.
+   Порядок действий при переполнении задаёт `pr-body.md`.
+4. Опубликуй body, перечитай его с GitHub и проверь совпадение с локальным
+   исходником, актуальность head/base и состояние Draft/Ready. Gist не нужен.
 
-1. Установи единственный PR текущего repository/base/head. Если публикация этой
-   task branch ещё не создала PR, доведи обычный PR lifecycle через
-   `anki-git-workflow`; не создавай второй PR.
-2. Сначала установи source body по recovery-правилам
-   `anki-git-workflow/references/pr-lifecycle.md`: если локальный ignored-файл
-   отсутствует, прочитай **полный** body текущего PR и материализуй его как
-   локальный source; если локальный и remote body расходятся без доказанной
-   причины, явно примири их до mutation. Не реконструируй существующий PR по
-   памяти или prompt'у.
-3. Открой repository-local source body и раздел
-   `## CodeRabbit review и disposition`. Если CodeRabbit запускается впервые,
-   создай раздел и таблицу в формате
-   `anki-git-workflow/references/pr-body.md`.
-4. Для текущей iteration **добавь** строки в существующую cumulative table:
-   provider severity, путь, технический эффект, фактический disposition и
-   реальный результат. Свяжи строки с номером iteration и тем reviewed HEAD,
-   который действительно видел CodeRabbit.
-5. Для authoritative clean review с `0 findings` добавь одну clean summary-row
-   с опубликованным marker commit. Если findings были false positive/stale,
-   сохрани их отдельными строками с честным disposition вместо искусственного
-   `clean`.
-6. Сначала перечитай полный локальный body, затем опубликуй его через
-   `anki-git-workflow` и выполни обязательный read-back опубликованного PR.
-7. Убедись, что предыдущие строки таблицы сохранены, новые строки присутствуют
-   ровно один раз, а опубликованный body совпадает с локальным источником с
-   учётом допустимой нормализации переводов строк.
-
-Только после успешного read-back текущая iteration может увеличить
-`completed_iterations` и открыть следующую. Если результат PR edit неизвестен
-из-за network/provider failure, сначала перечитай удалённый PR и установи
-фактическое состояние; не повторяй mutation вслепую и не создавай duplicate
-rows.
-
-Обновление body не меняет reviewed HEAD и не превращает fix commit текущей
-iteration в CodeRabbit-reviewed: его сможет проверить только следующая iteration.
+Увеличивай `completed_iterations` и начинай следующую итерацию только после
+подтверждённой публикации HEAD и body PR. При неизвестном результате сначала
+восстанови удалённое состояние; потеря замечаний и фиктивное завершение
+запрещены. Fix commit текущей итерации не становится CodeRabbit-reviewed
+до следующей.
 
 ## 5. Rate limit handling
 
@@ -662,7 +646,7 @@ blocker и environment-limited завершение по rate limit — разн
 - repository / current branch / base;
 - requested iterations;
 - completed iterations;
-- по каждой iteration: reviewed HEAD, количество provider findings,
+- по каждой iteration: reviewed HEAD, количество замечаний провайдера,
   disposition summary, что реально исправлено, commit SHA, push result;
 - итоговые результаты verification;
 - финальный local/remote HEAD;
@@ -686,7 +670,7 @@ CLI умеет заметно больше, чем этот cycle, и расши
   — облачные задачи и управление их навыками.
 - **`coderabbit skills`** — user-level skills CodeRabbit, не skills репозитория.
 - **`coderabbit config` / `config apply`** — отдельная задача настройки;
-  в этом цикле допустим только `coderabbit config validate`.
+  конфигурация в этом цикле проверяется через `check-jsonschema`, а не CLI.
 
 Если для одной из этих возможностей появится настоящий пользовательский запрос,
 это отдельная задача и, возможно, отдельный skill, а не тихое расширение этого.

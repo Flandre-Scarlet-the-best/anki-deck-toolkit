@@ -129,6 +129,10 @@ closed_enum!(
         MemoryPeakResident => "memory_peak_resident",
         MemoryPeakCgroup => "memory_peak_cgroup",
         CpuTimeCgroup => "cpu_time_cgroup",
+        IoReadBytes => "io_read_bytes",
+        IoWriteBytes => "io_write_bytes",
+        IoReadOperations => "io_read_operations",
+        IoWriteOperations => "io_write_operations",
         CpuUtilizationMean => "cpu_utilization_mean",
         CpuUtilizationPeak => "cpu_utilization_peak",
         MemoryHostPeakIncrease => "memory_host_peak_increase",
@@ -176,12 +180,15 @@ impl MetricId {
             TimeWallClock | TimeUser | TimeSystem | TimeCpu | CpuTimeCgroup | PhaseDuration => {
                 Unit::Second
             }
-            MemoryPeakResident | MemoryPeakCgroup | MemoryHostPeakIncrease | DiskUsage => {
-                Unit::Byte
-            }
+            MemoryPeakResident
+            | MemoryPeakCgroup
+            | MemoryHostPeakIncrease
+            | DiskUsage
+            | IoReadBytes
+            | IoWriteBytes => Unit::Byte,
             CpuUtilizationMean | CpuUtilizationPeak => Unit::Core,
             CpuCycles | Instructions | CacheReferences | CacheMisses | BranchMisses
-            | ModuleCounter => Unit::Count,
+            | ModuleCounter | IoReadOperations | IoWriteOperations => Unit::Count,
         }
     }
 
@@ -190,6 +197,17 @@ impl MetricId {
         matches!(
             self,
             MetricId::PhaseDuration | MetricId::ModuleCounter | MetricId::DiskUsage
+        )
+    }
+
+    /// Блочный I/O, учтённый ядром для группы, а не логические байты приложения.
+    pub const fn is_io(self) -> bool {
+        matches!(
+            self,
+            Self::IoReadBytes
+                | Self::IoWriteBytes
+                | Self::IoReadOperations
+                | Self::IoWriteOperations
         )
     }
 
@@ -394,6 +412,54 @@ pub static REGISTRY: &[MetricDefinition] = &[
         )],
     },
     MetricDefinition {
+        metric: MetricId::IoReadBytes,
+        unit: Unit::Byte,
+        summary: "Байты чтения блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма rbytes по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
+        )],
+    },
+    MetricDefinition {
+        metric: MetricId::IoWriteBytes,
+        unit: Unit::Byte,
+        summary: "Байты записи блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма wbytes по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
+        )],
+    },
+    MetricDefinition {
+        metric: MetricId::IoReadOperations,
+        unit: Unit::Count,
+        summary: "Операции чтения блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма rios по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
+        )],
+    },
+    MetricDefinition {
+        metric: MetricId::IoWriteOperations,
+        unit: Unit::Count,
+        summary: "Операции записи блочного I/O, учтённые cgroup v2.",
+        measurements: &[m(
+            Scope::Cgroup,
+            Source::CgroupV2,
+            LINUX,
+            false,
+            "Сумма wios по устройствам io.stat. Для собственной новой группы — итог до удаления; для контейнера — только если группа ещё доступна. Включает Hyperfine в собственной группе; не логические байты, не физический носитель за виртуальным диском. Отложенный writeback после конца интервала не включён; многослойные устройства могут учитывать один I/O повторно.",
+        )],
+    },
+    MetricDefinition {
         metric: MetricId::CpuTimeCgroup,
         unit: Unit::Second,
         summary: "Процессорное время всех процессов группы.",
@@ -415,14 +481,14 @@ pub static REGISTRY: &[MetricDefinition] = &[
                 Source::CgroupV2,
                 LINUX,
                 false,
-                "Разность usage_usec за интервал прогона, делённая на его длительность.",
+                "Итоговый usage_usec собственной группы, делённый на время от входа Hyperfine в группу до чтения итогового счётчика.",
             ),
             m(
                 Scope::Host,
                 Source::Procfs,
                 LINUX,
                 true,
-                "/proc/stat всей системы: верхняя оценка для процесса без своей cgroup.",
+                "Выборочное наблюдение загрузки всей системы по /proc/stat; не является верхней границей загрузки цели.",
             ),
         ],
     },
@@ -450,7 +516,7 @@ pub static REGISTRY: &[MetricDefinition] = &[
     MetricDefinition {
         metric: MetricId::MemoryHostPeakIncrease,
         unit: Unit::Byte,
-        summary: "Наибольшее снижение MemAvailable относительно начала прогона: верхняя оценка для всей системы.",
+        summary: "Максимальное снижение MemAvailable по выборочным наблюдениям с начала прогона; включает влияние посторонних процессов и не является верхней границей потребления цели.",
         measurements: &[m(
             Scope::Host,
             Source::Procfs,
@@ -557,12 +623,13 @@ pub static REGISTRY: &[MetricDefinition] = &[
     },
 ];
 
-/// Предельные значения политики прогонов для вида нагрузки. Они защищают от
-/// случайно бесконечного или неоправданно дорогого сценария.
+/// Предельные значения политики прогонов и шагов для вида нагрузки. Они
+/// защищают от случайно бесконечного или неоправданно дорогого сценария.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct RunLimits {
     pub max_warmup: u32,
     pub max_runs: u32,
+    pub max_step_timeout_seconds: u64,
     pub max_run_timeout_seconds: u64,
     pub max_total_budget_seconds: u64,
     pub single_run_allowed: bool,
@@ -574,6 +641,7 @@ impl WorkloadKind {
             WorkloadKind::ShortCli => RunLimits {
                 max_warmup: 100,
                 max_runs: 1000,
+                max_step_timeout_seconds: 1800,
                 max_run_timeout_seconds: 600,
                 max_total_budget_seconds: 3600,
                 single_run_allowed: false,
@@ -581,6 +649,7 @@ impl WorkloadKind {
             WorkloadKind::LongE2e => RunLimits {
                 max_warmup: 3,
                 max_runs: 10,
+                max_step_timeout_seconds: 4 * 3600,
                 max_run_timeout_seconds: 4 * 3600,
                 max_total_budget_seconds: 24 * 3600,
                 single_run_allowed: true,

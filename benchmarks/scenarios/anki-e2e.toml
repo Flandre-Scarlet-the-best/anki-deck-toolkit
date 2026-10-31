@@ -1,12 +1,12 @@
-# Сценарии E2E-стенда Anki Desktop. Контракт стенда — tools/anki-e2e/README.md,
-# журнал замеров — docs/performance/anki-e2e.md.
+# Сценарии E2E-стенда Anki Desktop. Контракт стенда — docs/ru/anki-e2e/README.md,
+# журнал замеров — docs/ru/anki-e2e/performance.md.
 schema_version = 1
 module = "anki-e2e"
 
 [[scenario]]
 id = "anki-e2e.full"
 title = "Полный набор E2E-сценариев стенда"
-revision = 1
+revision = 2
 kind = "long-e2e"
 status = "executable"
 description = "Штатный полный прогон стенда: smoke, addons, patch, crowdanki, process, errors в одном изолированном контейнере с официальной Linux Anki Desktop."
@@ -34,7 +34,8 @@ kind = "downloaded-artifact"
 role = "workload"
 identity = "file-sha256"
 description = "Официальный архив Linux Anki Desktop, выбранный стендом; SHA-256 и размер — из report.json."
-size = [{ name = "archive_bytes", unit = "byte", description = "Размер архива Anki в байтах." }]
+report_identity = "/artifact/sha256"
+size = [{ name = "archive_bytes", unit = "byte", description = "Размер архива Anki в байтах.", measure = { kind = "report", pointer = "/artifact/size" } }]
 
 [scenario.runs]
 warmup = 0
@@ -118,7 +119,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 1.0
-description = "Сборка образов идёт вне cgroup прогона, поэтому её стоимость видна только по хосту целиком: верхняя оценка."
+description = "Сборка образов идёт вне cgroup прогона. /proc/stat показывает выборочное наблюдение всего хоста и не является верхней границей загрузки сборки."
 
 [[scenario.metric]]
 metric = "memory_host_peak_increase"
@@ -126,7 +127,7 @@ scope = "host"
 source = "procfs"
 required = false
 sample_interval_seconds = 1.0
-description = "Наибольшее снижение MemAvailable за прогон: верхняя оценка памяти сборки образов."
+description = "Выборочное наблюдение снижения MemAvailable по всему хосту; это не верхняя граница памяти сборки образов."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -135,7 +136,7 @@ source = "module-log"
 label = "release"
 required = false
 resolution = 1.0
-description = "Выбор релиза и получение архива по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -144,7 +145,7 @@ source = "module-log"
 label = "anki-image"
 required = false
 resolution = 1.0
-description = "Сборка образа Anki по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -153,7 +154,7 @@ source = "module-log"
 label = "run-image"
 required = false
 resolution = 1.0
-description = "Сборка образа запуска (cargo build в Docker) по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "phase_duration"
@@ -162,7 +163,7 @@ source = "module-log"
 label = "scenarios"
 required = false
 resolution = 1.0
-description = "Исполнение сценариев в контейнере по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
 
 [[scenario.metric]]
 metric = "module_counter"
@@ -170,6 +171,7 @@ scope = "module-report"
 source = "module-report"
 label = "commands_started"
 required = false
+pointer = "/scenarios/*/commands_started"
 description = "Сумма commands_started по сценариям report.json: число запусков anki-repo."
 
 [[scenario.metric]]
@@ -178,7 +180,18 @@ scope = "path"
 source = "filesystem"
 label = "work-cache"
 required = false
+path = "target/anki-e2e/cache"
 description = "Размер target/anki-e2e/cache после прогона."
+
+[scenario.module_report]
+runs_dir = "target/anki-e2e/runs"
+report = "report.json"
+description = "Каждый вызов стенда создаёт новый каталог runs/<id> с report.json (контракт — docs/ru/anki-e2e/README.md)."
+
+[scenario.container]
+label = "io.github.anki-deck-toolkit.e2e.kind=container"
+owner_pid_label = "io.github.anki-deck-toolkit.e2e.host-pid"
+description = "Контейнер сценариев, который стенд создаёт на каждый прогон и удаляет в конце."
 
 [[scenario.requires]]
 kind = "docker"
@@ -188,6 +201,34 @@ kind = "network"
 purpose = "GitHub Releases API и архив Anki, AnkiWeb для сценариев аддонов, Docker Hub и зеркала Ubuntu для сборки образов"
 profiles = ["cold", "warm"]
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "docker_version", "hyperfine_version", "anki_version", "container_limits"]
 comparable = ["os", "arch", "virtualization", "logical_cpus", "docker_version", "anki_version", "container_limits"]
@@ -195,15 +236,17 @@ comparable = ["os", "arch", "virtualization", "logical_cpus", "docker_version", 
 [[scenario.environment.fact]]
 name = "anki_version"
 description = "Фактически установленная в образ версия Anki из report.json."
+report = ["/installed_anki_version"]
 
 [[scenario.environment.fact]]
 name = "container_limits"
-description = "Действующие --cpus, --memory и --pids-limit контейнера сценариев."
+description = "Действующие --cpus, --memory и --pids-limit контейнера сценариев по проверке изоляции в report.json."
+report = ["/isolation/nano_cpus", "/isolation/memory", "/isolation/pids_limit"]
 
 [[scenario]]
 id = "anki-e2e.smoke"
 title = "Сценарий smoke стенда"
-revision = 1
+revision = 2
 kind = "long-e2e"
 status = "executable"
 description = "Обнаружение Anki, первый запуск, doctor остановленной и запущенной Anki, launch и отказы stop без аддонов. Сценарий не устанавливает аддоны из AnkiWeb."
@@ -243,7 +286,8 @@ kind = "downloaded-artifact"
 role = "workload"
 identity = "file-sha256"
 description = "Официальный архив Linux Anki Desktop; SHA-256 и размер — из report.json."
-size = [{ name = "archive_bytes", unit = "byte", description = "Размер архива Anki в байтах." }]
+report_identity = "/artifact/sha256"
+size = [{ name = "archive_bytes", unit = "byte", description = "Размер архива Anki в байтах.", measure = { kind = "report", pointer = "/artifact/size" } }]
 
 [scenario.runs]
 warmup = 1
@@ -295,7 +339,17 @@ source = "module-log"
 label = "scenarios"
 required = false
 resolution = 1.0
-description = "Исполнение сценария в контейнере по меткам runner.log."
+description = "Сейчас метрика не поддерживается: модуль не публикует машинно-читаемые метки фаз; длительность не выводится из текста runner.log."
+
+[scenario.module_report]
+runs_dir = "target/anki-e2e/runs"
+report = "report.json"
+description = "Каждый вызов стенда создаёт новый каталог runs/<id> с report.json (контракт — docs/ru/anki-e2e/README.md)."
+
+[scenario.container]
+label = "io.github.anki-deck-toolkit.e2e.kind=container"
+owner_pid_label = "io.github.anki-deck-toolkit.e2e.host-pid"
+description = "Контейнер сценариев, который стенд создаёт на каждый прогон и удаляет в конце."
 
 [[scenario.requires]]
 kind = "docker"
@@ -305,6 +359,34 @@ kind = "network"
 purpose = "GitHub Releases API и архив Anki при выборе релиза, Docker Hub и зеркала Ubuntu при сборке образов"
 profiles = ["warm"]
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "docker_version", "hyperfine_version", "anki_version", "container_limits"]
 comparable = ["os", "arch", "virtualization", "logical_cpus", "docker_version", "anki_version", "container_limits"]
@@ -312,7 +394,9 @@ comparable = ["os", "arch", "virtualization", "logical_cpus", "docker_version", 
 [[scenario.environment.fact]]
 name = "anki_version"
 description = "Фактически установленная в образ версия Anki из report.json."
+report = ["/installed_anki_version"]
 
 [[scenario.environment.fact]]
 name = "container_limits"
-description = "Действующие --cpus, --memory и --pids-limit контейнера сценариев."
+description = "Действующие --cpus, --memory и --pids-limit контейнера сценариев по проверке изоляции в report.json."
+report = ["/isolation/nano_cpus", "/isolation/memory", "/isolation/pids_limit"]

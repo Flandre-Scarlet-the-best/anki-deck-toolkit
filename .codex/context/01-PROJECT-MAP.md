@@ -30,20 +30,22 @@ decks/                       # игнорируется Git целиком: по
 .asset-store/                # игнорируется Git: локальное доверенное хранилище ресурсов
 benchmarks/                  # каталог сценариев бенчмаркинга: catalog.toml и scenarios/<модуль>.toml
 docs/
-└── performance/             # методика замеров, контракт каталога и журналы производительности по модулям
+└── performance/             # методика замеров, контракт каталога и снимки производительности по модулям
 tools/
 ├── anki-e2e/                # локальный opt-in E2E-стенд Anki Desktop в Docker (вне CI)
 ├── anki-repo/               # набор инструментов анализа и точечной правки CrowdAnki-экспорта
 ├── benchmark-contract/      # загрузка и проверка каталога бенчмарков и результатов измерений
+├── benchmark-runner/        # исполнитель серий бенчмарков: Hyperfine 2.0 и системные метрики Linux
+├── benchmark-history/       # локальная история бенчмарков: архив, индекс SQLite, сравнение и отчёты
 └── asset-store/             # библиотека ресурсов, CLI kanji-assets и pitch-assets
 ```
 
 ## Владельцы
 
 - `tools/anki-e2e/` — участник корневого workspace: изолированный E2E-стенд
-  Anki Desktop в Docker. Контракт — `tools/anki-e2e/README.md`; запускается
+  Anki Desktop в Docker. Контракт — `docs/ru/anki-e2e/README.md`; запускается
   только явной командой, вне CI и `cargo test`.
-- `tools/anki-repo/desktop.md` — Rust-адаптер Anki Desktop: Windows Anki под WSL,
+- `docs/ru/anki-repo/desktop.md` — Rust-адаптер Anki Desktop: Windows Anki под WSL,
   Linux Anki на обычном Linux, явный выбор неоднозначной установки, AnkiConnect
   bootstrap и оригинальные CrowdAnki import/export. Не владеет ревизиями или
   публикацией `decks/input/`.
@@ -59,12 +61,20 @@ tools/
   доверенного состояния; проверенный корпус у каждого пользователя свой, и его
   отсутствие в чистом clone нормально.
 - `benchmarks/` и `tools/benchmark-contract/` — каталог сценариев бенчмаркинга и
-  контракт результатов; правила — `docs/performance/benchmarks.md`, CLI —
-  `tools/benchmark-contract/README.md`. Новый модуль подключается файлом
+  контракт результатов; правила — `docs/ru/performance/benchmarks.md`, CLI —
+  `docs/ru/benchmark-contract/README.md`. Новый модуль подключается файлом
   `benchmarks/scenarios/<модуль>.toml`.
-- `docs/performance/` — методика замеров производительности и потребления ресурсов
-  (`README.md`) и журналы по модулям (`<модуль>.md`) с переводами EN и zh-CN.
-  Значения журнала — свидетельства конкретного окружения, а не контракт и не порог CI.
+- `tools/benchmark-runner/` — исполнитель серий по каталогу: Hyperfine 2.0,
+  cgroup v2, `/proc`, отчёт модуля. Схемы каталога и результата не владеет,
+  а использует `benchmark-contract`. Контракт — `docs/ru/benchmark-runner/README.md`.
+- `tools/benchmark-history/` — локальная история результатов бенчмарков: архив
+  исходных JSON и индекс SQLite в каталоге данных пользователя, база, сравнение,
+  отчёт для PR и снимки документации. Контракт — `docs/ru/benchmark-history/README.md`.
+- `docs/ru/performance/` — методика замеров производительности и потребления ресурсов
+  (`README.md`) и каталог сценариев (`benchmarks.md`). Последний подтверждённый
+  снимок модуля хранится на русской странице `docs/ru/<модуль>/performance.md`;
+  переводы в `docs/en/` и `docs/zh-CN/` необязательны и снимками не обновляются.
+  Значения снимка — свидетельства конкретного окружения, а не контракт и не порог CI.
 - `.codex/context/` — долговременные карты формата и рабочего процесса.
 - `.agents/skills/` — skills репозитория, по каталогу на skill; процедурой владеет
   сам skill, а не этот файл. Обычной процедурой Git/GitHub владеет
@@ -74,13 +84,13 @@ tools/
 - `tools/anki-repo/` — пакет Rust `anki-repo` для анализа экспорта и строго
   ограниченной записи в него (`edit`, `create`, `retire`, `migrate-media`), а
   также статического отчёта `visual-report` и библиотечного контракта ревизий
-  `exchange`; контракты описаны в `tools/anki-repo/README.md` (CLI) и
-  `tools/anki-repo/exchange.md` (библиотека обмена). Это участник корневого рабочего пространства, а не отдельное
+  `exchange`; контракты описаны в `docs/ru/anki-repo/README.md` (CLI) и
+  `docs/ru/anki-repo/exchange.md` (библиотека обмена). Это участник корневого рабочего пространства, а не отдельное
   рабочее пространство: `cargo` запускается из корня репозитория.
 - `tools/asset-store/` — пакет Rust общей библиотеки жизненного цикла ресурсов,
   которыми управляет программа, и
   бинарников `kanji-assets` и `pitch-assets`; его единственный публичный контракт —
-  `tools/asset-store/README.md`. Пакет входит в корневое рабочее пространство и наследует
+  `docs/ru/asset-store/README.md`. Пакет входит в корневое рабочее пространство и наследует
   его `edition` и MSRV. Он не зависит от Anki/Yarxi и не читает `decks/**/media/`.
 - `Cargo.toml` в корне — единственный владелец `[workspace.package]`: заявленной
   MSRV (`rust-version`) и `edition` для всех Rust-участников. `Cargo.lock` тоже
@@ -110,7 +120,7 @@ clone — нормальное состояние, а не повод что-т�
 `decks/japanese/words/Words__N1…N5/` — состояние прошлых ревизий, а не контракт;
 одноразовая контролируемая миграция в плоский `decks/output/` выполняется
 командой `anki-repo migrate-layout` (по умолчанию без записи, её контракт —
-`tools/anki-repo/README.md`).
+`docs/ru/anki-repo/README.md`).
 
 Независимость тестов по умолчанию от фактических данных репозитория — не то же
 самое, что проверка пользовательских данных в CI. CI проверяет tracked код,
@@ -149,4 +159,4 @@ clone — нормальное состояние, а не повод что-т�
 которая меняет доказанные медиассылки после проверки пары «идентичность ресурса — имя» и всех
 потребителей. Ручная правка `deck.json` и файлов `media/` в обход команды
 запрещена. Создание колод и моделей набор инструментов не выполняет. Полный контракт
-команд и вывода описан в `tools/anki-repo/README.md`.
+команд и вывода описан в `docs/ru/anki-repo/README.md`.

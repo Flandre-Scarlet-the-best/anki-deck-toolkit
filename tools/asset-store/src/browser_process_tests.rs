@@ -23,6 +23,29 @@ fn fake_browser(workspace: &TempWorkspace, name: &str, body: &str) -> BrowserLau
     }
 }
 
+/// Параллельные тесты создают исполняемые скрипты и запускают процессы.
+/// Linux может временно вернуть ETXTBSY для недавно записанной фикстуры.
+/// Повторяем только отказ до создания процесса: ошибки сценария, stderr,
+/// ожидания и остановки возвращаются без повторов.
+async fn spawn_fake_browser(
+    spec: &BrowserLaunchSpec,
+) -> Result<(OwnedBrowserProcess, String), ProcessLaunchFailure> {
+    let busy = format!(
+        "запуск браузера: {}",
+        std::io::Error::from_raw_os_error(rustix::io::Errno::TXTBSY.raw_os_error())
+    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match OwnedBrowserProcess::spawn(spec).await {
+            Err(error) if error.message == busy && Instant::now() < deadline => {
+                assert_eq!(error.stop, Ok(ProcessStop::Exited));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Та же проверка, что у владельца группы: несобранные зомби не считаются.
 fn group_alive(group: i32) -> bool {
     match test_kill_process_group(Pid::from_raw(group).unwrap()) {
@@ -44,6 +67,42 @@ async fn wait_group_gone(group: i32) {
 }
 
 #[tokio::test]
+async fn fake_browser_waits_for_a_writable_fixture_handle_to_close() {
+    let workspace = TempWorkspace::create("browser-process-busy-fixture-test").unwrap();
+    let spec = fake_browser(
+        &workspace,
+        "browser",
+        &format!("echo 'DevTools listening on {ADDRESS}' >&2\nexec sleep 300"),
+    );
+    let writer = fs::OpenOptions::new()
+        .append(true)
+        .open(&spec.executable)
+        .unwrap();
+    // Детерминированное воспроизведение ETXTBSY до создания процесса.
+    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    assert_eq!(failure.stop, Ok(ProcessStop::Exited));
+    assert_eq!(
+        failure.message,
+        format!(
+            "запуск браузера: {}",
+            std::io::Error::from_raw_os_error(rustix::io::Errno::TXTBSY.raw_os_error())
+        )
+    );
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(writer);
+    });
+    let (mut process, address) = spawn_fake_browser(&spec).await.unwrap();
+    assert_eq!(address, ADDRESS);
+    assert_eq!(
+        process.stop(Duration::from_secs(2)).await,
+        Ok(ProcessStop::Killed)
+    );
+    release.await.unwrap();
+    workspace.close().unwrap();
+}
+
+#[tokio::test]
 async fn browser_runs_in_its_own_group_and_stop_kills_descendants() {
     let workspace = TempWorkspace::create("browser-process-group-test").unwrap();
     let spec = fake_browser(
@@ -51,7 +110,7 @@ async fn browser_runs_in_its_own_group_and_stop_kills_descendants() {
         "browser",
         &format!("sleep 300 &\necho 'DevTools listening on {ADDRESS}' >&2\nexec sleep 300"),
     );
-    let (mut process, address) = OwnedBrowserProcess::spawn(&spec).await.unwrap();
+    let (mut process, address) = spawn_fake_browser(&spec).await.unwrap();
     assert_eq!(address, ADDRESS);
     let pid = Pid::from_raw(process.pid()).unwrap();
     // Лидер своей группы: терминальный сигнал foreground-группы CLI до него не доходит.
@@ -75,7 +134,7 @@ async fn leader_exit_with_lingering_descendant_drains_only_owned_group() {
         "browser",
         &format!("sleep 300 &\necho 'DevTools listening on {ADDRESS}' >&2\nsleep 0.2\nexit 0"),
     );
-    let (mut process, _) = OwnedBrowserProcess::spawn(&spec).await.unwrap();
+    let (mut process, _) = spawn_fake_browser(&spec).await.unwrap();
     let group = process.pid();
     let status = process
         .wait_exit(Duration::from_secs(5))
@@ -97,7 +156,7 @@ async fn leader_exit_with_lingering_descendant_drains_only_owned_group() {
 async fn leader_exit_before_address_still_drains_descendants_within_limit() {
     let workspace = TempWorkspace::create("browser-process-early-exit-test").unwrap();
     let spec = fake_browser(&workspace, "browser", "sleep 300 &\nexit 1");
-    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    let failure = spawn_fake_browser(&spec).await.unwrap_err();
     assert!(
         failure.message.contains("до адреса DevTools"),
         "{}",
@@ -117,7 +176,7 @@ async fn exit_before_address_keeps_unterminated_stderr_held_open_by_descendant()
         "browser",
         "sleep 300 &\nprintf 'частичный отказ' >&2\nexit 3",
     );
-    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    let failure = spawn_fake_browser(&spec).await.unwrap_err();
     assert!(
         failure.message.contains("частичный отказ"),
         "{}",
@@ -138,7 +197,7 @@ async fn long_unterminated_stderr_before_address_is_parsed_with_bounded_buffers(
             "head -c 1048576 /dev/zero | tr '\\0' x >&2\necho >&2\necho 'DevTools listening on {ADDRESS}' >&2\nexec sleep 300"
         ),
     );
-    let (mut process, address) = OwnedBrowserProcess::spawn(&spec).await.unwrap();
+    let (mut process, address) = spawn_fake_browser(&spec).await.unwrap();
     assert_eq!(address, ADDRESS);
     assert_eq!(
         process.stop(Duration::from_secs(2)).await,
@@ -155,7 +214,7 @@ async fn long_unterminated_stderr_before_exit_keeps_bounded_diagnostics() {
         "browser",
         "printf 'начало отказа' >&2\nhead -c 1048576 /dev/zero | tr '\\0' x >&2\nexit 3",
     );
-    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    let failure = spawn_fake_browser(&spec).await.unwrap_err();
     assert!(
         failure.message.contains("до адреса DevTools"),
         "{}",
@@ -172,7 +231,7 @@ async fn launch_timeout_stops_the_group_and_reports_typed_stop() {
     let workspace = TempWorkspace::create("browser-process-timeout-test").unwrap();
     let mut spec = fake_browser(&workspace, "browser", "sleep 300 &\nexec sleep 300");
     spec.launch_timeout = Duration::from_millis(200);
-    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    let failure = spawn_fake_browser(&spec).await.unwrap_err();
     assert!(
         failure
             .message
@@ -190,7 +249,7 @@ async fn exit_before_address_keeps_bounded_safe_stderr() {
         "browser",
         "echo 'отказ инициализации' >&2\nexit 3",
     );
-    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    let failure = spawn_fake_browser(&spec).await.unwrap_err();
     assert!(
         failure.message.contains("до адреса DevTools"),
         "{}",
@@ -211,7 +270,7 @@ async fn stderr_eof_before_reapable_exit_is_a_natural_exit() {
         "browser",
         "echo 'отказ до выхода' >&2\nexec 2>&-\nsleep 0.1\nexit 3",
     );
-    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    let failure = spawn_fake_browser(&spec).await.unwrap_err();
     assert!(
         failure
             .message
@@ -233,7 +292,7 @@ async fn closed_stderr_with_live_leader_is_stopped_by_force() {
         "echo 'stderr закрыт' >&2\nsleep 300 2>&- &\nexec 2>&-\nexec sleep 300",
     );
     let started = Instant::now();
-    let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
+    let failure = spawn_fake_browser(&spec).await.unwrap_err();
     assert!(
         failure.message.contains("stderr закрыт до адреса DevTools"),
         "{}",
@@ -270,7 +329,7 @@ async fn dropping_unclosed_process_kills_only_its_group() {
         "browser",
         &format!("sleep 300 &\necho 'DevTools listening on {ADDRESS}' >&2\nexec sleep 300"),
     );
-    let (process, _) = OwnedBrowserProcess::spawn(&spec).await.unwrap();
+    let (process, _) = spawn_fake_browser(&spec).await.unwrap();
     let group = process.pid();
     drop(process);
     wait_group_gone(group).await;

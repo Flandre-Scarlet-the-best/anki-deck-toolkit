@@ -53,9 +53,61 @@ pub fn parse(text: &str) -> Result<Vec<Placeholder>, String> {
     Ok(found)
 }
 
+/// Подставить значения в строку. `resolve` возвращает значение подстановки
+/// или `None`, если значения нет: тогда подстановка — ошибка, а не пустая
+/// строка. Удвоенные скобки становятся литеральными.
+pub fn substitute(
+    text: &str,
+    resolve: impl Fn(&Placeholder) -> Option<String>,
+) -> Result<String, String> {
+    parse(text)?;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find(['{', '}']) {
+        out.push_str(&rest[..index]);
+        let tail = &rest[index..];
+        if tail.starts_with("{{") || tail.starts_with("}}") {
+            out.push_str(&tail[..1]);
+            rest = &tail[2..];
+            continue;
+        }
+        // parse уже проверил, что подстановка закрыта и известна.
+        let end = tail.find('}').unwrap_or(tail.len() - 1);
+        let body = &tail[1..end];
+        let placeholder = match body.split_once('.') {
+            Some(("param", name)) => Placeholder::Param(name.to_owned()),
+            Some((_, id)) => Placeholder::Input(id.to_owned()),
+            None => return Err(format!("неизвестная подстановка {{{body}}}")),
+        };
+        let value = resolve(&placeholder).ok_or_else(|| match &placeholder {
+            Placeholder::Param(name) => format!("у параметра «{name}» нет значения"),
+            Placeholder::Input(id) => format!("у входа «{id}» нет пути"),
+        })?;
+        out.push_str(&value);
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substitutes_values_and_literal_braces() {
+        let resolve = |p: &Placeholder| match p {
+            Placeholder::Param(name) if name == "v" => Some("26.09".to_owned()),
+            Placeholder::Input(id) if id == "export" => Some("/data/export".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            substitute("--v={param.v} {input.export} {{x}}", resolve).unwrap(),
+            "--v=26.09 /data/export {x}"
+        );
+        assert!(substitute("{param.missing}", resolve).is_err());
+        assert!(substitute("{env.HOME}", resolve).is_err());
+    }
 
     #[test]
     fn parses_params_inputs_and_escapes() {

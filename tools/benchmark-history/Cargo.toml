@@ -1,0 +1,42 @@
+[package]
+name = "benchmark-history"
+version = "0.1.0"
+# `edition` и MSRV наследуются из корневого `[workspace.package]`.
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Локальная история бенчмарков Anki-decks: неизменяемый архив проверенных результатов, восстанавливаемый индекс SQLite, выбор базы, сравнение и отчёты для PR и docs/performance"
+publish = false
+autotests = false
+
+[dependencies]
+benchmark-contract = { path = "../benchmark-contract" }
+clap = { version = "4.5", features = ["derive"] }
+# Встроенная сборка SQLite: индекс не зависит от системной библиотеки и её версии.
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
+
+[lib]
+name = "benchmark_history"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "benchmark-history"
+path = "src/main.rs"
+test = false
+
+[[test]]
+name = "history"
+path = "tests/history.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+comrak = { version = "0.59", default-features = false }

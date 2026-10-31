@@ -11,6 +11,7 @@ compile_error!("asset-store пока поддерживает только Linux
 mod acquisition_pool;
 pub mod batch;
 pub mod batch_runtime;
+pub mod bench_workload;
 pub mod browser_diagnostics;
 mod browser_process;
 pub mod browser_runtime;

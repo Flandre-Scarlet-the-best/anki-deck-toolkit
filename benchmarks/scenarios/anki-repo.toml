@@ -1,5 +1,5 @@
 # Короткие команды анализа одного CrowdAnki-экспорта. Контракт команд —
-# tools/anki-repo/README.md. Экспорт передаётся параметром при запуске: каталог
+# docs/ru/anki-repo/README.md. Экспорт передаётся параметром при запуске: каталог
 # не называет ни одной пользовательской колоды, а её путь не публикуется.
 schema_version = 1
 module = "anki-repo"
@@ -7,7 +7,7 @@ module = "anki-repo"
 [[scenario]]
 id = "anki-repo.validate"
 title = "Структурная проверка экспорта"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "`anki-repo --json validate` над одним локальным CrowdAnki-экспортом: чтение deck.json, разрешение моделей и проверка структурных инвариантов. Команда не пишет в экспорт и не ходит в сеть."
@@ -37,10 +37,17 @@ identity = "content-tree-sha256"
 parameter = "export_dir"
 description = "Экспорт, на котором измеряется команда; идентичность — SHA-256 содержимого дерева экспорта."
 size = [
-    { name = "deck_json_bytes", unit = "byte", description = "Размер deck.json в байтах." },
-    { name = "notes", unit = "count", description = "Число заметок во всём дереве колод экспорта." },
-    { name = "media_files", unit = "count", description = "Число имён в media_files всего дерева колод." },
+    { name = "deck_json_bytes", unit = "byte", description = "Размер deck.json в байтах.", measure = { kind = "file-bytes", path = "deck.json" } },
+    { name = "notes", unit = "count", description = "Число заметок во всём дереве колод экспорта.", measure = { kind = "probe", pointer = "/result/notes_total" } },
+    { name = "media_files", unit = "count", description = "Число имён в media_files всего дерева колод.", measure = { kind = "probe", pointer = "/result/media/declared_total" } },
 ]
+
+[scenario.input.probe]
+description = "Объём нагрузки сообщает сам модуль: `anki-repo --json stats` только читает экспорт; запуск — подготовка, а не измерение."
+program = { kind = "cargo-bin", package = "anki-repo", bin = "anki-repo" }
+args = ["--json", "stats", "{input.export}"]
+touches = "read-only"
+timeout_seconds = 300
 
 [scenario.runs]
 warmup = 3
@@ -89,6 +96,34 @@ source = "hyperfine"
 required = false
 description = "Устойчивее времени к шуму системы; без доступа к perf_event метрика будет unavailable."
 
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
@@ -96,7 +131,7 @@ comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
 [[scenario]]
 id = "anki-repo.stats"
 title = "Агрегированная статистика экспорта"
-revision = 1
+revision = 2
 kind = "short-cli"
 status = "executable"
 description = "`anki-repo --json stats` над одним локальным CrowdAnki-экспортом: типизированная загрузка и агрегирование по всему дереву колод. Команда не пишет в экспорт и не ходит в сеть."
@@ -126,9 +161,16 @@ identity = "content-tree-sha256"
 parameter = "export_dir"
 description = "Экспорт, на котором измеряется команда; идентичность — SHA-256 содержимого дерева экспорта."
 size = [
-    { name = "deck_json_bytes", unit = "byte", description = "Размер deck.json в байтах." },
-    { name = "notes", unit = "count", description = "Число заметок во всём дереве колод экспорта." },
+    { name = "deck_json_bytes", unit = "byte", description = "Размер deck.json в байтах.", measure = { kind = "file-bytes", path = "deck.json" } },
+    { name = "notes", unit = "count", description = "Число заметок во всём дереве колод экспорта.", measure = { kind = "probe", pointer = "/result/notes_total" } },
 ]
+
+[scenario.input.probe]
+description = "Объём нагрузки сообщает сам модуль: `anki-repo --json stats` только читает экспорт; запуск — подготовка, а не измерение."
+program = { kind = "cargo-bin", package = "anki-repo", bin = "anki-repo" }
+args = ["--json", "stats", "{input.export}"]
+touches = "read-only"
+timeout_seconds = 300
 
 [scenario.runs]
 warmup = 3
@@ -162,6 +204,34 @@ scope = "largest-process-in-tree"
 source = "hyperfine"
 required = false
 description = "Пик RSS процесса anki-repo. Для очень малого пика Hyperfine на Linux может сообщить унаследованное от себя значение."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки."
 
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]

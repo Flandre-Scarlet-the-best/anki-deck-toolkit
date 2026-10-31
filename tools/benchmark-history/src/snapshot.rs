@@ -1,0 +1,1012 @@
+//! Снимок последнего подтверждённого измерения на русской странице `docs/ru/<модуль>/performance.md`.
+//!
+//! Страница модуля хранит по одному блоку на пару «сценарий × профиль» в
+//! явно названном эталонном окружении. Блок генерируется из выбранного
+//! проверенного результата на русской странице и заменяет только блок той же пары. Другое окружение или оборудование,
+//! другой или неизвестный объём нагрузки, недоказанное тождество нагрузки,
+//! неполная серия, изменённая рабочая копия или более старый результат
+//! прежний снимок молча не заменяют. В постоянной документации нет коммитов,
+//! идентификаторов записей, идентичностей входов и путей: тождество нагрузки
+//! доказывается сверкой с результатом прежнего снимка в локальной истории —
+//! другим результатом, а не публикуемым, который даёт в точности тот же блок.
+
+use crate::format;
+use benchmark_contract::result::{
+    Aggregate, Availability, BenchmarkResult, Fact, Identity, OutcomeStatus, Quantity, RunStatus,
+};
+use benchmark_contract::scenario::{InputRole, Scenario};
+use benchmark_contract::vocabulary::BuiltinFact;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
+use std::fs;
+use std::io::Write as _;
+use std::path::{Component, Path, PathBuf};
+
+const BEGIN: &str = "<!-- benchmark-snapshot: ";
+const END: &str = "<!-- /benchmark-snapshot -->";
+pub const ANCHOR: &str = "<!-- benchmark-snapshot:anchor -->";
+
+/// Каталог русской документации и имя страницы снимка внутри модуля:
+/// `docs/ru/<модуль>/performance.md`. Переводы снимков не получают.
+const RUSSIAN_DOCS: [&str; 2] = ["docs", "ru"];
+const PAGE_NAME: &str = "performance.md";
+
+/// Русская страница снимка модуля внутри корня репозитория `repository`.
+///
+/// Путь сверяется по каноническому расположению: относительные пути, `..` и
+/// символические ссылки разрешаются до проверки, поэтому ни ссылка на перевод,
+/// ни обход через `..` не превращают чужую страницу в русскую. Возвращается
+/// канонический путь: запись идёт в саму страницу, а не заменяет ссылку на неё.
+/// Список модулей не ограничивается: модуль — любое имя каталога.
+pub fn russian_page(repository: &Path, page: &Path) -> Result<PathBuf, String> {
+    let expected = format!(
+        "--page — русская страница снимка модуля {}/<модуль>/{PAGE_NAME} в репозитории каталога; переводы снимками не обновляются",
+        RUSSIAN_DOCS.join("/")
+    );
+    let repository = repository.canonicalize().map_err(|e| {
+        format!(
+            "{}: корень репозитория каталога не найден: {e}",
+            repository.display()
+        )
+    })?;
+    let canonical = page
+        .canonicalize()
+        .map_err(|e| format!("{}: страница не найдена: {e}; {expected}", page.display()))?;
+    let inside = canonical
+        .strip_prefix(&repository)
+        .map_err(|_| format!("{}: {expected}", page.display()))?;
+    let parts: Vec<&std::ffi::OsStr> = inside
+        .components()
+        .map(|c| match c {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(|| format!("{}: {expected}", page.display()))?;
+    let valid = matches!(
+        parts.as_slice(),
+        [docs, ru, _, name]
+            if *docs == RUSSIAN_DOCS[0] && *ru == RUSSIAN_DOCS[1] && *name == PAGE_NAME
+    );
+    if !valid || !canonical.is_file() {
+        return Err(format!("{}: {expected}", page.display()));
+    }
+    Ok(canonical)
+}
+
+/// Машинная часть маркера блока: по ней блок находится и сверяется.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Meta {
+    pub scenario: String,
+    pub profile: String,
+    pub recorded_at: String,
+    /// Эталонное окружение снимка: [`REFERENCE_FACTS`] и факты
+    /// сопоставимости сценария.
+    pub environment: BTreeMap<String, String>,
+    /// Объём входов роли `workload` по ID входа: эталонная нагрузка снимка.
+    /// Маркер без этого поля читается, но нагрузка такого снимка неизвестна,
+    /// и её смену подтверждает только `--replace-workload`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<BTreeMap<String, BTreeMap<String, Quantity>>>,
+    /// Записанные параметры, влияющие на сопоставимость (например, число
+    /// писателей): результаты с разными значениями несопоставимы, поэтому
+    /// смену параметров снимка, как и смену нагрузки, подтверждает только
+    /// `--replace-workload`. Пустой набор в маркер не пишется.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct Block {
+    start: usize,
+    end: usize,
+    meta: Meta,
+}
+
+/// Блоки страницы по строкам маркеров.
+fn blocks(text: &str) -> Result<Vec<Block>, String> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut found = Vec::new();
+    let mut open: Option<(usize, Meta)> = None;
+    for (n, line) in lines.iter().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix(BEGIN) {
+            if open.is_some() {
+                return Err(format!("строка {}: блок снимка открыт повторно", n + 1));
+            }
+            let json = rest
+                .strip_suffix(" -->")
+                .ok_or_else(|| format!("строка {}: маркер снимка не закрыт", n + 1))?;
+            let meta: Meta = serde_json::from_str(json)
+                .map_err(|e| format!("строка {}: маркер снимка не разобран: {e}", n + 1))?;
+            open = Some((n, meta));
+        } else if line == END {
+            let (start, meta) = open
+                .take()
+                .ok_or_else(|| format!("строка {}: конец снимка без начала", n + 1))?;
+            found.push(Block {
+                start,
+                end: n,
+                meta,
+            });
+        }
+    }
+    if open.is_some() {
+        return Err("блок снимка не закрыт".into());
+    }
+    Ok(found)
+}
+
+/// Аппаратные и платформенные факты, которые входят в идентичность
+/// эталонного окружения снимка всегда, даже если сценарий не делает их
+/// условием сопоставимости: другая машина — другой процессор, объём памяти,
+/// смена WSL2 на Linux без виртуализации — не заменяет публичный эталон молча.
+/// Сопоставимость результатов по-прежнему решает только `comparable`.
+pub const REFERENCE_FACTS: &[BuiltinFact] = &[
+    BuiltinFact::Os,
+    BuiltinFact::Arch,
+    BuiltinFact::Virtualization,
+    BuiltinFact::CpuModel,
+    BuiltinFact::LogicalCpus,
+    BuiltinFact::MemoryTotalBytes,
+];
+
+/// Эталонное окружение — известные значения [`REFERENCE_FACTS`] и фактов
+/// сопоставимости сценария. Неизвестный факт совпадающим не считается:
+/// эталон без него не определён.
+pub fn reference_environment(
+    scenario: &Scenario,
+    result: &BenchmarkResult,
+) -> Result<BTreeMap<String, String>, String> {
+    let names: BTreeSet<String> = REFERENCE_FACTS
+        .iter()
+        .map(|f| f.as_str().to_owned())
+        .chain(scenario.environment.comparable.iter().cloned())
+        .collect();
+    let mut environment = BTreeMap::new();
+    for name in names {
+        match result.environment.get(&name) {
+            Some(Fact::Known { value }) => {
+                environment.insert(name, value.clone());
+            }
+            Some(Fact::Unavailable { reason }) => {
+                return Err(format!(
+                    "факт окружения {name} неизвестен ({reason}): эталонное окружение снимка не определено"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "факт окружения {name} не записан: эталонное окружение снимка не определено; сценарий должен записывать его в environment.record"
+                ));
+            }
+        }
+    }
+    Ok(environment)
+}
+
+/// Эталонная нагрузка — объём входов роли `workload`; идентичность в документацию
+/// не попадает.
+pub fn reference_workload(
+    result: &BenchmarkResult,
+) -> BTreeMap<String, BTreeMap<String, Quantity>> {
+    result
+        .inputs
+        .iter()
+        .filter(|input| input.role == InputRole::Workload)
+        .map(|input| (input.id.clone(), input.size.clone()))
+        .collect()
+}
+
+/// Идентичности входов роли `workload`. В документацию не попадают: ими
+/// тождество нагрузки сверяется только с локальной историей.
+pub fn workload_identities(result: &BenchmarkResult) -> BTreeMap<String, Identity> {
+    result
+        .inputs
+        .iter()
+        .filter(|input| input.role == InputRole::Workload)
+        .map(|input| (input.id.clone(), input.identity.clone()))
+        .collect()
+}
+
+/// Действующие значения параметров, объявленных влияющими на сопоставимость;
+/// отсутствующее значение берётся из `default` сценария.
+pub fn comparability_parameters(
+    scenario: &Scenario,
+    result: &BenchmarkResult,
+) -> BTreeMap<String, String> {
+    scenario
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.affects_comparability)
+        .filter_map(|parameter| {
+            result
+                .parameters
+                .get(&parameter.name)
+                .or(parameter.default.as_ref())
+                .map(|value| (parameter.name.clone(), value.clone()))
+        })
+        .collect()
+}
+
+/// Машинная часть маркера, которую результат даёт снимку.
+fn meta_of(scenario: &Scenario, result: &BenchmarkResult) -> Result<Meta, String> {
+    Ok(Meta {
+        scenario: result.scenario.id.clone(),
+        profile: result.profile.id.clone(),
+        recorded_at: result.provenance.recorded_at.clone(),
+        environment: reference_environment(scenario, result)?,
+        workload: Some(reference_workload(result)),
+        parameters: comparability_parameters(scenario, result),
+    })
+}
+
+/// Отпечаток содержимого результата: по нему публикуемый результат
+/// исключается из доказательства происхождения прежнего снимка.
+fn fingerprint(result: &BenchmarkResult) -> String {
+    let bytes = serde_json::to_vec(result).expect("JSON");
+    crate::archive::hex(&Sha256::digest(&bytes))
+}
+
+/// Результат локальной истории, который мог дать прежний снимок: блоки,
+/// которые он даёт для поддерживаемых страниц, и идентичности его нагрузки.
+#[derive(Debug, Clone)]
+pub struct Recorded {
+    fingerprint: String,
+    /// Маркер результата; `None`, если эталонное окружение не определено:
+    /// такой результат не может быть источником опубликованного снимка.
+    meta: Option<Meta>,
+    /// Блок, который результат даёт русской странице.
+    block: Option<String>,
+    identities: BTreeMap<String, Identity>,
+}
+
+impl Recorded {
+    pub fn of(scenario: &Scenario, result: &BenchmarkResult) -> Recorded {
+        let meta = meta_of(scenario, result).ok();
+        let block = meta
+            .as_ref()
+            .map(|meta| render(meta, result).trim_end_matches('\n').to_owned());
+        Recorded {
+            fingerprint: fingerprint(result),
+            meta,
+            block,
+            identities: workload_identities(result),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// Разрешить заменить снимок, сделанный в другом окружении.
+    pub replace_environment: bool,
+    /// Разрешить заменить снимок, тождество нагрузки которого с новой не
+    /// доказано: другой объём, другое содержимое или прежний результат неизвестен.
+    pub replace_workload: bool,
+    /// Разрешить результат рабочей копии с изменениями (это видно в блоке).
+    pub allow_dirty: bool,
+    /// Результаты локальной истории той же пары: доказательство тождества
+    /// нагрузки прежнего снимка. Пустой список — доказательства нет. Сам
+    /// публикуемый результат, если он здесь есть, доказательством не считается.
+    pub history: Vec<Recorded>,
+}
+
+/// Чем подтверждена эталонная нагрузка обновлённого снимка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkloadBasis {
+    /// Снимка этой пары на странице не было.
+    New,
+    /// Сценарий не объявляет входов роли `workload`.
+    NoWorkload,
+    /// В локальной истории есть другой результат, дающий в точности блок
+    /// прежнего снимка, и идентичности нагрузки всех таких результатов
+    /// совпадают с новой.
+    ProvenByHistory,
+    /// Тождество не доказано или нагрузка другая; замену явно подтвердил
+    /// `--replace-workload`.
+    ConfirmedReplacement,
+}
+
+impl WorkloadBasis {
+    pub fn describe(self) -> &'static str {
+        match self {
+            WorkloadBasis::New => "снимка этой пары не было, сравнивать нагрузку не с чем",
+            WorkloadBasis::NoWorkload => "сценарий не объявляет входов нагрузки",
+            WorkloadBasis::ProvenByHistory => {
+                "тождество нагрузки доказано: другой результат локальной истории даёт в точности блок прежнего снимка, и идентичности входов совпали"
+            }
+            WorkloadBasis::ConfirmedReplacement => {
+                "тождество нагрузки не доказано; смену эталонной нагрузки явно подтвердил --replace-workload"
+            }
+        }
+    }
+}
+
+/// Что изменится на русской странице.
+#[derive(Debug, Clone, Serialize)]
+pub struct Plan {
+    pub action: Action,
+    pub workload: WorkloadBasis,
+    /// Ровно одна русская страница. Список сохраняет форму машинного вывода
+    /// `plan.pages`, на который могут опираться сценарии пользователя.
+    pub pages: Vec<PageChange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Action {
+    Added,
+    Replaced,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PageChange {
+    pub path: PathBuf,
+    #[serde(skip)]
+    pub before: String,
+    #[serde(skip)]
+    pub after: String,
+    pub block: String,
+}
+
+/// Подготовить замену блока на русской странице, ничего не записывая.
+pub fn plan(
+    page: &Path,
+    scenario: &Scenario,
+    result: &BenchmarkResult,
+    options: &Options,
+) -> Result<Plan, String> {
+    if result.outcome.status != OutcomeStatus::Success {
+        return Err(format!(
+            "итог {:?}: снимок публикуется только из успешной серии",
+            result.outcome.status
+        )
+        .to_lowercase());
+    }
+    if result.scenario.id != scenario.id || result.scenario.revision != scenario.revision {
+        return Err(format!(
+            "результат записан для {} r{}, а каталог объявляет {} r{}: устаревший результат не публикуется",
+            result.scenario.id, result.scenario.revision, scenario.id, scenario.revision
+        ));
+    }
+    let dirty = result.provenance.code.dirty;
+    if dirty != Some(false) && !options.allow_dirty {
+        return Err(
+            "результат измерен в рабочей копии с изменениями или без записанного состояния: публикуйте измерение закоммиченного кода либо явно укажите --allow-dirty".into(),
+        );
+    }
+    let meta = meta_of(scenario, result)?;
+    let new = Published {
+        meta: &meta,
+        identities: workload_identities(result),
+        fingerprint: fingerprint(result),
+    };
+    let path = page.to_path_buf();
+    let before = fs::read_to_string(&path)
+        .map_err(|e| format!("{}: страница не читается: {e}", path.display()))?;
+    let block = render(&meta, result);
+    let (after, action, workload) =
+        place(&before, &new, &block, options).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Plan {
+        action,
+        workload,
+        pages: vec![PageChange {
+            path,
+            before,
+            after,
+            block,
+        }],
+    })
+}
+
+/// Публикуемый результат: его маркер, идентичности нагрузки и отпечаток.
+struct Published<'a> {
+    meta: &'a Meta,
+    identities: BTreeMap<String, Identity>,
+    fingerprint: String,
+}
+
+fn place(
+    text: &str,
+    new: &Published,
+    block: &str,
+    options: &Options,
+) -> Result<(String, Action, WorkloadBasis), String> {
+    let meta = new.meta;
+    let existing = blocks(text)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let same = existing
+        .iter()
+        .find(|b| b.meta.scenario == meta.scenario && b.meta.profile == meta.profile);
+    let (start, end, action, basis) = match same {
+        Some(old) => {
+            if old.meta.environment != meta.environment && !options.replace_environment {
+                let unknown: Vec<&str> = meta
+                    .environment
+                    .keys()
+                    .filter(|k| !old.meta.environment.contains_key(*k))
+                    .map(String::as_str)
+                    .collect();
+                let unknown = if unknown.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; в прежнем маркере не записаны {}, и совпадение не доказано",
+                        unknown.join(", ")
+                    )
+                };
+                return Err(format!(
+                    "снимок {} · {} получен в другом эталонном окружении ({}); новое окружение ({}) его молча не заменяет{unknown} — подтвердите смену эталона флагом --replace-environment",
+                    meta.scenario,
+                    meta.profile,
+                    describe(&old.meta.environment),
+                    describe(&meta.environment)
+                ));
+            }
+            let old_key = crate::index::time_key(&old.meta.recorded_at);
+            let new_key = crate::index::time_key(&meta.recorded_at);
+            if old_key > new_key {
+                return Err(format!(
+                    "на странице более новое подтверждённое измерение ({}) чем выбранное ({})",
+                    old.meta.recorded_at, meta.recorded_at
+                ));
+            }
+            let current = lines[old.start..=old.end]
+                .iter()
+                .map(|l| l.trim_end_matches('\r'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Совпавший текст блока тождества нагрузки не доказывает: её
+            // идентичностей в блоке нет, поэтому проверка та же, что при замене.
+            let basis = workload_basis(&old.meta, &current, new, options)?;
+            if current == block.trim_end_matches('\n') {
+                return Ok((text.to_owned(), Action::Unchanged, basis));
+            }
+            (old.start, old.end + 1, Action::Replaced, basis)
+        }
+        None => {
+            let anchor = lines
+                .iter()
+                .position(|l| l.trim_end_matches('\r') == ANCHOR)
+                .ok_or_else(|| {
+                    format!("на странице нет снимка этой пары и строки {ANCHOR}, перед которой добавляются новые снимки")
+                })?;
+            (anchor, anchor, Action::Added, WorkloadBasis::New)
+        }
+    };
+    let mut out: Vec<String> = lines[..start].iter().map(|s| (*s).to_owned()).collect();
+    // Вставленные строки получают окончания строк самой страницы.
+    let eol = if text.contains("\r\n") { "\r" } else { "" };
+    out.extend(
+        block
+            .trim_end_matches('\n')
+            .split('\n')
+            .map(|l| format!("{l}{eol}")),
+    );
+    if action == Action::Added {
+        out.push(eol.to_owned());
+    }
+    out.extend(lines[end..].iter().map(|s| (*s).to_owned()));
+    Ok((out.join("\n"), action, basis))
+}
+
+/// Тождество нагрузки прежнего снимка и нового результата. Совпадение объёма
+/// его не доказывает: два разных входа могут иметь одинаковые размеры. Сами
+/// идентичности на странице не хранятся, поэтому доказательство — результат
+/// локальной истории, который даёт в точности блок прежнего снимка (маркер,
+/// момент записи, окружение, метрики), и идентичности его нагрузки. Публикуемый
+/// результат такого доказательства не даёт: иначе новый результат того же
+/// объёма, записанный в ту же секунду, подтвердил бы сам себя. Несколько
+/// источников с разной нагрузкой — происхождение неоднозначно. Без
+/// доказательства замена требует явного `--replace-workload`.
+fn workload_basis(
+    old: &Meta,
+    current: &str,
+    new: &Published,
+    options: &Options,
+) -> Result<WorkloadBasis, String> {
+    let pair = format!("{} · {}", new.meta.scenario, new.meta.profile);
+    let confirm =
+        "подтвердите смену или неподтверждённость эталонной нагрузки флагом --replace-workload";
+    let refuse = |reason: String| {
+        if options.replace_workload {
+            Ok(WorkloadBasis::ConfirmedReplacement)
+        } else {
+            Err(reason)
+        }
+    };
+    let Some(old_workload) = &old.workload else {
+        return refuse(format!(
+            "в маркере снимка {pair} эталонная нагрузка не записана: совпадение с новой нагрузкой не доказано — {confirm}"
+        ));
+    };
+    if old.parameters != new.meta.parameters {
+        return refuse(format!(
+            "снимок {pair} получен с другими параметрами, влияющими на сопоставимость ({}); новые параметры ({}) его молча не заменяют — {confirm}",
+            describe(&old.parameters),
+            describe(&new.meta.parameters)
+        ));
+    }
+    if Some(old_workload) != new.meta.workload.as_ref() {
+        return refuse(format!(
+            "снимок {pair} получен на нагрузке другого объёма; новая нагрузка его молча не заменяет — {confirm}"
+        ));
+    }
+    if old_workload.is_empty() && new.identities.is_empty() {
+        return Ok(WorkloadBasis::NoWorkload);
+    }
+    let marked: Vec<&Recorded> = options
+        .history
+        .iter()
+        .filter(|r| r.meta.as_ref() == Some(old))
+        .collect();
+    let gives_block = |r: &&&Recorded| r.block.as_deref() == Some(current);
+    let itself = marked
+        .iter()
+        .any(|r| r.fingerprint == new.fingerprint && gives_block(&r));
+    let others: Vec<&&Recorded> = marked
+        .iter()
+        .filter(|r| r.fingerprint != new.fingerprint)
+        .collect();
+    let sources: Vec<&&Recorded> = others.iter().copied().filter(gives_block).collect();
+    if sources.is_empty() {
+        return refuse(if itself {
+            format!(
+                "блок снимка {pair} даёт сам публикуемый результат, а другого результата с этим блоком в локальной истории нет: маркер не хранит идентичностей входов, поэтому публикуемый результат не доказывает происхождения прежнего снимка (повторный запуск той же публикации страницы не меняет) — {confirm}"
+            )
+        } else if !others.is_empty() {
+            format!(
+                "в локальной истории есть результат с данными маркера снимка {pair} ({}), но блок на странице с ним не совпадает (изменён вручную или сгенерирован другой версией генератора): происхождение прежнего снимка не доказано — {confirm}",
+                old.recorded_at
+            )
+        } else {
+            format!(
+                "снимок {pair} получен на нагрузке того же объёма, но объём не доказывает тождество входа, а результата прежнего снимка ({}) в локальной истории нет — тождество нагрузки не доказано; восстановите историю этого результата или {confirm}",
+                old.recorded_at
+            )
+        });
+    }
+    let ambiguous: BTreeSet<&str> = sources
+        .iter()
+        .flat_map(|r| differing(&r.identities, &sources[0].identities))
+        .collect();
+    if !ambiguous.is_empty() {
+        return refuse(format!(
+            "блок снимка {pair} дают несколько результатов локальной истории с разной нагрузкой (входы {}): происхождение прежнего снимка неоднозначно — {confirm}",
+            ambiguous.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let changed = differing(&sources[0].identities, &new.identities);
+    if changed.is_empty() {
+        return Ok(WorkloadBasis::ProvenByHistory);
+    }
+    refuse(format!(
+        "снимок {pair} получен на нагрузке того же объёма, но с другим содержимым: идентичности входов {} отличаются от результата прежнего снимка в локальной истории — {confirm}",
+        changed.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// ID входов, идентичности которых различаются.
+fn differing<'a>(
+    a: &'a BTreeMap<String, Identity>,
+    b: &'a BTreeMap<String, Identity>,
+) -> BTreeSet<&'a str> {
+    a.keys()
+        .chain(b.keys())
+        .filter(|id| a.get(*id) != b.get(*id))
+        .map(String::as_str)
+        .collect()
+}
+
+fn describe(environment: &BTreeMap<String, String>) -> String {
+    environment
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Шаг записи русской страницы: точка внедрения отказа в проверках.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Запись временной копии новой страницы.
+    Prepare,
+    /// Замена страницы временной копией.
+    Commit,
+}
+
+/// Записать русскую страницу; переводы не изменяются.
+///
+/// Гарантия согласованности: страница готовится во временном файле и
+/// заменяется атомарным переименованием; после ошибки подготовки или замены
+/// прежний документ остаётся без изменений. Страницу, изменённую после
+/// подготовки плана, не перезаписываем.
+pub fn apply(plan: &Plan) -> Result<(), String> {
+    apply_with(plan, &mut |_| Ok(()))
+}
+
+/// [`apply`] с внедрением отказа перед каждым шагом записи.
+pub fn apply_with(
+    plan: &Plan,
+    fault: &mut dyn FnMut(Step) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let [page] = plan.pages.as_slice() else {
+        return Err(format!(
+            "план снимка должен содержать одну русскую страницу, а содержит {}; страницы не изменены",
+            plan.pages.len()
+        ));
+    };
+    if page.after == page.before {
+        return Ok(());
+    }
+    let current = fs::read_to_string(&page.path).map_err(|e| {
+        format!(
+            "{}: страница не читается: {e}; страница не изменена",
+            page.path.display()
+        )
+    })?;
+    if current != page.before {
+        return Err(format!(
+            "{}: страница изменилась после подготовки снимка; страница не изменена, повторите snapshot",
+            page.path.display()
+        ));
+    }
+    let tmp = page
+        .path
+        .with_extension(format!("md.{}.snapshot.tmp", std::process::id()));
+    let write = |path: &Path, text: &str| -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    };
+    let replaced = fault(Step::Prepare)
+        .and_then(|()| write(&tmp, &page.after))
+        .and_then(|()| fault(Step::Commit))
+        .and_then(|()| fs::rename(&tmp, &page.path));
+    if let Err(e) = replaced {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "{}: {e}; страница не изменена",
+            page.path.display()
+        ));
+    }
+    Ok(())
+}
+
+struct Labels {
+    /// Разделитель «подпись: текст» и конец предложения.
+    colon: &'static str,
+    stop: &'static str,
+    heading: &'static str,
+    confirmed: &'static str,
+    outcome: fn(usize, usize, u32) -> String,
+    dirty: &'static str,
+    environment: &'static str,
+    value: &'static str,
+    workload: &'static str,
+    parameter: &'static str,
+    no_workload: &'static str,
+    metric: &'static str,
+    scope: &'static str,
+    mean: &'static str,
+    median: &'static str,
+    range: &'static str,
+    not_measured: &'static str,
+    reference: &'static str,
+    /// Слово «ядро» после числа.
+    cores: fn(f64) -> &'static str,
+}
+
+fn labels() -> Labels {
+    Labels {
+        colon: ": ",
+        stop: ".",
+        heading: "профиль",
+        confirmed: "Последнее подтверждённое измерение",
+        outcome: |ok, all, warmup| {
+            format!("итог `success`: успешных прогонов {ok} из {all}, прогревов {warmup}")
+        },
+        dirty: "измерена рабочая копия с изменениями",
+        environment: "Факт окружения",
+        value: "Значение",
+        workload: "Нагрузка",
+        parameter: "параметр",
+        no_workload: "Сценарий не объявляет входов.",
+        metric: "Метрика",
+        scope: "Scope / источник",
+        mean: "Среднее ± σ",
+        median: "Медиана",
+        range: "Мин–макс",
+        not_measured: "Не измерено",
+        reference: "Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.",
+        cores: format::cores_ru,
+    }
+}
+
+fn marker(meta: &Meta) -> String {
+    let json = serde_json::to_string(meta).expect("JSON");
+    // `--` внутри HTML-комментария недопустимо: экранируется в строке JSON.
+    format!("{BEGIN}{} -->", json.replace("--", "-\\u002d"))
+}
+
+/// Текст, который GFM покажет буквально: без управляющих символов и краевых
+/// пробелов (их съедает ячейка), без экранирования, кода, выделения, ссылок,
+/// HTML, сущностей, формул, автоссылок и эмодзи-кодов. `|` допустим: в ячейке
+/// он экранируется на уровне таблицы, в том числе внутри кода.
+fn literal_in_markdown(value: &str) -> bool {
+    let chars: Vec<char> = value.chars().collect();
+    let alphanumeric = |index: Option<usize>| {
+        index
+            .and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphanumeric())
+    };
+    !value.is_empty()
+        && value.trim() == value
+        && !value.to_lowercase().contains("www.")
+        && chars.iter().enumerate().all(|(i, &c)| match c {
+            c if c.is_alphanumeric() => true,
+            ' ' | '.' | ',' | ';' | '-' | '+' | '=' | '/' | '(' | ')' | '%' | '\'' | '"' | '|' => {
+                true
+            }
+            // Внутри слова `_` не открывает выделение (`x86_64`).
+            '_' => alphanumeric(i.checked_sub(1)) && alphanumeric(Some(i + 1)),
+            // `:` перед пробелом или в конце не начинает ни схему ссылки, ни эмодзи-код.
+            ':' => chars.get(i + 1).is_none_or(|n| *n == ' '),
+            _ => false,
+        })
+}
+
+/// Значение в ячейке таблицы. Обычное остаётся прежним: текстом или, для
+/// `code`, в обратных кавычках. Иное — точная JSON-строка в `<code>`, где всё,
+/// кроме букв и цифр, записано числовыми ссылками: Markdown не видит в ней ни
+/// разделителей ячеек и строк, ни разметки, а управляющие символы, краевые
+/// пробелы и обратные кавычки остаются видимыми и однозначными.
+fn markdown_cell(value: &str, code: bool) -> String {
+    if literal_in_markdown(value) {
+        let text = value.replace('|', "\\|");
+        return if code { format!("`{text}`") } else { text };
+    }
+    let json = serde_json::to_string(value).expect("строка JSON");
+    let escaped: String = json
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_string()
+            } else {
+                format!("&#{};", u32::from(c))
+            }
+        })
+        .collect();
+    format!("<code>{escaped}</code>")
+}
+
+/// Причина в абзаце «Не измерено»: ASCII-знаки разметки экранируются обратной
+/// косой чертой (CommonMark показывает их буквально), `_` внутри слова
+/// остаётся как есть, управляющие символы, включая переводы строк, заменяются
+/// пробелом: причина остаётся одной строкой абзаца и не закрывает блок снимка.
+fn markdown_text(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let intraword = c == '_'
+            && i > 0
+            && chars[i - 1].is_alphanumeric()
+            && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+        match c {
+            c if c.is_control() => out.push(' '),
+            '\\' | '`' | '*' | '[' | ']' | '<' | '>' | '&' | '~' | '|' | '!' | '$' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '_' if !intraword => out.push_str("\\_"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+pub fn render(meta: &Meta, result: &BenchmarkResult) -> String {
+    let l = labels();
+    let show = |value: f64, unit| format::quantity_in(value, unit, l.cores);
+    let mut out = String::new();
+    let _ = writeln!(out, "{}", marker(meta));
+    let _ = writeln!(
+        out,
+        "### `{}` · {} `{}`\n",
+        result.scenario.id, l.heading, result.profile.id
+    );
+    let ok = result
+        .runs
+        .iter()
+        .filter(|r| r.status == RunStatus::Success)
+        .count();
+    let tool = |t: &benchmark_contract::result::Tool| format!("{} {}", t.name, t.version);
+    let mut facts = vec![
+        format!("{} UTC", &result.provenance.recorded_at[..10]),
+        format!(
+            "`{}` {}",
+            result.scenario.module, result.provenance.code.module_version
+        ),
+        tool(&result.provenance.measurement),
+    ];
+    if let Some(runner) = &result.provenance.runner {
+        facts.push(tool(runner));
+    }
+    facts.push(format!(
+        "r{} · {} · {}",
+        result.scenario.revision, result.profile.cache, result.profile.network
+    ));
+    facts.push((l.outcome)(ok, result.runs.len(), result.warmup_runs));
+    if result.provenance.code.dirty != Some(false) {
+        facts.push(l.dirty.to_owned());
+    }
+    let _ = writeln!(
+        out,
+        "{}{}{}{}\n",
+        l.confirmed,
+        l.colon,
+        facts.join(" · "),
+        l.stop
+    );
+
+    let _ = writeln!(out, "| {} | {} |\n|---|---|", l.environment, l.value);
+    for (name, fact) in &result.environment {
+        if let Fact::Known { value } = fact {
+            let mark = if meta.environment.contains_key(name) {
+                " ★"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "| `{name}`{mark} | {} |", markdown_cell(value, false));
+        }
+    }
+    out.push('\n');
+
+    // Параметры, влияющие на сопоставимость, — часть определения нагрузки
+    // снимка: без них блок не говорит, что именно измерено.
+    let mut sizes: Vec<(String, String)> = meta
+        .parameters
+        .iter()
+        .map(|(name, value)| {
+            (
+                format!("{} `{name}`", l.parameter),
+                markdown_cell(value, true),
+            )
+        })
+        .collect();
+    let input_sizes: Vec<(String, String)> = result
+        .inputs
+        .iter()
+        .flat_map(|input| {
+            input
+                .size
+                .iter()
+                .map(move |(name, q)| (format!("`{}` · `{name}`", input.id), show(q.value, q.unit)))
+        })
+        .collect();
+    sizes.extend(input_sizes);
+    if sizes.is_empty() {
+        let _ = writeln!(out, "{}\n", l.no_workload);
+    } else {
+        let _ = writeln!(out, "| {} | {} |\n|---|---|", l.workload, l.value);
+        for (name, value) in sizes {
+            let _ = writeln!(out, "| {name} | {value} |");
+        }
+        out.push('\n');
+    }
+
+    let _ = writeln!(
+        out,
+        "| {} | {} | {} | {} | {} | n |\n|---|---|---|---|---|---|",
+        l.metric, l.scope, l.mean, l.median, l.range
+    );
+    let mut missing = Vec::new();
+    for metric in &result.metrics {
+        match Aggregate::compute(&result.successful_values(&metric.key)) {
+            Some(a) => {
+                let spread = a
+                    .stddev
+                    .map(|s| format!(" ± {}", show(s, metric.unit)))
+                    .unwrap_or_default();
+                let partial = if metric.availability == Availability::Partial {
+                    " · partial"
+                } else {
+                    ""
+                };
+                let _ = writeln!(
+                    out,
+                    "| `{}` | {} / {} | {}{spread}{partial} | {} | {} – {} | {} |",
+                    metric.key,
+                    metric.scope,
+                    metric.source,
+                    show(a.mean, metric.unit),
+                    show(a.median, metric.unit),
+                    show(a.min, metric.unit),
+                    show(a.max, metric.unit),
+                    a.count
+                );
+            }
+            None => missing.push(format!(
+                "`{}` — `{}`{}",
+                metric.key,
+                serde_json::to_value(metric.availability)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                metric
+                    .reason
+                    .as_deref()
+                    .map(|r| format!(": {}", markdown_text(r)))
+                    .unwrap_or_default()
+            )),
+        }
+    }
+    out.push('\n');
+    if !missing.is_empty() {
+        let _ = writeln!(
+            out,
+            "{}{}{}{}\n",
+            l.not_measured,
+            l.colon,
+            missing.join("; "),
+            l.stop
+        );
+    }
+    let _ = writeln!(out, "★ {}", l.reference);
+    let _ = writeln!(out, "{END}");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_values_keep_their_published_form() {
+        for value in ["x86_64", "rustc 1.99.1 (58cf8f9c3 2026-10-13)", "Ядро: 4"] {
+            assert_eq!(markdown_cell(value, false), value);
+            assert_eq!(markdown_cell(value, true), format!("`{value}`"));
+        }
+        assert_eq!(markdown_cell("a|b", false), r"a\|b");
+        assert_eq!(markdown_cell("a|b", true), r"`a\|b`");
+        assert_eq!(
+            markdown_cell("a`b", false),
+            "<code>&#34;a&#96;b&#34;</code>"
+        );
+        assert_eq!(
+            markdown_text("perf_event /proc/stat"),
+            "perf_event /proc/stat"
+        );
+        assert_eq!(markdown_text("_x_ <b>\n"), r"\_x\_ \<b\> ");
+    }
+
+    #[test]
+    fn marker_never_contains_comment_terminator() {
+        let meta = Meta {
+            scenario: "a.b".into(),
+            profile: "warm".into(),
+            recorded_at: "2026-10-28T00:00:00Z".into(),
+            environment: BTreeMap::from([("cpu_model".into(), "X -- Y --- Z".into())]),
+            workload: None,
+            parameters: BTreeMap::from([("writers".into(), "4 -- 8".into())]),
+        };
+        let text = marker(&meta);
+        assert!(!text[4..text.len() - 3].contains("--"), "{text}");
+        // Пустые параметры в маркер не пишутся: маркеры сценариев без них не меняются.
+        let plain = Meta {
+            parameters: BTreeMap::new(),
+            ..meta.clone()
+        };
+        assert!(!marker(&plain).contains("parameters"));
+        let parsed = blocks(&format!("{text}\nbody\n{END}\n")).unwrap();
+        assert_eq!(parsed[0].meta, meta);
+    }
+}

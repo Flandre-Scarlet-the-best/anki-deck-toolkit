@@ -826,14 +826,17 @@ impl AssetStore {
         } else {
             validate_verified_manifest(&directory, &manifest, policy)?;
         }
-        // Индекс по идентичности: пакет на весь корпус не обходит манифест целиком на каждый запрос.
-        let mut by_identity: BTreeMap<&AssetIdentity, Vec<&AssetRecord>> = BTreeMap::new();
-        for record in &manifest.assets {
-            by_identity
-                .entry(&record.identity)
-                .or_default()
-                .push(record);
-        }
+        // Полная проверка выше уже доказала сортировку по идентичности
+        // (и формату внутри неё). Ищем диапазон прямо в манифесте: не строим
+        // отдельный индекс всего корпуса даже ради одного запроса.
+        let records_for = |identity: &AssetIdentity| {
+            let start = manifest
+                .assets
+                .partition_point(|record| record.identity < *identity);
+            let remaining = &manifest.assets[start..];
+            let count = remaining.partition_point(|record| record.identity == *identity);
+            &remaining[..count]
+        };
         // Проверка всего выбора до callback: потребитель не получает частичный
         // набор, который затем невозможно безопасно разместить в одном media/.
         if policy.allows_consumer_name_overlap() {
@@ -843,18 +846,16 @@ impl AssetStore {
                 if policy.validate_identity(identity).is_err() {
                     continue;
                 }
-                if let Some(records) = by_identity.get(identity) {
-                    for record in records {
-                        let key = policy.consumer_name_key(&record.consumer_filename);
-                        if names
-                            .insert(key, identity)
-                            .is_some_and(|old| old != identity)
-                        {
-                            return Err(AssetError::new(
-                                ErrorCode::IdentityConflict,
-                                "выбранные ресурсы претендуют на эквивалентное имя потребителя",
-                            ));
-                        }
+                for record in records_for(identity) {
+                    let key = policy.consumer_name_key(&record.consumer_filename);
+                    if names
+                        .insert(key, identity)
+                        .is_some_and(|old| old != identity)
+                    {
+                        return Err(AssetError::new(
+                            ErrorCode::IdentityConflict,
+                            "выбранные ресурсы претендуют на эквивалентное имя потребителя",
+                        ));
                     }
                 }
             }
@@ -862,13 +863,12 @@ impl AssetStore {
         for (index, (identity, format)) in requests.iter().enumerate() {
             let read = (|| {
                 policy.validate_identity(identity)?;
-                let records = by_identity.get(identity).map_or(&[][..], Vec::as_slice);
+                let records = records_for(identity);
                 let record = match format {
                     Some(format) => records
                         .iter()
-                        .copied()
                         .find(|record| in_slot(policy, record, identity, *format)),
-                    None => preferred_record(policy, records.iter().copied(), identity, |record| {
+                    None => preferred_record(policy, records.iter(), identity, |record| {
                         is_trusted_for_policy(record, expected_validator, policy)
                     }),
                 }
@@ -4520,9 +4520,13 @@ fn scan_asset_directory(
             ));
         }
         if metadata.is_dir() {
+            // Все потомки образуют непрерывный диапазон в BTreeSet.
+            // Разделитель обязателен: assets/png-extra не потомок assets/png.
+            let prefix = format!("{path}/");
             if !registered_paths
-                .iter()
-                .any(|registered| registered.starts_with(&format!("{path}/")))
+                .range(prefix.clone()..)
+                .next()
+                .is_some_and(|registered| registered.starts_with(&prefix))
             {
                 if !reject_orphans {
                     let child = open_directory_at(directory, &name)

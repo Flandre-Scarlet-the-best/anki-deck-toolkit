@@ -1,0 +1,14 @@
+# Малый корпус kanji: 200 символов, каждый четвёртый также в PNG.
+# Контракт полей — docs/ru/asset-store/README.md, раздел о нагрузке бенчмарков;
+# SHA-256 этого файла — идентичность нагрузки сценариев asset-store.
+generator = 1
+domain = "kanji"
+seed = 1
+assets = 200
+png_every = 4
+image_side = 48
+reads = 250
+ingest = 20
+batch_entries = 200
+batch_blobs = 50
+blob_bytes = 4096

@@ -1,0 +1,1191 @@
+# Сценарии файлового ядра asset-store: настоящие операции AssetStore и
+# SafeBatchRuntime над детерминированным синтетическим корпусом. Исполнитель
+# нагрузки — asset-store-bench (docs/ru/asset-store/README.md), спецификации
+# объёмов — benchmarks/workloads/asset-store/*.toml, методика и снимки —
+# docs/ru/asset-store/performance.md.
+#
+# Эталон строится шагом setup штатной публикацией ingest_verified в
+# игнорируемом Git каталоге target/benchmark-workloads/asset-store; cleanup
+# удаляет рабочую копию, эталон переиспользуется только той же сборкой. Изменяющие сценарии перед каждым прогоном восстанавливают рабочую
+# копию из эталона (prepare), а постусловия проверяют вне измеряемого интервала
+# (conclude). Браузерные и сетевые пути (Chromium, Yarxi, JPDB, LLM) здесь не
+# измеряются.
+schema_version = 1
+module = "asset-store"
+
+[[scenario]]
+id = "asset-store.verify-integrity"
+title = "Проверка целостности корпуса"
+revision = 2
+kind = "short-cli"
+status = "executable"
+description = "Открытие существующего хранилища (проверка владельца, манифестов, сверка runtime-границы) и verify_integrity: манифест и наличие каждого файла под разделяемой блокировкой. Байты файлов не хешируются."
+measured = "Один запуск собранного release-бинарника asset-store-bench от старта процесса до выхода: open_existing и verify_integrity над эталоном. Построение эталона, прогревы и проверка постусловия в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "verify-integrity", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл спецификации нагрузки, например benchmarks/workloads/asset-store/kanji-medium.toml. Путь не публикуется: нагрузку в результате представляют SHA-256 файла и объём из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса: домен, зерно, число записей, размеры изображений и пакетного состояния. Версия генератора входит в файл, поэтому SHA-256 файла описывает и содержимое корпуса."
+size = [
+    { name = "records", unit = "count", description = "Записей корпуса: идентичности и их форматные варианты.", measure = { kind = "probe", pointer = "/records" } },
+    { name = "corpus_bytes", unit = "byte", description = "Суммарный размер байтов всех записей корпуса.", measure = { kind = "probe", pointer = "/corpus_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: корпус штатной публикацией ingest_verified, входящие файлы и пакетное состояние. Эталон прежней серии переиспользуется, только если его построил тот же исполняемый файл по той же спецификации и его дерево совпало с записанным; иначе он строится заново."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 2
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 120
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Операция только читает эталон серии; его файлы в page cache после прогревочных прогонов. Глобальный page cache не сбрасывается."
+cleared = []
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.conclude]]
+description = "Постусловие: SHA-256 дерева эталона не изменился — операция действительно только читает."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "verify-integrity", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "read-only"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции, fsync, блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель и процесс Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "cpu_utilization_peak"
+scope = "host"
+source = "procfs"
+required = false
+sample_interval_seconds = 0.05
+description = "Опрос /proc/stat всей системы: выборочное наблюдение хостовой нагрузки, не верхняя граница пиковой загрузки цели."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "asset-store.read-batch"
+title = "Пакетное чтение доверенных байтов"
+revision = 2
+kind = "short-cli"
+status = "executable"
+description = "Штатный пакетный API visit_verified_variants_with_policy: одна разделяемая блокировка и одна полная проверка манифеста на весь набор, затем чтение каждого файла со сверкой размера, формата и SHA-256."
+measured = "Один запуск release-бинарника asset-store-bench: пакетное чтение reads записей эталона. Построение эталона, прогревы и проверка постусловия в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "read-batch", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл спецификации нагрузки, например benchmarks/workloads/asset-store/kanji-medium.toml. Путь не публикуется: нагрузку в результате представляют SHA-256 файла и объём из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса: домен, зерно, число записей, размеры изображений и пакетного состояния. Версия генератора входит в файл, поэтому SHA-256 файла описывает и содержимое корпуса."
+size = [
+    { name = "records", unit = "count", description = "Записей корпуса: идентичности и их форматные варианты.", measure = { kind = "probe", pointer = "/records" } },
+    { name = "reads", unit = "count", description = "Запросов чтения за прогон.", measure = { kind = "probe", pointer = "/reads" } },
+    { name = "read_bytes", unit = "byte", description = "Суммарный размер байтов запрошенных записей.", measure = { kind = "probe", pointer = "/read_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: корпус штатной публикацией ingest_verified, входящие файлы и пакетное состояние. Эталон прежней серии переиспользуется, только если его построил тот же исполняемый файл по той же спецификации и его дерево совпало с записанным; иначе он строится заново."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 2
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 120
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Операция только читает эталон серии; его файлы в page cache после прогревочных прогонов. Глобальный page cache не сбрасывается."
+cleared = []
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.conclude]]
+description = "Постусловие: SHA-256 дерева эталона не изменился — операция действительно только читает."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "read-batch", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "read-only"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции, fsync, блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель и процесс Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "asset-store.read-single"
+title = "Те же чтения по одному запросу"
+revision = 2
+kind = "short-cli"
+status = "executable"
+description = "Те же запросы, что у read-batch, но отдельным вызовом read_verified_variants_with_policy на каждый: блокировка, разбор и проверка всего манифеста повторяются для каждого запроса. Сценарий отделяет стоимость повторной проверки манифеста от стоимости чтения байтов."
+measured = "Один запуск release-бинарника asset-store-bench: reads одиночных чтений эталона. Построение эталона, прогревы и проверка постусловия в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "read-single", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл спецификации нагрузки, например benchmarks/workloads/asset-store/kanji-medium.toml. Путь не публикуется: нагрузку в результате представляют SHA-256 файла и объём из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса: домен, зерно, число записей, размеры изображений и пакетного состояния. Версия генератора входит в файл, поэтому SHA-256 файла описывает и содержимое корпуса."
+size = [
+    { name = "records", unit = "count", description = "Записей корпуса: идентичности и их форматные варианты.", measure = { kind = "probe", pointer = "/records" } },
+    { name = "reads", unit = "count", description = "Запросов чтения за прогон.", measure = { kind = "probe", pointer = "/reads" } },
+    { name = "read_bytes", unit = "byte", description = "Суммарный размер байтов запрошенных записей.", measure = { kind = "probe", pointer = "/read_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: корпус штатной публикацией ingest_verified, входящие файлы и пакетное состояние. Эталон прежней серии переиспользуется, только если его построил тот же исполняемый файл по той же спецификации и его дерево совпало с записанным; иначе он строится заново."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 1
+min_runs = 5
+max_runs = 50
+single_run_allowed = false
+run_timeout_seconds = 600
+total_budget_seconds = 3600
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Операция только читает эталон серии; его файлы в page cache после прогревочных прогонов. Глобальный page cache не сбрасывается."
+cleared = []
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.conclude]]
+description = "Постусловие: SHA-256 дерева эталона не изменился — операция действительно только читает."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "read-single", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "read-only"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции, fsync, блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель и процесс Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "asset-store.ingest"
+title = "Публикация новых ресурсов"
+revision = 2
+kind = "short-cli"
+status = "executable"
+description = "Открытие хранилища и публикация ingest новых идентичностей штатным ingest_verified: staging, семантическая проверка (полное декодирование изображения), атомарная фиксация файла, перезапись манифеста, интент и закрытие журнала, fsync. Один писатель."
+measured = "Один запуск release-бинарника asset-store-bench от старта до выхода: открытие и все публикации, включая чтение входящих файлов. Восстановление рабочей копии (prepare) и проверка постусловий (conclude) в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "ingest", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл спецификации нагрузки, например benchmarks/workloads/asset-store/kanji-medium.toml. Путь не публикуется: нагрузку в результате представляют SHA-256 файла и объём из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса: домен, зерно, число записей, размеры изображений и пакетного состояния. Версия генератора входит в файл, поэтому SHA-256 файла описывает и содержимое корпуса."
+size = [
+    { name = "records", unit = "count", description = "Записей корпуса: идентичности и их форматные варианты.", measure = { kind = "probe", pointer = "/records" } },
+    { name = "corpus_bytes", unit = "byte", description = "Суммарный размер байтов всех записей корпуса.", measure = { kind = "probe", pointer = "/corpus_bytes" } },
+    { name = "ingest", unit = "count", description = "Новых идентичностей, публикуемых за прогон.", measure = { kind = "probe", pointer = "/ingest" } },
+    { name = "ingest_bytes", unit = "byte", description = "Суммарный размер публикуемых за прогон байтов.", measure = { kind = "probe", pointer = "/ingest_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: корпус штатной публикацией ingest_verified, входящие файлы и пакетное состояние. Эталон прежней серии переиспользуется, только если его построил тот же исполняемый файл по той же спецификации и его дерево совпало с записанным; иначе он строится заново."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 1
+min_runs = 5
+max_runs = 50
+single_run_allowed = false
+run_timeout_seconds = 600
+total_budget_seconds = 3600
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Перед каждым прогоном, включая прогревы, рабочая копия хранилища восстанавливается из эталона и каждый её файл и каталог синхронизируется на диск: стартовое состояние одинаково и записано, его байты в page cache. Глобальный page cache не сбрасывается."
+cleared = ["рабочая копия хранилища target/benchmark-workloads/asset-store/run"]
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.prepare]]
+description = "Восстановление рабочей копии из эталона с fsync; в измерение не входит."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["prepare", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 600
+
+[[scenario.profile.conclude]]
+description = "Постусловия: целостность манифеста и файлов, число записей, байты по SHA-256, чистый журнал и пустой staging либо ревизия и blob пакета."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "ingest", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции, fsync, блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель и процесс Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "disk_usage"
+scope = "path"
+source = "filesystem"
+label = "store"
+required = false
+path = "target/benchmark-workloads/asset-store/run/store"
+description = "Кажущийся размер рабочей копии хранилища после прогона."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "asset-store.ingest-contention"
+title = "Публикация конкурирующими писателями"
+revision = 2
+kind = "short-cli"
+status = "executable"
+description = "Тот же объём публикации, что у ingest, распределённый между writers независимыми дескрипторами хранилища в потоках одного процесса; исключение обеспечивает штатная блокировка flock, как между процессами. Писатели стартуют одновременно после открытия. Измеряет сериализацию на блокировке, а не межпроцессный запуск."
+measured = "Один запуск release-бинарника asset-store-bench: открытие хранилища каждым писателем и все публикации до завершения последнего писателя. prepare и conclude в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "ingest-contention", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store", "--writers", "{param.writers}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл спецификации нагрузки, например benchmarks/workloads/asset-store/kanji-medium.toml. Путь не публикуется: нагрузку в результате представляют SHA-256 файла и объём из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.parameter]]
+name = "writers"
+description = "Число независимых писателей; общий объём публикации от него не зависит."
+required = true
+choices = ["1", "2", "4", "8"]
+record = true
+affects_comparability = true
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса: домен, зерно, число записей, размеры изображений и пакетного состояния. Версия генератора входит в файл, поэтому SHA-256 файла описывает и содержимое корпуса."
+size = [
+    { name = "records", unit = "count", description = "Записей корпуса: идентичности и их форматные варианты.", measure = { kind = "probe", pointer = "/records" } },
+    { name = "corpus_bytes", unit = "byte", description = "Суммарный размер байтов всех записей корпуса.", measure = { kind = "probe", pointer = "/corpus_bytes" } },
+    { name = "ingest", unit = "count", description = "Новых идентичностей, публикуемых за прогон.", measure = { kind = "probe", pointer = "/ingest" } },
+    { name = "ingest_bytes", unit = "byte", description = "Суммарный размер публикуемых за прогон байтов.", measure = { kind = "probe", pointer = "/ingest_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: корпус штатной публикацией ingest_verified, входящие файлы и пакетное состояние. Эталон прежней серии переиспользуется, только если его построил тот же исполняемый файл по той же спецификации и его дерево совпало с записанным; иначе он строится заново."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 1
+min_runs = 5
+max_runs = 50
+single_run_allowed = false
+run_timeout_seconds = 600
+total_budget_seconds = 3600
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Перед каждым прогоном, включая прогревы, рабочая копия хранилища восстанавливается из эталона и каждый её файл и каталог синхронизируется на диск: стартовое состояние одинаково и записано, его байты в page cache. Глобальный page cache не сбрасывается."
+cleared = ["рабочая копия хранилища target/benchmark-workloads/asset-store/run"]
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.prepare]]
+description = "Восстановление рабочей копии из эталона с fsync; в измерение не входит."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["prepare", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 600
+
+[[scenario.profile.conclude]]
+description = "Постусловия: целостность манифеста и файлов, число записей, байты по SHA-256, чистый журнал и пустой staging либо ревизия и blob пакета."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "ingest-contention", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store", "--writers", "{param.writers}"]
+touches = "scenario-temp"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции, fsync, блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель и процесс Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "disk_usage"
+scope = "path"
+source = "filesystem"
+label = "store"
+required = false
+path = "target/benchmark-workloads/asset-store/run/store"
+description = "Кажущийся размер рабочей копии хранилища после прогона."
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Средняя загрузка подгруппы за время её жизни: писатели и Hyperfine вместе, весь вызов Hyperfine до остановки сэмплера."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "asset-store.batch-reopen"
+title = "Повторное открытие пакетного состояния"
+revision = 2
+kind = "short-cli"
+status = "executable"
+description = "SafeBatchRuntime::open и load: исключительная блокировка пакета, ограниченное чтение state.json, разбор, проверка структуры и полная сверка размера и SHA-256 каждого blob, на который ссылается состояние. Это путь восстановления после перезапуска."
+measured = "Один запуск release-бинарника asset-store-bench: открытие пакета эталона и загрузка состояния. Построение эталона, прогревы и проверка постусловия в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "batch-reopen", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл спецификации нагрузки, например benchmarks/workloads/asset-store/kanji-medium.toml. Путь не публикуется: нагрузку в результате представляют SHA-256 файла и объём из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса: домен, зерно, число записей, размеры изображений и пакетного состояния. Версия генератора входит в файл, поэтому SHA-256 файла описывает и содержимое корпуса."
+size = [
+    { name = "batch_entries", unit = "count", description = "Записей пакетного состояния.", measure = { kind = "probe", pointer = "/batch_entries" } },
+    { name = "batch_blobs", unit = "count", description = "Неизменяемых blob, на которые ссылается состояние.", measure = { kind = "probe", pointer = "/batch_blobs" } },
+    { name = "batch_blob_bytes", unit = "byte", description = "Суммарный размер blob пакета.", measure = { kind = "probe", pointer = "/batch_blob_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: корпус штатной публикацией ingest_verified, входящие файлы и пакетное состояние. Эталон прежней серии переиспользуется, только если его построил тот же исполняемый файл по той же спецификации и его дерево совпало с записанным; иначе он строится заново."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 2
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 120
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Операция только читает эталон серии; его файлы в page cache после прогревочных прогонов. Глобальный page cache не сбрасывается."
+cleared = []
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.conclude]]
+description = "Постусловие: SHA-256 дерева эталона не изменился — операция действительно только читает."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "batch-reopen", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "read-only"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции, fsync, блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель и процесс Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "asset-store.batch-checkpoint"
+title = "Сохранение пакетного состояния"
+revision = 2
+kind = "short-cli"
+status = "executable"
+description = "SafeBatchRuntime: open, load с полной сверкой blob и save. unchanged сохраняет то же состояние; modified записывает новый неизменяемый blob, меняет запись и повышает ревизию. save атомарен и синхронизирует файл и каталог."
+measured = "Один запуск release-бинарника asset-store-bench: открытие, загрузка и сохранение пакета рабочей копии. prepare и conclude в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "batch-checkpoint", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store", "--change", "{param.change}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл спецификации нагрузки, например benchmarks/workloads/asset-store/kanji-medium.toml. Путь не публикуется: нагрузку в результате представляют SHA-256 файла и объём из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.parameter]]
+name = "change"
+description = "unchanged — повторное сохранение того же состояния; modified — новый blob, изменённая запись и ревизия + 1."
+required = true
+choices = ["unchanged", "modified"]
+record = true
+affects_comparability = true
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса: домен, зерно, число записей, размеры изображений и пакетного состояния. Версия генератора входит в файл, поэтому SHA-256 файла описывает и содержимое корпуса."
+size = [
+    { name = "batch_entries", unit = "count", description = "Записей пакетного состояния.", measure = { kind = "probe", pointer = "/batch_entries" } },
+    { name = "batch_blobs", unit = "count", description = "Неизменяемых blob, на которые ссылается состояние.", measure = { kind = "probe", pointer = "/batch_blobs" } },
+    { name = "batch_blob_bytes", unit = "byte", description = "Суммарный размер blob пакета.", measure = { kind = "probe", pointer = "/batch_blob_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: корпус штатной публикацией ingest_verified, входящие файлы и пакетное состояние. Эталон прежней серии переиспользуется, только если его построил тот же исполняемый файл по той же спецификации и его дерево совпало с записанным; иначе он строится заново."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации (полная очистка — asset-store-bench clean без --keep-template). Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 2
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 120
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Перед каждым прогоном, включая прогревы, рабочая копия хранилища восстанавливается из эталона и каждый её файл и каталог синхронизируется на диск: стартовое состояние одинаково и записано, его байты в page cache. Глобальный page cache не сбрасывается."
+cleared = ["рабочая копия хранилища target/benchmark-workloads/asset-store/run"]
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.prepare]]
+description = "Восстановление рабочей копии из эталона с fsync; в измерение не входит."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["prepare", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 600
+
+[[scenario.profile.conclude]]
+description = "Постусловия: целостность манифеста и файлов, число записей, байты по SHA-256, чистый журнал и пустой staging либо ревизия и blob пакета."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "batch-checkpoint", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store", "--change", "{param.change}"]
+touches = "scenario-temp"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции, fsync, блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель и процесс Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O: сумма по устройствам io.stat; не логический объём нагрузки. Для контейнера недоступен при потере итогового снимка группы."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]

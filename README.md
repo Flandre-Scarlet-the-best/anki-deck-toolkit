@@ -6,11 +6,11 @@
 
 **Rust CLI для анализа, проверки, точечного редактирования и визуального сравнения экспортов CrowdAnki JSON.**
 
-[![Проверки репозитория](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/AliceLiddell01/anki-deck-toolkit/actions/workflows/ci.yml)
+[![Проверки репозитория](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/Rust-workspace-000000?logo=rust&logoColor=white)
-![CrowdAnki JSON](https://img.shields.io/badge/CrowdAnki-JSON-2f81f7)
 ![Платформа Linux](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
-[![Лицензия: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Лицензия: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Просмотры](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.svg?label=%D0%9F%D1%80%D0%BE%D1%81%D0%BC%D0%BE%D1%82%D1%80%D1%8B&color=blue)](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/)
 [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
 
 Набор инструментов для владельцев и разработчиков Anki-колод: исследование экспорта, проверка структуры и медиассылок, контроль качества заметок, безопасные правки с `dry-run`, создание заметок в существующих моделях и HTML-отчёт «до / после». Инструменты не вызывают LLM API, но поддерживают проверяемый рабочий процесс с внешними ИИ-агентами.
@@ -114,11 +114,13 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 
 Подробные команды и машиночитаемые контракты находятся в профильной документации:
 
-- [`anki-repo` — анализ, контроль качества, ограниченные изменения и визуальный отчёт](tools/anki-repo/README.md)
-- [`asset-store` и `kanji-assets` — жизненный цикл ресурсов и проверка](tools/asset-store/README.md)
-- [`repository-maintenance` — инвентаризация диска и безопасный GC](tools/repository-maintenance/README.md)
-- [`anki-e2e` — локальный изолированный E2E-стенд Anki Desktop в Docker](tools/anki-e2e/README.md)
-- [`benchmark-contract` — каталог сценариев бенчмаркинга и контракт результатов измерений](tools/benchmark-contract/README.md)
+- [`anki-repo` — анализ, контроль качества, ограниченные изменения и визуальный отчёт](docs/ru/anki-repo/README.md)
+- [`asset-store` и `kanji-assets` — жизненный цикл ресурсов и проверка](docs/ru/asset-store/README.md)
+- [`repository-maintenance` — инвентаризация диска и безопасный GC](docs/ru/repository-maintenance/README.md)
+- [`anki-e2e` — локальный изолированный E2E-стенд Anki Desktop в Docker](docs/ru/anki-e2e/README.md)
+- [`benchmark-contract` — каталог сценариев бенчмаркинга и контракт результатов измерений](docs/ru/benchmark-contract/README.md)
+- [`benchmark-runner` — исполнитель серий бенчмарков: Hyperfine 2.0 и метрики Linux](docs/ru/benchmark-runner/README.md)
+- [`benchmark-history` — локальная история бенчмарков, сравнение и отчёты для PR и документации](docs/ru/benchmark-history/README.md)
 
 ## Инструменты
 
@@ -142,7 +144,7 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 Все изменяющие команды по умолчанию выполняют пробный запуск (`dry-run`), а запись делают только с явным `--apply` после проверок. `edit` и `retire` меняют только `deck.json`. `create` может разместить в `media/` только проверенные файлы из настроенных доменов и добавить нужные объявления `media_files`. `migrate-media` может переписать доказанные ссылки существующих заметок, разместить канонический файл и удалить освобождённый файл со старым именем после публикации `deck.json`.
 
 
-[Полный контракт `anki-repo` →](tools/anki-repo/README.md)
+[Полный контракт `anki-repo` →](docs/ru/anki-repo/README.md)
 
 ### `repository-maintenance`
 
@@ -151,7 +153,7 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 показывает пробный запуск (`dry-run`), а запись требует `--apply`. Чужие и неизвестные записи
 временного каталога отображаются, но не удаляются.
 
-[Политика, аудит источников, команды и ограничения →](tools/repository-maintenance/README.md)
+[Политика, аудит источников, команды и ограничения →](docs/ru/repository-maintenance/README.md)
 
 ### `asset-store` / `kanji-assets`
 
@@ -169,7 +171,7 @@ Yarxi
 
 Проверенный корпус — локальное доверенное состояние рабочей копии: он содержит только подтверждённые ресурсы и сведения об их происхождении, а его важнейшие файлы — `manifest.json` и `.owner.json`. Неподтверждённые кандидаты в корпус не попадают, и корпус не публикуется через Git: у каждого пользователя он свой, а его отсутствие в чистом clone нормально. `asset-store` не сканирует `decks/**/media/` и не использует пользовательские каталоги медиа как источник данных.
 
-[Полный контракт `asset-store` →](tools/asset-store/README.md)
+[Полный контракт `asset-store` →](docs/ru/asset-store/README.md)
 
 ## Создание и визуальная проверка карточки
 
@@ -207,7 +209,7 @@ visual-report
 - кандидат перед записью повторно разбирается и проверяется;
 - точечные операции стараются доказать, что изменили именно разрешённую поверхность.
 
-Подробные гарантии принадлежат [README набора инструментов](tools/anki-repo/README.md), а не этому обзорному файлу.
+Подробные гарантии принадлежат [README набора инструментов](docs/ru/anki-repo/README.md), а не этому обзорному файлу.
 
 </details>
 
@@ -259,6 +261,8 @@ CI проверяет отслеживаемый код, документаци�
 │   ├── anki-e2e/             # локальный E2E-стенд Anki Desktop
 │   ├── anki-repo/            # анализ, контроль качества, ограниченные изменения, визуальный отчёт
 │   ├── benchmark-contract/   # каталог бенчмарков и проверка результатов
+│   ├── benchmark-runner/     # исполнитель серий бенчмарков
+│   ├── benchmark-history/    # локальная история бенчмарков и отчёты
 │   ├── asset-store/          # библиотека ресурсов и kanji-assets
 │   └── repository-maintenance/ # инвентаризация и безопасный GC
 ├── .asset-store/             # локальное доверенное хранилище ресурсов, игнорируется Git
@@ -324,11 +328,11 @@ cargo run --quiet --locked -p asset-store --bin kanji-corpus-gate
 
 ## Лицензия
 
-Собственный программный код, автоматизация и настройки репозитория, а также документация проекта распространяются по **лицензии MIT**.
+Собственный программный код, автоматизация, конфигурация и авторская документация проекта распространяются по **GNU Affero General Public License v3.0 (AGPL-3.0-only)**.
 
-Содержимое `decks/`, пользовательские медиафайлы и сторонние ресурсы или корпуса не получают лицензию MIT автоматически: для них действуют права исходных правообладателей или отдельные условия, если они указаны. Пользовательские данные не публикуются через Git и не покрываются лицензией MIT.
+AGPL-3.0 не применяется автоматически к пользовательским колодам, скачанным сторонним ассетам или результатам работы инструментов (например, HTML-отчётам и обработанным изображениям). Проект не заявляет авторских прав на сторонние материалы и не назначает новую лицензию выходным файлам: их правовой режим зависит от исходного содержимого, правообладателей и условий источников. Пользовательские данные не публикуются через Git.
 
-[Полный текст и границы лицензии →](LICENSE)
+[Текст AGPL-3.0 →](LICENSE) · [Границы лицензирования и права на ассеты →](docs/ru/licensing/README.md)
 
 ---
 

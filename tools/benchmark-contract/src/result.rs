@@ -1020,7 +1020,11 @@ fn check_against_catalog(
     let recorded: BTreeSet<&str> = result.inputs.iter().map(|i| i.id.as_str()).collect();
     for input in &scenario.inputs {
         let Some(record) = result.inputs.iter().find(|r| r.id == input.id) else {
-            if result.outcome.status != OutcomeStatus::Unsupported {
+            // Без успешного прогона вход мог остаться неразрешённым:
+            // идентичность загружаемого артефакта, например, сообщает только
+            // отчёт прогона, а прервавшийся прогон её не получил. Значений,
+            // которые сопоставлялись бы с другой нагрузкой, при этом нет.
+            if result.runs.iter().any(|r| r.status == RunStatus::Success) {
                 sink.error(
                     "missing_input",
                     field(format!("inputs.{}", input.id)),

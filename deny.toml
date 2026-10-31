@@ -29,6 +29,38 @@ allow = [
     "Zlib",
 ]
 
+# Исключения только для собственных пакетов workspace под AGPL-3.0-only.
+# Глобальный allow для сторонних зависимостей остаётся неизменным:
+# новая AGPL-зависимость требует отдельного решения о совместимости.
+
+[[licenses.exceptions]]
+name = "anki-e2e"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
+name = "anki-repo"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
+name = "asset-store"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
+name = "benchmark-contract"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
+name = "benchmark-history"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
+name = "benchmark-runner"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
+name = "repository-maintenance"
+allow = ["AGPL-3.0-only"]
+
 [bans]
 # Несколько версий одного crate в графе — обычное следствие экосистемы, а не дефект.
 multiple-versions = "allow"

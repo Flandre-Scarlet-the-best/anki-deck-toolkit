@@ -37,7 +37,8 @@ kind = "downloaded-artifact"
 role = "workload"
 identity = "declared-version"
 description = "Учебный внешний артефакт."
-size = [{ name = "archive_bytes", unit = "byte", description = "Размер артефакта." }]
+report_identity = "/artifact/version"
+size = [{ name = "archive_bytes", unit = "byte", description = "Размер артефакта.", measure = { kind = "report", pointer = "/artifact/size" } }]
 
 [scenario.runs]
 warmup = 0
@@ -139,6 +140,12 @@ scope = "module-report"
 source = "module-report"
 label = "checks"
 required = false
+pointer = "/checks/*/count"
+
+[scenario.module_report]
+runs_dir = "runs"
+report = "report.json"
+description = "Учебный отчёт: каждый вызов создаёт runs/<id>/report.json."
 
 [[scenario.requires]]
 kind = "linux-cgroup-v2"
