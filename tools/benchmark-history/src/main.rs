@@ -133,7 +133,7 @@ enum Command {
     /// Обновить снимок на странице модуля (RU, EN, zh-CN); без --apply только показать.
     Snapshot {
         id: String,
-        /// Русская страница модуля, например tools/anki-repo/performance.md.
+        /// Русская страница модуля, например docs/ru/anki-repo/performance.md.
         #[arg(long)]
         page: PathBuf,
         /// Записать страницы.
@@ -722,7 +722,7 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if name.ends_with(".en.md") || name.ends_with(".zh-CN.md") || !name.ends_with(".md") {
-                return Err((Exit::Usage, "--page — русская страница модуля (<модуль>.md); переводы обновляются вместе с ней".into()));
+                return Err((Exit::Usage, "--page — русская страница модуля (docs/ru/<модуль>/performance.md); переводы не обновляются автоматически".into()));
             }
             let absolute = std::path::absolute(page).map_err(|e| (Exit::Usage, e.to_string()))?;
             let repository = catalog
