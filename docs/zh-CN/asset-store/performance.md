@@ -2,10 +2,9 @@
 
 [Русский](../../ru/asset-store/performance.md) · [English](../../en/asset-store/performance.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/asset-store/performance.md)为准。欢迎提交翻译和校对改进。
-
-资源存储文件核心的性能（[存储契约与负载执行器](docs/ru/README.md)）：方法、
-测量边界、合成负载特征以及目录场景最近一次已确认的快照。通用测量规则见[方法论](../performance/docs/ru/README.md)，
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/asset-store/performance.md)为准。欢迎提交翻译和校对改进。
+资源存储文件核心的性能（[存储契约与负载执行器](README.md)）：方法、
+测量边界、合成负载特征以及目录场景最近一次已确认的快照。通用测量规则见[方法论](../performance/README.md)，
 场景字段见[基准目录](../performance/benchmarks.md)。
 
 ## 测量内容

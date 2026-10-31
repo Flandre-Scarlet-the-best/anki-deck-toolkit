@@ -2,10 +2,9 @@
 
 [Русский](../../ru/anki-repo/performance.md) · [English](../../en/anki-repo/performance.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/anki-repo/performance.md)为准。欢迎提交翻译和校对改进。
-
-CrowdAnki 导出分析短命令的性能（[命令契约](docs/ru/README.md)）：按目录场景
-给出的最近确认快照。通用测量规则见[测量方法](../performance/docs/ru/README.md)，场景字段见
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/anki-repo/performance.md)为准。欢迎提交翻译和校对改进。
+CrowdAnki 导出分析短命令的性能（[命令契约](README.md)）：按目录场景
+给出的最近确认快照。通用测量规则见[测量方法](../performance/README.md)，场景字段见
 [基准目录](../performance/benchmarks.md)。
 
 ## 测量内容
@@ -30,7 +29,7 @@ CrowdAnki 导出分析短命令的性能（[命令契约](docs/ru/README.md)）�
 cargo run -p benchmark-runner -- check anki-repo.validate --profile warm --param export_dir=/path/to/export
 cargo run -p benchmark-runner -- run anki-repo.validate --profile warm --param export_dir=/path/to/export --runs 20
 cargo run -p benchmark-history -- list --scenario anki-repo.validate
-cargo run -p benchmark-history -- snapshot <ID> --page docs/ru/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot <ID> --page tools/anki-repo/performance.md
 ```
 
 ## 快照

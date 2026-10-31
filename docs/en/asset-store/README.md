@@ -1,9 +1,8 @@
 # Asset store and `kanji-assets`
 
-[Русский](../../ru/asset-store/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/asset-store/docs/ru/README.md)
+[Русский](../../ru/asset-store/README.md) · **English** · [简体中文](../../zh-CN/asset-store/README.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/asset-store/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/asset-store/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 
 `asset-store` is the shared Rust library for program-managed assets, responsible for manifests, checksums, integrity, and lifecycle. The domain-specific `kanji-assets` CLI provides Yarxi entry discovery, kanji image validation, and publication of approved files to the canonical corpus. The tool does not read `decks/**/media/`, does not modify `media_files`, and does not copy images into decks.
 
@@ -53,7 +52,7 @@ Legacy consumer filenames require separate proof through `AssetDomainPolicy::pro
 
 Kanji GIF and PNG assets occupy separate `assets/gif/` and `assets/png/` directories, named exactly after a character and extension. For pitch-accent, the identity key is the exact surface form, not the reading: `assets/png/<surface>.png` is published to consumers as `<surface>.pitch.png`. For `飴`, storage is `assets/png/飴.png`, while Anki receives `飴.pitch.png`, independently of kanji media named `飴.png`. Reading and positive JPDB vocabulary ID are preserved as metadata/evidence.
 
-The store owns the **canonical** consumer filename but never rewrites existing note references. `anki-repo migrate-media` handles a legacy `<surface>.png` pitch reference (see [anki-repo documentation](../anki-repo/docs/ru/README.md)); the store provides verified bytes but does not rename its own files. Reading comparison treats hiragana/katakana as equivalent but requires the exact surface/reading pair to match a form of the selected dictionary entry, retaining the original JPDB reading in `evidence`.
+The store owns the **canonical** consumer filename but never rewrites existing note references. `anki-repo migrate-media` handles a legacy `<surface>.png` pitch reference (see [anki-repo documentation](../anki-repo/README.md)); the store provides verified bytes but does not rename its own files. Reading comparison treats hiragana/katakana as equivalent but requires the exact surface/reading pair to match a form of the selected dictionary entry, retaining the original JPDB reading in `evidence`.
 
 Decoding a PNG alone does not justify `VERIFIED`. `PitchAccentImageValidator` checks surface/reading, the real page of the entry with matching ID, the inventory of graph variants, the selection of exactly one of them, and dark-mode proof.
 
@@ -923,7 +922,7 @@ Suggestions live in the batch's `llm-review/suggestions.json` and are bound to i
 `benchmarks/scenarios/asset-store.toml` scenarios. It calls the real
 `AssetStore` and `SafeBatchRuntime` (logic: `asset_store::bench_workload`) and
 measures nothing itself: time, CPU and memory are collected by
-[`benchmark-runner`](../benchmark-runner/docs/ru/README.md); method and snapshots are on
+[`benchmark-runner`](../benchmark-runner/README.md); method and snapshots are on
 the [performance page](performance.md).
 
 Subcommands map to scenario steps: `describe` (workload size probe, no

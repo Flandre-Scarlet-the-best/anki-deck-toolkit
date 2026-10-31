@@ -3,8 +3,8 @@
 **Русский** · [English](../../en/anki-repo/performance.md) · [简体中文](../../zh-CN/anki-repo/performance.md)
 
 Производительность коротких команд анализа CrowdAnki-экспорта
-([контракт команд](docs/ru/README.md)): последний подтверждённый
-снимок по сценариям каталога. Общие правила замера — в [методике](../performance/docs/ru/README.md),
+([контракт команд](README.md)): последний подтверждённый
+снимок по сценариям каталога. Общие правила замера — в [методике](../performance/README.md),
 поля сценариев — в [каталоге бенчмарков](../performance/benchmarks.md).
 
 ## Что измеряется
@@ -35,7 +35,7 @@
 cargo run -p benchmark-runner -- check anki-repo.validate --profile warm --param export_dir=/path/to/export
 cargo run -p benchmark-runner -- run anki-repo.validate --profile warm --param export_dir=/path/to/export --runs 20
 cargo run -p benchmark-history -- list --scenario anki-repo.validate
-cargo run -p benchmark-history -- snapshot <ID> --page docs/ru/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot <ID> --page tools/anki-repo/performance.md
 ```
 
 ## Снимки

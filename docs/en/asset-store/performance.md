@@ -2,13 +2,12 @@
 
 [Русский](../../ru/asset-store/performance.md) · **English** · [简体中文](../../zh-CN/asset-store/performance.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/asset-store/performance.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/asset-store/performance.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 Performance of the asset store's file core
-([store contract and workload executor](docs/ru/README.md)):
+([store contract and workload executor](README.md)):
 method, measurement boundary, synthetic workload characteristics and the last
 confirmed snapshots of the catalog scenarios. General measurement rules are in
-the [methodology](../performance/docs/ru/README.md), scenario fields in the
+the [methodology](../performance/README.md), scenario fields in the
 [benchmark catalog](../performance/benchmarks.md).
 
 ## What is measured
