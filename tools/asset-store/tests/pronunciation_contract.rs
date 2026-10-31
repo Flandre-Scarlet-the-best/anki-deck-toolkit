@@ -983,7 +983,8 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
     assert!(lines.contains("import_mp3"));
     assert!(lines.contains("audio_tool_missing"));
     assert!(!lines.contains("fixture-speaker"));
-    let restored = run(Path::new("/usr/bin:/bin"));
+    let original_path = std::env::var_os("PATH").expect("для теста нужен PATH с FFmpeg и prlimit");
+    let restored = run(Path::new(&original_path));
     assert!(
         restored.status.success(),
         "{}",
