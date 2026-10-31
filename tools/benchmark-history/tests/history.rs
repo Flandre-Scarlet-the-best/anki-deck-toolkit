@@ -3152,7 +3152,11 @@ fn snapshot_russian_page_is_safe_on_failure_and_stale_write() {
     );
     assert!(updated.contains("benchmark-snapshot: {"));
     for translated in &pages[1..] {
-        assert!(!fs::read_to_string(translated).unwrap().contains("benchmark-snapshot: {"));
+        assert!(
+            !fs::read_to_string(translated)
+                .unwrap()
+                .contains("benchmark-snapshot: {")
+        );
     }
 }
 
