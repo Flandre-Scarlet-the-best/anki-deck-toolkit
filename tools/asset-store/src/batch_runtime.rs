@@ -6,7 +6,8 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -97,6 +98,73 @@ pub struct SafeBatchRuntime {
     locked: bool,
     needs_reload: bool,
     verified_blob_keys: BTreeSet<(String, String, u64, Option<String>)>,
+    /// Идентичность `state.json`, который этот объект сам надёжно опубликовал
+    /// при непрерывно удерживаемой блокировке. Сбрасывается при освобождении
+    /// блокировки и при любом отказе записи.
+    durable_state: Option<FileIdentity>,
+}
+
+/// Отпечаток inode по `fstat`. Замена файла меняет `ino`, запись на месте —
+/// `mtime` и `ctime`, но лишь с точностью меток времени ФС: внешняя
+/// перезапись теми же по размеру байтами в пределах одного тика может оставить
+/// отпечаток прежним. Писатели под блокировкой пакета сбрасывают отпечаток
+/// сами, поэтому для них совпадение означает тот же неизменённый файл,
+/// который был синхронизирован при публикации.
+///
+/// Отпечаток снимается с открытого дескриптора, а не с имени: процесс, который
+/// заменяет `state.json`, не удерживая блокировку пакета, во время сравнения
+/// может направить имя на другой inode. Такие писатели вне контракта —
+/// `flock` рекомендательная, и прежняя атомарная запись от них тоже не
+/// защищала; последовательная внешняя замена между вызовами `save`
+/// обнаруживается по смене отпечатка.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl FileIdentity {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+/// Как `save` выполнил обязательство надёжного сохранения.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveOutcome {
+    /// Новые байты атомарно опубликованы с синхронизацией файла и каталога.
+    Written,
+    /// Назначение побайтно совпадает и этим объектом уже надёжно опубликовано.
+    UnchangedAlreadyDurable,
+    /// Назначение побайтно совпадает; его надёжность подтверждена синхронизацией
+    /// существующего файла и каталога без новой публикации.
+    UnchangedDurabilityConfirmed,
+}
+
+impl SaveOutcome {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Written => "state_save_succeeded",
+            Self::UnchangedAlreadyDurable => "state_save_unchanged_already_durable",
+            Self::UnchangedDurabilityConfirmed => "state_save_unchanged_durability_confirmed",
+        }
+    }
+}
+
+/// Результат сравнения назначения с новыми байтами.
+enum ExistingState {
+    Missing,
+    Different,
+    Identical { file: File, identity: FileIdentity },
 }
 
 /// Изолированный каталог производных артефактов. Все имена — одиночные
@@ -163,6 +231,7 @@ impl SafeBatchRuntime {
             locked: true,
             needs_reload: false,
             verified_blob_keys: BTreeSet::new(),
+            durable_state: None,
         })
     }
 
@@ -172,7 +241,7 @@ impl SafeBatchRuntime {
 
     /// Безопасно создаёт отдельный JSONL-файл запуска в пространстве имён пакета.
     /// Имя и путь принадлежат runtime. Коллизия имён не перезаписывает прежний
-    /// файл: создаётся другое имя. Возвращённый writer живёт независимо от блокировки.
+    /// файл: создаётся другое имя. Возвращённый объект записи живёт независимо от блокировки.
     pub fn create_run_log(&self) -> Result<RuntimeRunLog, AssetError> {
         self.require_lock()?;
         tracing::debug!(
@@ -220,7 +289,7 @@ impl SafeBatchRuntime {
 
     /// Освобождает исключительную блокировку на время внешнего ожидания.
     /// Дескрипторы и кэш уже проверенных неизменяемых blob остаются привязаны
-    /// к этому объекту. Право сохранять загруженный snapshot аннулируется;
+    /// к этому объекту. Право сохранять загруженный снимок аннулируется;
     /// после повторного захвата необходимо успешное `load`/`reload_cached`.
     pub fn release_lock(&mut self) -> Result<(), AssetError> {
         if !self.locked {
@@ -256,6 +325,9 @@ impl SafeBatchRuntime {
         self.locked = false;
         self.loaded_revision = None;
         self.needs_reload = true;
+        // Без блокировки файл может заменить другой владелец; прежнее
+        // подтверждение надёжности к новому содержимому не относится.
+        self.durable_state = None;
         tracing::debug!(
             operation = "batch_runtime_lock",
             stage = "runtime_lock",
@@ -334,7 +406,7 @@ impl SafeBatchRuntime {
             force_blob_recheck = force_recheck,
             "Загрузка текущего состояния пакета"
         );
-        // Неудачная загрузка тоже лишает старый snapshot права на запись.
+        // Неудачная загрузка тоже лишает старый снимок права на запись.
         self.loaded_revision = None;
         self.needs_reload = true;
         let bytes = match read_file(&self.directory, "state.json", MAX_RUNTIME_STATE_BYTES) {
@@ -393,6 +465,13 @@ impl SafeBatchRuntime {
     /// Сохраняет состояние после его загрузки; новый пакет допускает только
     /// если `state.json` ещё отсутствует. Запись атомарна и синхронизирует файл
     /// и каталог до возврата.
+    ///
+    /// Если загруженный пакет уже содержит побайтно те же данные, новая
+    /// публикация не создаётся: после всех проверок состояния и blob runtime
+    /// сравнивает байты назначения и либо опирается на собственную надёжную
+    /// публикацию того же inode, либо подтверждает надёжность синхронизацией
+    /// существующего файла и каталога. Ошибка сравнения или подтверждения
+    /// приводит к обычной атомарной записи, а не к успеху без записи.
     pub fn save<S: RuntimeBatchState>(&mut self, state: &S) -> Result<(), AssetError> {
         self.require_lock()?;
         if self.needs_reload {
@@ -446,26 +525,94 @@ impl SafeBatchRuntime {
                 "состояние пакета превышает ограничение runtime-данных",
             ));
         }
-        atomic_write(
-            &self.directory,
-            "state.json",
-            &bytes,
-            MAX_RUNTIME_STATE_BYTES,
-        )?;
+        let outcome = self.publish_state(&bytes, self.loaded_revision.is_some())?;
         self.loaded_revision = Some(state.revision());
-        tracing::info!(
-            operation = "batch_runtime_state_save",
-            stage = "checkpoint",
-            code = "state_save_succeeded",
-            batch_id = self.batch_id,
-            revision = state.revision(),
-            "Состояние пакета надёжно записано"
-        );
+        match outcome {
+            SaveOutcome::Written => tracing::info!(
+                operation = "batch_runtime_state_save",
+                stage = "checkpoint",
+                code = outcome.code(),
+                batch_id = self.batch_id,
+                revision = state.revision(),
+                state_bytes = bytes.len(),
+                "Состояние пакета надёжно записано"
+            ),
+            SaveOutcome::UnchangedAlreadyDurable | SaveOutcome::UnchangedDurabilityConfirmed => {
+                tracing::info!(
+                    operation = "batch_runtime_state_save",
+                    stage = "checkpoint",
+                    code = outcome.code(),
+                    batch_id = self.batch_id,
+                    revision = state.revision(),
+                    state_bytes = bytes.len(),
+                    durability_sync = outcome == SaveOutcome::UnchangedDurabilityConfirmed,
+                    "Состояние пакета уже сохранено в тех же байтах; новая запись не выполнялась"
+                )
+            }
+        }
         Ok(())
     }
 
+    /// Обеспечивает надёжное наличие `bytes` в `state.json`. Сравнение
+    /// выполняется только для уже загруженного пакета: создание первого
+    /// состояния всегда остаётся настоящей атомарной записью.
+    fn publish_state(&mut self, bytes: &[u8], compare: bool) -> Result<SaveOutcome, AssetError> {
+        if compare {
+            match compare_existing(
+                &self.directory,
+                "state.json",
+                bytes,
+                MAX_RUNTIME_STATE_BYTES,
+            ) {
+                Ok(ExistingState::Identical { file, identity }) => {
+                    if self.durable_state == Some(identity) {
+                        return Ok(SaveOutcome::UnchangedAlreadyDurable);
+                    }
+                    match confirm_durability(&file, &self.directory) {
+                        Ok(()) => {
+                            self.durable_state = Some(identity);
+                            return Ok(SaveOutcome::UnchangedDurabilityConfirmed);
+                        }
+                        Err(error) => tracing::warn!(
+                            operation = "batch_runtime_state_save",
+                            stage = "checkpoint",
+                            code = "state_durability_confirmation_failed",
+                            batch_id = self.batch_id,
+                            message = %crate::diagnostics::safe_message(&error.message),
+                            "Надёжность совпадающего состояния не подтверждена; выполняется полная запись"
+                        ),
+                    }
+                }
+                Ok(ExistingState::Missing | ExistingState::Different) => {}
+                Err(error) if error.code == ErrorCode::IoFailure => tracing::warn!(
+                    operation = "batch_runtime_state_save",
+                    stage = "checkpoint",
+                    code = "state_compare_failed",
+                    batch_id = self.batch_id,
+                    message = %crate::diagnostics::safe_message(&error.message),
+                    "Не удалось сравнить сохранённое состояние; выполняется полная запись"
+                ),
+                // Тип, размер и граница назначения проверяются так же, как
+                // перед атомарной заменой: такой отказ не обходится записью.
+                Err(error) => {
+                    self.durable_state = None;
+                    return Err(error);
+                }
+            }
+        }
+        self.durable_state = None;
+        let identity = atomic_write_with_identity(
+            &self.directory,
+            "state.json",
+            bytes,
+            MAX_RUNTIME_STATE_BYTES,
+        )?;
+        self.durable_state = identity;
+        Ok(SaveOutcome::Written)
+    }
+
     /// Сохраняет blob по пути, вычисленному из SHA-256. Повторная запись того же SHA допускается
-    /// только при совпадении байтов. Runtime сохраняет прежний layout candidates/.
+    /// только при совпадении байтов. Runtime сохраняет прежнюю структуру каталога candidates/.
     pub fn persist_blob(
         &self,
         bytes: &[u8],
@@ -724,7 +871,84 @@ fn read_file(parent: &File, name: &str, maximum: u64) -> Result<Vec<u8>, AssetEr
     Ok(bytes)
 }
 
+/// Сравнивает обычный ограниченный файл назначения с ожидаемыми байтами
+/// потоково, без второй копии состояния в памяти. Проверки типа, размера и
+/// `NOFOLLOW` совпадают с проверками перед атомарной заменой.
+fn compare_existing(
+    parent: &File,
+    name: &str,
+    bytes: &[u8],
+    maximum: u64,
+) -> Result<ExistingState, AssetError> {
+    validate_leaf_name(name)?;
+    let Some(mut file) = open_regular_runtime_file(parent, name, maximum)? else {
+        return Ok(ExistingState::Missing);
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| AssetError::io("метаданные runtime-файла", error))?;
+    if metadata.len() != bytes.len() as u64 {
+        return Ok(ExistingState::Different);
+    }
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut offset = 0_usize;
+    loop {
+        let read = match inject_fault(FaultPoint::CompareRead).and_then(|()| file.read(&mut buffer))
+        {
+            Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return Err(AssetError::io("сравнение runtime-файла", error)),
+        };
+        if read == 0 {
+            break;
+        }
+        let end = offset + read;
+        if end > bytes.len() || buffer[..read] != bytes[offset..end] {
+            return Ok(ExistingState::Different);
+        }
+        offset = end;
+    }
+    if offset != bytes.len() {
+        return Ok(ExistingState::Different);
+    }
+    let identity = FileIdentity::of(
+        &file
+            .metadata()
+            .map_err(|error| AssetError::io("метаданные runtime-файла", error))?,
+    );
+    // Файл менялся во время чтения: прочитанные байты не описывают один inode.
+    if identity != FileIdentity::of(&metadata) {
+        return Ok(ExistingState::Different);
+    }
+    Ok(ExistingState::Identical { file, identity })
+}
+
+/// Делает надёжными данные уже существующего файла и запись каталога о нём:
+/// это то же постусловие, что даёт атомарная публикация, без новых данных.
+fn confirm_durability(file: &File, parent: &File) -> Result<(), AssetError> {
+    record_fs_operation(|counts| counts.file_syncs += 1);
+    inject_fault(FaultPoint::ConfirmFileSync)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| AssetError::io("синхронизация runtime-файла", error))?;
+    record_fs_operation(|counts| counts.directory_syncs += 1);
+    inject_fault(FaultPoint::ConfirmDirectorySync)
+        .and_then(|()| parent.sync_all())
+        .map_err(|error| AssetError::io("синхронизация каталога runtime", error))
+}
+
 fn atomic_write(parent: &File, name: &str, bytes: &[u8], maximum: u64) -> Result<(), AssetError> {
+    atomic_write_with_identity(parent, name, bytes, maximum).map(|_| ())
+}
+
+/// Атомарная запись, которая дополнительно возвращает отпечаток
+/// опубликованного inode после синхронизации файла и каталога. `None` — запись
+/// надёжна, но отпечаток получить не удалось.
+fn atomic_write_with_identity(
+    parent: &File,
+    name: &str,
+    bytes: &[u8],
+    maximum: u64,
+) -> Result<Option<FileIdentity>, AssetError> {
     validate_leaf_name(name)?;
     if bytes.len() as u64 > maximum {
         return Err(AssetError::new(
@@ -746,17 +970,26 @@ fn atomic_write(parent: &File, name: &str, bytes: &[u8], maximum: u64) -> Result
         Mode::from_raw_mode(0o600),
     )
     .map_err(boundary_io)?;
+    record_fs_operation(|counts| counts.temporary_files += 1);
     let result = (|| {
         let mut file = File::from(descriptor);
         file.write_all(bytes)
             .map_err(|error| AssetError::io("запись runtime-файла", error))?;
-        file.sync_all()
+        record_fs_operation(|counts| counts.file_syncs += 1);
+        inject_fault(FaultPoint::WriteFileSync)
+            .and_then(|()| file.sync_all())
             .map_err(|error| AssetError::io("синхронизация runtime-файла", error))?;
+        record_fs_operation(|counts| counts.renames += 1);
         renameat(parent, temporary.as_str(), parent, name).map_err(boundary_io)?;
-        parent
-            .sync_all()
+        record_fs_operation(|counts| counts.directory_syncs += 1);
+        inject_fault(FaultPoint::WriteDirectorySync)
+            .and_then(|()| parent.sync_all())
             .map_err(|error| AssetError::io("синхронизация каталога runtime", error))?;
-        Ok(())
+        // `ctime` меняется при переименовании, поэтому отпечаток снимается после него.
+        Ok(file
+            .metadata()
+            .ok()
+            .map(|metadata| FileIdentity::of(&metadata)))
     })();
     if result.is_err() {
         let _ = unlinkat(parent, temporary.as_str(), AtFlags::empty());
@@ -854,7 +1087,82 @@ thread_local! {
     /// Счётчик чтения blob-файлов для проверок ограниченного числа обращений к диску.
     pub(crate) static REFERENCED_BLOB_READS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// Счётчики операций записи и синхронизации для контрактных тестов `save`.
+    pub(crate) static FS_OPERATIONS: std::cell::Cell<FsOperationCounts> =
+        const { std::cell::Cell::new(FsOperationCounts::ZERO) };
+    /// Взведённые одноразовые отказы ввода-вывода для регрессионных тестов `save`.
+    pub(crate) static INJECTED_FAULTS: std::cell::RefCell<Vec<FaultPoint>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
+
+/// Места сохранения состояния, где тест может вызвать отказ ввода-вывода,
+/// не воспроизводимый настройкой прав доступа. В рабочей сборке отказы не
+/// внедряются.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FaultPoint {
+    /// Чтение назначения при побайтовом сравнении.
+    CompareRead,
+    /// `fsync` существующего файла при подтверждении надёжности.
+    ConfirmFileSync,
+    /// `fsync` каталога при подтверждении надёжности.
+    ConfirmDirectorySync,
+    /// `fsync` временного файла до `renameat`.
+    WriteFileSync,
+    /// `fsync` каталога после `renameat`.
+    WriteDirectorySync,
+}
+
+/// Срабатывает один раз для каждой взведённой точки.
+#[cfg(test)]
+fn inject_fault(point: FaultPoint) -> std::io::Result<()> {
+    INJECTED_FAULTS.with(|faults| {
+        let mut faults = faults.borrow_mut();
+        match faults.iter().position(|armed| *armed == point) {
+            Some(index) => {
+                faults.remove(index);
+                Err(std::io::Error::other(format!("внедрённый отказ {point:?}")))
+            }
+            None => Ok(()),
+        }
+    })
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn inject_fault(_point: FaultPoint) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Действия с файловой системой, которыми тесты отличают запись от сохранения без записи.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FsOperationCounts {
+    pub temporary_files: usize,
+    pub renames: usize,
+    pub file_syncs: usize,
+    pub directory_syncs: usize,
+}
+
+#[cfg(test)]
+impl FsOperationCounts {
+    pub const ZERO: Self = Self {
+        temporary_files: 0,
+        renames: 0,
+        file_syncs: 0,
+        directory_syncs: 0,
+    };
+}
+
+#[cfg(test)]
+fn record_fs_operation(update: impl FnOnce(&mut FsOperationCounts)) {
+    FS_OPERATIONS.with(|cell| {
+        let mut counts = cell.get();
+        update(&mut counts);
+        cell.set(counts);
+    });
+}
+
+#[cfg(not(test))]
+fn record_fs_operation(_update: impl FnOnce(&mut FsOperationCounts)) {}
 
 fn path_error() -> AssetError {
     AssetError::new(
