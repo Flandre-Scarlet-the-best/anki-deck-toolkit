@@ -2,7 +2,7 @@
 
 Применяется, когда фактическая `.anki-repo/create.yaml` назначает `kanji_assets`
 полю создаваемой заметки. Публичные команды и JSON принадлежат
-`tools/asset-store/README.md`; здесь задана оркестрация. При расхождении проверь
+`docs/ru/asset-store/README.md`; здесь задана оркестрация. При расхождении проверь
 `kanji-assets --help` и README владельца. Не заменяй отсутствующий API скриптом,
 который меняет манифест или самостоятельно сравнивает изображения.
 
@@ -163,5 +163,5 @@ cargo run --quiet --locked -p asset-store --bin kanji-corpus-gate
 и `--after`, вне `decks/**`. Повтор должен сходиться к no-op без дубликатов.
 
 Контракт команд —
-[`tools/asset-store/README.md`](../../../../tools/asset-store/README.md) и
-[`tools/anki-repo/README.md`](../../../../tools/anki-repo/README.md).
+[`docs/ru/asset-store/README.md`](../../../../docs/ru/asset-store/README.md) и
+[`docs/ru/anki-repo/README.md`](../../../../docs/ru/anki-repo/README.md).

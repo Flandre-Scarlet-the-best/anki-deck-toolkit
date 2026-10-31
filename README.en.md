@@ -4,7 +4,7 @@
 
 [Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
 
-<!-- i18n-source-git-blob: 590024888e66c950f1c732607a9b5ddd94b6c876 -->
+> **Translation notice:** This translation may be outdated. The Russian documentation is authoritative; proofreading and translation contributions are welcome.
 
 **Rust CLI tools for inspecting and validating CrowdAnki JSON exports, making targeted edits, and visually comparing exports.**
 
@@ -116,13 +116,13 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 
 Detailed commands and machine-readable contracts are documented in the tool-specific READMEs:
 
-- [`anki-repo` — inspection, QA, constrained changes, and visual reports](tools/anki-repo/README.en.md)
-- [`asset-store` and `kanji-assets` — asset lifecycle and verification](tools/asset-store/README.en.md)
-- [`repository-maintenance` — disk inventory and safe garbage collection](tools/repository-maintenance/README.en.md)
-- [`anki-e2e` — local isolated Anki Desktop E2E stand in Docker](tools/anki-e2e/README.en.md)
-- [`benchmark-contract` — benchmark scenario catalog and measurement result contract](tools/benchmark-contract/README.en.md)
-- [`benchmark-runner` — benchmark series runner: Hyperfine 2.0 and Linux metrics](tools/benchmark-runner/README.en.md)
-- [`benchmark-history` — local benchmark history, comparison and reports for PRs and documentation](tools/benchmark-history/README.en.md)
+- [`anki-repo` — inspection, QA, constrained changes, and visual reports](docs/en/anki-repo/README.md)
+- [`asset-store` and `kanji-assets` — asset lifecycle and verification](docs/en/asset-store/README.md)
+- [`repository-maintenance` — disk inventory and safe garbage collection](docs/en/repository-maintenance/README.md)
+- [`anki-e2e` — local isolated Anki Desktop E2E stand in Docker](docs/en/anki-e2e/README.md)
+- [`benchmark-contract` — benchmark scenario catalog and measurement result contract](docs/en/benchmark-contract/README.md)
+- [`benchmark-runner` — benchmark series runner: Hyperfine 2.0 and Linux metrics](docs/en/benchmark-runner/README.md)
+- [`benchmark-history` — local benchmark history, comparison and reports for PRs and documentation](docs/en/benchmark-history/README.md)
 
 ## Tools
 
@@ -145,13 +145,13 @@ The repository's main toolkit for working with CrowdAnki exports.
 
 All mutating commands run in `dry-run` mode by default and write only after validation and an explicit `--apply`. `edit` and `retire` modify only `deck.json`. `create` may add only verified files from configured domains to `media/` and include the required `media_files` declarations. `migrate-media` may rewrite proven references in existing notes, place the canonical file, and remove an unused file under its old name after publishing `deck.json`.
 
-[Full `anki-repo` contract →](tools/anki-repo/README.en.md)
+[Full `anki-repo` contract →](docs/en/anki-repo/README.md)
 
 ### `repository-maintenance`
 
 A separate Linux/WSL utility that accounts for Cargo `target` directories, project-owned external build caches, and all entries under `/tmp`. `scan` only measures usage; `clean` defaults to `dry-run` and requires `--apply` to write. Unowned and unknown temporary files are reported but never deleted.
 
-[Policy, source audit, commands, and limitations →](tools/repository-maintenance/README.en.md)
+[Policy, source audit, commands, and limitations →](docs/en/repository-maintenance/README.md)
 
 ### `asset-store` / `kanji-assets`
 
@@ -169,7 +169,7 @@ Yarxi
 
 The verified corpus is trusted local state in the working copy. It contains only confirmed assets and their provenance information; the key files are `manifest.json` and `.owner.json`. Unverified candidates never enter the corpus, and it is not published through Git. Each user has their own corpus, and its absence in a fresh clone is normal. `asset-store` does not scan `decks/**/media/` and does not use user media directories as a data source.
 
-[Full `asset-store` contract →](tools/asset-store/README.en.md)
+[Full `asset-store` contract →](docs/en/asset-store/README.md)
 
 ## Creating and visually verifying a card
 
@@ -207,7 +207,7 @@ Authorization can also be configured for `pitch-accent`. In both cases, the rule
 - A candidate is parsed and validated again before writing.
 - Targeted operations attempt to prove that they changed only authorized data.
 
-The detailed guarantees belong to the [toolkit README](tools/anki-repo/README.en.md), not this overview.
+The detailed guarantees belong to the [toolkit README](docs/en/anki-repo/README.md), not this overview.
 
 </details>
 
@@ -330,7 +330,7 @@ The repository's own software, automation, configuration, and original project d
 
 AGPL-3.0 does not automatically cover user decks, downloaded third-party assets, or program outputs (such as HTML reports and processed images). The project does not claim ownership of third-party material or impose a new license on generated files. Rights and restrictions depend on the inputs, their owners, and the applicable source licenses. User data is not published through Git.
 
-[AGPL-3.0 license text →](LICENSE) · [Licensing scope and asset rights →](LICENSING.en.md)
+[AGPL-3.0 license text →](LICENSE) · [Licensing scope and asset rights →](docs/en/licensing/README.md)
 
 ---
 

@@ -23,7 +23,7 @@ pub struct Hyperfine {
 /// Найти Hyperfine и проверить, что это 2.x: экспорт 1.x несовместим.
 pub fn detect() -> Result<Hyperfine, String> {
     let path = which("hyperfine").ok_or(
-        "hyperfine не найден в PATH: установите Hyperfine 2.0 (см. tools/benchmark-runner/README.md)",
+        "hyperfine не найден в PATH: установите Hyperfine 2.0 (см. docs/ru/benchmark-runner/README.md)",
     )?;
     let line = tool_line(
         &path.to_string_lossy(),

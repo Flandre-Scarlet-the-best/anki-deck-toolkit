@@ -4,7 +4,7 @@
 а Python-контракты payload — в `.github/scripts/test_desktop_bridge.py` и входят
 в обычный `unittest discover` CI. Они не читают пользовательские колоды и не
 подтверждают живую загрузку аддонов. Контракт диагностики и отдельной фактической
-приёмки — `tools/anki-repo/desktop.md`; процедуру живых прогонов определяет
+приёмки — `docs/ru/anki-repo/desktop.md`; процедуру живых прогонов определяет
 `anki-live-testing`.
 
 ## Автоматическая проверка toolkit'ом
@@ -63,7 +63,7 @@ cargo run --quiet --bin anki-repo -- edit decks/output/Words__N3 \
 не доменной ошибкой. Код `3` означает, что проверку вообще не удалось начать:
 каталог экспорта недоступен, передан не каталог, нет `deck.json` или его нельзя
 прочитать. Отсутствие физического media-файла — это `WARNING`, а не `ERROR`.
-Полный список кодов и контракт вывода — `tools/anki-repo/README.md`.
+Полный список кодов и контракт вывода — `docs/ru/anki-repo/README.md`.
 
 Перед правкой зафиксируй `inspect`/`stats` (число заметок, узлов, моделей,
 распределение по полям), после правки повтори и сравни. Для точечной работы с
@@ -295,7 +295,7 @@ anki-repo migrate-layout --root . --apply --json     # повтор: summary.exp
 отслеживалась Git, поэтому после `--apply` её нужно снять из индекса
 (`git rm -r --cached decks/<прежняя_область>`): `.gitignore` не отменяет уже
 добавленный индекс. Полный контракт и список отказов —
-`tools/anki-repo/README.md`.
+`docs/ru/anki-repo/README.md`.
 
 Отказы, которые не являются поводом обходить команду:
 
@@ -307,7 +307,7 @@ anki-repo migrate-layout --root . --apply --json     # повтор: summary.exp
   допускается настроенным обработчиком. Наличие файла в `media/` не заменяет
   правила и свидетельство о проверенном каноническом содержимом. Описание
   создания с медиафайлами и машинно-читаемых причин отказа находится в
-  `tools/anki-repo/README.md`.
+  `docs/ru/anki-repo/README.md`.
 - `guid_conflict` (6) — заметка с таким `guid` уже есть и отличается от запроса.
   Это задача `edit`, а не `create`.
 - `guid_collision` (6) — `guid` новой заметки не свободен: он повторён в самом
@@ -331,7 +331,7 @@ CrowdAnki проверяет стенд `tools/anki-e2e` — только явн
 Он не входит в `cargo test --workspace`, CI, hooks и build scripts; модульные
 тесты самого runner Docker не требуют и идут в обычном workspace-наборе.
 `BLOCKED` из-за недоступного Docker или неподдержанной версии Anki не равен
-`PASS`. Контракт, параметры и отчёт — `tools/anki-e2e/README.md`.
+`PASS`. Контракт, параметры и отчёт — `docs/ru/anki-e2e/README.md`.
 
 ## Каталог бенчмарков
 
@@ -340,8 +340,8 @@ CrowdAnki проверяет стенд `tools/anki-e2e` — только явн
 Docker, Anki и Hyperfine для этого не нужны. Тесты `benchmark-contract` входят в
 `cargo test --workspace --locked` и
 проверяют и настоящий каталог, и учебные фикстуры. Измерения они не запускают.
-Правила — `docs/performance/benchmarks.md`, коды возврата —
-`tools/benchmark-contract/README.md`.
+Правила — `docs/ru/performance/benchmarks.md`, коды возврата —
+`docs/ru/benchmark-contract/README.md`.
 
 Локальную историю результатов проверяют тесты `benchmark-history` в том же
 наборе: синтетический каталог и хранилище во временном каталоге, восстановление
@@ -358,7 +358,7 @@ Docker, Anki и Hyperfine для этого не нужны. Тесты `benchma
 падают при заданной переменной `CI`. Ветви cgroup и офлайн проверяют либо
 измерение, либо честный отказ — в зависимости от возможностей окружения.
 Серии сценариев настоящего каталога `benchmarks/` в `cargo test` и CI не входят;
-интерфейс и коды возврата — `tools/benchmark-runner/README.md`.
+интерфейс и коды возврата — `docs/ru/benchmark-runner/README.md`.
 
 ## Проверки CI
 
@@ -367,7 +367,7 @@ Docker, Anki и Hyperfine для этого не нужны. Тесты `benchma
 идентичности, A/C/B, цепочка ревизий, повторное открытие состояния, конфликты,
 конкурентные вызовы, отказы записи и файловые границы. Эти тесты входят в обычный
 workspace-набор; живой Anki и пользовательский `decks/input/` им не нужны.
-Полный контракт ревизий и границы доказательств — в `tools/anki-repo/exchange.md`.
+Полный контракт ревизий и границы доказательств — в `docs/ru/anki-repo/exchange.md`.
 
 `.github/workflows/ci.yml` (workflow «Проверки репозитория») прогоняет те же
 проверки, что и локально, но независимо от машины разработчика. Он запускается
@@ -387,7 +387,10 @@ workspace-набор; живой Anki и пользовательский `decks
 
 - «Форматирование и Clippy» — единственный владелец проверок, не зависящих от
   данных репозитория: регрессионные тесты `.github/scripts/test_*.py`, проверка
-  метаданных и ссылок Agent Skills и локализаций; `actionlint` закреплённой
+  метаданных и ссылок Agent Skills; целостность локальных ссылок во всём
+  отслеживаемом Markdown (`check_markdown_links.py`: существующая относительная
+  ссылка ведёт в существующее место; наличие и актуальность переводов не
+  проверяются, сети и LLM нет); `actionlint` закреплённой
   версии (официальный релиз, проверенный по SHA-256) по всем workflow, включая
   выражения `${{ }}` и shellcheck скриптов `run:`; затем `cargo fmt --all --check`
   и `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
@@ -472,6 +475,7 @@ Python-проверки контрактов, затем канонически�
 ```bash
 python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 python3 .github/scripts/check_skill_contracts.py
+python3 .github/scripts/check_markdown_links.py
 python3 .github/scripts/check_local_data_untracked.py
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings

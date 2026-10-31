@@ -15,9 +15,9 @@ description: >-
 ## Область
 
 Этот skill владеет оркестрацией создания **новых** заметок в существующей
-колоде и модели. `tools/anki-repo/README.md` владеет контрактом `models`,
+колоде и модели. `docs/ru/anki-repo/README.md` владеет контрактом `models`,
 `create`, `validate`, `visual-report`, правилами обработчиков и командой
-`migrate-media`; `tools/asset-store/README.md` — контрактом `kanji-assets`,
+`migrate-media`; `docs/ru/asset-store/README.md` — контрактом `kanji-assets`,
 `pitch-assets`, целостностью ресурсов, итоговым доверием и состоянием пакетов.
 Общий жизненный цикл Git/GitHub выполняй через `anki-git-workflow`; сам локальный
 VERIFIED-корпус ресурсов через Git не публикуется. Не создавай обёртку,
@@ -92,7 +92,7 @@ VERIFIED-корпус ресурсов через Git не публикуетс�
 Единственная разрешённая правка **существующей** заметки в этом процессе —
 перевод ссылки на текущее каноническое имя домена командой
 `anki-repo migrate-media`. Её контракт, флаги, доказательства и причины отказа
-принадлежат `tools/anki-repo/README.md`.
+принадлежат `docs/ru/anki-repo/README.md`.
 
 Плоское пространство имён `media/` общий для доменов: изображение символа называется
 `<char>.gif|png`, pitch — `<surface>.pitch.png`. Прежнее pitch-имя

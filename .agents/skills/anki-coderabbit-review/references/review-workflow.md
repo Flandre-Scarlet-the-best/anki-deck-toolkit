@@ -468,7 +468,7 @@ fixes требуется:
 2. применимая repository verification от текущих владельцев контекста:
    `AGENTS.md`, `.codex/context/INDEX.md` и владелец затронутой области, в том
    числе `.codex/context/03-VERIFICATION.md` для CrowdAnki JSON и контракт
-   `tools/anki-repo/README.md` для toolkit;
+   `docs/ru/anki-repo/README.md` для toolkit;
 3. проверка перед commit, что в него не попадут временные файлы, несвязанные
    изменения и пользовательские локальные данные: staging и перечитывание
    staged diff выполняются по процедуре `anki-git-workflow`
