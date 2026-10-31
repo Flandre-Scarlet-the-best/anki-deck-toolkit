@@ -3380,7 +3380,14 @@ fn snapshot_cli_publishes_only_russian_documentation() {
         "--apply",
     ]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(fs::symlink_metadata(&page_arg).is_ok());
+    #[cfg(unix)]
+    assert!(
+        fs::symlink_metadata(&page_arg)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "ссылка осталась ссылкой"
+    );
     let after = read_all();
     assert!(after[0].contains("benchmark-snapshot: {"), "{}", after[0]);
     assert_eq!(&after[1..], &before[1..], "переводы не изменяются");
