@@ -1,8 +1,9 @@
 # 资源存储与 `kanji-assets`
 
-[Русский](README.md) · [English](README.en.md) · **简体中文**
+[Русский](../../ru/asset-store/docs/ru/README.md) · [English](../../en/asset-store/docs/ru/README.md) · **简体中文**
 
-<!-- i18n-source-git-blob: 6628e0a62498cd5097add28fc1097fa2bad95a13 -->
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/asset-store/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
+
 
 `asset-store` 是用于程序管理资源的公共 Rust 库，负责清单、校验和、完整性及生命周期。领域专用 CLI `kanji-assets` 负责查找 Yarxi 条目、验证汉字图片，并把通过验证的文件发布到规范资源库。本工具不读取 `decks/**/media/`，不更改 `media_files`，也不会把图片复制到牌组中。
 
@@ -50,7 +51,7 @@
 
 汉字 GIF 和 PNG 分别存放于 `assets/gif/` 与 `assets/png/`，文件名严格由字符和扩展名组成。音高重音以准确的词形 `surface` 而非读音 `reading` 为键：文件存储为 `assets/png/<surface>.png`，提供给消费者时叫 `<surface>.pitch.png`。例如 `飴` 内部路径为 `assets/png/飴.png`，Anki 获取 `飴.pitch.png`，与汉字媒体名 `飴.png` 相互独立。读音与正整数 JPDB 词条 ID 保存于元数据和证据中。
 
-资源存储负责**规范**消费者文件名，但不重写已有笔记的引用。旧的 `<surface>.png` 音高重音引用由 `anki-repo migrate-media` 迁移（参见 [anki-repo 文档](../anki-repo/README.zh-CN.md)）；存储仍提供已验证字节，不会重命名自身文件。比较读音时将平假名与片假名视为等价，但必须确认准确的词形/读音组合是所选词条的一种形式；`evidence` 保留 JPDB 的原始读音。
+资源存储负责**规范**消费者文件名，但不重写已有笔记的引用。旧的 `<surface>.png` 音高重音引用由 `anki-repo migrate-media` 迁移（参见 [anki-repo 文档](../anki-repo/docs/ru/README.md)）；存储仍提供已验证字节，不会重命名自身文件。比较读音时将平假名与片假名视为等价，但必须确认准确的词形/读音组合是所选词条的一种形式；`evidence` 保留 JPDB 的原始读音。
 
 仅成功解码 PNG 不足以获得 `VERIFIED`。`PitchAccentImageValidator` 验证词形和读音、与指定 ID 对应的真实词条页面、图形变体清单、恰好选中其中一个变体以及深色主题的证据。
 
@@ -879,8 +880,8 @@ cargo run --quiet --locked --bin pitch-assets -- --output json batch review-expo
 
 `asset-store-bench` 执行 `benchmarks/scenarios/asset-store.toml` 场景的被测负载。它调用真实的
 `AssetStore` 与 `SafeBatchRuntime`（逻辑位于 `asset_store::bench_workload`），自身不做任何测量：
-时间、CPU 和内存由 [`benchmark-runner`](../benchmark-runner/README.zh-CN.md) 采集；方法与快照见
-[性能页面](performance.zh-CN.md)。
+时间、CPU 和内存由 [`benchmark-runner`](../benchmark-runner/docs/ru/README.md) 采集；方法与快照见
+[性能页面](performance.md)。
 
 子命令对应场景步骤：`describe`（负载规模探针，不写盘）、`setup`（以常规 `ingest_verified`
 发布构建模板及批处理状态）、`prepare`（从模板复制工作副本并对每个文件 `fsync`）、

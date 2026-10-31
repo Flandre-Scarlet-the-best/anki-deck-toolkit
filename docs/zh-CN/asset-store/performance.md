@@ -1,11 +1,12 @@
 # 性能：`asset-store`
 
-[Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 99af1fa4fde5348941f03cd12fec04d0767a2f18 -->
+[Русский](../../ru/asset-store/performance.md) · [English](../../en/asset-store/performance.md) · **简体中文**
 
-资源存储文件核心的性能（[存储契约与负载执行器](README.zh-CN.md)）：方法、
-测量边界、合成负载特征以及目录场景最近一次已确认的快照。通用测量规则见[方法论](../../docs/performance/README.zh-CN.md)，
-场景字段见[基准目录](../../docs/performance/benchmarks.zh-CN.md)。
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/asset-store/performance.md)为准。欢迎提交翻译和校对改进。
+
+资源存储文件核心的性能（[存储契约与负载执行器](docs/ru/README.md)）：方法、
+测量边界、合成负载特征以及目录场景最近一次已确认的快照。通用测量规则见[方法论](../performance/docs/ru/README.md)，
+场景字段见[基准目录](../performance/benchmarks.md)。
 
 ## 测量内容
 
@@ -81,7 +82,7 @@ cargo run -p benchmark-history -- baseline <ID>
 同一工作副本中同一模块的系列不会并行运行（代码 `7`）。系列运行期间不要修改工作副本中未被忽略的
 文件，否则结果不是 `success`。做优化时，用同一场景、规格和配置分别测量改动前的基线与改动后的
 候选，并用 `benchmark-history compare` 比较（流程见技能
-[`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md)）。
+[`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md)）。
 
 ## 快照
 

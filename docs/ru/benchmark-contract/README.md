@@ -1,18 +1,18 @@
 # Контракт измерений: `benchmark-contract`
 
-**Русский** · [English](README.en.md) · [简体中文](README.zh-CN.md)
+**Русский** · [English](../../en/benchmark-contract/docs/ru/README.md) · [简体中文](../../zh-CN/benchmark-contract/docs/ru/README.md)
 
 `benchmark-contract` — библиотека и CLI, которые загружают каталог сценариев
 бенчмаркинга `benchmarks/`, проверяют декларации и результаты измерений,
 импортируют экспорт Hyperfine 2.0 и отвечают, сопоставимы ли два результата.
 Смысл полей, профилей, метрик и правила регистрации сценария —
-[руководство по каталогу](../../docs/performance/benchmarks.md); общие правила
-замеров — [методика](../../docs/performance/README.md).
+[руководство по каталогу](../performance/benchmarks.md); общие правила
+замеров — [методика](../performance/docs/ru/README.md).
 
 Инструмент ничего не запускает и не измеряет: он читает TOML каталога,
 манифесты Cargo и JSON результатов. Он не пишет файлов, не обращается к сети и
 не трогает колоды, медиа, профили Anki, `decks/**` и `.asset-store/`. Серии
-по каталогу выполняет [`benchmark-runner`](../benchmark-runner/README.md),
+по каталогу выполняет [`benchmark-runner`](../benchmark-runner/docs/ru/README.md),
 используя эту библиотеку.
 
 ## Команды

@@ -1,12 +1,12 @@
 # Производительность: `asset-store`
 
-**Русский** · [English](performance.en.md) · [简体中文](performance.zh-CN.md)
+**Русский** · [English](../../en/asset-store/performance.md) · [简体中文](../../zh-CN/asset-store/performance.md)
 
 Производительность файлового ядра хранилища ресурсов
-([контракт хранилища и исполнитель нагрузки](README.md)):
+([контракт хранилища и исполнитель нагрузки](docs/ru/README.md)):
 методика, граница измерения, характеристики синтетической нагрузки и последние
 подтверждённые снимки по сценариям каталога. Общие правила замера — в
-[методике](../../docs/performance/README.md), поля сценариев — в [каталоге бенчмарков](../../docs/performance/benchmarks.md).
+[методике](../performance/docs/ru/README.md), поля сценариев — в [каталоге бенчмарков](../performance/benchmarks.md).
 
 ## Что измеряется
 
@@ -96,7 +96,7 @@ cargo run -p benchmark-history -- baseline <ID>
 Для оптимизации измерь базу до изменения и кандидата после тем же сценарием,
 спецификацией и профилем и сравни их `benchmark-history compare`
 (порядок — skill
-[`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md)).
+[`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md)).
 
 ## Снимки
 

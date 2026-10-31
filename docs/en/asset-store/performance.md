@@ -1,14 +1,15 @@
 # Performance: `asset-store`
 
-[Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: 99af1fa4fde5348941f03cd12fec04d0767a2f18 -->
+[Русский](../../ru/asset-store/performance.md) · **English** · [简体中文](../../zh-CN/asset-store/performance.md)
+
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/asset-store/performance.md) is authoritative. Corrections and translation contributions are welcome.
 
 Performance of the asset store's file core
-([store contract and workload executor](README.en.md)):
+([store contract and workload executor](docs/ru/README.md)):
 method, measurement boundary, synthetic workload characteristics and the last
 confirmed snapshots of the catalog scenarios. General measurement rules are in
-the [methodology](../../docs/performance/README.en.md), scenario fields in the
-[benchmark catalog](../../docs/performance/benchmarks.en.md).
+the [methodology](../performance/docs/ru/README.md), scenario fields in the
+[benchmark catalog](../performance/benchmarks.md).
 
 ## What is measured
 
@@ -100,7 +101,7 @@ a series runs, do not change non-ignored files of the working copy, otherwise
 the outcome is not `success`. For an optimization, measure the baseline before
 the change and the candidate after it with the same scenario, spec and profile
 and compare them with `benchmark-history compare` (procedure: skill
-[`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md)).
+[`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md)).
 
 ## Snapshots
 
