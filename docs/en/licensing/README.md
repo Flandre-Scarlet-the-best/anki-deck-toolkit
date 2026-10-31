@@ -1,8 +1,12 @@
 # Licensing scope and rights in materials
 
+[Русский](../../ru/licensing/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/licensing/docs/ru/README.md)
+
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/licensing/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
+
 The project's primary source-code license is the **GNU Affero General Public
 License version 3 (AGPL-3.0-only)**. Its complete, unmodified text is in
-[LICENSE](LICENSE).
+[LICENSE](../../../LICENSE).
 
 ## Project code and documentation
 

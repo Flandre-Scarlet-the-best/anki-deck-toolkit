@@ -1,8 +1,10 @@
 # Область действия лицензии и права на материалы
 
+**Русский** · [English](../../en/licensing/docs/ru/README.md) · [简体中文](../../zh-CN/licensing/docs/ru/README.md)
+
 Основная лицензия исходного кода проекта — **GNU Affero General Public License
 версии 3 (AGPL-3.0-only)**. Её полный неизменённый текст находится в
-[LICENSE](LICENSE).
+[LICENSE](../../../LICENSE).
 
 ## Собственный код и документация
 
