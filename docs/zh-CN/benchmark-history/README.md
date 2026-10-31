@@ -1,14 +1,13 @@
 # 本地基准历史：`benchmark-history`
 
-[Русский](../../ru/benchmark-history/docs/ru/README.md) · [English](../../en/benchmark-history/docs/ru/README.md) · **简体中文**
+[Русский](../../ru/benchmark-history/README.md) · [English](../../en/benchmark-history/README.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/benchmark-history/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
-
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/benchmark-history/README.md)为准。欢迎提交翻译和校对改进。
 `benchmark-history` 为每个用户保存其自己的已验证基准结果历史，在其中查找比较基线，
 对比“之前”与“之后”，生成以 `## Производительность`（性能）为标题的完整报告供 Gist 和 PR 摘要使用，以及
 `tools/<模块>/performance.md` 模块性能页面和其翻译的快照。它不做任何测量：
-系列由 [`benchmark-runner`](../benchmark-runner/docs/ru/README.md) 执行，结果模型、校验和
-可比性规则属于 [`benchmark-contract`](../benchmark-contract/docs/ru/README.md)。这里没有第二种
+系列由 [`benchmark-runner`](../benchmark-runner/README.md) 执行，结果模型、校验和
+可比性规则属于 [`benchmark-contract`](../benchmark-contract/README.md)。这里没有第二种
 结果格式，也没有第二个测量引擎。
 
 它完全在本地工作：不联网、不需要 GitHub 令牌、没有服务器也没有共享数据库。一个克隆的
@@ -74,7 +73,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/ru/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup

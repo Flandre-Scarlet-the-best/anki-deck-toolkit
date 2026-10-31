@@ -1,9 +1,8 @@
 # Benchmark runner: `benchmark-runner`
 
-[Русский](../../ru/benchmark-runner/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/benchmark-runner/docs/ru/README.md)
+[Русский](../../ru/benchmark-runner/README.md) · **English** · [简体中文](../../zh-CN/benchmark-runner/README.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/benchmark-runner/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/benchmark-runner/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
 system metrics (cgroup v2, `/proc`, the module's machine-readable report, the
@@ -12,11 +11,11 @@ is validated by `benchmark_contract::result::check` against the catalog before
 it is accepted; a result that fails validation never becomes final.
 
 The meaning of scenario fields, profiles and metrics is in the [catalog
-guide](../../docs/en/performance/benchmarks.md); the catalog and result
-schemas are owned by [`benchmark-contract`](../benchmark-contract/docs/ru/README.md);
-general measurement rules are in the [methodology](../performance/docs/ru/README.md);
+guide](../../docs/performance/benchmarks.en.md); the catalog and result
+schemas are owned by [`benchmark-contract`](../benchmark-contract/README.md);
+general measurement rules are in the [methodology](../performance/README.md);
 measurements of the runner itself are on its [performance page](performance.md);
-the local result history is [`benchmark-history`](../benchmark-history/docs/ru/README.md).
+the local result history is [`benchmark-history`](../benchmark-history/README.md).
 
 The runner does not change user exports or Anki profiles, does not read
 `decks/input/`, does not call `sudo`, does not prune Docker caches
@@ -80,7 +79,7 @@ summary is stored as `summary.json` in the artifacts directory.
 ## Local history
 
 After writing an accepted result, `run` hands it to the local
-[`benchmark-history`](../benchmark-history/docs/ru/README.md) history with the same
+[`benchmark-history`](../benchmark-history/README.md) history with the same
 contract and catalog, without measuring again: `BENCHMARK_HISTORY_DIR`, otherwise
 the user's XDG data directory. A store inside the working copy is refused. The
 `history` field of the summary: `status` — `archived`, `already-archived`,

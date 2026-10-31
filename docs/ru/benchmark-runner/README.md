@@ -1,6 +1,6 @@
 # Исполнитель бенчмарков: `benchmark-runner`
 
-**Русский** · [English](../../en/benchmark-runner/docs/ru/README.md) · [简体中文](../../zh-CN/benchmark-runner/docs/ru/README.md)
+**Русский** · [English](../../en/benchmark-runner/README.md) · [简体中文](../../zh-CN/benchmark-runner/README.md)
 
 `benchmark-runner` — CLI для Linux, который запускает сценарии каталога
 `benchmarks/` по ID и профилю, измеряет цель через Hyperfine 2.0, добавляет
@@ -10,11 +10,11 @@
 будет принят; непрошедший проверку результат финальным не становится.
 
 Смысл полей сценария, профилей и метрик — [руководство по
-каталогу](../../docs/ru/performance/benchmarks.md); схемами каталога и результата
-владеет [`benchmark-contract`](../benchmark-contract/docs/ru/README.md); общие правила
-замеров — [методика](../performance/docs/ru/README.md); измерения самого
+каталогу](../../docs/performance/benchmarks.md); схемами каталога и результата
+владеет [`benchmark-contract`](../benchmark-contract/README.md); общие правила
+замеров — [методика](../performance/README.md); измерения самого
 исполнителя — [страница производительности](performance.md);
-локальная история результатов — [`benchmark-history`](../benchmark-history/docs/ru/README.md).
+локальная история результатов — [`benchmark-history`](../benchmark-history/README.md).
 
 Исполнитель не меняет пользовательские экспорты и профили Anki, не читает
 `decks/input/`, не вызывает `sudo`, не чистит кэши Docker (`docker system prune`
@@ -77,7 +77,7 @@ cargo run -p benchmark-runner -- --json run anki-e2e.smoke --profile warm --runs
 ## Локальная история
 
 После записи принятого результата `run` передаёт его в локальную историю
-[`benchmark-history`](../benchmark-history/docs/ru/README.md) тем же контрактом и
+[`benchmark-history`](../benchmark-history/README.md) тем же контрактом и
 каталогом, без повторного измерения: `BENCHMARK_HISTORY_DIR`, иначе каталог
 данных XDG пользователя. Хранилище внутри рабочей копии отвергается. Поле
 `history` сводки: `status` — `archived`, `already-archived`, `disabled`

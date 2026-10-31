@@ -2,13 +2,12 @@
 
 [Русский](../../ru/benchmark-runner/performance.md) · **English** · [简体中文](../../zh-CN/benchmark-runner/performance.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/benchmark-runner/performance.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/benchmark-runner/performance.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 Measurements of the benchmark runner itself
-([interface and semantics](docs/ru/README.md)): how
+([interface and semantics](README.md)): how
 accurately it measures a workload with a known cost, what exactly each metric
 contains and what polling `/proc` and the run's own cgroup cost. General
-measurement rules are in the [methodology](../performance/docs/ru/README.md).
+measurement rules are in the [methodology](../performance/README.md).
 
 ## What is measured
 

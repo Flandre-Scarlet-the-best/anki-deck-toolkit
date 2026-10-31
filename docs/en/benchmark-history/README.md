@@ -1,17 +1,16 @@
 # Local benchmark history: `benchmark-history`
 
-[Русский](../../ru/benchmark-history/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/benchmark-history/docs/ru/README.md)
+[Русский](../../ru/benchmark-history/README.md) · **English** · [简体中文](../../zh-CN/benchmark-history/README.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/benchmark-history/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/benchmark-history/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
 results into a complete report headed `## Производительность` (performance)
 for the Gist and preparation of a compact PR summary, and into snapshots for module performance pages at
 `tools/<module>/performance.md` and their translations. It measures
-nothing: series are run by [`benchmark-runner`](../benchmark-runner/docs/ru/README.md),
+nothing: series are run by [`benchmark-runner`](../benchmark-runner/README.md),
 while the result model, its validation and the comparability rules belong to
-[`benchmark-contract`](../benchmark-contract/docs/ru/README.md). There is no second
+[`benchmark-contract`](../benchmark-contract/README.md). There is no second
 result format and no second measurement engine here.
 
 It works entirely locally: no network, no GitHub tokens, no server and no shared
@@ -97,7 +96,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/ru/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup

@@ -1,17 +1,16 @@
 # 测量契约：`benchmark-contract`
 
-[Русский](../../ru/benchmark-contract/docs/ru/README.md) · [English](../../en/benchmark-contract/docs/ru/README.md) · **简体中文**
+[Русский](../../ru/benchmark-contract/README.md) · [English](../../en/benchmark-contract/README.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/benchmark-contract/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
-
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/benchmark-contract/README.md)为准。欢迎提交翻译和校对改进。
 `benchmark-contract` 是一个库和 CLI：加载基准场景目录 `benchmarks/`，校验声明和测量
 结果，导入 Hyperfine 2.0 导出，并回答两个结果是否可比较。字段、配置、指标的含义以及
 注册场景的规则见[目录指南](../performance/benchmarks.md)；通用测量规则见
-[测量方法](../performance/docs/ru/README.md)。
+[测量方法](../performance/README.md)。
 
 该工具不运行也不测量任何东西：它读取目录 TOML、Cargo 清单和结果 JSON。它不写文件、
 不访问网络，也不触碰卡组、媒体、Anki 配置文件、`decks/**` 和 `.asset-store/`。按目录
-运行系列由 [`benchmark-runner`](../benchmark-runner/docs/ru/README.md) 完成，它使用本库。
+运行系列由 [`benchmark-runner`](../benchmark-runner/README.md) 完成，它使用本库。
 
 ## 命令
 

@@ -1,15 +1,15 @@
 # Локальная история бенчмарков: `benchmark-history`
 
-**Русский** · [English](../../en/benchmark-history/docs/ru/README.md) · [简体中文](../../zh-CN/benchmark-history/docs/ru/README.md)
+**Русский** · [English](../../en/benchmark-history/README.md) · [简体中文](../../zh-CN/benchmark-history/README.md)
 
 `benchmark-history` хранит у каждого пользователя его собственную историю
 проверенных результатов бенчмарков, находит в ней базу для сравнения,
 сопоставляет «до» и «после» и готовит из результатов полный отчёт
 с заголовком `## Производительность` для Gist и подготовки сводки PR, а также снимки для страниц производительности
 модулей в `tools/<модуль>/performance.md` и их переводов. Он ничего не измеряет:
-серии выполняет [`benchmark-runner`](../benchmark-runner/docs/ru/README.md), а модель
+серии выполняет [`benchmark-runner`](../benchmark-runner/README.md), а модель
 результата, его проверку и правила сопоставимости задаёт
-[`benchmark-contract`](../benchmark-contract/docs/ru/README.md). Второго формата
+[`benchmark-contract`](../benchmark-contract/README.md). Второго формата
 результатов и второго измерительного движка здесь нет.
 
 Работает полностью локально: без сети, токенов GitHub, сервера и общей базы.
@@ -94,7 +94,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/ru/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup

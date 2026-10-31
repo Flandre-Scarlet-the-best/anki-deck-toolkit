@@ -1,20 +1,19 @@
 # Measurement contract: `benchmark-contract`
 
-[Русский](../../ru/benchmark-contract/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/benchmark-contract/docs/ru/README.md)
+[Русский](../../ru/benchmark-contract/README.md) · **English** · [简体中文](../../zh-CN/benchmark-contract/README.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/benchmark-contract/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/benchmark-contract/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 `benchmark-contract` is a library and CLI that load the `benchmarks/`
 benchmark scenario catalog, validate declarations and measurement results,
 import Hyperfine 2.0 exports and answer whether two results are comparable.
 The meaning of fields, profiles, metrics and the rules for registering a
 scenario are in the [catalog guide](../performance/benchmarks.md);
-general measurement rules are in the [methodology](../performance/docs/ru/README.md).
+general measurement rules are in the [methodology](../performance/README.md).
 
 The tool runs and measures nothing: it reads the catalog TOML, Cargo manifests
 and result JSON. It writes no files, uses no network and does not touch decks,
 media, Anki profiles, `decks/**` or `.asset-store/`. Catalog series are
-executed by [`benchmark-runner`](../benchmark-runner/docs/ru/README.md), which uses
+executed by [`benchmark-runner`](../benchmark-runner/README.md), which uses
 this library.
 
 ## Commands

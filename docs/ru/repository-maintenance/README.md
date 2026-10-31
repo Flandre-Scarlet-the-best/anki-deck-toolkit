@@ -1,6 +1,6 @@
 # Контроль дискового мусора
 
-**Русский** · [English](../../en/repository-maintenance/docs/ru/README.md) · [简体中文](../../zh-CN/repository-maintenance/docs/ru/README.md)
+**Русский** · [English](../../en/repository-maintenance/README.md) · [简体中文](../../zh-CN/repository-maintenance/README.md)
 
 `repository-maintenance` — отдельный пакет Cargo для наблюдения за локальными
 артефактами и безопасной очистки воспроизводимых данных. Он отделён от
