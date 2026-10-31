@@ -1,4 +1,8 @@
 name: Контракт описания PR
+# Кандидатная проверка: на `pull_request` workflow и валидатор берутся из самого
+# PR, поэтому результат показывает, принимает ли описание валидатор этого PR, но
+# не является независимым доказательством. Независимую проверку тем же
+# валидатором из base SHA выполняет `pr-body-trusted.yml`.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]

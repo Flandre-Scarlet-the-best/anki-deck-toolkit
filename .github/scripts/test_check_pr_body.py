@@ -1,6 +1,8 @@
-"""Negative and positive contract tests for PR body formatting."""
+"""Отрицательные и положительные тесты контракта описания PR и доверенной проверки."""
 
 import json
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,6 +57,15 @@ def body_with(performance: str) -> str:
 
 def valid_body() -> str:
     return body_with(NOT_APPLICABLE)
+
+
+CR_HEADER = "| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |"
+CR_DELIMITER = "| --- | --- | --- | --- | --- | --- |"
+CR_ROW = "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"
+
+
+def coderabbit(*lines: str) -> str:
+    return valid_body() + "\n\n## CodeRabbit review и disposition\n" + "\n".join(lines)
 
 
 class PrBodyContractTests(unittest.TestCase):
@@ -112,7 +123,7 @@ class PrBodyContractTests(unittest.TestCase):
         self.assertEqual(validate("\n\n".join(f"## {n} ###\n{text[n]}" for n in HEADINGS)), [])
 
     def test_fenced_content_does_not_make_section_nonempty(self):
-        body = valid_body().replace("Фактическая информация для раздела CI.", "```md\nThis is a sample, not CI evidence.\n```")
+        body = valid_body().replace("Фактическая информация для раздела CI.", "```md\nЭто пример, а не свидетельство CI.\n```")
         self.assertTrue(any("Пустой" in e for e in validate(body)))
 
     def test_coderabbit_table_in_fence_is_not_accepted(self):
@@ -144,6 +155,53 @@ class PrBodyContractTests(unittest.TestCase):
         table = "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n"
         self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
         self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 findings | clean | `abcdef0` |"), [])
+
+    def test_coderabbit_table_requires_delimiter_row(self):
+        # Без строки-разделителя GitHub показывает две строки текста, а не таблицу.
+        errors = validate(coderabbit(CR_HEADER, CR_ROW))
+        self.assertTrue(any("разделителя" in e for e in errors), errors)
+        errors = validate(coderabbit(CR_HEADER, "Пояснение.", CR_DELIMITER, CR_ROW))
+        self.assertTrue(any("разделителя" in e for e in errors), errors)
+
+    def test_coderabbit_delimiter_must_match_header_columns(self):
+        for delimiter in ("| --- | --- | --- | --- | --- |", "| --- | --- | --- | --- | --- | --- | --- |", "| --- | --- | x | --- | --- | --- |"):
+            errors = validate(coderabbit(CR_HEADER, delimiter, CR_ROW))
+            self.assertTrue(any("разделителя" in e for e in errors), (delimiter, errors))
+
+    def test_coderabbit_rows_must_have_all_columns(self):
+        short = "| 1 · `abcdef0` | — | — | clean | `abcdef0` |"
+        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, short))
+        self.assertTrue(any("5 столбцов" in e for e in errors), errors)
+        # Неполная строка не прячется за соседней корректной.
+        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, short))
+        self.assertTrue(any("5 столбцов" in e for e in errors), errors)
+
+    def test_coderabbit_row_must_belong_to_the_table(self):
+        # Пустая строка или абзац завершают таблицу: строка итерации после них
+        # уже не связана с заголовком.
+        for gap in ("", "Отдельный абзац без разделителей"):
+            errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, gap, CR_ROW))
+            self.assertTrue(any("строка завершённой итерации" in e for e in errors), (gap, errors))
+        # Отступ в четыре пробела делает строки код-блоком, а не таблицей.
+        errors = validate(coderabbit("    " + CR_HEADER, "    " + CR_DELIMITER, "    " + CR_ROW))
+        self.assertTrue(any("заголовок" in e for e in errors), errors)
+
+    def test_coderabbit_single_cumulative_table(self):
+        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", CR_HEADER, CR_DELIMITER, CR_ROW))
+        self.assertTrue(any("повторяется" in e for e in errors), errors)
+
+    def test_coderabbit_valid_gfm_variants_are_accepted(self):
+        second = "| 2 · `0123456789abcdef0123456789abcdef01234567` | major | `src/a.rs` | потеря данных | confirmed | исправлено `1234567` |"
+        self.assertEqual(validate(coderabbit("Накопительный журнал ревью.", CR_HEADER, CR_DELIMITER, CR_ROW, second, "", "Итог: блокирующих нет.")), [])
+        aligned = "|:---|:---:|---:|---|---|---|"
+        self.assertEqual(validate(coderabbit(CR_HEADER, aligned, CR_ROW)), [])
+        bare = [line.strip().strip("|").strip() for line in (CR_HEADER, CR_DELIMITER, CR_ROW)]
+        self.assertEqual(validate(coderabbit(*bare)), [])
+        escaped = "| 1 · `abcdef0` | minor | `a\\|b.md` | разметка | false positive | — |"
+        self.assertEqual(validate(coderabbit(CR_HEADER, CR_DELIMITER, escaped)), [])
+
+    def test_coderabbit_section_stays_conditional(self):
+        self.assertEqual(validate(valid_body()), [])
 
     def test_performance_decisions_are_accepted(self):
         for performance in (NOT_APPLICABLE, MEASURED, NOT_MEASURED, "**Статус:** не применимо\n- **Причина:** перевод README на английский, код и сборка не меняются."):
@@ -230,6 +288,14 @@ class PrBodyContractTests(unittest.TestCase):
         self.assertFalse(is_automation_pr(payload("someone", "renovate/fake")))
         self.assertFalse(is_automation_pr(payload("renovate[bot]", "feat/other")))
 
+    def test_cli_accepts_pull_request_target_payload(self):
+        # Событие `pull_request_target` несёт тот же объект `pull_request`.
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / "event.json"
+            event.write_text(json.dumps({"action": "edited", "pull_request": {"body": valid_body(), "user": {"login": "someone"}, "head": {"ref": "feat/x"}}}), encoding="utf-8")
+            proc = subprocess.run([sys.executable, str(Path(__file__).with_name("check_pr_body.py")), "--event-path", str(event)], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_cli_rejects_event_without_pull_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = Path(tmp) / "event.json"
@@ -237,6 +303,63 @@ class PrBodyContractTests(unittest.TestCase):
             proc = subprocess.run([sys.executable, str(Path(__file__).with_name("check_pr_body.py")), "--event-path", str(event)], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 2)
             self.assertIn("pull_request", proc.stderr)
+
+
+WORKFLOWS = Path(__file__).resolve().parents[1] / "workflows"
+TRUSTED = WORKFLOWS / "pr-body-trusted.yml"
+
+
+class TrustedWorkflowTests(unittest.TestCase):
+    """Доверенная проверка не исполняет код PR и берёт валидатор только из base."""
+
+    def setUp(self):
+        self.text = TRUSTED.read_text(encoding="utf-8")
+        # Комментарии не участвуют в контракте: проверяется только сам YAML.
+        self.yaml = "\n".join(line for line in self.text.splitlines() if not line.lstrip().startswith("#"))
+
+    def test_runs_only_on_pull_request_target(self):
+        triggers = re.search(r"(?m)^on:\n((?:[ \t]+.*\n)+)", self.yaml + "\n").group(1)
+        self.assertEqual(re.findall(r"(?m)^  (\w+):", triggers), ["pull_request_target"])
+
+    def test_checks_out_exact_base_sha_without_credentials(self):
+        checkouts = re.findall(r"uses: actions/checkout@", self.yaml)
+        self.assertEqual(len(checkouts), 1)
+        self.assertIn("ref: ${{ github.event.pull_request.base.sha }}", self.yaml)
+        self.assertIn("persist-credentials: false", self.yaml)
+
+    def test_no_head_code_secrets_or_write_access(self):
+        for forbidden in ("head.sha", "head.ref", "head.repo", "merge_commit_sha", "refs/pull", "secrets.", "github.token", "GITHUB_TOKEN", ": write", "write-all"):
+            self.assertNotIn(forbidden, self.yaml, forbidden)
+        permissions = re.search(r"(?m)^permissions:\n((?:[ \t]+.*\n)+)", self.yaml + "\n").group(1)
+        self.assertEqual(permissions.split(), ["contents:", "read"])
+
+    def test_runs_validator_from_checked_out_base(self):
+        runs = re.findall(r"(?m)^\s+run: (.+)$", self.yaml)
+        self.assertEqual(runs, ['python3 .github/scripts/check_pr_body.py --event-path "$GITHUB_EVENT_PATH"'])
+        self.assertIn("name: Доверенная структура PR", self.yaml)
+
+    def test_validator_replaced_in_pr_does_not_change_trusted_result(self):
+        # PR заменяет валидатор безусловным успехом. Доверенный шаг исполняет
+        # команду workflow в рабочей копии base SHA, поэтому невалидное описание
+        # по-прежнему отклоняется; та же команда в рабочей копии head доказывает,
+        # что подмена сработала бы, если бы источником был сам PR.
+        command = re.findall(r"(?m)^\s+run: (.+)$", self.yaml)[0]
+        source = Path(__file__).with_name("check_pr_body.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            base, head = Path(tmp) / "base", Path(tmp) / "head"
+            for root in (base, head):
+                (root / ".github" / "scripts").mkdir(parents=True)
+            shutil.copy(source, base / ".github" / "scripts" / "check_pr_body.py")
+            (head / ".github" / "scripts" / "check_pr_body.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+            event = Path(tmp) / "event.json"
+            event.write_text(json.dumps({"action": "edited", "pull_request": {"body": "## Цель\nТолько цель.", "user": {"login": "someone"}, "head": {"ref": "feat/x"}}}), encoding="utf-8")
+            env = {"GITHUB_EVENT_PATH": str(event), "PATH": "/usr/bin:/bin"}
+            command = command.replace("python3", shutil.which("python3") or sys.executable, 1)
+            trusted = subprocess.run(command, shell=True, cwd=base, env=env, capture_output=True, text=True)
+            tampered = subprocess.run(command, shell=True, cwd=head, env=env, capture_output=True, text=True)
+        self.assertEqual(trusted.returncode, 1, trusted.stderr)
+        self.assertIn("Отсутствует обязательный заголовок", trusted.stderr)
+        self.assertEqual(tampered.returncode, 0)
 
 
 if __name__ == "__main__":
