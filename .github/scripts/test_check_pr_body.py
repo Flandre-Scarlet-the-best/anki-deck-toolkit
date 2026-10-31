@@ -167,6 +167,22 @@ class PrBodyContractTests(unittest.TestCase):
                     errors = validate(coderabbit("- нет таблицы", f"{indent}{marker}md", f"{indent}<!-- `пример`", rows, f"{indent}{marker}"))
                     self.assertTrue(any("заголовок" in e for e in errors), errors)
 
+    def test_coderabbit_row_after_gap_is_rejected(self):
+        later = "| 2 · `abcdef1` | minor | `a.rs` | эффект | confirmed | `abcdef2` |"
+        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", later))
+        self.assertTrue(any("оторвана" in e for e in errors), errors)
+
+    def test_performance_limits_include_heading(self):
+        heading = len("## Производительность\n")
+        base = NOT_APPLICABLE + "\n"
+        fits = base + "x" * (650 - heading - len(base))
+        self.assertEqual(validate(body_with(fits)), [])
+        self.assertTrue(any("650" in e for e in validate(body_with(fits + "x"))))
+
+    def test_measured_requires_scenario_subsection(self):
+        flat = MEASURED.replace("### `anki-repo.validate` · профиль `warm`\n", "")
+        self.assertTrue(any("подразделе" in e for e in validate(body_with(flat))))
+
     def test_coderabbit_every_row_is_checked(self):
         # Некорректная строка не прячется за соседней корректной.
         for bad in ("| 2 | major | `a.rs` | x | confirmed | `abcdef0` |", "| 2 · `abcdef0` | major | | | | |"):

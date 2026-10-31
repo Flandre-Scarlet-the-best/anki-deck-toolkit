@@ -273,9 +273,11 @@ def validate_coderabbit(content: str) -> list[str]:
         ]
     errors: list[str] = []
     completed = False
-    for line in lines[start + 2:]:
+    end = len(lines)
+    for offset, line in enumerate(lines[start + 2:], start + 2):
         row = table_row(line)
         if row is None:
+            end = offset
             break
         if len(row) != len(CODERABBIT_HEADER):
             errors.append(
@@ -291,6 +293,11 @@ def validate_coderabbit(content: str) -> list[str]:
         completed = True
     if not completed:
         errors.append("В разделе CodeRabbit отсутствует строка завершённой итерации")
+    # Строка итерации после разрыва уже не входит в накопительную таблицу GFM.
+    for line in lines[end:]:
+        row = table_row(line)
+        if row and ITERATION_CELL.match(row[0]):
+            errors.append(f"Строка итерации CodeRabbit оторвана от накопительной таблицы: {line.strip()}")
     return errors
 
 
@@ -309,14 +316,16 @@ def validate_performance(content: str) -> list[str]:
     """Проверить компактный вывод; достоверность результатов требует отдельной проверки."""
     prefix = "## Производительность: "
     errors: list[str] = []
-    if len(content) > MAX_PERFORMANCE_LENGTH:
-        errors.append(prefix + f"{len(content)} символов, максимум {MAX_PERFORMANCE_LENGTH}; сократите отчёт до выводов")
+    # Лимиты относятся ко всему разделу вместе с его заголовком.
+    length = len("## Производительность\n") + len(content.strip())
+    if length > MAX_PERFORMANCE_LENGTH:
+        errors.append(prefix + f"{length} символов, максимум {MAX_PERFORMANCE_LENGTH}; сократите отчёт до выводов")
     found = fields(content)
     statuses = [v.strip("`").casefold() for v in found.get("Статус", [])]
     if len(statuses) != 1 or statuses[0] not in STATUSES:
         return errors + [prefix + "нужна ровно одна строка «Статус: измерено», «Статус: не применимо» или «Статус: не измерено»"]
     status = statuses[0]
-    if status != "измерено" and len(content) > MAX_SIMPLE_PERFORMANCE_LENGTH:
+    if status != "измерено" and length > MAX_SIMPLE_PERFORMANCE_LENGTH:
         errors.append(prefix + f"краткое решение занимает более {MAX_SIMPLE_PERFORMANCE_LENGTH} символов")
     if status == "не применимо":
         if not substantive(found.get("Причина", []), 40):
@@ -329,7 +338,9 @@ def validate_performance(content: str) -> list[str]:
             errors.append(prefix + "«не измерено» требует строки «Доказательство производительности: отсутствует»")
     else:
         blocks = scenario_blocks(content)
-        measured = [(heading, block) for heading, block in blocks if not heading.endswith("— не измерено")] if blocks else [("", content)]
+        if not blocks:
+            errors.append(prefix + "каждый сценарий «измерено» описывается в отдельном `###`-подразделе")
+        measured = [(heading, block) for heading, block in blocks if not heading.endswith("— не измерено")]
         for heading, block in blocks:
             if heading.endswith("— не измерено"):
                 info = fields(block)
@@ -338,7 +349,7 @@ def validate_performance(content: str) -> list[str]:
                         errors.append(prefix + f"неизмеренный сценарий требует строки «{name}:» ({heading})")
                 if NO_EVIDENCE[1] not in [v.casefold() for v in info.get(NO_EVIDENCE[0], [])]:
                     errors.append(prefix + f"неизмеренный сценарий требует отсутствия доказательства ({heading})")
-        if not measured:
+        if blocks and not measured:
             errors.append(prefix + "«измерено» требует хотя бы один измеренный сценарий")
         for heading, block in measured:
             where = f" ({heading})" if heading else ""
