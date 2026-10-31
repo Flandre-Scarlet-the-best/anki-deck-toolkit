@@ -19,7 +19,7 @@ different values.
 | What | Where | Who sees it |
 |---|---|---|
 | The full history of every measurement | the local [`benchmark-history`](../benchmark-history/README.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
-| The full task report | the unchanged `benchmark-history report` in the task Gist with its manifest | everyone, via the PR link |
+| The full task report | the unchanged `benchmark-history report` retained as local evidence | author and reviewers when provided |
 | The public historical record | the PR's `## Производительность` (performance) section: a compact summary of the scenario, baseline, candidate, results, conclusions and significant regressions | everyone, through the PR history |
 | The current snapshot | the `docs/ru/<module>/performance.md` pages: the last confirmed measurement of each scenario × profile pair | everyone |
 
@@ -119,13 +119,13 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
    has changes, the environment differs from the reference one or the page holds
    a newer measurement.
 4. Save the complete unchanged `benchmark-history report` for the same result
-   in the mandatory task Gist with its manifest. Keep a compact PR summary of
+   locally for verification. Keep a compact PR summary of
    the scenario, measured baseline/candidate, key numbers, conclusion and all
    material regressions.
 
 Permanent documentation contains no commit SHAs, PR numbers, absolute local
 paths, input identities or author names (a rule of
-[`AGENTS.md`](../../../AGENTS.md)); those details belong in the task Gist, PR summary and
+[`AGENTS.md`](../../../AGENTS.md)); those details belong in the PR summary and
 in the local history. Snapshots inside `benchmark-snapshot` markers are not
 edited by hand.
 

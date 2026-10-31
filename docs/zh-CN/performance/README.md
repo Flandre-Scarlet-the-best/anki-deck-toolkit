@@ -15,7 +15,7 @@
 | 内容 | 位置 | 谁能看到 |
 |---|---|---|
 | 每次测量的完整历史 | 本地 [`benchmark-history`](../benchmark-history/README.md) 历史：用户数据目录中原始 JSON 的不可变归档和 SQLite 索引 | 仅其所有者 |
-| 任务的完整报告 | 任务 Gist 中未修改的 `benchmark-history report` 及其 manifest | 所有人，通过 PR 链接 |
+| 任务的完整报告 | 本地保留未经修改的 `benchmark-history report` | 执行者及获取报告的审阅者 |
 | 公开的历史记录 | PR 的 `## Производительность`（性能）章节：场景、基线、候选版本、结果、结论和显著退化的简要摘要 | 所有人，通过 PR 历史 |
 | 当前快照 | 本目录的页面：每个场景 × 配置对的最近确认测量 | 所有人 |
 
@@ -92,11 +92,11 @@ skill [`performance-benchmarking`](../../../.agents/skills/performance-benchmark
    `benchmark-history snapshot <ID> --page docs/ru/<模块>/performance.md`，然后用 `--apply` 写入。
    工具会同时更新三种语言中该对的块；若系列不完整、工作副本有修改、环境与参考环境不同或页面
    上有更新的测量，则拒绝。
-4. 将同一结果完整且未经修改的 `benchmark-history report` 保存到必需的任务 Gist，并附上 manifest。
+4. 将同一结果完整且未经修改的 `benchmark-history report` 保存在本地以供核查。
    PR 正文保留简洁摘要：场景、测量的基线和候选提交、关键数值、结论及所有显著回退。
 
 永久文档中不包含提交 SHA、PR 编号、本地绝对路径、输入标识和作者姓名
-（[`AGENTS.md`](../../../AGENTS.md) 的规则）；这些细节属于任务 Gist、PR 摘要和本地历史。`benchmark-snapshot`
+（[`AGENTS.md`](../../../AGENTS.md) 的规则）；这些细节属于 PR 摘要和本地历史。`benchmark-snapshot`
 标记内的快照不手动编辑。
 
 在历史出现之前记录的手动观测保留在模块页面上，并明确标注其没有原始 JSON 结果：不得将其当作

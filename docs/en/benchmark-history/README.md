@@ -6,7 +6,7 @@
 `benchmark-history` keeps each user's own history of validated benchmark
 results, finds a baseline in it, compares "before" and "after", and turns the
 results into a complete report headed `## Производительность` (performance)
-for the Gist and preparation of a compact PR summary, and into snapshots for module performance pages at
+for preparing a compact PR summary, and into snapshots for module performance pages at
 `docs/ru/<module>/performance.md` ; translations are not updated automatically. It measures
 nothing: series are run by [`benchmark-runner`](../benchmark-runner/README.md),
 while the result model, its validation and the comparability rules belong to
@@ -15,7 +15,7 @@ result format and no second measurement engine here.
 
 It works entirely locally: no network, no GitHub tokens, no server and no shared
 database. One clone's history is never synchronised with anyone else's, and no
-measurement is published automatically: the complete report goes into the Gist
+measurement is published automatically: the complete report remains local
 and a compact summary into the PR through the normal
 [`anki-git-workflow`](../../../.agents/skills/anki-git-workflow/SKILL.md) process,
 and a documentation snapshot is written only with an explicit `--apply`.
@@ -110,7 +110,7 @@ cargo run -p benchmark-history -- restore /path/to/backup
 | `show <ID>` | record summary; `--raw` prints the original JSON of the archive copy |
 | `baseline <ID>` | every baseline candidate with reasons why it fits or not, and the chosen baseline; `--commit` narrows the choice |
 | `compare <base> <result>` | the `benchmark-contract` verdict, before/after, deltas and the assessment against the spread |
-| `report <ID>...` | Complete Markdown report for the Gist and PR summary; `--baseline ID` (one per scenario × profile pair), `--first` or `--commit` |
+| `report <ID>...` | Complete local Markdown report for preparing the PR summary; `--baseline ID` (one per scenario × profile pair), `--first` or `--commit` |
 | `snapshot <ID> --page P` | snapshot for the canonical Russian module page `docs/ru/<module>/performance.md`; without `--apply` it only shows it |
 | `verify` | checks every archive copy against its identifier and the contract, and the index against the archive projection; does not change the archive or create a store (a missing store is code 3); whatever index reconciliation on opening fixed before the check is reported and gives code 1 |
 | `reindex` | rebuilds the index from the archive |
@@ -211,9 +211,9 @@ refused both there and in `compare`. Comparability is still decided only by
 - Incomparable results get no conclusions; `unavailable`, `unsupported` and
   `failed` are shown as a status with a reason, never as zero.
 
-## Gist report and PR summary
+## Local report and PR summary
 
-`report` builds the complete report for the mandatory Gist. Its format:
+`report` builds a full local report for verification. Its format:
 `Статус: измерено` with the fields «Сценарий», «Измеренный код» (commit,
 changes flag, source tree), «Нагрузка» (input identity and size), «Окружение»,
 «Прогоны», «База», «Сопоставимость», the metric table, «Вывод»,
@@ -222,11 +222,11 @@ distinguishes new functionality (`--first`: there is no "before") from the
 absence of a usable baseline. A `failure` or `unsupported` result yields
 `Статус: не измерено` with a reason, diagnostics and the line
 «Доказательство производительности: отсутствует». The section is printed to
-stdout and saved unchanged in a Gist file with a hash in the manifest. The PR
+stdout and preserved unchanged locally. The PR
 body contains a compact summary of scenarios, measured baseline/candidate,
 key numbers, conclusions and all material regressions following
 [`pr-body.md`](../../../.agents/skills/anki-git-workflow/references/pr-body.md).
-Full tables stay in the Gist; the tool never writes to GitHub.
+Full tables remain in local evidence; the tool never writes to GitHub.
 
 ## Documentation snapshot
 
