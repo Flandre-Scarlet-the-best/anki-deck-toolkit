@@ -1,9 +1,8 @@
 # 性能与资源消耗
 
-[Русский](../../ru/performance/docs/ru/README.md) · [English](../../en/performance/docs/ru/README.md) · **简体中文**
+[Русский](../../ru/performance/README.md) · [English](../../en/performance/README.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/performance/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
-
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/performance/README.md)为准。欢迎提交翻译和校对改进。
 本目录提供通用方法及指向各模块页面的链接，展示仓库各模块性能与资源消耗的**最近确认指标**：时间、CPU、内存、磁盘。每个模块有
 自己的页面，包含测量方法、指标定义，以及在明确命名的参考环境中按场景和配置划分的快照。
 本页规定测量的进行、保存和发布的通用规则。
@@ -15,7 +14,7 @@
 
 | 内容 | 位置 | 谁能看到 |
 |---|---|---|
-| 每次测量的完整历史 | 本地 [`benchmark-history`](../benchmark-history/docs/ru/README.md) 历史：用户数据目录中原始 JSON 的不可变归档和 SQLite 索引 | 仅其所有者 |
+| 每次测量的完整历史 | 本地 [`benchmark-history`](../benchmark-history/README.md) 历史：用户数据目录中原始 JSON 的不可变归档和 SQLite 索引 | 仅其所有者 |
 | 任务的完整报告 | 任务 Gist 中未修改的 `benchmark-history report` 及其 manifest | 所有人，通过 PR 链接 |
 | 公开的历史记录 | PR 的 `## Производительность`（性能）章节：场景、基线、候选版本、结果、结论和显著退化的简要摘要 | 所有人，通过 PR 历史 |
 | 当前快照 | 本目录的页面：每个场景 × 配置对的最近确认测量 | 所有人 |
@@ -41,7 +40,7 @@
 场景、执行条件配置、被测工作的边界以及带覆盖范围的指标，以机器可读的形式声明在
 `benchmarks/` 目录中；测量结果以带版本的 JSON 记录。如何注册场景以及如何解读
 结果，见[基准目录](benchmarks.md)；系列由
-[`benchmark-runner`](../benchmark-runner/docs/ru/README.md) 执行。本页规则同样适用于按目录进行的测量：
+[`benchmark-runner`](../benchmark-runner/README.md) 执行。本页规则同样适用于按目录进行的测量：
 目录要求每个场景声明确切的缓存状态，而快照仍然是环境的证据。
 
 ## 测量规则

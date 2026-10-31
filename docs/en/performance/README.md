@@ -1,9 +1,8 @@
 # Performance and resource usage
 
-[Русский](../../ru/performance/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/performance/docs/ru/README.md)
+[Русский](../../ru/performance/README.md) · **English** · [简体中文](../../zh-CN/performance/README.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/performance/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/performance/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 This directory provides the common methodology and links to the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
 module has its own page with its method, metric definitions and snapshots per
@@ -19,7 +18,7 @@ different values.
 
 | What | Where | Who sees it |
 |---|---|---|
-| The full history of every measurement | the local [`benchmark-history`](../benchmark-history/docs/ru/README.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
+| The full history of every measurement | the local [`benchmark-history`](../benchmark-history/README.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
 | The full task report | the unchanged `benchmark-history report` in the task Gist with its manifest | everyone, via the PR link |
 | The public historical record | the PR's `## Производительность` (performance) section: a compact summary of the scenario, baseline, candidate, results, conclusions and significant regressions | everyone, through the PR history |
 | The current snapshot | the `tools/<module>/performance.md` pages: the last confirmed measurement of each scenario × profile pair | everyone |
@@ -52,7 +51,7 @@ metrics with their scope are declared in machine-readable form in the
 `benchmarks/` catalog, and measurement results are recorded as versioned JSON.
 How to register a scenario and read a result is described in the
 [benchmark catalog](benchmarks.md); series are executed by
-[`benchmark-runner`](../benchmark-runner/docs/ru/README.md). The rules on this page also apply to
+[`benchmark-runner`](../benchmark-runner/README.md). The rules on this page also apply to
 catalog-driven measurements: the catalog requires the exact cache state to be
 declared for each scenario, and a snapshot remains evidence of an environment.
 

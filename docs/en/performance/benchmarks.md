@@ -2,20 +2,19 @@
 
 [Русский](../../ru/performance/benchmarks.md) · **English** · [简体中文](../../zh-CN/performance/benchmarks.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/performance/benchmarks.md) is authoritative. Corrections and translation contributions are welcome.
-
-The catalog is the machine-readable form of what the [methodology](docs/ru/README.md)
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/performance/benchmarks.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
+The catalog is the machine-readable form of what the [methodology](README.md)
 describes in words: which scenarios are measured, under which conditions, what
 the measured interval contains, and which metrics with which scope are
 collected. The result contract is versioned JSON in which a runner records
 measurements. Both contracts are checked by `benchmark-contract`
-([CLI and exit codes](../benchmark-contract/docs/ru/README.md)).
+([CLI and exit codes](../benchmark-contract/README.md)).
 
 The catalog and its checks run and measure nothing. Series are executed by
-[`benchmark-runner`](../benchmark-runner/docs/ru/README.md): Hyperfine 2.0
+[`benchmark-runner`](../benchmark-runner/README.md): Hyperfine 2.0
 and Linux system metrics. It uses this contract instead of inventing its own.
 The local result history, baseline selection and reports are kept by
-[`benchmark-history`](../benchmark-history/docs/ru/README.md); the repository
+[`benchmark-history`](../benchmark-history/README.md); the repository
 holds no run history and no thresholds. Module snapshots
 (`tools/<module>/performance.md`) remain evidence of specific environments.
 
@@ -482,7 +481,7 @@ the catalog and only then stores it. Comparisons use `compare`.
 
 There is no history storage, no regression computation and no CI thresholds
 here: history and reports live in
-[`benchmark-history`](../benchmark-history/docs/ru/README.md), without
+[`benchmark-history`](../benchmark-history/README.md), without
 thresholds. Numbers from module snapshots do not become thresholds.
 
 ## Block I/O

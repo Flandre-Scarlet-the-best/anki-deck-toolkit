@@ -1,9 +1,8 @@
 # Anki Desktop E2E stand
 
-[Русский](../../ru/anki-e2e/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/anki-e2e/docs/ru/README.md)
+[Русский](../../ru/anki-e2e/README.md) · **English** · [简体中文](../../zh-CN/anki-e2e/README.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/anki-e2e/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/anki-e2e/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 
 `anki-e2e` is a permanent local E2E stand for the `anki-repo anki` group
 ([contract](../../ru/anki-repo/desktop.md)). A Rust runner on the host builds a
@@ -250,7 +249,7 @@ The first run builds the images; later runs use the cache.
 
 Phase timings, CPU, memory and disk of the stand, together with the measurement
 method, are on the [performance page](performance.md);
-the general measurement rules are in the [methodology](../performance/docs/ru/README.md).
+the general measurement rules are in the [methodology](../performance/README.md).
 
 ## Boundaries
 

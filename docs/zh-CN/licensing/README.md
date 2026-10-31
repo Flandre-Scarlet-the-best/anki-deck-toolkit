@@ -1,9 +1,5 @@
 # 许可适用范围与素材权利
 
-[Русский](../../ru/licensing/docs/ru/README.md) · [English](../../en/licensing/docs/ru/README.md) · **简体中文**
-
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/licensing/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
-
 本项目源代码主要采用 **GNU Affero General Public License 第 3 版（AGPL-3.0-only）**。
 完整且未经修改的许可文本见 [LICENSE](../../../LICENSE)。
 

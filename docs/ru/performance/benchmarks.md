@@ -2,17 +2,17 @@
 
 **Русский** · [English](../../en/performance/benchmarks.md) · [简体中文](../../zh-CN/performance/benchmarks.md)
 
-Каталог — машинная форма того, что [методика](docs/ru/README.md) описывает словами:
+Каталог — машинная форма того, что [методика](README.md) описывает словами:
 какие сценарии измеряются, в каких условиях, что входит в измеряемый интервал и
 какие метрики с каким охватом собираются. Контракт результата — версионируемый
 JSON, в котором исполнитель записывает измерения. Оба контракта проверяет
-`benchmark-contract` ([CLI и коды возврата](../benchmark-contract/docs/ru/README.md)).
+`benchmark-contract` ([CLI и коды возврата](../benchmark-contract/README.md)).
 
 Каталог и проверка ничего не запускают и не измеряют. Серии выполняет
-[`benchmark-runner`](../benchmark-runner/docs/ru/README.md): Hyperfine 2.0 и
+[`benchmark-runner`](../benchmark-runner/README.md): Hyperfine 2.0 и
 системные метрики Linux. Он использует этот контракт, а не создаёт свой.
 Локальную историю результатов, выбор базы и отчёты ведёт
-[`benchmark-history`](../benchmark-history/docs/ru/README.md); в репозитории
+[`benchmark-history`](../benchmark-history/README.md); в репозитории
 истории прогонов и порогов нет. Снимки модулей (`tools/<модуль>/performance.md`)
 остаются свидетельствами конкретных окружений.
 
@@ -469,7 +469,7 @@ cargo run -p benchmark-contract -- --json vocabulary
 ## Границы
 
 Здесь нет хранилища истории, расчёта регрессий и порогов CI: история и отчёты —
-в [`benchmark-history`](../benchmark-history/docs/ru/README.md), без порогов.
+в [`benchmark-history`](../benchmark-history/README.md), без порогов.
 Числа снимков модулей не становятся порогами.
 
 ## Блочный ввод-вывод
