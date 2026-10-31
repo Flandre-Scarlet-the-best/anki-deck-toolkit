@@ -25,7 +25,7 @@ re-validation or scaling is tested at its own boundary:
 | `asset-store.ingest` | `ingest_verified` of new identities by one writer | staging, validator check, atomic file commit, manifest rewrite, journal intent and close, `fsync` |
 | `asset-store.ingest-contention` | the same publication volume across `writers` independent handles | serialization on the regular `flock` between writer threads of one process |
 | `asset-store.batch-reopen` | `SafeBatchRuntime::open` and `load` | batch lock, state read and check, full verification of every blob |
-| `asset-store.batch-checkpoint` | `open`, `load` and `save`; `change` = `unchanged` or `modified` | atomic state write with file and directory sync; `modified` also writes a new blob and bumps the revision |
+| `asset-store.batch-checkpoint` | `open`, `load` and `save`; `change` = `unchanged` or `modified` | `modified` — a new blob, revision bump and atomic state write with file and directory sync; `unchanged` — streamed byte comparison and `fsync` of the existing file and directory without a new write |
 
 In every scenario the interval is one run of the built release binary
 `asset-store-bench` from process start to exit, including opening the store.
