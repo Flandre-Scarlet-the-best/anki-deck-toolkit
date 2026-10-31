@@ -2,7 +2,6 @@ use super::{Candidate, ForvoSession, error};
 use crate::{
     AssetError,
     pronunciation::{MAX_AUDIO_BYTES, Pronunciation},
-    temp_workspace::TempWorkspace,
 };
 use chromiumoxide::cdp::browser_protocol::browser::{
     CancelDownloadParams, DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
@@ -127,22 +126,24 @@ impl ForvoSession {
         request: &Pronunciation,
         candidate: &Candidate,
     ) -> Result<Vec<u8>, AssetError> {
-        if self.browser.page().url().await.ok().flatten().as_deref()
+        // У предыдущей попытки могли остаться незавершённые CDP-загрузки.
+        // Следующая попытка возможна только после остановки всего процесса.
+        self.recycle_after_download().await?;
+        if self.browser().page().url().await.ok().flatten().as_deref()
             != Some(super::word_url(&request.surface).as_str())
         {
             self.navigate(&super::word_url(&request.surface)).await?;
         }
         self.require_authenticated().await?;
-        eprintln!("forvo_download_started record_id={}", candidate.record_id);
-        let workspace = TempWorkspace::create("forvo-download").map_err(|_| {
+        tracing::info!(event = "forvo_download_started", record_id = %candidate.record_id, "Начата загрузка записи Forvo");
+        self.download_used = true;
+        let download_path = self.browser().download_staging().map_err(|_| {
             error(
                 "download_staging_failed",
                 "Не удалось создать приватный staging",
             )
         })?;
-        let download_path = workspace.path().to_path_buf();
-        self.download_workspaces.push(workspace);
-        let browser = self.browser.browser();
+        let browser = self.browser().browser();
         // Слушатели устанавливаются до клика. GUID определяет имя независимо от suggestedFilename/filePath.
         let mut begins = browser
             .event_listener::<EventDownloadWillBegin>()
@@ -213,19 +214,19 @@ impl ForvoSession {
                 .filter(|p| p.x.is_finite() && p.y.is_finite())
                 .ok_or_else(|| error("dom_changed", "Нет координат кнопки"))?;
             let point = chromiumoxide::layout::Point::new(point.x, point.y);
-            self.browser.page().move_mouse(point).await.map_err(|_| {
+            self.browser().page().move_mouse(point).await.map_err(|_| {
                 error(
                     "download_button_unavailable",
                     "Не удалось навести указатель на Download MP3",
                 )
             })?;
-            self.browser.page().click(point).await.map_err(|_| {
+            self.browser().page().click(point).await.map_err(|_| {
                 error(
                     "download_button_unavailable",
                     "Не удалось нажать Download MP3",
                 )
             })?;
-            eprintln!("forvo_download_clicked record_id={}", candidate.record_id);
+            tracing::debug!(event = "forvo_download_clicked", record_id = %candidate.record_id, "Нажата кнопка загрузки Forvo");
             loop {
                 if let Some((guid, length)) = tracker.completed()? {
                     let file = OpenOptions::new()
@@ -267,8 +268,8 @@ impl ForvoSession {
                 tokio::select! {
                     begin=begins.next()=>{
                         let begin=begin.ok_or_else(||error("browser_recovery_required","Поток загрузок Chromium закрыт"))?;
-                        eprintln!("forvo_download_begin record_id={}",candidate.record_id);
-                        let mut owned_frame=self.browser.page().mainframe().await.ok().flatten().as_ref()==Some(&begin.frame_id);
+                        tracing::debug!(event = "forvo_download_begin", record_id = %candidate.record_id, "Chromium начал загрузку");
+                        let mut owned_frame=self.browser().page().mainframe().await.ok().flatten().as_ref()==Some(&begin.frame_id);
                         if !owned_frame {
                             for page in browser.pages().await.map_err(|_|error("browser_recovery_required","Не удалось сопоставить вкладку загрузки"))? {
                                 if !baseline.contains(page.target_id()) && page.mainframe().await.ok().flatten().as_ref()==Some(&begin.frame_id) {owned_frame=true;break;}
@@ -279,7 +280,7 @@ impl ForvoSession {
                     },
                     progress=progresses.next()=>{
                         let progress=progress.ok_or_else(||error("browser_recovery_required","Поток прогресса Chromium закрыт"))?;
-                        if progress.state!=DownloadProgressState::InProgress {eprintln!("forvo_download_terminal state={}",progress.state.as_ref());}
+                        if progress.state!=DownloadProgressState::InProgress {tracing::debug!(event = "forvo_download_terminal", state = progress.state.as_ref(), "Chromium завершил загрузку");}
                         tracker.progress(&progress)?;
                     },
                 }
@@ -294,7 +295,7 @@ impl ForvoSession {
                     "download_timeout",
                     "Загрузка не завершена; проверьте окно Forvo и продолжите после восстановления",
                 );
-                match super::observe_auth(self.browser.page()).await {
+                match super::observe_auth(self.browser().page()).await {
                     Ok(super::AuthState::Authenticated) => (),
                     Ok(super::AuthState::LoginRequired) if self.was_authenticated => {
                         failure = super::auth_error(super::AuthState::SessionExpired)
@@ -302,7 +303,7 @@ impl ForvoSession {
                     Ok(state) => failure = super::auth_error(state),
                     Err(e) => failure = e,
                 }
-                if let Ok(pages) = self.browser.browser().pages().await {
+                if let Ok(pages) = self.browser().browser().pages().await {
                     for page in pages {
                         if !baseline.contains(page.target_id()) {
                             match super::observe_auth(&page).await {

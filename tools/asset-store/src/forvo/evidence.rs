@@ -119,15 +119,53 @@ pub async fn acquire(
     session: &mut ForvoSession,
     request: &Pronunciation,
 ) -> Result<Acquisition, AssetError> {
-    acquire_from(session, request).await
+    let first = acquire_from(session, request).await;
+    match first {
+        Err(e) if super::requires_interaction(&e) => {
+            if session
+                .recover_interactively(Some(&request.surface))
+                .await?
+            {
+                acquire_from(session, request).await
+            } else {
+                Err(e)
+            }
+        }
+        other => other,
+    }
 }
 pub(super) async fn acquire_from(
     session: &mut impl CandidateSource,
     request: &Pronunciation,
 ) -> Result<Acquisition, AssetError> {
+    use crate::browser_diagnostics::{BrowserItemContext, BrowserItemTimer};
+    let timer = BrowserItemTimer::new(BrowserItemContext::without_generation(
+        "forvo_web",
+        &request.surface,
+        1,
+    ));
+    let result = acquire_timed(session, request, &timer).await;
+    match &result {
+        Ok(_) => timer.finish_success(),
+        Err(error) => timer.finish_failure(provider_code(error), pauses_batch(error), None),
+    }
+    result
+}
+
+async fn acquire_timed(
+    session: &mut impl CandidateSource,
+    request: &Pronunciation,
+    timer: &crate::browser_diagnostics::BrowserItemTimer,
+) -> Result<Acquisition, AssetError> {
     let mut candidates = None;
     for retry in 0..3 {
-        match session.candidates(request).await {
+        let stage = timer.stage("candidates");
+        let found = session.candidates(request).await;
+        match &found {
+            Ok(_) => stage.finish_success(),
+            Err(error) => stage.finish_failure(provider_code(error), pauses_batch(error), None),
+        }
+        match found {
             Ok(items) => {
                 candidates = Some(items);
                 break;
@@ -144,6 +182,7 @@ pub(super) async fn acquire_from(
     let candidates = candidates.expect("bounded attempts");
     let mut attempts = Vec::new();
     for candidate in candidates.iter().filter(|c| c.download_available) {
+        let stage = timer.stage("download_and_validate_mp3");
         let result = session
             .download(request, candidate)
             .await
@@ -151,7 +190,7 @@ pub(super) async fn acquire_from(
                 pronunciation::probe_mp3(&bytes).map_err(|e| {
                     error(
                         if e.code == crate::ErrorCode::ValidatorFailure
-                            && e.details["blocker"] != "audio_tool_missing"
+                            && e.details["blocker"].is_null()
                         {
                             "invalid_mp3"
                         } else {
@@ -162,6 +201,10 @@ pub(super) async fn acquire_from(
                 })?;
                 Ok(bytes)
             });
+        match &result {
+            Ok(_) => stage.finish_success(),
+            Err(error) => stage.finish_failure(provider_code(error), pauses_batch(error), None),
+        }
         match result {
             Ok(bytes) => {
                 attempts.push(Attempt {
@@ -190,12 +233,7 @@ pub(super) async fn acquire_from(
                 return Err(e);
             }
             Err(e) => {
-                eprintln!(
-                    "Forvo {}: {} — {}",
-                    candidate.record_id,
-                    provider_code(&e),
-                    e.message
-                );
+                tracing::debug!(event = "forvo_candidate_failed", record_id = %candidate.record_id, code = provider_code(&e), "Попытка получения записи Forvo отклонена");
                 attempts.push(Attempt {
                     record_id: candidate.record_id.clone(),
                     code: provider_code(&e).into(),

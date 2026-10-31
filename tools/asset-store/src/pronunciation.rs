@@ -300,7 +300,12 @@ impl SemanticValidator for AudioTechnicalValidator {
                 }],
             ))
         };
-        run().map_err(|e| ValidatorFailure::new(e.code.as_str(), e.message))
+        run().map_err(|e| {
+            ValidatorFailure::new(
+                e.details["blocker"].as_str().unwrap_or(e.code.as_str()),
+                e.message,
+            )
+        })
     }
 }
 

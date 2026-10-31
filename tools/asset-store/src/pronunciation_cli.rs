@@ -35,7 +35,7 @@ enum Decision {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Видимый Chromium с собственным постоянным профилем Forvo.
+    /// Forvo в собственном постоянном профиле Chromium; окно требуется для входа.
     Forvo {
         #[arg(long)]
         profile: Option<PathBuf>,
@@ -286,7 +286,7 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
                 "профиль Forvo не может находиться внутри decks/**",
             ));
         }
-        return execute_forvo(&root, &profile, action, &protected);
+        return execute_forvo(&root, &profile, action, &protected, cli.output);
     }
     if let Action::Probe { file } = &cli.command {
         return Ok(
@@ -457,7 +457,9 @@ pub fn main() -> u8 {
     let cli = Cli::parse();
     let (value, code) = match execute(&cli) {
         Ok(value) => {
-            let code = if value["outcome"] == "paused" {
+            let code = if value["outcome"] == "cancelled" {
+                130
+            } else if value["outcome"] == "paused" {
                 if value["result"]["paused"]["code"] == "interrupted" {
                     130
                 } else {
@@ -485,6 +487,7 @@ fn execute_forvo(
     profile: &Path,
     action: &ForvoAction,
     protected: &BTreeSet<PathBuf>,
+    output: Output,
 ) -> Result<serde_json::Value, AssetError> {
     use crate::forvo::{self, AuthState, ForvoSession};
     let open_store = |initialize: bool| {
@@ -506,17 +509,19 @@ fn execute_forvo(
                 let plan=serde_json::from_slice(&read_local(plan,protected,1024*1024)?).map_err(|_|AssetError::new(ErrorCode::InvalidIdentity,"неверный строгий JSON-план Forvo"))?;
                 let store=open_store(true)?;
                 forvo::batch::start(&store,batch_id,plan)?;
-                Ok(serde_json::json!(forvo::batch::resume(&store,batch_id,profile,*max_items).await?))
+                run_forvo_batch_logged(&store,batch_id,profile,*max_items,output).await
             }
-            ForvoAction::BatchResume{batch_id,max_items}=>Ok(serde_json::json!(forvo::batch::resume(&open_store(false)?,batch_id,profile,*max_items).await?)),
+            ForvoAction::BatchResume{batch_id,max_items}=>run_forvo_batch_logged(&open_store(false)?,batch_id,profile,*max_items,output).await,
             _=>{
                 // Проверяем входные пары до запуска браузера.
                 let request=match action {ForvoAction::Candidates{surface,reading}|ForvoAction::Fetch{surface,reading,..}=>Some(Pronunciation::new(surface,reading)?),_=>None};
                 let store=if matches!(action,ForvoAction::Fetch{..}) {Some(open_store(true)?)} else {None};
-                let mut session=ForvoSession::launch(profile).await?;
+                let mut session=if matches!(action,ForvoAction::Login{..}) { ForvoSession::launch_interactive(profile).await? } else { ForvoSession::launch(profile).await? };
                 let result=tokio::select! {
                     result=async {
-                        match action {
+                      let mut retried = false;
+                      loop {
+                        let attempt: Result<serde_json::Value, AssetError> = async { match action {
                             ForvoAction::Login{timeout_seconds,surface}=>{
                                 eprintln!("Войдите вручную в открытом окне Forvo; пароль не передаётся CLI.");
                                 let surface=surface.as_deref().map(|s|Pronunciation::new(s,s).map(|r|r.surface)).transpose()?;
@@ -537,17 +542,97 @@ fn execute_forvo(
                                 Ok(serde_json::json!({"asset":asset,"acquisition":acquisition.evidence}))
                             }
                             _=>unreachable!(),
+                        }}.await;
+                        match attempt {
+                            Err(error) if !retried && !matches!(action, ForvoAction::Login{..} | ForvoAction::Fetch{..}) && forvo::requires_interaction(&error) => {
+                                if !session.recover_interactively(request.as_ref().map(|r|r.surface.as_str())).await? { break Err(error); }
+                                retried = true;
+                            }
+                            other => break other,
                         }
+                      }
                     }=>result,
                     _=tokio::signal::ctrl_c()=>Err(AssetError::new(ErrorCode::Interrupted,"Forvo прерван пользователем")),
                 };
-                session.close().await?;
-                result
+                let stopped = session.close().await;
+                match (result, stopped) {
+                    (Err(mut original), Err(cleanup)) => { original.details["browser_cleanup"] = serde_json::json!({"code":forvo::provider_code(&cleanup),"message":cleanup.message}); Err(original) },
+                    (Err(original), _) => Err(original),
+                    (_, Err(cleanup)) => Err(cleanup),
+                    (Ok(value), Ok(())) => Ok(value),
+                }
             }
         }
     })?;
     let paused = result.get("paused").is_some_and(|v| !v.is_null());
+    let cancelled = matches!(
+        action,
+        ForvoAction::BatchStart { .. } | ForvoAction::BatchResume { .. }
+    ) && result["cancelled"] == true;
     Ok(
-        serde_json::json!({"schema_version":1,"outcome":if paused {"paused"} else {"ok"},"result":result}),
+        serde_json::json!({"schema_version":1,"outcome":if cancelled {"cancelled"} else if paused {"paused"} else {"ok"},"result":result}),
     )
+}
+
+async fn run_forvo_batch_logged(
+    store: &AssetStore,
+    id: &str,
+    profile: &Path,
+    max_items: usize,
+    output: Output,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::batch_runtime::SafeBatchRuntime;
+    use crate::diagnostics::{OutputMode, RunLogGuard};
+    use tracing::instrument::WithSubscriber;
+
+    let log = SafeBatchRuntime::open(store.root(), id)?.create_run_log()?;
+    let path = log.path.display().to_string();
+    let guard = RunLogGuard::new(
+        log.file,
+        match output {
+            Output::Json => OutputMode::Json,
+            Output::Text => OutputMode::Human,
+        },
+    );
+    let result = async {
+        tracing::info!(
+            event = "run_started",
+            stage = "run",
+            code = "forvo_batch_started",
+            "Начата обработка пакета Forvo"
+        );
+        let result = crate::forvo::batch::resume(store, id, profile, max_items).await;
+        match &result {
+            Ok(batch) => tracing::info!(
+                event = "run_finished",
+                stage = "run",
+                paused = batch.paused.is_some(),
+                cancelled = batch.cancelled,
+                "Обработка пакета Forvo завершена"
+            ),
+            Err(error) => tracing::error!(
+                event = "run_stopped",
+                stage = "run",
+                code = error.code.as_str(),
+                "Обработка пакета Forvo остановлена"
+            ),
+        }
+        result
+    }
+    .with_subscriber(guard.dispatch())
+    .await;
+    if let Err(logging) = guard.finish() {
+        return Err(AssetError::with_details(
+            ErrorCode::IoFailure,
+            "Не удалось сохранить диагностический журнал Forvo",
+            serde_json::json!({"diagnostic_log":path,"logging_error":crate::diagnostics::safe_message(&logging),"original_error":result.as_ref().err().map(|e| serde_json::json!({"code":e.code.as_str(),"message":crate::diagnostics::safe_message(&e.message)}))}),
+        ));
+    }
+    let batch = result.map_err(|mut error| {
+        error.details["diagnostic_log"] = serde_json::json!(path);
+        error
+    })?;
+    let mut value = serde_json::to_value(batch).expect("состояние Forvo сериализуется");
+    value["diagnostic_log"] = serde_json::json!(path);
+    Ok(value)
 }

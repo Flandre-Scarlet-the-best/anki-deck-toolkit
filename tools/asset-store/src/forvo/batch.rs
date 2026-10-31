@@ -6,6 +6,7 @@ use super::{
 use crate::{
     AssetError, AssetStore, ErrorCode,
     batch_runtime::{RuntimeBatchState, RuntimeBlobRef, SafeBatchRuntime},
+    browser_diagnostics::{BrowserItemContext, BrowserItemTimer},
     pronunciation::{MAX_AUDIO_BYTES, Pronunciation, batch::MAX_BATCH_ITEMS},
 };
 use serde::{Deserialize, Serialize};
@@ -52,7 +53,16 @@ impl From<AssetError> for Failure {
             _ => None,
         };
         Self {
-            code: provider_code(&e).into(),
+            code: e.details["blocker"]
+                .as_str()
+                .or_else(|| {
+                    e.details["blockers"]
+                        .as_array()
+                        .and_then(|values| values.first())
+                        .and_then(|value| value.as_str())
+                })
+                .unwrap_or_else(|| provider_code(&e))
+                .into(),
             message: e.message,
             report,
         }
@@ -201,16 +211,37 @@ pub fn cancel(store: &AssetStore, id: &str) -> Result<ForvoBatch, AssetError> {
     }
     Ok(batch)
 }
-async fn cancellation(store: &AssetStore, id: &str) -> Result<(), AssetError> {
+pub(super) async fn cancellation(store: &AssetStore, id: &str) -> Result<(), AssetError> {
     let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
+    let mut batch = load(&mut runtime)?;
     loop {
-        if load(&mut runtime)?.cancelled {
+        if batch.cancelled {
             return Ok(());
         }
         runtime.release_lock()?;
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         runtime.reacquire_lock()?;
+        batch = runtime.reload_cached()?.ok_or_else(invalid)?;
     }
+}
+
+fn retryable_import(error: &AssetError) -> bool {
+    const BLOCKERS: &[&str] = &[
+        "audio_tool_missing",
+        "audio_tool_start_failed",
+        "audio_tool_runtime_failed",
+        "audio_temp_io_failure",
+        "io_failure",
+    ];
+    error.code == ErrorCode::IoFailure
+        || error.details["blocker"]
+            .as_str()
+            .is_some_and(|code| BLOCKERS.contains(&code))
+        || error.details["blockers"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str().is_some_and(|code| BLOCKERS.contains(&code)))
+        })
 }
 
 pub async fn resume(
@@ -238,10 +269,25 @@ pub async fn resume(
         let mut done=0;
         while let Some(index)=batch.items.iter().position(|i|i.outcome.is_none()) {
             if done>=max_items||batch.cancelled{break;}
+            let timer = BrowserItemTimer::new(BrowserItemContext::without_generation("forvo_web", &batch.items[index].request.surface, 1));
             if batch.items[index].acquisition.is_none(){
+                let stage = timer.stage("acquire");
                 runtime.release_lock()?;
                 let launched=if session.is_none() {
-                    match ForvoSession::launch(profile).await {Ok(s)=>{session=Some(s);Ok(())},Err(e)=>Err(e)}
+                    enum LaunchResult { Finished(Box<Result<ForvoSession,AssetError>>), Interrupted(AssetError) }
+                    let mut launching=Box::pin(ForvoSession::launch(profile));
+                    match tokio::select! {
+                        result=&mut launching => LaunchResult::Finished(Box::new(result)),
+                        _=tokio::signal::ctrl_c()=>LaunchResult::Interrupted(AssetError::new(ErrorCode::Interrupted,"Запуск Forvo прерван; продолжите через batch-resume")),
+                        result=cancellation(store,id)=>LaunchResult::Interrupted(result.err().unwrap_or_else(||AssetError::new(ErrorCode::Interrupted,"Forvo-пакет отменён"))),
+                    } {
+                        LaunchResult::Finished(result)=>match *result {Ok(s)=>{session=Some(s);Ok(())},Err(e)=>Err(e)},
+                        LaunchResult::Interrupted(mut interrupted)=>{
+                            let cleanup=match launching.await {Ok(s)=>s.close().await,Err(e) if provider_code(&e)=="browser_cleanup_failed"=>Err(e),Err(_)=>Ok(())};
+                            if let Err(e)=cleanup {interrupted.details["browser_cleanup"]=serde_json::json!({"code":provider_code(&e),"message":e.message});}
+                            Err(interrupted)
+                        }
+                    }
                 } else {Ok(())};
                 let acquisition=match launched {
                     Err(e)=>Err(e),
@@ -251,9 +297,15 @@ pub async fn resume(
                     r=cancellation(store,id)=>{r?;Err(AssetError::new(ErrorCode::Interrupted,"Forvo-пакет отменён"))},
                     }
                 };
+                match &acquisition { Ok(_) => stage.finish_success(), Err(e) => stage.finish_failure(provider_code(e), pauses_batch(e), None) }
                 runtime.reacquire_lock()?;
                 batch=load(&mut runtime)?;
-                if batch.cancelled{break;}
+                if let Err(e)=&acquisition && !e.details["browser_cleanup"].is_null() {
+                    return Err(AssetError::with_details(e.code, e.message.clone(), e.details.clone()));
+                }
+                if batch.cancelled {
+                    break;
+                }
                 match acquisition {
                     Ok(acquisition)=>{
                         let blob=runtime.persist_blob_with_limit(&acquisition.bytes,"mp3",MAX_AUDIO_BYTES)?;
@@ -261,16 +313,30 @@ pub async fn resume(
                         batch.paused=None;batch.revision+=1;runtime.save(&batch)?;
                     }
                     Err(e) if pauses_batch(&e)||e.code==ErrorCode::Interrupted=>{
+                        tracing::warn!(event="forvo_batch_paused", stage="acquire", code=provider_code(&e), "Пакет Forvo приостановлен");
+                        timer.finish_failure(provider_code(&e), true, None);
                         batch.paused=Some(e.into());batch.revision+=1;runtime.save(&batch)?;break;
                     }
                     Err(e)=>{
+                        timer.finish_failure(provider_code(&e), false, None);
                         batch.items[index].outcome=Some(e.into());batch.paused=None;batch.revision+=1;runtime.save(&batch)?;done+=1;continue;
                     }
                 }
             }
             let item=&batch.items[index];
+            let stage = timer.stage("import_mp3");
             let saved=item.acquisition.as_ref().expect("checkpoint");
             let result=runtime.read_blob(&saved.blob).and_then(|bytes|import_acquisition(store,&item.request,&Acquisition{bytes,evidence:saved.evidence.clone()},item.replace_expected_sha256.clone()));
+            if let Err(e) = &result && retryable_import(e) {
+                let failure=Failure::from(AssetError::with_details(e.code, e.message.clone(), e.details.clone()));
+                stage.finish_failure(&failure.code, true, None);
+                timer.finish_failure(&failure.code, true, None);
+                tracing::warn!(event="forvo_batch_paused", stage="import_mp3", code=failure.code, "Импорт сохранённого MP3 приостановлен");
+                batch.paused=Some(failure);
+                batch.revision+=1;runtime.save(&batch)?;break;
+            }
+            match &result { Ok(_) => stage.finish_success(), Err(e) => stage.finish_failure(provider_code(e), false, None) }
+            match &result { Ok(_) => timer.finish_success(), Err(e) => timer.finish_failure(provider_code(e), false, None) }
             batch.items[index].outcome=Some(match result {
                 Ok(_)=>Failure{code:"imported".into(),message:"Оригинальный MP3 сохранён; техническая проверка не даёт фонетического доверия".into(),report:None},
                 Err(e)=>e.into(),
@@ -279,9 +345,20 @@ pub async fn resume(
         }
         Ok::<_,AssetError>(())
     }.await;
-    if let Some(session) = session {
-        session.close().await?;
+    let stopped = if let Some(session) = session {
+        session.close().await
+    } else {
+        Ok(())
+    };
+    match (result, stopped) {
+        (Err(mut original), Err(cleanup)) => {
+            original.details["browser_cleanup"] =
+                serde_json::json!({"code":provider_code(&cleanup),"message":cleanup.message});
+            return Err(original);
+        }
+        (Err(original), _) => return Err(original),
+        (_, Err(cleanup)) => return Err(cleanup),
+        _ => (),
     }
-    result?;
     Ok(batch)
 }
