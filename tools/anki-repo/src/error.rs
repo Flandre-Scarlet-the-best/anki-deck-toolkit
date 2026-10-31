@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(ErrorCode::ExternalFailure.as_str(), "external_failure");
     }
 
-    /// Семантика кодов завершения, которую обязан документировать `tools/anki-repo/README.md`.
+    /// Семантика кодов завершения, которую обязан документировать `docs/ru/anki-repo/README.md`.
     ///
     /// Один exit code описывает несколько кодов ошибок, поэтому документация
     /// должна перечислять их вместе: `4` — `find`/`not_found` и

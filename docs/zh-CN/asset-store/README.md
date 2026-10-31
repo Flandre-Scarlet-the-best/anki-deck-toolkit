@@ -8,7 +8,7 @@
 
 独立的 `pronunciation_audio` 域和 `pronunciation-assets` CLI 可导入本地日语 MP3
 发音，保存技术验证结果，并要求人工明确确认。命令和限制见完整的[日语 MP3
-契约](pronunciation.md)。`.asset-store/pronunciation-audio/` 语料库独立于图像；尚未启用牌组集成。
+契约](../../ru/asset-store/pronunciation.md)（俄语原文）。`.asset-store/pronunciation-audio/` 语料库独立于图像；尚未启用牌组集成。
 
 ## 数据存放位置
 

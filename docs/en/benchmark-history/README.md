@@ -332,6 +332,7 @@ section in every branch, validated by the real
 reference hardware, a marker without a recorded workload, workload identity at
 an equal size, refusal to take the result being published as proof of the
 previous snapshot, a matching block with a different workload, a scenario
-without a workload and a failed write of one of the three pages; and the whole
-CLI.
+without a workload and a failed write of the Russian page that leaves
+translations untouched; and the whole CLI, including `--page` refusals for
+translations, legacy and unrelated paths.
 The tests read neither `decks/**` nor the user's data directory.

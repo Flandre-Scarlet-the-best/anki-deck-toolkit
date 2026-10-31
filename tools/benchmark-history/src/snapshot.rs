@@ -11,46 +11,69 @@
 //! другим результатом, а не публикуемым, который даёт в точности тот же блок.
 
 use crate::format;
-use crate::reason;
 use benchmark_contract::result::{
     Aggregate, Availability, BenchmarkResult, Fact, Identity, OutcomeStatus, Quantity, RunStatus,
 };
 use benchmark_contract::scenario::{InputRole, Scenario};
 use benchmark_contract::vocabulary::BuiltinFact;
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const BEGIN: &str = "<!-- benchmark-snapshot: ";
 const END: &str = "<!-- /benchmark-snapshot -->";
 pub const ANCHOR: &str = "<!-- benchmark-snapshot:anchor -->";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lang {
-    Ru,
-    En,
-    ZhCn,
-}
+/// Каталог русской документации и имя страницы снимка внутри модуля:
+/// `docs/ru/<модуль>/performance.md`. Переводы снимков не получают.
+const RUSSIAN_DOCS: [&str; 2] = ["docs", "ru"];
+const PAGE_NAME: &str = "performance.md";
 
-impl Lang {
-    pub const ALL: [Lang; 1] = [Lang::Ru];
-
-    fn page(self, ru: &Path) -> PathBuf {
-        let stem = ru
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        match self {
-            Lang::Ru => ru.to_path_buf(),
-            Lang::En => ru.with_file_name(format!("{stem}.en.md")),
-            Lang::ZhCn => ru.with_file_name(format!("{stem}.zh-CN.md")),
-        }
+/// Русская страница снимка модуля внутри корня репозитория `repository`.
+///
+/// Путь сверяется по каноническому расположению: относительные пути, `..` и
+/// символические ссылки разрешаются до проверки, поэтому ни ссылка на перевод,
+/// ни обход через `..` не превращают чужую страницу в русскую. Возвращается
+/// канонический путь: запись идёт в саму страницу, а не заменяет ссылку на неё.
+/// Список модулей не ограничивается: модуль — любое имя каталога.
+pub fn russian_page(repository: &Path, page: &Path) -> Result<PathBuf, String> {
+    let expected = format!(
+        "--page — русская страница снимка модуля {}/<модуль>/{PAGE_NAME} в репозитории каталога; переводы снимками не обновляются",
+        RUSSIAN_DOCS.join("/")
+    );
+    let repository = repository.canonicalize().map_err(|e| {
+        format!(
+            "{}: корень репозитория каталога не найден: {e}",
+            repository.display()
+        )
+    })?;
+    let canonical = page
+        .canonicalize()
+        .map_err(|e| format!("{}: страница не найдена: {e}; {expected}", page.display()))?;
+    let inside = canonical
+        .strip_prefix(&repository)
+        .map_err(|_| format!("{}: {expected}", page.display()))?;
+    let parts: Vec<&std::ffi::OsStr> = inside
+        .components()
+        .map(|c| match c {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(|| format!("{}: {expected}", page.display()))?;
+    let valid = matches!(
+        parts.as_slice(),
+        [docs, ru, _, name]
+            if *docs == RUSSIAN_DOCS[0] && *ru == RUSSIAN_DOCS[1] && *name == PAGE_NAME
+    );
+    if !valid || !canonical.is_file() {
+        return Err(format!("{}: {expected}", page.display()));
     }
+    Ok(canonical)
 }
 
 /// Машинная часть маркера блока: по ней блок находится и сверяется.
@@ -235,31 +258,21 @@ pub struct Recorded {
     /// Маркер результата; `None`, если эталонное окружение не определено:
     /// такой результат не может быть источником опубликованного снимка.
     meta: Option<Meta>,
-    /// Блоки для поддерживаемых страниц в порядке [`Lang::ALL`].
-    blocks: Vec<String>,
+    /// Блок, который результат даёт русской странице.
+    block: Option<String>,
     identities: BTreeMap<String, Identity>,
 }
 
 impl Recorded {
     pub fn of(scenario: &Scenario, result: &BenchmarkResult) -> Recorded {
         let meta = meta_of(scenario, result).ok();
-        let blocks = meta
+        let block = meta
             .as_ref()
-            .map(|meta| {
-                Lang::ALL
-                    .iter()
-                    .map(|lang| {
-                        render(*lang, meta, result)
-                            .trim_end_matches('\n')
-                            .to_owned()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map(|meta| render(meta, result).trim_end_matches('\n').to_owned());
         Recorded {
             fingerprint: fingerprint(result),
             meta,
-            blocks,
+            block,
             identities: workload_identities(result),
         }
     }
@@ -298,17 +311,6 @@ pub enum WorkloadBasis {
 }
 
 impl WorkloadBasis {
-    /// Порядок, в котором основание представляет план нескольких страниц:
-    /// явное подтверждение важнее доказательства, замена — добавления.
-    fn weight(self) -> u8 {
-        match self {
-            WorkloadBasis::New => 0,
-            WorkloadBasis::NoWorkload => 1,
-            WorkloadBasis::ProvenByHistory => 2,
-            WorkloadBasis::ConfirmedReplacement => 3,
-        }
-    }
-
     pub fn describe(self) -> &'static str {
         match self {
             WorkloadBasis::New => "снимка этой пары не было, сравнивать нагрузку не с чем",
@@ -323,11 +325,13 @@ impl WorkloadBasis {
     }
 }
 
-/// Что изменится на страницах.
+/// Что изменится на русской странице.
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub action: Action,
     pub workload: WorkloadBasis,
+    /// Ровно одна русская страница. Список сохраняет форму машинного вывода
+    /// `plan.pages`, на который могут опираться сценарии пользователя.
     pub pages: Vec<PageChange>,
 }
 
@@ -381,35 +385,21 @@ pub fn plan(
         identities: workload_identities(result),
         fingerprint: fingerprint(result),
     };
-    let mut pages = Vec::new();
-    let mut action = Action::Unchanged;
-    let mut workload: Option<WorkloadBasis> = None;
-    for (n, lang) in Lang::ALL.into_iter().enumerate() {
-        let path = lang.page(page);
-        let before = fs::read_to_string(&path)
-            .map_err(|e| format!("{}: страница не читается: {e}", path.display()))?;
-        let block = render(lang, &meta, result);
-        let (after, this, basis) = place(&before, n, &new, &block, options)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        // Замена на одной из страниц важнее добавления на другой, а самое
-        // слабое основание замены не скрывается более сильным.
-        if this == Action::Replaced || action == Action::Unchanged {
-            action = this;
-        }
-        if workload.is_none_or(|w| basis.weight() > w.weight()) {
-            workload = Some(basis);
-        }
-        pages.push(PageChange {
+    let path = page.to_path_buf();
+    let before = fs::read_to_string(&path)
+        .map_err(|e| format!("{}: страница не читается: {e}", path.display()))?;
+    let block = render(&meta, result);
+    let (after, action, workload) =
+        place(&before, &new, &block, options).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Plan {
+        action,
+        workload,
+        pages: vec![PageChange {
             path,
             before,
             after,
             block,
-        });
-    }
-    Ok(Plan {
-        action,
-        workload: workload.expect("русскую страницу"),
-        pages,
+        }],
     })
 }
 
@@ -422,7 +412,6 @@ struct Published<'a> {
 
 fn place(
     text: &str,
-    lang: usize,
     new: &Published,
     block: &str,
     options: &Options,
@@ -473,7 +462,7 @@ fn place(
                 .join("\n");
             // Совпавший текст блока тождества нагрузки не доказывает: её
             // идентичностей в блоке нет, поэтому проверка та же, что при замене.
-            let basis = workload_basis(&old.meta, &current, lang, new, options)?;
+            let basis = workload_basis(&old.meta, &current, new, options)?;
             if current == block.trim_end_matches('\n') {
                 return Ok((text.to_owned(), Action::Unchanged, basis));
             }
@@ -517,7 +506,6 @@ fn place(
 fn workload_basis(
     old: &Meta,
     current: &str,
-    lang: usize,
     new: &Published,
     options: &Options,
 ) -> Result<WorkloadBasis, String> {
@@ -556,7 +544,7 @@ fn workload_basis(
         .iter()
         .filter(|r| r.meta.as_ref() == Some(old))
         .collect();
-    let gives_block = |r: &&&Recorded| r.blocks.get(lang).map(String::as_str) == Some(current);
+    let gives_block = |r: &&&Recorded| r.block.as_deref() == Some(current);
     let itself = marked
         .iter()
         .any(|r| r.fingerprint == new.fingerprint && gives_block(&r));
@@ -622,34 +610,22 @@ fn describe(environment: &BTreeMap<String, String>) -> String {
         .join(", ")
 }
 
-/// Git blob SHA-1 содержимого для анализа и тестирования экспортов.
-pub fn git_blob_sha(bytes: &[u8]) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
-    hasher.update(bytes);
-    crate::archive::hex(&hasher.finalize())
-}
-
-/// Шаг записи страниц: точка внедрения отказа в проверках. Номер — позиция
-/// страницы в плане (0 — русская).
+/// Шаг записи русской страницы: точка внедрения отказа в проверках.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     /// Запись временной копии новой страницы.
-    Prepare(usize),
+    Prepare,
     /// Замена страницы временной копией.
-    Commit(usize),
-    /// Возврат уже заменённой страницы к прежнему тексту после отказа.
-    Restore(usize),
+    Commit,
 }
 
 /// Записать русскую страницу; переводы не изменяются.
-/// подтверждён для прежнего русского текста: тогда изменение — тот же
-/// сгенерированный блок на всех языках, и синхронность сохраняется.
 ///
 /// Гарантия согласованности: страница готовится во временном файле и
-/// заменяется атомарным переименованием; после ошибки подготовки прежний
-/// документ остаётся без изменений. Конкурентную правку документа не перезаписываем.
-pub fn apply(plan: &Plan) -> Result<Vec<String>, String> {
+/// заменяется атомарным переименованием; после ошибки подготовки или замены
+/// прежний документ остаётся без изменений. Страницу, изменённую после
+/// подготовки плана, не перезаписываем.
+pub fn apply(plan: &Plan) -> Result<(), String> {
     apply_with(plan, &mut |_| Ok(()))
 }
 
@@ -657,32 +633,31 @@ pub fn apply(plan: &Plan) -> Result<Vec<String>, String> {
 pub fn apply_with(
     plan: &Plan,
     fault: &mut dyn FnMut(Step) -> std::io::Result<()>,
-) -> Result<Vec<String>, String> {
-    let mut changes: Vec<(usize, &PageChange, String)> = Vec::new();
-    for (n, page) in plan.pages.iter().enumerate() {
-        if page.after != page.before {
-            changes.push((n, page, page.after.clone()));
-        }
-    }
-    // Страница, изменённая после подготовки плана, не перезаписывается.
-    for (_, page, _) in &changes {
-        let current = fs::read_to_string(&page.path).map_err(|e| {
-            format!(
-                "{}: страница не читается: {e}; страницы не изменены",
-                page.path.display()
-            )
-        })?;
-        if current != page.before {
-            return Err(format!(
-                "{}: страница изменилась после подготовки снимка; страницы не изменены, повторите snapshot",
-                page.path.display()
-            ));
-        }
-    }
-    let tmp = |page: &PageChange| {
-        page.path
-            .with_extension(format!("md.{}.snapshot.tmp", std::process::id()))
+) -> Result<(), String> {
+    let [page] = plan.pages.as_slice() else {
+        return Err(format!(
+            "план снимка должен содержать одну русскую страницу, а содержит {}; страницы не изменены",
+            plan.pages.len()
+        ));
     };
+    if page.after == page.before {
+        return Ok(());
+    }
+    let current = fs::read_to_string(&page.path).map_err(|e| {
+        format!(
+            "{}: страница не читается: {e}; страница не изменена",
+            page.path.display()
+        )
+    })?;
+    if current != page.before {
+        return Err(format!(
+            "{}: страница изменилась после подготовки снимка; страница не изменена, повторите snapshot",
+            page.path.display()
+        ));
+    }
+    let tmp = page
+        .path
+        .with_extension(format!("md.{}.snapshot.tmp", std::process::id()));
     let write = |path: &Path, text: &str| -> std::io::Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -692,66 +667,22 @@ pub fn apply_with(
         file.write_all(text.as_bytes())?;
         file.sync_all()
     };
-    let mut prepared = Vec::new();
-    for (n, page, text) in &changes {
-        let path = tmp(page);
-        if let Err(e) = fault(Step::Prepare(*n)).and_then(|()| write(&path, text)) {
-            let _ = fs::remove_file(&path);
-            for done in &prepared {
-                let _ = fs::remove_file(done);
-            }
-            return Err(format!("{}: {e}; страницы не изменены", path.display()));
-        }
-        prepared.push(path);
-    }
-    for (k, (n, page, _)) in changes.iter().enumerate() {
-        let renamed = fault(Step::Commit(*n)).and_then(|()| fs::rename(&prepared[k], &page.path));
-        let Err(error) = renamed else { continue };
-        for left in &prepared[k..] {
-            let _ = fs::remove_file(left);
-        }
-        let mut restored = Vec::new();
-        let mut stuck = Vec::new();
-        for (n, page, _) in changes[..k].iter().rev() {
-            let back = tmp(page);
-            let undone = fault(Step::Restore(*n))
-                .and_then(|()| write(&back, &page.before))
-                .and_then(|()| fs::rename(&back, &page.path));
-            match undone {
-                Ok(()) => restored.push(page.path.display().to_string()),
-                Err(e) => {
-                    let _ = fs::remove_file(&back);
-                    stuck.push(format!("{} ({e})", page.path.display()));
-                }
-            }
-        }
-        if stuck.is_empty() {
-            return Err(format!(
-                "{}: {error}; страницы не изменены{}",
-                page.path.display(),
-                if restored.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (возвращены к прежнему тексту: {})", restored.join(", "))
-                }
-            ));
-        }
-        let untouched: Vec<String> = changes[k..]
-            .iter()
-            .map(|(_, p, _)| p.path.display().to_string())
-            .collect();
+    let replaced = fault(Step::Prepare)
+        .and_then(|()| write(&tmp, &page.after))
+        .and_then(|()| fault(Step::Commit))
+        .and_then(|()| fs::rename(&tmp, &page.path));
+    if let Err(e) = replaced {
+        let _ = fs::remove_file(&tmp);
         return Err(format!(
-            "{}: {error}; страницы рассогласованы: обновлены и не возвращены {}, не обновлены {}; восстановите их из Git и повторите snapshot",
-            page.path.display(),
-            stuck.join(", "),
-            untouched.join(", ")
+            "{}: {e}; страница не изменена",
+            page.path.display()
         ));
     }
-    Ok(Vec::new())
+    Ok(())
 }
 
 struct Labels {
-    /// Разделитель «подпись: текст» и конец предложения по нормам языка.
+    /// Разделитель «подпись: текст» и конец предложения.
     colon: &'static str,
     stop: &'static str,
     heading: &'static str,
@@ -774,78 +705,29 @@ struct Labels {
     cores: fn(f64) -> &'static str,
 }
 
-fn labels(lang: Lang) -> Labels {
-    match lang {
-        Lang::Ru => Labels {
-            colon: ": ",
-            stop: ".",
-            heading: "профиль",
-            confirmed: "Последнее подтверждённое измерение",
-            outcome: |ok, all, warmup| {
-                format!("итог `success`: успешных прогонов {ok} из {all}, прогревов {warmup}")
-            },
-            dirty: "измерена рабочая копия с изменениями",
-            environment: "Факт окружения",
-            value: "Значение",
-            workload: "Нагрузка",
-            parameter: "параметр",
-            no_workload: "Сценарий не объявляет входов.",
-            metric: "Метрика",
-            scope: "Scope / источник",
-            mean: "Среднее ± σ",
-            median: "Медиана",
-            range: "Мин–макс",
-            not_measured: "Не измерено",
-            reference: "Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.",
-            cores: format::cores_ru,
+fn labels() -> Labels {
+    Labels {
+        colon: ": ",
+        stop: ".",
+        heading: "профиль",
+        confirmed: "Последнее подтверждённое измерение",
+        outcome: |ok, all, warmup| {
+            format!("итог `success`: успешных прогонов {ok} из {all}, прогревов {warmup}")
         },
-        Lang::En => Labels {
-            colon: ": ",
-            stop: ".",
-            heading: "profile",
-            confirmed: "Last confirmed measurement",
-            outcome: |ok, all, warmup| {
-                let unit = if warmup == 1 { "run" } else { "runs" };
-                format!("outcome `success`: {ok} of {all} runs successful, {warmup} warmup {unit}")
-            },
-            dirty: "a working copy with changes was measured",
-            environment: "Environment fact",
-            value: "Value",
-            workload: "Workload",
-            parameter: "parameter",
-            no_workload: "The scenario declares no inputs.",
-            metric: "Metric",
-            scope: "Scope / source",
-            mean: "Mean ± σ",
-            median: "Median",
-            range: "Min–max",
-            not_measured: "Not measured",
-            reference: "The reference environment is defined by hardware and platform facts and by the scenario's comparability facts; on update, a snapshot from another environment or other hardware never silently replaces this one. The values are an observation of this environment, not a norm for other systems and not a CI threshold.",
-            cores: |value| if value == 1.0 { "core" } else { "cores" },
-        },
-        Lang::ZhCn => Labels {
-            colon: "：",
-            stop: "。",
-            heading: "配置",
-            confirmed: "最近一次确认的测量",
-            outcome: |ok, all, warmup| {
-                format!("结果 `success`：{all} 次运行中 {ok} 次成功，预热 {warmup} 次")
-            },
-            dirty: "测量的是含未提交修改的工作副本",
-            environment: "环境事实",
-            value: "值",
-            workload: "负载",
-            parameter: "参数",
-            no_workload: "该场景未声明输入。",
-            metric: "指标",
-            scope: "范围 / 来源",
-            mean: "均值 ± σ",
-            median: "中位数",
-            range: "最小–最大",
-            not_measured: "未测量",
-            reference: "参考环境由硬件与平台事实以及场景的可比性事实确定；更新时，来自其他环境或其他硬件的快照不会静默替换本快照。这些数值是该环境的观测结果，不是对其他系统的标准，也不是 CI 阈值。",
-            cores: |_| "核",
-        },
+        dirty: "измерена рабочая копия с изменениями",
+        environment: "Факт окружения",
+        value: "Значение",
+        workload: "Нагрузка",
+        parameter: "параметр",
+        no_workload: "Сценарий не объявляет входов.",
+        metric: "Метрика",
+        scope: "Scope / источник",
+        mean: "Среднее ± σ",
+        median: "Медиана",
+        range: "Мин–макс",
+        not_measured: "Не измерено",
+        reference: "Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.",
+        cores: format::cores_ru,
     }
 }
 
@@ -931,8 +813,8 @@ fn markdown_text(text: &str) -> String {
     out
 }
 
-pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
-    let l = labels(lang);
+pub fn render(meta: &Meta, result: &BenchmarkResult) -> String {
+    let l = labels();
     let show = |value: f64, unit| format::quantity_in(value, unit, l.cores);
     let mut out = String::new();
     let _ = writeln!(out, "{}", marker(meta));
@@ -1062,7 +944,7 @@ pub fn render(lang: Lang, meta: &Meta, result: &BenchmarkResult) -> String {
                 metric
                     .reason
                     .as_deref()
-                    .map(|r| format!(": {}", markdown_text(&reason::localize(r, lang))))
+                    .map(|r| format!(": {}", markdown_text(r)))
                     .unwrap_or_default()
             )),
         }
@@ -1126,14 +1008,5 @@ mod tests {
         assert!(!marker(&plain).contains("parameters"));
         let parsed = blocks(&format!("{text}\nbody\n{END}\n")).unwrap();
         assert_eq!(parsed[0].meta, meta);
-    }
-
-    #[test]
-    fn git_blob_sha_matches_git() {
-        // `printf 'hello\n' | git hash-object --stdin`
-        assert_eq!(
-            git_blob_sha(b"hello\n"),
-            "ce013625030ba8dba906f756967f9e9ca394464a"
-        );
     }
 }

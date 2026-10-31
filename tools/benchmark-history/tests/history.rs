@@ -202,7 +202,13 @@ impl Fixture {
     }
 
     fn cli(&self, args: &[&str]) -> (i32, String, String) {
+        self.cli_in(&std::env::current_dir().unwrap(), args)
+    }
+
+    /// CLI из каталога `dir`: относительные аргументы разрешаются от него.
+    fn cli_in(&self, dir: &Path, args: &[&str]) -> (i32, String, String) {
         let output = isolated(BIN)
+            .current_dir(dir)
             .arg("--catalog")
             .arg(self.catalog_dir())
             .args(args)
@@ -1375,29 +1381,18 @@ fn newer_same_workload(base: &BenchmarkResult) -> BenchmarkResult {
     next
 }
 
-const PAGE_RU: &str = "# Производительность: `fixture`\n\n**Русский** · [English](fixture.en.md) · [简体中文](fixture.zh-CN.md)\n\n## Снимки\n\n<!-- benchmark-snapshot:anchor -->\n\n## Методика\n\nТекст.\n";
+const PAGE_RU: &str = "# Производительность: `fixture`\n\n## Снимки\n\n<!-- benchmark-snapshot:anchor -->\n\n## Методика\n\nТекст.\n";
 
-fn page(lang: &str, _ru_sha: &str) -> String {
-    let nav = match lang {
-        "en" => "[Русский](fixture.md) · **English** · [简体中文](fixture.zh-CN.md)",
-        _ => "[Русский](fixture.md) · [English](fixture.en.md) · **简体中文**",
-    };
-    format!(
-        "# Performance: `fixture`\n\n{nav}\n\n## Snapshots\n\n<!-- benchmark-snapshot:anchor -->\n\n## Method\n\nText.\n"
-    )
-}
+/// Необязательный перевод страницы с тем же якорем: снимок его не трогает.
+const PAGE_TRANSLATED: &str = "# Performance: `fixture`\n\n## Snapshots\n\n<!-- benchmark-snapshot:anchor -->\n\n## Method\n\nText.\n";
 
 #[test]
 fn snapshots_update_one_pair_and_guard_reference_environment() {
     let f = fixture();
     let catalog = f.catalog();
     let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
-    let docs = f.root.join("workspace/docs");
-    let ru = docs.join("fixture.md");
-    fs::write(&ru, PAGE_RU).unwrap();
-    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
-    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
-    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
+    let pages = snapshot_pages(&f, "fixture");
+    let ru = pages[0].clone();
 
     let first = result(&Spec::default());
     let newer = result(&Spec {
@@ -1428,12 +1423,8 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
         "идентичность входа не попадает в документацию"
     );
     // Необязательные переводы остаются без изменений после публикации снимка.
-    for lang in ["en", "zh-CN"] {
-        let translated = fs::read_to_string(docs.join(format!("fixture.{lang}.md"))).unwrap();
-        assert!(
-            !translated.contains("benchmark-snapshot: {"),
-            "{lang}: {translated}"
-        );
+    for translated in &pages[1..] {
+        assert_eq!(fs::read_to_string(translated).unwrap(), PAGE_TRANSLATED);
     }
 
     // Повтор того же результата ничего не меняет, но сам результат своего
@@ -1526,10 +1517,6 @@ fn snapshots_update_one_pair_and_guard_reference_environment() {
         snapshot::Action::Replaced
     );
     // Маркер без записанной нагрузки читается, но не сверяется.
-    let pages: Vec<PathBuf> = ["fixture.md", "fixture.en.md", "fixture.zh-CN.md"]
-        .iter()
-        .map(|name| docs.join(name))
-        .collect();
     let current: Vec<String> = pages
         .iter()
         .map(|path| fs::read_to_string(path).unwrap())
@@ -2522,12 +2509,7 @@ fn snapshot_reference_hardware_is_separate_from_comparability() {
         .environment
         .comparable
         .retain(|name| name != "cpu_model");
-    let docs = f.root.join("workspace/docs");
-    let ru = docs.join("fixture.md");
-    fs::write(&ru, PAGE_RU).unwrap();
-    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
-    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
-    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
+    let ru = snapshot_pages(&f, "fixture").remove(0);
     let first = result(&Spec::default());
     let options = Options {
         history: vec![snapshot::Recorded::of(&scenario, &first)],
@@ -2628,16 +2610,8 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
     let f = fixture();
     let catalog = f.catalog();
     let scenario = &catalog.scenario("fixture.cli").unwrap().scenario;
-    let docs = f.root.join("workspace/docs");
-    let ru = docs.join("fixture.md");
-    fs::write(&ru, PAGE_RU).unwrap();
-    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
-    fs::write(docs.join("fixture.en.md"), page("en", &sha)).unwrap();
-    fs::write(docs.join("fixture.zh-CN.md"), page("zh", &sha)).unwrap();
-    let pages: Vec<PathBuf> = ["fixture.md", "fixture.en.md", "fixture.zh-CN.md"]
-        .iter()
-        .map(|name| docs.join(name))
-        .collect();
+    let pages = snapshot_pages(&f, "fixture");
+    let ru = pages[0].clone();
     let read_all = || -> Vec<String> {
         pages
             .iter()
@@ -2725,14 +2699,11 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
             snapshot::WorkloadBasis::ProvenByHistory
         )
     );
-    // Явное подтверждение смены: видно в плане и обновляет все три языка.
+    // Явное подтверждение смены видно в плане и обновляет только русскую страницу.
     let confirmed = Options {
         replace_workload: true,
         ..with_history.clone()
     };
-    // Блока нет только на последней странице: её добавление не скрывает
-    // замену и её основание на остальных.
-    fs::write(&pages[2], page("zh", &sha)).unwrap();
     let plan = snapshot::plan(&ru, scenario, &changed, &confirmed).unwrap();
     assert_eq!(
         (plan.action, plan.workload),
@@ -2741,9 +2712,6 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
             snapshot::WorkloadBasis::ConfirmedReplacement
         )
     );
-    fs::write(&pages[2], &published[2]).unwrap();
-    let plan = snapshot::plan(&ru, scenario, &changed, &confirmed).unwrap();
-    assert_eq!(plan.workload, snapshot::WorkloadBasis::ConfirmedReplacement);
     snapshot::apply(&plan).unwrap();
     let updated = read_all();
     assert!(updated[0].contains("2026-10-04"));
@@ -2802,18 +2770,26 @@ fn snapshot_requires_proven_workload_identity_not_equal_size() {
     assert_eq!(read_all(), published, "без --apply ничего не записано");
 }
 
-/// Страницы снимка модуля `stem` на трёх языках с якорем: RU, EN, zh-CN.
-fn snapshot_pages(f: &Fixture, stem: &str) -> Vec<PathBuf> {
+/// Страница снимка модуля `module` в фактической раскладке документации:
+/// русская `docs/ru/<модуль>/performance.md` и необязательные переводы
+/// `docs/en/…` и `docs/zh-CN/…` с тем же якорем. Первой идёт русская.
+fn snapshot_pages(f: &Fixture, module: &str) -> Vec<PathBuf> {
     let docs = f.root.join("workspace/docs");
-    let sha = snapshot::git_blob_sha(PAGE_RU.as_bytes());
-    let pages: Vec<PathBuf> = ["md", "en.md", "zh-CN.md"]
+    ["ru", "en", "zh-CN"]
         .iter()
-        .map(|ext| docs.join(format!("{stem}.{ext}")))
-        .collect();
-    fs::write(&pages[0], PAGE_RU).unwrap();
-    fs::write(&pages[1], page("en", &sha)).unwrap();
-    fs::write(&pages[2], page("zh", &sha)).unwrap();
-    pages
+        .map(|lang| {
+            let dir = docs.join(lang).join(module);
+            fs::create_dir_all(&dir).unwrap();
+            let page = dir.join("performance.md");
+            let text = if *lang == "ru" {
+                PAGE_RU
+            } else {
+                PAGE_TRANSLATED
+            };
+            fs::write(&page, text).unwrap();
+            page
+        })
+        .collect()
 }
 
 #[test]
@@ -3134,7 +3110,7 @@ fn snapshot_russian_page_is_safe_on_failure_and_stale_write() {
     fs::write(ru, &original).unwrap();
     let options = Options::default();
     let plan = snapshot::plan(ru, scenario, &result(&Spec::default()), &options).unwrap();
-    for fail in [snapshot::Step::Prepare(0), snapshot::Step::Commit(0)] {
+    for fail in [snapshot::Step::Prepare, snapshot::Step::Commit] {
         let err = snapshot::apply_with(&plan, &mut |step| {
             if step == fail {
                 Err(std::io::Error::other("внедрённый отказ"))
@@ -3143,8 +3119,14 @@ fn snapshot_russian_page_is_safe_on_failure_and_stale_write() {
             }
         })
         .unwrap_err();
-        assert!(err.contains("страницы не изменены"), "{err}");
+        assert!(err.contains("страница не изменена"), "{err}");
         assert_eq!(fs::read_to_string(ru).unwrap(), original);
+        let leftovers: Vec<_> = fs::read_dir(ru.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "performance.md")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
     fs::write(ru, format!("{original}\nизменена")).unwrap();
     assert!(
@@ -3310,27 +3292,100 @@ fn snapshot_materializes_optional_default_comparability_parameter() {
 #[test]
 fn snapshot_cli_publishes_only_russian_documentation() {
     let f = fixture();
-    let dir = f.root.join("workspace/docs/ru/fixture");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("performance.md"), PAGE_RU).unwrap();
+    let pages = snapshot_pages(&f, "модуль-ё");
+    let workspace = f.root.join("workspace");
     let mut store = f.open();
     let id = f.import(&mut store, &result(&Spec::default()));
     drop(store);
+    let read_all = || -> Vec<String> {
+        pages
+            .iter()
+            .map(|path| fs::read_to_string(path).unwrap())
+            .collect()
+    };
+    let before = read_all();
+
+    // Недопустимые страницы отклоняются до подготовки плана: ни одна не меняется.
+    let legacy = workspace.join("tools/fixture/performance.md");
+    let stray = workspace.join("docs/notes.md");
+    let nested = workspace.join("docs/ru/fixture/extra/performance.md");
+    let named = workspace.join("docs/ru/fixture/README.md");
+    let outside = f.root.join("docs/ru/fixture/performance.md");
+    for path in [&legacy, &stray, &nested, &named, &outside] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, PAGE_RU).unwrap();
+    }
+    let traversal = workspace.join("docs/ru/модуль-ё/../../en/модуль-ё/performance.md");
+    let mut refused: Vec<PathBuf> = vec![
+        pages[1].clone(),
+        pages[2].clone(),
+        legacy.clone(),
+        stray.clone(),
+        nested.clone(),
+        named.clone(),
+        outside.clone(),
+        traversal,
+        workspace.join("docs/ru/missing/performance.md"),
+    ];
+    #[cfg(unix)]
+    {
+        // Ссылка с русским именем на перевод остаётся переводом.
+        let alias = workspace.join("docs/ru/alias");
+        fs::create_dir_all(&alias).unwrap();
+        std::os::unix::fs::symlink(&pages[1], alias.join("performance.md")).unwrap();
+        refused.push(alias.join("performance.md"));
+    }
+    for path in &refused {
+        for apply in [false, true] {
+            let mut args = vec!["snapshot", &id, "--page", path.to_str().unwrap()];
+            if apply {
+                args.push("--apply");
+            }
+            let (code, out, err) = f.cli(&args);
+            assert_eq!(code, 2, "{}: {out}{err}", path.display());
+            assert!(
+                err.contains("docs/ru/<модуль>/performance.md"),
+                "{}: {err}",
+                path.display()
+            );
+        }
+    }
+    assert_eq!(read_all(), before, "отказы ничего не записали");
+    for path in [&legacy, &stray, &nested, &named, &outside] {
+        assert_eq!(fs::read_to_string(path).unwrap(), PAGE_RU);
+    }
+
+    // Относительный путь от корня репозитория и обход через `..`, ведущий
+    // в ту же русскую страницу, допустимы; без --apply ничего не пишется.
+    let relative = "docs/en/../ru/модуль-ё/performance.md";
+    let (code, out, err) = f.cli_in(&workspace, &["snapshot", &id, "--page", relative]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("ничего не записано"), "{out}");
+    assert_eq!(read_all(), before, "без --apply ничего не записано");
+
+    #[cfg(unix)]
+    let page_arg = {
+        // Ссылка на русскую страницу записывает саму страницу, а не заменяет ссылку.
+        let link = workspace.join("docs/link.md");
+        std::os::unix::fs::symlink(&pages[0], &link).unwrap();
+        link
+    };
+    #[cfg(not(unix))]
+    let page_arg = pages[0].clone();
     let (code, out, err) = f.cli(&[
         "snapshot",
         &id,
         "--page",
-        dir.join("performance.md").to_str().unwrap(),
+        page_arg.to_str().unwrap(),
         "--apply",
     ]);
     assert_eq!(code, 0, "{out}{err}");
-    assert!(
-        fs::read_to_string(dir.join("performance.md"))
-            .unwrap()
-            .contains("benchmark-snapshot: {")
-    );
-    assert!(!dir.join("performance.en.md").exists());
-    assert!(!dir.join("performance.zh-CN.md").exists());
+    assert!(fs::symlink_metadata(&page_arg).is_ok());
+    let after = read_all();
+    assert!(after[0].contains("benchmark-snapshot: {"), "{}", after[0]);
+    assert_eq!(&after[1..], &before[1..], "переводы не изменяются");
+    assert!(!pages[0].with_file_name("performance.en.md").exists());
+    assert!(!pages[0].with_file_name("performance.zh-CN.md").exists());
 }
 
 /// Страница в HTML по правилам GFM: таблицы, автоссылки, зачёркивание,

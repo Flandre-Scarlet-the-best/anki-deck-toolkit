@@ -16,7 +16,7 @@ and Linux system metrics. It uses this contract instead of inventing its own.
 The local result history, baseline selection and reports are kept by
 [`benchmark-history`](../benchmark-history/README.md); the repository
 holds no run history and no thresholds. Module snapshots
-(`tools/<module>/performance.md`) remain evidence of specific environments.
+(`docs/ru/<module>/performance.md`) remain evidence of specific environments.
 
 ## Where things live
 

@@ -2,7 +2,7 @@
 
 Применяется, когда фактическая `.anki-repo/create.yaml` назначает `pitch_accent`
 полю создаваемой заметки. Публичные команды и JSON принадлежат
-`tools/asset-store/README.md`; здесь задана оркестрация. При расхождении проверь
+`docs/ru/asset-store/README.md`; здесь задана оркестрация. При расхождении проверь
 `pitch-assets --help` и README владельца. Не заменяй отсутствующий API скриптом,
 который меняет манифест или самостоятельно рисует/сравнивает графики.
 
@@ -145,7 +145,7 @@ Pitch принимает только текущее автоматическо�
 (`destination_media_conflict`). Разрешай конфликт через `anki-repo migrate-media`,
 которая доказывает связь идентичности с прежним именем и семантику каждого живого
 потребителя. Порядок — [SKILL.md](../SKILL.md), раздел «Прежнее имя
-файла-потребителя»; контракт — `tools/anki-repo/README.md`.
+файла-потребителя»; контракт — `docs/ru/anki-repo/README.md`.
 Не переименовывай файл и не правь `deck.json` руками, не заканчивай набор на
 N−1 заметках и не меняй слово из-за занятого имени.
 
@@ -189,5 +189,5 @@ pitch поле остаётся пустым, ожидающие ресурсы 
 каноническое. Отчёт держи вне `decks/**` и Git. Повтор сходится к no-op.
 
 Контракт команд —
-[`tools/asset-store/README.md`](../../../../tools/asset-store/README.md) и
-[`tools/anki-repo/README.md`](../../../../tools/anki-repo/README.md).
+[`docs/ru/asset-store/README.md`](../../../../docs/ru/asset-store/README.md) и
+[`docs/ru/anki-repo/README.md`](../../../../docs/ru/anki-repo/README.md).

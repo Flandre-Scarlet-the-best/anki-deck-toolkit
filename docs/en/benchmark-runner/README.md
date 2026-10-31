@@ -11,7 +11,7 @@ is validated by `benchmark_contract::result::check` against the catalog before
 it is accepted; a result that fails validation never becomes final.
 
 The meaning of scenario fields, profiles and metrics is in the [catalog
-guide](../../docs/performance/benchmarks.en.md); the catalog and result
+guide](../performance/benchmarks.md); the catalog and result
 schemas are owned by [`benchmark-contract`](../benchmark-contract/README.md);
 general measurement rules are in the [methodology](../performance/README.md);
 measurements of the runner itself are on its [performance page](performance.md);

@@ -130,7 +130,7 @@ enum Command {
         #[arg(long, conflicts_with_all = ["baselines", "first"])]
         commit: Option<String>,
     },
-    /// Обновить снимок на странице модуля (RU, EN, zh-CN); без --apply только показать.
+    /// Обновить снимок на русской странице модуля docs/ru/<модуль>/performance.md; без --apply только показать.
     Snapshot {
         id: String,
         /// Русская страница модуля, например docs/ru/anki-repo/performance.md.
@@ -713,32 +713,14 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
             allow_dirty,
         } => {
             let catalog = require_catalog(cli)?;
+            // Путь проверяется до открытия хранилища и подготовки плана:
+            // отказ не меняет ни одного файла.
+            let page = snapshot::russian_page(&catalog.repository_root, page)
+                .map_err(|e| (Exit::Usage, e))?;
             let store = open(cli)?;
             let id = store.resolve(id).map_err(failure)?;
             let (_, result) = store.load(&id).map_err(failure)?;
             let scenario = declaration(&catalog, &result)?;
-            let name = page
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if name.ends_with(".en.md") || name.ends_with(".zh-CN.md") || !name.ends_with(".md") {
-                return Err((Exit::Usage, "--page — русская страница модуля (docs/ru/<модуль>/performance.md); переводы не обновляются автоматически".into()));
-            }
-            let absolute = std::path::absolute(page).map_err(|e| (Exit::Usage, e.to_string()))?;
-            let repository = catalog
-                .repository_root
-                .canonicalize()
-                .unwrap_or(catalog.repository_root.clone());
-            if !absolute
-                .canonicalize()
-                .unwrap_or(absolute.clone())
-                .starts_with(&repository)
-            {
-                return Err((
-                    Exit::Usage,
-                    "страница снимка должна лежать в репозитории каталога".into(),
-                ));
-            }
             // Тождество нагрузки прежнего снимка доказывается результатами
             // той же пары в локальной истории: на странице идентичностей нет.
             // Публикуемый результат snapshot сам исключает из доказательства.
@@ -757,15 +739,13 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
                 allow_dirty: *allow_dirty,
                 history,
             };
-            let plan = snapshot::plan(&absolute, scenario, &result, &options)
+            let plan = snapshot::plan(&page, scenario, &result, &options)
                 .map_err(|e| (Exit::Negative, e))?;
-            let notes = if *apply && plan.action != snapshot::Action::Unchanged {
-                snapshot::apply(&plan).map_err(|e| (Exit::Error, e))?
-            } else {
-                Vec::new()
-            };
+            if *apply && plan.action != snapshot::Action::Unchanged {
+                snapshot::apply(&plan).map_err(|e| (Exit::Error, e))?;
+            }
             if cli.json {
-                print_json(&json!({"ok": true, "applied": *apply, "plan": plan, "notes": notes}));
+                print_json(&json!({"ok": true, "applied": *apply, "plan": plan}));
             } else {
                 let action = match plan.action {
                     snapshot::Action::Added => "снимок будет добавлен",
@@ -778,14 +758,11 @@ fn run(cli: &Cli) -> Result<Exit, Failure> {
                     println!("  {}", p.path.display());
                 }
                 println!("\n{}", plan.pages[0].block);
-                for note in &notes {
-                    eprintln!("benchmark-history: {note}");
-                }
                 if plan.action != snapshot::Action::Unchanged {
                     println!(
                         "{}",
                         if *apply {
-                            "страницы записаны"
+                            "страница записана"
                         } else {
                             "ничего не записано: для записи добавьте --apply"
                         }

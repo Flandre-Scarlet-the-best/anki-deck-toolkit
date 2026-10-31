@@ -1,5 +1,5 @@
-# Сценарии E2E-стенда Anki Desktop. Контракт стенда — tools/anki-e2e/README.md,
-# журнал замеров — tools/anki-e2e/performance.md.
+# Сценарии E2E-стенда Anki Desktop. Контракт стенда — docs/ru/anki-e2e/README.md,
+# журнал замеров — docs/ru/anki-e2e/performance.md.
 schema_version = 1
 module = "anki-e2e"
 
@@ -186,7 +186,7 @@ description = "Размер target/anki-e2e/cache после прогона."
 [scenario.module_report]
 runs_dir = "target/anki-e2e/runs"
 report = "report.json"
-description = "Каждый вызов стенда создаёт новый каталог runs/<id> с report.json (контракт — tools/anki-e2e/README.md)."
+description = "Каждый вызов стенда создаёт новый каталог runs/<id> с report.json (контракт — docs/ru/anki-e2e/README.md)."
 
 [scenario.container]
 label = "io.github.anki-deck-toolkit.e2e.kind=container"
@@ -344,7 +344,7 @@ description = "Сейчас метрика не поддерживается: м
 [scenario.module_report]
 runs_dir = "target/anki-e2e/runs"
 report = "report.json"
-description = "Каждый вызов стенда создаёт новый каталог runs/<id> с report.json (контракт — tools/anki-e2e/README.md)."
+description = "Каждый вызов стенда создаёт новый каталог runs/<id> с report.json (контракт — docs/ru/anki-e2e/README.md)."
 
 [scenario.container]
 label = "io.github.anki-deck-toolkit.e2e.kind=container"

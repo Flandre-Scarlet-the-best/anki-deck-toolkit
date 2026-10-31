@@ -387,7 +387,10 @@ workspace-набор; живой Anki и пользовательский `decks
 
 - «Форматирование и Clippy» — единственный владелец проверок, не зависящих от
   данных репозитория: регрессионные тесты `.github/scripts/test_*.py`, проверка
-  метаданных и ссылок Agent Skills и локализаций; `actionlint` закреплённой
+  метаданных и ссылок Agent Skills; целостность локальных ссылок во всём
+  отслеживаемом Markdown (`check_markdown_links.py`: существующая относительная
+  ссылка ведёт в существующее место; наличие и актуальность переводов не
+  проверяются, сети и LLM нет); `actionlint` закреплённой
   версии (официальный релиз, проверенный по SHA-256) по всем workflow, включая
   выражения `${{ }}` и shellcheck скриптов `run:`; затем `cargo fmt --all --check`
   и `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`.
@@ -472,6 +475,7 @@ Python-проверки контрактов, затем канонически�
 ```bash
 python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 python3 .github/scripts/check_skill_contracts.py
+python3 .github/scripts/check_markdown_links.py
 python3 .github/scripts/check_local_data_untracked.py
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings

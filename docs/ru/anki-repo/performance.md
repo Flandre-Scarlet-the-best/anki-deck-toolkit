@@ -35,7 +35,7 @@
 cargo run -p benchmark-runner -- check anki-repo.validate --profile warm --param export_dir=/path/to/export
 cargo run -p benchmark-runner -- run anki-repo.validate --profile warm --param export_dir=/path/to/export --runs 20
 cargo run -p benchmark-history -- list --scenario anki-repo.validate
-cargo run -p benchmark-history -- snapshot <ID> --page tools/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot <ID> --page docs/ru/anki-repo/performance.md
 ```
 
 ## Снимки

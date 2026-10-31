@@ -27,10 +27,10 @@
 
 | 模块 | 页面 | 基于 JSON 结果的快照 |
 |---|---|---|
-| `anki-repo` | [anki-repo/performance.zh-CN.md](../anki-repo/performance.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
-| `asset-store` | [asset-store/performance.zh-CN.md](../asset-store/performance.md) | `asset-store.*` · `warm`（`kanji-medium`） |
+| `anki-repo` | [anki-repo/performance.md](../anki-repo/performance.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store/performance.md](../asset-store/performance.md) | `asset-store.*` · `warm`（`kanji-medium`） |
 | `anki-e2e` | [anki-e2e/performance.zh-CN.md](../anki-e2e/performance.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
-| `benchmark-runner` | [benchmark-runner/performance.zh-CN.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
+| `benchmark-runner` | [benchmark-runner/performance.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
 新模块需要俄语原文页面 `docs/ru/<模块>/performance.md`，在放置快照的位置加入
 `<!-- benchmark-snapshot:anchor -->` 一行，并在此表中增加一行。

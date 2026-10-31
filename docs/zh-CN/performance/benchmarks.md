@@ -12,7 +12,7 @@
 [`benchmark-runner`](../benchmark-runner/README.md) 执行：Hyperfine 2.0
 与 Linux 系统指标。它使用本契约，而不是另起一套。本地结果历史、基线选择和报告由
 [`benchmark-history`](../benchmark-history/README.md) 负责；仓库中没有运行历史
-和阈值。模块快照（`tools/<模块>/performance.md`）仍然是特定环境的证据。
+和阈值。模块快照（`docs/ru/<模块>/performance.md`）仍然是特定环境的证据。
 
 ## 文件位置
 
