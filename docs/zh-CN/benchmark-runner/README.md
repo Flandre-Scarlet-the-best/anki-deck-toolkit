@@ -1,18 +1,19 @@
 # 基准执行器：`benchmark-runner`
 
-[Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 926d1abd926410fce7cde1065e3db16a1b6ffc39 -->
+[Русский](../../ru/benchmark-runner/docs/ru/README.md) · [English](../../en/benchmark-runner/docs/ru/README.md) · **简体中文**
+
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/benchmark-runner/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
 
 `benchmark-runner` 是一个 Linux CLI：按 ID 和配置运行 `benchmarks/` 目录中的场景，用
 Hyperfine 2.0 测量目标，加入 Linux 系统指标（cgroup v2、`/proc`、模块的机器可读报告、
 文件系统），并以 `benchmark-contract` 格式写出结果。结果在被接受之前由
 `benchmark_contract::result::check` 对照目录校验；未通过校验的结果不会成为最终结果。
 
-场景字段、配置和指标的含义见[目录指南](../../docs/performance/benchmarks.zh-CN.md)；
-目录和结果的模式归 [`benchmark-contract`](../benchmark-contract/README.zh-CN.md) 所有；
-通用测量规则见[测量方法](../../docs/performance/README.zh-CN.md)；执行器自身的测量见其
-[性能页面](performance.zh-CN.md)；本地结果历史见
-[`benchmark-history`](../benchmark-history/README.zh-CN.md)。
+场景字段、配置和指标的含义见[目录指南](../performance/benchmarks.md)；
+目录和结果的模式归 [`benchmark-contract`](../benchmark-contract/docs/ru/README.md) 所有；
+通用测量规则见[测量方法](../performance/docs/ru/README.md)；执行器自身的测量见其
+[性能页面](performance.md)；本地结果历史见
+[`benchmark-history`](../benchmark-history/docs/ru/README.md)。
 
 执行器不修改用户导出和 Anki 配置文件，不读取 `decks/input/`，不调用 `sudo`，不清理
 Docker 缓存（`docker system prune` 之类），自身不向网络发送数据。它把已接收的结果交给
@@ -73,7 +74,7 @@ cargo run -p benchmark-runner -- --json run anki-e2e.smoke --profile warm --runs
 ## 本地历史
 
 写出已接收的结果后，`run` 用同一契约和目录将其交给本地
-[`benchmark-history`](../benchmark-history/README.zh-CN.md) 历史，无需重新测量：
+[`benchmark-history`](../benchmark-history/docs/ru/README.md) 历史，无需重新测量：
 `BENCHMARK_HISTORY_DIR`，否则为用户的 XDG 数据目录。位于工作副本内的存储会被拒绝。摘要的
 `history` 字段：`status` —— `archived`、`already-archived`、`disabled`（`--no-history`）、
 `failed`（带 `reason`）或 `not-recorded`（没有已接收的结果），以及记录 `id`。若存储被另一个 `benchmark-history` 命令占用，执行器最多等待 10 秒，之后保存为 `failed`。历史失败不会删除
@@ -194,7 +195,7 @@ systemd scope 会立即被删除。对这类场景，Hyperfine 的 CPU 时间只
 ### 采样器的影响
 
 只在测量运行期间按 `sample_interval` 轮询 `/proc` 和 cgroup。对目标时间影响的测量见
-[执行器页面](performance.zh-CN.md)；`--no-sampling` 完全
+[执行器页面](performance.md)；`--no-sampling` 完全
 关闭轮询。
 
 ## 发布的内容
@@ -252,6 +253,6 @@ Docker，离线配置需要 util-linux 中的 `unshare`。
 `io_read_bytes`、`io_write_bytes`、`io_read_operations` 和 `io_write_operations`
 来自自有委派 cgroup 或已发现容器的 `io.stat`。未委派或未能启用的 `io` 不影响 CPU/RAM：启用通过 `cgroup.subtree_control` 验证，拒绝时为带原因的 `unsupported`。
 覆盖范围、单位、writeback 归属、多层/虚拟设备限制和声明修订见
-[指标契约](../../docs/performance/benchmarks.zh-CN.md#块-io)。
+[指标契约](../performance/benchmarks.md#块-io)。
 `benchmark-runner.calibration-io` 执行包含 `fsync` 的受控文件循环，仅请求驱逐自身干净页面。
 已有文件不会被覆盖；强制终止进程可能留下文件，下一次运行会拒绝，直至所有者显式清理。

@@ -1,7 +1,8 @@
 # Benchmark runner: `benchmark-runner`
 
-[Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 926d1abd926410fce7cde1065e3db16a1b6ffc39 -->
+[Русский](../../ru/benchmark-runner/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/benchmark-runner/docs/ru/README.md)
+
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/benchmark-runner/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
 
 `benchmark-runner` is a Linux CLI that runs scenarios of the `benchmarks/`
 catalog by ID and profile, measures the target with Hyperfine 2.0, adds Linux
@@ -11,11 +12,11 @@ is validated by `benchmark_contract::result::check` against the catalog before
 it is accepted; a result that fails validation never becomes final.
 
 The meaning of scenario fields, profiles and metrics is in the [catalog
-guide](../../docs/performance/benchmarks.en.md); the catalog and result
-schemas are owned by [`benchmark-contract`](../benchmark-contract/README.en.md);
-general measurement rules are in the [methodology](../../docs/performance/README.en.md);
-measurements of the runner itself are on its [performance page](performance.en.md);
-the local result history is [`benchmark-history`](../benchmark-history/README.en.md).
+guide](../../docs/en/performance/benchmarks.md); the catalog and result
+schemas are owned by [`benchmark-contract`](../benchmark-contract/docs/ru/README.md);
+general measurement rules are in the [methodology](../performance/docs/ru/README.md);
+measurements of the runner itself are on its [performance page](performance.md);
+the local result history is [`benchmark-history`](../benchmark-history/docs/ru/README.md).
 
 The runner does not change user exports or Anki profiles, does not read
 `decks/input/`, does not call `sudo`, does not prune Docker caches
@@ -79,7 +80,7 @@ summary is stored as `summary.json` in the artifacts directory.
 ## Local history
 
 After writing an accepted result, `run` hands it to the local
-[`benchmark-history`](../benchmark-history/README.en.md) history with the same
+[`benchmark-history`](../benchmark-history/docs/ru/README.md) history with the same
 contract and catalog, without measuring again: `BENCHMARK_HISTORY_DIR`, otherwise
 the user's XDG data directory. A store inside the working copy is refused. The
 `history` field of the summary: `status` — `archived`, `already-archived`,
@@ -244,7 +245,7 @@ namespaces the outcome is also `unsupported`.
 
 `/proc` and cgroup are polled only during a measured run, once per
 `sample_interval`. Measurements of the impact on target time are in the
-[runner page](performance.en.md); `--no-sampling`
+[runner page](performance.md); `--no-sampling`
 turns polling off completely.
 
 ## What is published
@@ -318,7 +319,7 @@ come from `io.stat` of an own delegated cgroup or a discovered container.
 Missing or refused `io` leaves CPU/RAM available: enabling is verified through
 `cgroup.subtree_control`, and a refusal is `unsupported` with its reason. Scope, units, writeback attribution,
 stacked/virtual-device limits and declaration revisions are defined by the
-[metric contract](../../docs/performance/benchmarks.en.md#block-io).
+[metric contract](../performance/benchmarks.md#block-io).
 `benchmark-runner.calibration-io` performs a controlled file cycle with `fsync`
 and eviction advice for its own clean pages only. Existing files are never overwritten;
 forced process termination may leave the file behind, causing the next run to fail

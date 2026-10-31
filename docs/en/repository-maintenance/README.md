@@ -1,8 +1,9 @@
 # Disk Cleanup and Maintenance
 
-[Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
+[Русский](../../ru/repository-maintenance/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/repository-maintenance/docs/ru/README.md)
 
-<!-- i18n-source-git-blob: 2630521deeff475a4b9958ebae7ebbc40e95ebd7 -->
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/repository-maintenance/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
+
 
 `repository-maintenance` is a separate Cargo package for monitoring local artifacts and safely cleaning up reproducible data. It is independent of `anki-repo`: it does not work with CrowdAnki exports and instead manages the lifecycle of disk usage.
 
@@ -35,7 +36,7 @@ This utility does not change Cargo profiles. One-off builds remain confined to `
 
 ## Policy
 
-The only tracked source of default values is [`policy.toml`](policy.toml):
+The only tracked source of default values is [`policy.toml`](../../../tools/repository-maintenance/policy.toml):
 
 | Item | Value | Action |
 |---|---:|---|

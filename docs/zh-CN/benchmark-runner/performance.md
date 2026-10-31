@@ -1,11 +1,12 @@
 # 性能：`benchmark-runner`
 
-[Русский](performance.md) · [English](performance.en.md) · **简体中文**
-<!-- i18n-source-git-blob: fc16f0f09f5e44949116c4fb07d8bef34ece20e2 -->
+[Русский](../../ru/benchmark-runner/performance.md) · [English](../../en/benchmark-runner/performance.md) · **简体中文**
 
-基准执行器自身的测量（[接口与语义](README.zh-CN.md)）：它对已知开销的
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/benchmark-runner/performance.md)为准。欢迎提交翻译和校对改进。
+
+基准执行器自身的测量（[接口与语义](docs/ru/README.md)）：它对已知开销的
 负载测得有多准确、每个指标究竟包含什么，以及轮询 `/proc` 和运行自有 cgroup 的代价。通用测量规则见
-[方法论](../../docs/performance/README.zh-CN.md)。
+[方法论](../performance/docs/ru/README.md)。
 
 ## 测量内容
 
@@ -303,4 +304,4 @@ cargo run -p benchmark-history -- list --module benchmark-runner
 执行器本身仍以普通用户运行。共享控制器设置与缓存未改变。
 本环境的标准用户 scope 未委派 `io`：单独系列保留带原因的 `unsupported`，而非零值。
 这证明 WSL2 内 Linux 内核的记账，不是虚拟磁盘后面的物理介质测量。
-语义及归属限制见[指标契约](../../docs/performance/benchmarks.zh-CN.md#块-io)。
+语义及归属限制见[指标契约](../performance/benchmarks.md#块-io)。

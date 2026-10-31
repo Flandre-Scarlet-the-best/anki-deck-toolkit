@@ -1,18 +1,19 @@
 # 本地基准历史：`benchmark-history`
 
-[Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: cca7043f7d6d97e0937c68b137b061e7c979c1cc -->
+[Русский](../../ru/benchmark-history/docs/ru/README.md) · [English](../../en/benchmark-history/docs/ru/README.md) · **简体中文**
+
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/benchmark-history/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
 
 `benchmark-history` 为每个用户保存其自己的已验证基准结果历史，在其中查找比较基线，
 对比“之前”与“之后”，生成以 `## Производительность`（性能）为标题的完整报告供 Gist 和 PR 摘要使用，以及
 `tools/<模块>/performance.md` 模块性能页面和其翻译的快照。它不做任何测量：
-系列由 [`benchmark-runner`](../benchmark-runner/README.zh-CN.md) 执行，结果模型、校验和
-可比性规则属于 [`benchmark-contract`](../benchmark-contract/README.zh-CN.md)。这里没有第二种
+系列由 [`benchmark-runner`](../benchmark-runner/docs/ru/README.md) 执行，结果模型、校验和
+可比性规则属于 [`benchmark-contract`](../benchmark-contract/docs/ru/README.md)。这里没有第二种
 结果格式，也没有第二个测量引擎。
 
 它完全在本地工作：不联网、不需要 GitHub 令牌、没有服务器也没有共享数据库。一个克隆的
 历史不会与他人的同步，任何测量都不会被自动发布：通过常规的
-[`anki-git-workflow`](../../.agents/skills/anki-git-workflow/SKILL.md) 流程将完整报告保存到 Gist、将简洁摘要放到 PR 中，
+[`anki-git-workflow`](../../../.agents/skills/anki-git-workflow/SKILL.md) 流程将完整报告保存到 Gist、将简洁摘要放到 PR 中，
 文档快照只在显式 `--apply` 时写入。
 
 ## 历史存放位置
@@ -73,7 +74,7 @@ cargo run -p benchmark-history -- show 1a2b3c4d
 cargo run -p benchmark-history -- baseline 1a2b3c4d
 cargo run -p benchmark-history -- compare 5e6f7a8b 1a2b3c4d
 cargo run -p benchmark-history -- report 1a2b3c4d
-cargo run -p benchmark-history -- snapshot 1a2b3c4d --page tools/anki-repo/performance.md
+cargo run -p benchmark-history -- snapshot 1a2b3c4d --page docs/ru/anki-repo/performance.md
 cargo run -p benchmark-history -- verify
 cargo run -p benchmark-history -- backup /path/to/backup
 cargo run -p benchmark-history -- restore /path/to/backup
@@ -160,7 +161,7 @@ ID 可以完整给出，也可以给出不少于六个字符的前缀。全局�
 «Вывод»、«Ограничения» 和 «Источники»（完整的记录 ID）。没有基线时，章节区分新功能（`--first`：
 不存在“之前”）与缺少可用基线。`failure` 或 `unsupported` 结果给出 `Статус: не измерено`，附带原因、
 诊断以及 «Доказательство производительности: отсутствует» 一行。完整报告输出到 stdout，原样保存为 Gist 文件，并在 manifest 中记录哈希。
-PR 正文按照 [`pr-body.md`](../../.agents/skills/anki-git-workflow/references/pr-body.md)
+PR 正文按照 [`pr-body.md`](../../../.agents/skills/anki-git-workflow/references/pr-body.md)
 保留场景、测量的基线与候选、关键数值、结论及所有显著回退的简洁摘要；完整表格留在 Gist。
 工具本身从不写入 GitHub。
 

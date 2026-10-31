@@ -1,13 +1,14 @@
 # Performance: `benchmark-runner`
 
-[Русский](performance.md) · **English** · [简体中文](performance.zh-CN.md)
-<!-- i18n-source-git-blob: fc16f0f09f5e44949116c4fb07d8bef34ece20e2 -->
+[Русский](../../ru/benchmark-runner/performance.md) · **English** · [简体中文](../../zh-CN/benchmark-runner/performance.md)
+
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/benchmark-runner/performance.md) is authoritative. Corrections and translation contributions are welcome.
 
 Measurements of the benchmark runner itself
-([interface and semantics](README.en.md)): how
+([interface and semantics](docs/ru/README.md)): how
 accurately it measures a workload with a known cost, what exactly each metric
 contains and what polling `/proc` and the run's own cgroup cost. General
-measurement rules are in the [methodology](../../docs/performance/README.en.md).
+measurement rules are in the [methodology](../performance/docs/ru/README.md).
 
 ## What is measured
 
@@ -335,4 +336,4 @@ settings and caches were unchanged. The standard user scope in this environment
 lacks `io` delegation: a separate series retained `unsupported` with a reason,
 never zeros. This confirms Linux kernel accounting inside WSL2, not physical
 media behind its virtual disk. Semantics and attribution limits are defined in the
-[metric contract](../../docs/performance/benchmarks.en.md#block-io).
+[metric contract](../performance/benchmarks.md#block-io).

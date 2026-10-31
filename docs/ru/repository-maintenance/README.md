@@ -1,6 +1,6 @@
 # Контроль дискового мусора
 
-**Русский** · [English](README.en.md) · [简体中文](README.zh-CN.md)
+**Русский** · [English](../../en/repository-maintenance/docs/ru/README.md) · [简体中文](../../zh-CN/repository-maintenance/docs/ru/README.md)
 
 `repository-maintenance` — отдельный пакет Cargo для наблюдения за локальными
 артефактами и безопасной очистки воспроизводимых данных. Он отделён от
@@ -77,7 +77,7 @@
 
 ## Политика
 
-Единственный отслеживаемый источник параметров по умолчанию — [`policy.toml`](policy.toml):
+Единственный отслеживаемый источник параметров по умолчанию — [`policy.toml`](../../../tools/repository-maintenance/policy.toml):
 
 | Объект | Значение | Действие |
 |---|---:|---|
