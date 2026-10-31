@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверка структуры описания PR, написанного человеком (только stdlib)."""
+"""Проверка контракта описания ручного PR репозитория (только стандартная библиотека)."""
 
 import argparse
 import json
@@ -33,20 +33,14 @@ PLACEHOLDERS = {
     "", "-", "—", "–", "n/a", "na", "none", "нет", "todo", "tbd", "...", "…",
     "не применимо", "заполнить", "уточнить", "см. ниже", "см. выше", "?",
 }
-# Поля компактной сводки; полный benchmark-history report хранится в Gist.
+# Поля отчёта `benchmark-history report` для каждого измеренного сценария.
 MEASURED_FIELDS = ("Сценарий", "База", "Кандидат", "Результат", "Вывод", "Регрессии")
-MAX_BODY_LENGTH = 6000
-REPORT_SECTION = "Подробный отчёт"
-REVIEW_SECTION = "CodeRabbit review и disposition"
-
-
-def normalize_body(body: str) -> str:
-    """Текст для подсчёта кодовых точек Unicode после единственной нормализации CRLF/CR → LF."""
-    return body.replace("\r\n", "\n").replace("\r", "\n")
-
+MAX_BODY_LENGTH = 10_000
+MAX_PERFORMANCE_LENGTH = 2_200
+MAX_SIMPLE_PERFORMANCE_LENGTH = 650
 NO_EVIDENCE = ("Доказательство производительности", "отсутствует")
 PERFORMANCE_HINT = (
-    "добавьте после ## Проверки раздел ## Производительность: компактную сводку измерений "
+    "добавьте после ## Проверки раздел ## Производительность: компактную сводку проверенных измерений "
     "из проверенных результатов, «Статус: не применимо» с конкретной причиной или "
     "«Статус: не измерено» с причиной, диагностикой и строкой "
     "«Доказательство производительности: отсутствует»"
@@ -55,8 +49,6 @@ PERFORMANCE_HINT = (
 
 # GitHub скрывает HTML-комментарии, поэтому заголовки внутри них не являются
 # видимыми разделами body. Внутри код-блока `<!--` — литерал, а не комментарий.
-
-
 def mask_list_fences(lines: list[str]) -> list[str]:
     """Скрыть fenced-блоки внутри пунктов списка до разбора комментариев.
 
@@ -137,7 +129,7 @@ def mask_list_fences(lines: list[str]) -> list[str]:
 
 
 def strip_comments(lines: list[str]) -> list[str]:
-    """Построчно удалить HTML-комментарии, сохраняя fenced-блоки кода."""
+    """Убрать HTML-комментарии построчно, не трогая содержимое код-блоков."""
     result: list[str] = []
     inside = False
     fence_char = ""
@@ -177,7 +169,7 @@ def strip_comments(lines: list[str]) -> list[str]:
 
 
 def sections(body: str) -> list[tuple[str, str]]:
-    """Извлечь видимые заголовки второго уровня и их текст."""
+    """Видимые заголовки второго уровня и текст их разделов без код-блоков."""
     lines = strip_comments(body.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
     found: list[tuple[str, str]] = []
     active: list[str] = []
@@ -226,13 +218,87 @@ def placeholder(value: str) -> bool:
 
 
 def substantive(values: list[str], minimum: int) -> bool:
-    """Проверить наличие конкретного пояснения вместо шаблонной заглушки."""
+    """Есть хотя бы одно конкретное пояснение, а не шаблонная заглушка."""
     return any(not placeholder(v) and len(v.strip()) >= minimum and len(v.split()) >= 3 for v in values)
 
 
 def table_cells(row: str) -> list[str]:
-    """Ячейки Markdown-таблицы с неэкранированной границей."""
+    """Ячейки строки таблицы Markdown: делит только неэкранированная «|»."""
     return [c.strip() for c in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+
+
+CODERABBIT = "CodeRabbit review и disposition"
+CODERABBIT_HEADER = ("Итерация / reviewed HEAD", "Уровень", "Путь", "Влияние", "Решение", "Исправление")
+# Ячейка строки-разделителя GFM: дефисы с необязательным выравниванием «:».
+DELIMITER_CELL = re.compile(r"^:?-+:?$")
+# Первая ячейка завершённой итерации: номер и reviewed HEAD в code span.
+ITERATION_CELL = re.compile(r"^[1-9]\d*\s*·\s*`[0-9a-f]{7,40}`$")
+
+
+def table_row(line: str) -> list[str] | None:
+    """Ячейки строки таблицы GFM; None — строка не может быть строкой таблицы.
+
+    Строка с отступом от четырёх пробелов — код-блок, пустая строка завершает
+    таблицу. Внешние «|» необязательны, ячейки делит только неэкранированная «|».
+    """
+    if not line.strip() or len(line) - len(line.lstrip(" ")) > 3 or not re.search(r"(?<!\\)\|", line):
+        return None
+    return table_cells(line)
+
+
+def validate_coderabbit(content: str) -> list[str]:
+    """Проверить, что раздел содержит связанную накопительную таблицу GFM.
+
+    Заголовок, строка-разделитель с тем же числом столбцов и строки данных должны
+    идти подряд: только так GitHub собирает их в одну таблицу. Каждая строка
+    данных обязана иметь все шесть заполненных столбцов и в первом — номер
+    итерации с reviewed HEAD; таблица без единой такой строки не принимается.
+    """
+    lines = content.split("\n")
+    header = [n for n, line in enumerate(lines) if table_row(line) == list(CODERABBIT_HEADER)]
+    if not header:
+        return ["В разделе CodeRabbit отсутствует заголовок накопительной таблицы"]
+    if len(header) > 1:
+        return ["В разделе CodeRabbit заголовок накопительной таблицы повторяется: нужна одна таблица"]
+    start = header[0]
+    delimiter = table_row(lines[start + 1]) if start + 1 < len(lines) else None
+    if (
+        delimiter is None
+        or len(delimiter) != len(CODERABBIT_HEADER)
+        or not all(DELIMITER_CELL.match(cell) for cell in delimiter)
+    ):
+        return [
+            "В разделе CodeRabbit за заголовком таблицы нет строки-разделителя "
+            f"из {len(CODERABBIT_HEADER)} столбцов (`| --- | … |`): GitHub не соберёт таблицу"
+        ]
+    errors: list[str] = []
+    completed = False
+    end = len(lines)
+    for offset, line in enumerate(lines[start + 2:], start + 2):
+        row = table_row(line)
+        if row is None:
+            end = offset
+            break
+        if len(row) != len(CODERABBIT_HEADER):
+            errors.append(
+                f"Строка таблицы CodeRabbit содержит {len(row)} столбцов вместо {len(CODERABBIT_HEADER)}: {line.strip()}"
+            )
+            continue
+        if not ITERATION_CELL.match(row[0]) or not all(row[1:]):
+            errors.append(
+                "Строка таблицы CodeRabbit не связана с итерацией и reviewed HEAD "
+                f"или содержит пустые ячейки: {line.strip()}"
+            )
+            continue
+        completed = True
+    if not completed:
+        errors.append("В разделе CodeRabbit отсутствует строка завершённой итерации")
+    # Строка итерации после разрыва уже не входит в накопительную таблицу GFM.
+    for line in lines[end:]:
+        row = table_row(line)
+        if row and ITERATION_CELL.match(row[0]):
+            errors.append(f"Строка итерации CodeRabbit оторвана от накопительной таблицы: {line.strip()}")
+    return errors
 
 
 def scenario_blocks(content: str) -> list[tuple[str, str]]:
@@ -247,340 +313,66 @@ def scenario_blocks(content: str) -> list[tuple[str, str]]:
 
 
 def validate_performance(content: str) -> list[str]:
-    """Структура решения о производительности; подлинность цифр проверяет рецензент."""
+    """Проверить компактный вывод; достоверность результатов требует отдельной проверки."""
     prefix = "## Производительность: "
+    errors: list[str] = []
+    # Лимиты относятся ко всему разделу вместе с его заголовком.
+    length = len("## Производительность\n") + len(content.strip())
+    if length > MAX_PERFORMANCE_LENGTH:
+        errors.append(prefix + f"{length} символов, максимум {MAX_PERFORMANCE_LENGTH}; сократите отчёт до выводов")
     found = fields(content)
     statuses = [v.strip("`").casefold() for v in found.get("Статус", [])]
     if len(statuses) != 1 or statuses[0] not in STATUSES:
-        return [prefix + "нужна ровно одна строка «Статус: измерено», «Статус: не применимо» или «Статус: не измерено»"]
+        return errors + [prefix + "нужна ровно одна строка «Статус: измерено», «Статус: не применимо» или «Статус: не измерено»"]
     status = statuses[0]
-    errors: list[str] = []
+    if status != "измерено" and length > MAX_SIMPLE_PERFORMANCE_LENGTH:
+        errors.append(prefix + f"краткое решение занимает более {MAX_SIMPLE_PERFORMANCE_LENGTH} символов")
     if status == "не применимо":
         if not substantive(found.get("Причина", []), 40):
-            errors.append(prefix + "«не применимо» требует конкретной причины в строке «Причина:» (не короче 40 символов, не шаблон)")
+            errors.append(prefix + "«не применимо» требует конкретной причины не короче 40 символов")
     elif status == "не измерено":
-        if not substantive(found.get("Причина", []), 20):
-            errors.append(prefix + "«не измерено» требует блокирующей причины в строке «Причина:»")
-        if not substantive(found.get("Диагностика", []), 20):
-            errors.append(prefix + "«не измерено» требует проверенной диагностики в строке «Диагностика:»")
+        for name in ("Причина", "Диагностика"):
+            if not substantive(found.get(name, []), 20):
+                errors.append(prefix + f"«не измерено» требует фактической строки «{name}:»")
         if NO_EVIDENCE[1] not in [v.casefold() for v in found.get(NO_EVIDENCE[0], [])]:
             errors.append(prefix + "«не измерено» требует строки «Доказательство производительности: отсутствует»")
     else:
-        # Поля одного сценария не закрывают требования другого: каждый
-        # измеренный блок `### …` проверяется отдельно; отчёт без подзаголовков —
-        # один блок.
         blocks = scenario_blocks(content)
-        measured = [(h, b) for h, b in blocks if not h.endswith("— не измерено")] if blocks else [("", content)]
-        # Неизмеренный сценарий рядом с измеренными несёт те же строки, что и
-        # статус «не измерено»; длина причины не требуется — её пишет исполнитель.
+        if not blocks:
+            errors.append(prefix + "каждый сценарий «измерено» описывается в отдельном `###`-подразделе")
+        measured = [(heading, block) for heading, block in blocks if not heading.endswith("— не измерено")]
         for heading, block in blocks:
-            if not heading.endswith("— не измерено"):
-                continue
-            block_fields = fields(block)
-            for name in ("Причина", "Диагностика"):
-                values = block_fields.get(name, [])
-                if not values or all(placeholder(v) for v in values):
-                    errors.append(prefix + f"неизмеренный сценарий требует строки «{name}:» ({heading})")
-            if NO_EVIDENCE[1] not in [v.casefold() for v in block_fields.get(NO_EVIDENCE[0], [])]:
-                errors.append(prefix + f"неизмеренный сценарий требует строки «Доказательство производительности: отсутствует» ({heading})")
-        if not measured:
-            errors.append(prefix + "«измерено» требует хотя бы одного измеренного сценария")
+            if heading.endswith("— не измерено"):
+                info = fields(block)
+                for name in ("Причина", "Диагностика"):
+                    if not info.get(name) or all(placeholder(value) for value in info[name]):
+                        errors.append(prefix + f"неизмеренный сценарий требует строки «{name}:» ({heading})")
+                if NO_EVIDENCE[1] not in [v.casefold() for v in info.get(NO_EVIDENCE[0], [])]:
+                    errors.append(prefix + f"неизмеренный сценарий требует отсутствия доказательства ({heading})")
+        if blocks and not measured:
+            errors.append(prefix + "«измерено» требует хотя бы один измеренный сценарий")
         for heading, block in measured:
             where = f" ({heading})" if heading else ""
-            block_fields = fields(block)
+            info = fields(block)
             for name in MEASURED_FIELDS:
-                values = block_fields.get(name, [])
+                values = info.get(name, [])
                 if len(values) != 1 or any(placeholder(v) for v in values):
-                    errors.append(prefix + f"для измерения нужна строка «{name}:» с фактическими сведениями{where}")
-            result = block_fields.get("Результат", [])
-            if not any(re.search(r"\d[\d.,\s]*\s*(?:ms|µs|ns|s|%|KiB|MiB|GiB|bytes|count|инструкц\w*|мс|с)\b|\d\s*%", value) and not placeholder(value) for value in result):
-                errors.append(prefix + "«Результат» требует числового значения с единицей")
+                    errors.append(prefix + f"для измерения нужна фактическая строка «{name}:»{where}")
+            result = info.get("Результат", [])
+            if not any(re.search(r"\d[\d.,\s]*\s*(?:ms|µs|ns|s|%|KiB|MiB|GiB|bytes|count|мс|с)\b|\d\s*%", value) for value in result):
+                errors.append(prefix + f"«Результат» требует числового значения с единицей{where}")
             if re.search(r"(?m)^\s*\|\s*Метрика\s*\|", block):
-                errors.append(prefix + "полную таблицу benchmark-history report перенесите в Gist")
-
+                errors.append(prefix + f"не вставляйте полную таблицу отчёта: оставьте компактный вывод{where}")
     return errors
-
-
-
-# Полный журнал хранится в Gist; legacy-таблица не обходит новый контракт.
-CODERABBIT_FIELDS = ("Прогресс", "Итог", "Существенное", "Полный журнал")
-COMPACT_NAMES = "|".join(map(re.escape, CODERABBIT_FIELDS))
-COMPACT_FIELD = re.compile(
-    rf"(?m)^[ \t]*[-*+][ \t]+\*\*(?P<name>{COMPACT_NAMES}):\*\*[ \t]*"
-)
-COMPACT_CANDIDATE = re.compile(
-    rf"(?m)^[ \t]*[-*+][ \t]+(?:\*\*)?(?:{COMPACT_NAMES})"
-)
-LEGACY_HEADER = ("Итерация / reviewed HEAD", "Уровень", "Путь", "Влияние", "Решение", "Исправление")
-# Роль должна непосредственно относиться к SHA, а не просто встречаться рядом
-# с двумя произвольными идентификаторами. Перенос строки внутри пункта допустим.
-SHA = r"`([0-9a-f]{7,40})`"
-REVIEW_ROLE = r"(?:reviewed(?:\s+head)?|(?:последн\w+\s+)?ревью|проверенн\w+\s+head)"
-PUBLISHED_ROLE = r"(?:опубликован\w*(?:\s+(?:после\s+\w+\s+)?head)?|published(?:\s+head)?)"
-
-
-def role_shas(text: str, role: str) -> set[str]:
-    """SHA после названия роли либо перед ним через тире/скобку."""
-    before = re.compile(rf"\b{role}\s*[:=—–-]?\s*{SHA}", re.IGNORECASE)
-    after = re.compile(rf"{SHA}\s*(?:[—–-]\s*|\(\s*){role}\b", re.IGNORECASE)
-    return set(before.findall(text)) | set(after.findall(text))
-
-
-CODERABBIT_GIST = re.compile(
-    r"\[(?P<label>[^\[\]\n]+?)\]\(https://gist\.github\.com/"
-    r"(?P<owner>[A-Za-z0-9-]+)/(?P<id>[0-9a-f]{32})\)"
-)
-
-
-def is_escaped(content: str, index: int) -> bool:
-    """Определить, экранирован ли символ нечётным числом обратных слешей."""
-    slashes = 0
-    index -= 1
-    while index >= 0 and content[index] == "\\":
-        slashes += 1
-        index -= 1
-    return slashes % 2 == 1
-
-
-def without_inline_code(content: str) -> str:
-    """Заменить содержимое закрытых inline code span пробелами той же длины."""
-    chars = list(content)
-    index = 0
-    while index < len(content):
-        if content[index] != "`" or is_escaped(content, index):
-            index += 1
-            continue
-        end = index + 1
-        while end < len(content) and content[end] == "`":
-            end += 1
-        delimiter = content[index:end]
-        close = end
-        closing_start = -1
-        while close < len(content):
-            candidate = content.find("`", close)
-            if candidate < 0:
-                break
-            candidate_end = candidate + 1
-            while candidate_end < len(content) and content[candidate_end] == "`":
-                candidate_end += 1
-            if content[candidate:candidate_end] == delimiter:
-                closing_start = candidate
-                break
-            close = candidate_end
-        if closing_start < 0:
-            index = end
-            continue
-        for position in range(index, closing_start + len(delimiter)):
-            if chars[position] != "\n":
-                chars[position] = " "
-        index = closing_start + len(delimiter)
-    return "".join(chars)
-
-
-def mask_indented_code(content: str) -> str:
-    """Скрыть код с отступом, учитывая абзацы и отступ содержимого списка.
-
-    Код не прерывает абзац; после пустой строки отступ отсчитывается от
-    начала содержимого текущего пункта, а табуляция занимает до четырёх колонок.
-    """
-    result = []
-    item_indent = 0
-    paragraph = False
-    code = False
-    for line in content.splitlines(keepends=True):
-        text = line.rstrip("\n")
-        expanded = text.expandtabs(4)
-        if not expanded.strip():
-            paragraph = False
-            result.append(line)
-            continue
-        indent = len(expanded) - len(expanded.lstrip(" "))
-        if item_indent and indent < item_indent and not paragraph:
-            item_indent = 0
-        relative = indent - item_indent if item_indent and indent >= item_indent else indent
-        if relative >= 4 and (code or not paragraph):
-            code = True
-            result.append(" " * len(text) + line[len(text):])
-            continue
-        code = False
-        marker = re.match(r"^ {0,3}[-*+][ \t]+", expanded[item_indent:] if item_indent and indent >= item_indent else expanded)
-        if marker:
-            base = item_indent if item_indent and indent >= item_indent else 0
-            item_indent = base + marker.end()
-            paragraph = True
-        else:
-            paragraph = True
-        result.append(line)
-    return "".join(result)
-
-
-def list_item_end(content: str, match: re.Match[str]) -> int:
-    """Конец пункта списка: после пустой строки нужен отступ содержимого."""
-    marker = re.match(r"[ \t]*[-*+][ \t]+", match.group())
-    assert marker is not None
-    indent = len(marker.group().expandtabs(4))
-    position = content.find("\n", match.end())
-    if position < 0:
-        return len(content)
-    blank = False
-    position += 1
-    for line in content[position:].splitlines(keepends=True):
-        text = line.rstrip("\n")
-        expanded = text.expandtabs(4)
-        if not expanded.strip():
-            blank = True
-        else:
-            leading = len(expanded) - len(expanded.lstrip(" "))
-            if leading < indent and (blank or re.match(r" {0,3}(?:[-*+]\s+|#{1,6}\s|>)", expanded)):
-                return position
-            blank = False
-        position += len(line)
-    return len(content)
-
-
-def validate_compact_coderabbit(content: str, matches: list[re.Match[str]]) -> list[str]:
-    """Проверить четыре поля компактной сводки и видимую ссылку на Gist."""
-    errors: list[str] = []
-    captured: dict[str, list[str]] = {name: [] for name in CODERABBIT_FIELDS}
-    for match in matches:
-        end = list_item_end(content, match)
-        captured[match.group("name")].append(content[match.end():end].strip())
-
-    for name, values in captured.items():
-        if len(values) != 1:
-            errors.append(f"CodeRabbit: поле «{name}» должно встречаться ровно один раз")
-        elif name != "Полный журнал" and not substantive(values, 4):
-            errors.append(f"CodeRabbit: поле «{name}» должно содержать содержательное значение")
-
-    progress_values = captured["Прогресс"]
-    if len(progress_values) == 1 and substantive(progress_values, 4):
-        progress = progress_values[0]
-        reviewed = role_shas(progress, REVIEW_ROLE)
-        published = role_shas(progress, PUBLISHED_ROLE)
-        iteration = re.search(
-            r"(?:\b[1-9]\d*\s+(?:завершённ\w+\s+)?итерац|"
-            r"\bитераци\w*\s*[:№#]?\s*[1-9]\d*)",
-            progress,
-            re.IGNORECASE,
-        )
-        if not iteration or not any(r != p for r in reviewed for p in published):
-            errors.append("CodeRabbit: в «Прогресс» нужны номер итерации, reviewed HEAD и опубликованный HEAD")
-
-    result_values = captured["Итог"]
-    if (len(result_values) == 1 and substantive(result_values, 4)
-            and not re.search(r"(?<!\w)\d+(?!\w)", re.sub(SHA, "", result_values[0]))):
-        errors.append("CodeRabbit: в «Итог» нужны количественные данные")
-
-    visible = without_inline_code(content)
-    fields_visible = [match for match in COMPACT_FIELD.finditer(visible)]
-    for index, match in enumerate(fields_visible):
-        if match.group("name") != "Полный журнал":
-            continue
-        end = list_item_end(visible, match)
-        field_text = visible[match.end():end]
-        links = [
-            link for link in CODERABBIT_GIST.finditer(field_text)
-            if not is_escaped(field_text, link.start())
-            and not (link.start() > 0 and field_text[link.start() - 1] == "!"
-                     and not is_escaped(field_text, link.start() - 1))
-        ]
-        if len(links) != 1:
-            errors.append("CodeRabbit: в «Полный журнал» нужна одна видимая Markdown-ссылка на GitHub Gist")
-            break
-        label_start = match.end() + links[0].start("label")
-        label_end = match.end() + links[0].end("label")
-        if not content[label_start:label_end].strip():
-            errors.append("CodeRabbit: в «Полный журнал» нужна одна видимая Markdown-ссылка на GitHub Gist")
-            break
-    else:
-        if len(captured["Полный журнал"]) == 1 and not any(
-            match.group("name") == "Полный журнал" for match in fields_visible
-        ):
-            errors.append("CodeRabbit: в «Полный журнал» нужна одна видимая Markdown-ссылка на GitHub Gist")
-
-    return errors
-
-
-def validate_coderabbit(content: str) -> list[str]:
-    """Проверить старую таблицу либо полную компактную сводку CodeRabbit."""
-    content = mask_indented_code(content)
-    visible = without_inline_code(content)
-    legacy_present = any(
-        line.lstrip().startswith("|") and table_cells(line) == list(LEGACY_HEADER)
-        for line in visible.splitlines()
-    )
-    compact_candidates = list(COMPACT_CANDIDATE.finditer(visible))
-    compact_matches = list(COMPACT_FIELD.finditer(visible))
-    format_errors = []
-    if len(compact_candidates) != len(compact_matches):
-        format_errors.append("CodeRabbit: поля компактной сводки должны иметь точный формат «- **Поле:**»")
-
-    if legacy_present and compact_candidates:
-        errors = ["CodeRabbit: старая таблица и компактная сводка не должны сосуществовать"]
-        errors.extend(format_errors)
-        errors.extend(validate_compact_coderabbit(content, compact_matches))
-        return errors
-    if legacy_present:
-        return ["CodeRabbit: перенесите старую таблицу в coderabbit-review.md и оставьте компактную сводку с Gist"]
-    if not compact_candidates:
-        return ["CodeRabbit: нужна полноценная сводка с Gist"]
-
-    errors = validate_compact_coderabbit(content, compact_matches)
-    errors.extend(format_errors)
-    if errors:
-        return ["CodeRabbit: нужна полноценная сводка с Gist"] + errors
-    return []
-
-
-
-def gist_links(content: str) -> list[re.Match[str]]:
-    """Только канонические видимые ссылки: не в коде, не изображения и не экранированные."""
-    visible = without_inline_code(mask_indented_code(content))
-    return [
-        link for link in CODERABBIT_GIST.finditer(visible)
-        if not is_escaped(visible, link.start())
-        and not (link.start() and visible[link.start() - 1] == "!"
-                 and not is_escaped(visible, link.start() - 1))
-        and content[link.start("label"):link.end("label")].strip()
-        and not placeholder(content[link.start("label"):link.end("label")])
-        and len(set(link.group("id"))) > 1
-    ]
-
-
-def visible_body(body: str) -> str:
-    """Включить преамбулу при поиске ссылок; комментарии/fences уже скрыты."""
-    return "\n".join(text for _, text in sections("## __preamble__\n" + body))
-
-
-def canonical_gist(body: str) -> str:
-    """URL проверенной локальной структурой единственной ссылки."""
-    links = gist_links(visible_body(body))
-    if len(links) != 1:
-        raise ValueError("Нужна ровно одна видимая каноническая Markdown-ссылка на Gist")
-    return f"https://gist.github.com/{links[0].group('owner')}/{links[0].group('id')}"
-
-
-def validate_gist_link(body: str, blocks: list[tuple[str, str]]) -> list[str]:
-    links = gist_links(visible_body(body))
-    target = REVIEW_SECTION if any(name == REVIEW_SECTION for name, _ in blocks) else REPORT_SECTION
-    errors = []
-    if len(links) != 1:
-        errors.append("PR: нужна ровно одна видимая каноническая Markdown-ссылка на Gist")
-    targets = [text for name, text in blocks if name == target]
-    if len(targets) != 1 or len(gist_links(targets[0])) != 1:
-        errors.append(f"Gist: единственную ссылку разместите в ## {target}")
-    return errors
-
 
 def validate(body: str) -> list[str]:
-    """Вернуть детерминированные ошибки; пустой список означает верную структуру."""
-    body = normalize_body(body)
+    """Детерминированный список ошибок; пустой список — структура соответствует контракту."""
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
     if len(body) > MAX_BODY_LENGTH:
         return [f"PR body: {len(body)} символов, максимум {MAX_BODY_LENGTH}"]
     blocks = sections(body)
     names = [heading for heading, _ in blocks]
     errors: list[str] = []
-    errors.extend(validate_gist_link(body, blocks))
     for name in REQUIRED:
         count = names.count(name)
         if count == 0 and name == PERFORMANCE:
@@ -600,17 +392,17 @@ def validate(body: str) -> list[str]:
             errors.append(f"Раздел содержит только заглушку: ## {name}")
         elif name == PERFORMANCE and content.strip() and names.count(PERFORMANCE) == 1:
             errors.extend(validate_performance(content))
-    if "CodeRabbit review и disposition" in names:
-        if names.count("CodeRabbit review и disposition") > 1:
+    if CODERABBIT in names:
+        if names.count(CODERABBIT) > 1:
             errors.append("Раздел CodeRabbit повторяется")
         for name, content in blocks:
-            if name == "CodeRabbit review и disposition":
+            if name == CODERABBIT:
                 errors.extend(validate_coderabbit(content))
     return errors
 
 
 def is_automation_pr(payload: dict) -> bool:
-    """Проверить узкое исключение для dependency-PR от известных bot-аккаунтов."""
+    """Узкое исключение: PR зависимостей от проверенного аккаунта бота из его префикса ветки."""
     pr = payload.get("pull_request") or {}
     login = (pr.get("user") or {}).get("login", "")
     branch = (pr.get("head") or {}).get("ref", "")
@@ -620,8 +412,8 @@ def is_automation_pr(payload: dict) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--body-file", type=Path, help="Локальный исходный Markdown-файл перед публикацией PR")
-    source.add_argument("--event-path", type=Path, help="JSON-событие GitHub pull_request")
+    source.add_argument("--body-file", type=Path, help="локальный Markdown-источник body до публикации PR")
+    source.add_argument("--event-path", type=Path, help="JSON события GitHub pull_request или pull_request_target")
     args = parser.parse_args()
     try:
         if args.body_file is not None:
