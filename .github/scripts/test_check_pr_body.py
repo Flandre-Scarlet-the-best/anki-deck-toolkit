@@ -156,6 +156,12 @@ class PrBodyContractTests(unittest.TestCase):
         self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
         self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 замечаний | clean | `abcdef0` |"), [])
 
+    def test_coderabbit_every_row_is_checked(self):
+        # Некорректная строка не прячется за соседней корректной.
+        for bad in ("| 2 | major | `a.rs` | x | confirmed | `abcdef0` |", "| 2 · `abcdef0` | major | | | | |"):
+            errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, bad))
+            self.assertTrue(any("не связана" in e for e in errors), (bad, errors))
+
     def test_coderabbit_table_requires_delimiter_row(self):
         # Без строки-разделителя GitHub показывает две строки текста, а не таблицу.
         errors = validate(coderabbit(CR_HEADER, CR_ROW))

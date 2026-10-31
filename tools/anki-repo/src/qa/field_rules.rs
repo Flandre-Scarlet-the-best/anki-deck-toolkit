@@ -320,7 +320,7 @@ mod tests {
             value["notes"][0]["fields"][1] = json!("");
         });
         // Правило описывает содержимое, а не адресуемость: заметка без guid
-        // по-прежнему даёт замечание, но оно честно помечено как неисполнимый.
+        // по-прежнему даёт замечание, но оно честно помечено как неисполнимое.
         let found = findings_for(&json, "empty_field_value");
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].note_position, 0);

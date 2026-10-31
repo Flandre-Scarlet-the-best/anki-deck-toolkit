@@ -236,7 +236,7 @@ pub fn review(
                 related: related_notes(index, &finding.related, finding.note_position),
                 related_truncated: finding.related_truncated,
             });
-        // Участник группы тоже должен понимать, почему он в batch'е: сам
+        // Участник группы тоже должен понимать, почему он в batch'е: само
         // замечание приписано владельцу, и без этой ссылки batch выглядел бы
         // набором несвязанных заметок.
         if finding.group_size.is_some() {
@@ -314,7 +314,7 @@ fn related_notes(index: &ExportIndex<'_>, related: &[usize], owner: usize) -> Ve
         .collect()
 }
 
-/// Собирает одну карточку batch'а с ограничением числа замечания.
+/// Собирает одну карточку batch'а с ограничением числа замечаний.
 fn build_item(
     index: &ExportIndex<'_>,
     position: usize,

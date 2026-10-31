@@ -174,8 +174,8 @@ def validate_coderabbit(content: str) -> list[str]:
 
     Заголовок, строка-разделитель с тем же числом столбцов и строки данных должны
     идти подряд: только так GitHub собирает их в одну таблицу. Каждая строка
-    данных обязана иметь все шесть столбцов, и хотя бы одна из них описывает
-    завершённую итерацию с номером, reviewed HEAD и заполненными ячейками.
+    данных обязана иметь все шесть заполненных столбцов и в первом — номер
+    итерации с reviewed HEAD; таблица без единой такой строки не принимается.
     """
     lines = content.split("\n")
     header = [n for n, line in enumerate(lines) if table_row(line) == list(CODERABBIT_HEADER)]
@@ -205,8 +205,13 @@ def validate_coderabbit(content: str) -> list[str]:
                 f"Строка таблицы CodeRabbit содержит {len(row)} столбцов вместо {len(CODERABBIT_HEADER)}: {line.strip()}"
             )
             continue
-        if ITERATION_CELL.match(row[0]) and all(row[1:]):
-            completed = True
+        if not ITERATION_CELL.match(row[0]) or not all(row[1:]):
+            errors.append(
+                "Строка таблицы CodeRabbit не связана с итерацией и reviewed HEAD "
+                f"или содержит пустые ячейки: {line.strip()}"
+            )
+            continue
+        completed = True
     if not completed:
         errors.append("В разделе CodeRabbit отсутствует строка завершённой итерации")
     return errors

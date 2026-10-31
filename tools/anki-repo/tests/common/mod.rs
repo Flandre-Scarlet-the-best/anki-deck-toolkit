@@ -414,7 +414,7 @@ pub fn write_proposals(dir: &TempDir, name: &str, document: &Value) -> PathBuf {
 /// Все заметки сырого экспорта в порядке обхода дерева.
 ///
 /// Порядок совпадает с порядком `note_index` tool'а и не зависит от него: это
-/// независимый источник для проверки адресов замечания.
+/// независимый источник для проверки адресов замечаний.
 pub fn collect_notes<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
     if let Some(notes) = value.get("notes").and_then(Value::as_array) {
         out.extend(notes);

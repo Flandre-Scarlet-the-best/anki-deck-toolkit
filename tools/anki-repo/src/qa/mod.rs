@@ -255,7 +255,7 @@ pub const RULES: &[Rule] = &[
     },
 ];
 
-/// Индекс правила в реестре; он же приоритет в каноническом порядке замечания.
+/// Индекс правила в реестре; он же приоритет в каноническом порядке замечаний.
 #[must_use]
 pub fn rule_index(code: &str) -> Option<usize> {
     RULES.iter().position(|rule| rule.code == code)
