@@ -1,9 +1,8 @@
 # 磁盘空间维护与清理
 
-[Русский](../../ru/repository-maintenance/docs/ru/README.md) · [English](../../en/repository-maintenance/docs/ru/README.md) · **简体中文**
+[Русский](../../ru/repository-maintenance/README.md) · [English](../../en/repository-maintenance/README.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/repository-maintenance/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
-
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/repository-maintenance/README.md)为准。欢迎提交翻译和校对改进。
 
 `repository-maintenance` 是一个独立的 Cargo 软件包，用于监测本地产物，并安全清理能够重新生成的数据。它与 `anki-repo` 分开实现，因为它不处理 CrowdAnki 导出数据，而是负责磁盘空间的生命周期管理。
 
@@ -36,7 +35,7 @@
 
 ## 清理策略
 
-默认参数的唯一受 Git 跟踪的来源是 [`policy.toml`](../../../tools/repository-maintenance/policy.toml)：
+默认参数的唯一受 Git 跟踪的来源是 [`policy.toml`](policy.toml)：
 
 | 项目 | 数值 | 操作 |
 |---|---:|---|
