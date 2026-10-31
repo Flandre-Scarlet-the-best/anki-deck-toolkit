@@ -1,0 +1,25 @@
+name: Доверенный контракт PR и Gist
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-gist-trusted:
+    name: Пара PR и Gist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Только доверенная base: ни checkout, ни выполнение кода из head PR.
+      # Gist и body читаются как данные. Секреты и write permissions не нужны.
+      - name: Получить доверенный валидатор из base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Проверить фактически опубликованные PR и Gist
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/check_pr_gist.py --event-path "$GITHUB_EVENT_PATH"

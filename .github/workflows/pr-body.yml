@@ -4,6 +4,7 @@ on:
     types: [opened, edited, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   pr-body:
@@ -18,3 +19,7 @@ jobs:
       # только проверка, которой нужно событие PR, — описание самого PR.
       - name: Проверить реальное описание PR
         run: python3 .github/scripts/check_pr_body.py --event-path "$GITHUB_EVENT_PATH"
+      - name: Проверить опубликованную пару PR и Gist
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/check_pr_gist.py --event-path "$GITHUB_EVENT_PATH"

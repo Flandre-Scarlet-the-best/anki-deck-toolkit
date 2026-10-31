@@ -752,6 +752,57 @@ fn empty_unregistered_directories_are_ignored_only_outside_publishable_gate() {
 }
 
 #[test]
+fn verified_reads_reject_nonempty_sibling_prefixes_and_nested_unknown_directories() {
+    let temp = TempDir::new("read-directory-prefixes");
+    let root = temp.path().join("store");
+    let store = open_kanji_store(&root);
+    let identity = AssetIdentity::new("kanji", "元").unwrap();
+    let validator = FixedValidator::new(SemanticStatus::Verified);
+    store
+        .ingest_verified(
+            VerifiedIngestRequest {
+                identity: identity.clone(),
+                bytes: b"GIF89a fixture".to_vec(),
+                provenance: Provenance {
+                    source_kind: "fixture".into(),
+                    source_name: "prefix.gif".into(),
+                },
+                domain_metadata: Some(serde_json::json!({"character": "元"})),
+                replace_expected_sha256: None,
+            },
+            &validator,
+        )
+        .unwrap();
+    let read = || {
+        AssetStore::read_verified(
+            &root,
+            std::slice::from_ref(&identity),
+            &validator.identity(),
+        )
+    };
+    assert_eq!(read().unwrap()[0].bytes, b"GIF89a fixture");
+    // Имена до и после зарегистрированного диапазона, включая общий префикс.
+    for relative in [
+        "assets/gi",
+        "assets/gif-extra",
+        "assets/zzz",
+        "assets/gif/unknown",
+    ] {
+        let directory = root.join(relative);
+        fs::create_dir(&directory).unwrap();
+        assert!(read().is_ok(), "пустой каталог допустим: {relative}");
+        fs::write(directory.join("unexpected.bin"), b"unknown bytes").unwrap();
+        assert_eq!(
+            read().unwrap_err().code,
+            ErrorCode::UnexpectedPath,
+            "{relative}"
+        );
+        fs::remove_dir_all(directory).unwrap();
+        assert!(read().is_ok());
+    }
+}
+
+#[test]
 fn publishable_gate_rejects_stale_validator_identity() {
     let temp = TempDir::new("publishable-stale-validator");
     let root = temp.path().join("store");
@@ -929,6 +980,11 @@ fn kanji_gif_and_png_are_independent_records_with_format_scoped_cas() {
         (identity.clone(), DetectedFormat::Png),
         (missing, DetectedFormat::Png),
         (identity.clone(), DetectedFormat::Gif),
+        (
+            AssetIdentity::new("kanji", "一").unwrap(),
+            DetectedFormat::Gif,
+        ),
+        (identity.clone(), DetectedFormat::Png),
     ];
     let mut visited = Vec::new();
     AssetStore::visit_verified_variants_with_policy(
@@ -952,6 +1008,8 @@ fn kanji_gif_and_png_are_independent_records_with_format_scoped_cas() {
             (0, Ok(png.sha256.clone())),
             (1, Err(ErrorCode::MissingAssetFile)),
             (2, Ok(gif.sha256.clone())),
+            (3, Err(ErrorCode::MissingAssetFile)),
+            (4, Ok(png.sha256.clone())),
         ]
     );
 
@@ -978,6 +1036,27 @@ fn kanji_gif_and_png_are_independent_records_with_format_scoped_cas() {
     let reopened = open_kanji_store(&root);
     assert_eq!(reopened.verify_integrity().unwrap().len(), 2);
     drop(reopened);
+
+    // Двоичный поиск разрешён только после проверки сортировки манифеста.
+    let manifest_path = root.join("manifest.json");
+    let original_manifest = fs::read(&manifest_path).unwrap();
+    let mut unordered: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+    unordered["assets"].as_array_mut().unwrap().reverse();
+    fs::write(&manifest_path, serde_json::to_vec(&unordered).unwrap()).unwrap();
+    let mut calls = 0;
+    let error = AssetStore::visit_verified_variants_with_policy(
+        &root,
+        &requests,
+        &validator.identity(),
+        &asset_store::KanjiDomainPolicy,
+        |_, _| {
+            calls += 1;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!((calls, error.code), (0, ErrorCode::ManifestCorrupt));
+    fs::write(&manifest_path, original_manifest).unwrap();
 
     // Повреждение любого файла корпуса отклоняет весь снимок до первого `visit`.
     let tampered = root.join(&gif.storage_path);
