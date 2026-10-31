@@ -458,7 +458,10 @@ rustfmt и actionlint и на имя упавшего теста. Вывод т�
 `pr-gist-trusted.yml` использует только валидатор из base SHA на
 `pull_request_target`, без выполнения кода head и write permissions; его права —
 `contents: read` и `pull-requests: read`. Состояние required contexts
-проверяется по реальному ruleset. Тесты скриптов и метаданные
+проверяется по реальному ruleset. Распознанное переходное состояние публикации
+того же HEAD обе проверки перечитывают в ограниченном окне, а по его истечении
+отказывают; правила окна принадлежат `anki-git-workflow`
+(`references/pr-gist.md`). Тесты скриптов и метаданные
 Agent Skills здесь намеренно не дублируются — их выполняет `ci.yml`, который
 покрывает и push в основную ветку. Единственный владелец версии MSRV —
 `[workspace.package]` корневого `Cargo.toml`.

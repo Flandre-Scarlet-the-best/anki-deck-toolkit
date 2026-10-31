@@ -10,9 +10,10 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-from check_pr_body import validate
+from check_pr_body import MAX_BODY_LENGTH, validate
 from check_pr_gist import (
-    ContractError, GitHubAPI, NoRedirect, check_remote, check_unpublished, gist_files, sha256, validate_evidence,
+    ContractError, GitHubAPI, NoRedirect, StaleBinding, check_event, check_remote, check_unpublished, gist_files,
+    read_manifest, sha256, validate_evidence,
 )
 from test_check_pr_body import COMPACT_CODERABBIT, GIST, MEASURED, REPORT, body_with, valid_body
 
@@ -122,14 +123,14 @@ class GistContractTests(unittest.TestCase):
                 check_remote(None, REPOSITORY, 7, api=api)
                 self.assertEqual(api.paths[0], "/repos/example/toolkit/pulls/7")
 
-    def test_original_failure_length_and_missing_gist(self):
-        # Синтетическое воспроизведение: исходный пользовательский body не fixture.
+    def test_oversized_body_and_missing_gist(self):
+        # Инвариант контракта: заведомо чрезмерное описание отвергается целиком,
+        # с Gist или без; точные границы 6000/6001 проверяет отдельный тест.
         for include_gist in (False, True):
             base = valid_body(include_gist)
-            text = base + "я" * (32493 - len(base))
-            self.assertEqual(len(text), 32493)
+            text = base + "я" * (MAX_BODY_LENGTH * 5 - len(base))
             errors = validate(text)
-            self.assertTrue(any("максимум 6000" in e for e in errors))
+            self.assertTrue(any(f"максимум {MAX_BODY_LENGTH}" in e for e in errors))
         text = valid_body(False)
         text += "я" * (3000 - len(text))
         self.assertTrue(any("Gist" in e for e in validate(text)))
@@ -389,8 +390,194 @@ class GistContractTests(unittest.TestCase):
         for raw in (b'{"id":', b'[]', b'\xff'):
             with patch.object(api.opener, "open", return_value=io.BytesIO(raw)), self.assertRaises(ContractError):
                 api.get("/gists/" + "a" * 32)
-        with self.assertRaisesRegex(ContractError, "redirect"):
+        with self.assertRaisesRegex(ContractError, "перенаправление"):
             NoRedirect().redirect_request(None, None, 302, "Found", {}, "https://other.example")
+
+
+def two_series(same_result=True):
+    """Две независимые серии разных сценариев; результат может совпадать дословно."""
+    body, files, manifest = fixture(True)
+    second = MEASURED.split("### validation warm", 1)[1].replace("anki-repo.validate warm", "anki-repo.list warm")
+    if not same_result:
+        second = second.replace("80 ms, −20 %", "90 ms, −10 %")
+    body = body.replace("существенных ухудшений не обнаружено по проверенным метрикам.\n",
+                        "существенных ухудшений не обнаружено по проверенным метрикам.\n\n### listing warm" + second, 1)
+    report = "anki-repo.list: исходная серия 100 ms → 80 ms, n=10; ухудшений не выявлено."
+    files["benchmark-list.md"] = report
+    manifest["artifacts"].append({"file": "benchmark-list.md", "sha256": sha256(report),
+                                  "kind": "benchmark-report", "commit_sha": HEAD})
+    manifest["benchmarks"].append({**manifest["benchmarks"][0], "scenario": "anki-repo.list",
+                                   "report_file": "benchmark-list.md",
+                                   "result": manifest["benchmarks"][0]["result"] if same_result
+                                   else "wall-clock 100 ms → 90 ms, −10 %, n=10."})
+    files["manifest.md"] = manifest_text(manifest)
+    return body, files, manifest
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class RegressionContractTests(unittest.TestCase):
+    def test_candidate_preflight_differs_from_published_body(self):
+        body, files, _ = fixture()
+        old = body.replace(HEAD, BASE)
+        # До публикации кандидат проверяется, старый опубликованный body не мешает.
+        message = check_remote(body, REPOSITORY, 7, FakeAPI([pr(old), snapshot(files), snapshot(files), pr(old)]))
+        self.assertIn("опубликованное описание не проверялось", message)
+        # После публикации расхождение с кандидатом не превращается в успех.
+        with self.assertRaisesRegex(ContractError, "отличается от локального кандидата"):
+            check_remote(body, REPOSITORY, 7, FakeAPI([pr(old)]), published=True)
+        # Без кандидата проверяется именно опубликованное (устаревшее) описание.
+        with self.assertRaisesRegex(StaleBinding, "CI не привязан"):
+            check_remote(None, REPOSITORY, 7, FakeAPI([pr(old)]))
+        published = body.replace("\n", "\r\n") + "\r\n"
+        message = check_remote(body, REPOSITORY, 7, FakeAPI([pr(published), snapshot(files), snapshot(files),
+                                                              pr(published)]), published=True)
+        self.assertIn("Опубликованная пара", message)
+        with self.assertRaisesRegex(ContractError, "изменились"):
+            check_remote(body, REPOSITORY, 7, FakeAPI([pr(body), snapshot(files), snapshot(files),
+                                                       pr(body + " правка")]), published=True)
+
+    def test_equal_results_of_distinct_series_are_matched_one_to_one(self):
+        body, files, manifest = two_series()
+        validate_evidence(body, files, EXPECTED, manifest)
+        validate_evidence(*two_series(same_result=False)[:2], EXPECTED)
+        # Потерянная сводка: две серии, одна сводка с тем же результатом.
+        single = body.split("\n\n### listing warm", 1)[0] + "\n\n## CI" + body.split("## CI", 1)[1]
+        with self.assertRaisesRegex(ContractError, "сводки PR"):
+            validate_evidence(single, files, EXPECTED)
+        # Дубль сводки вместо второй серии: сценарий первой серии повторён.
+        doubled = body.replace("anki-repo.list warm", "anki-repo.validate warm")
+        with self.assertRaisesRegex(ContractError, "нет сводки сценария anki-repo.list"):
+            validate_evidence(doubled, files, EXPECTED)
+        # Дублированная запись manifest без собственной серии.
+        m = copy.deepcopy(manifest)
+        m["benchmarks"].append(dict(m["benchmarks"][0]))
+        with self.assertRaisesRegex(ContractError, "повторная запись"):
+            validate_evidence(body, {**files, "manifest.md": manifest_text(m)}, EXPECTED)
+        # Чужой SHA кандидата и подмена значения.
+        with self.assertRaisesRegex(ContractError, "candidate_sha"):
+            validate_evidence(body.replace("`bbbbbbbbbbbb` — измеренный commit, warm.\n- Результат: wall-clock 100 ms → 80 ms, −20 %, n=10.\n- Вывод: улучшение сверх разброса повторов; полная серия в подробном отчёте.\n- Регрессии: существенных ухудшений не обнаружено по проверенным метрикам.\n\n### listing",
+                                           "`cccccccccccc` — измеренный commit, warm.\n- Результат: wall-clock 100 ms → 80 ms, −20 %, n=10.\n- Вывод: улучшение сверх разброса повторов; полная серия в подробном отчёте.\n- Регрессии: существенных ухудшений не обнаружено по проверенным метрикам.\n\n### listing"),
+                              files, EXPECTED)
+        with self.assertRaisesRegex(ContractError, "сводки"):
+            validate_evidence(body.replace("80 ms", "70 ms", 1), files, EXPECTED)
+        # Регрессия одной серии не закрывается сводкой другой серии.
+        m = copy.deepcopy(manifest)
+        m["benchmarks"][1]["regressions"] = ["RSS +15 %"]
+        files_r = {**files, "benchmark-list.md": files["benchmark-list.md"] + " RSS +15 %"}
+        m["artifacts"][-1]["sha256"] = sha256(files_r["benchmark-list.md"])
+        files_r["manifest.md"] = manifest_text(m)
+        first_only = body.replace("существенных ухудшений не обнаружено по проверенным метрикам.\n\n### listing",
+                                  "RSS +15 %\n\n### listing")
+        with self.assertRaisesRegex(ContractError, "регрессия"):
+            validate_evidence(first_only, files_r, EXPECTED)
+
+    def test_manifest_tables_require_real_separator(self):
+        _, files, manifest = fixture(True)
+        text = files["manifest.md"]
+        self.assertEqual(read_manifest(text)["benchmarks"][0]["report_file"], "benchmark.md")
+        aligned = text.replace("| --- | --- | --- | --- |\n| details.md", "| :--- | :---: | ---: | - |\n| details.md")
+        self.assertEqual(read_manifest(aligned)["artifacts"], read_manifest(text)["artifacts"])
+        details_row = next(line for line in text.splitlines() if line.startswith("| details.md"))
+        broken = {
+            "текст вместо разделителя": text.replace("| --- | --- | --- | --- |\n| details.md",
+                                                      "| просто | текст | вместо | разделителя |\n| details.md"),
+            "нет разделителя": text.replace("| --- | --- | --- | --- |\n| details.md", "| details.md"),
+            "неверная ширина": text.replace("| --- | --- | --- | --- |\n| details.md", "| --- | --- | --- |\n| details.md"),
+            "строка без границы": text.replace(details_row + "\n", details_row + "\n" + details_row.lstrip("|") + "\n"),
+            "разорванная таблица": text.replace(details_row + "\n", details_row + "\n\n" + details_row + "\n"),
+        }
+        for name, variant in broken.items():
+            with self.subTest(name=name), self.assertRaisesRegex(ContractError, "Индекс"):
+                read_manifest(variant)
+        empty = fixture()[1]["manifest.md"]
+        self.assertEqual(read_manifest(empty)["benchmarks"], [])
+
+    def test_gist_transition_from_new_pr_to_created_pr(self):
+        body, files, manifest = fixture()
+        pending = copy.deepcopy(manifest)
+        pending["pr_number"] = None
+        details = files["details.md"].replace(f"https://github.com/{REPOSITORY}/pull/7\n", "")
+        pending["artifacts"][0]["sha256"] = sha256(details)
+        before = {**files, "details.md": details, "manifest.md": manifest_text(pending)}
+        branch = {"commit": {"sha": HEAD}}
+        check_unpublished(body, {**EXPECTED, "pr_number": None},
+                          FakeAPI([branch, snapshot(before), snapshot(before), branch]))
+        # PR создан, Gist ещё не дополнен: переходное состояние, а не успех.
+        with self.assertRaisesRegex(StaleBinding, "номером созданного PR"):
+            check_remote(None, REPOSITORY, 7, FakeAPI([pr(body), snapshot(before)]))
+        # Номер добавлен, но обратной ссылки в details.md нет — финальный отказ.
+        no_link = copy.deepcopy(manifest)
+        no_link["artifacts"][0]["sha256"] = sha256(details)
+        with self.assertRaisesRegex(ContractError, "не связан с PR"):
+            validate_evidence(body, {**before, "manifest.md": manifest_text(no_link)}, EXPECTED)
+        check_remote(None, REPOSITORY, 7, FakeAPI([pr(body), snapshot(files), snapshot(files), pr(body)]))
+
+    def test_event_waits_for_sequential_body_update_on_same_head(self):
+        body, files, _ = fixture()
+        stale = body.replace(HEAD, BASE)
+        clock = FakeClock()
+        # synchronize: body ещё описывает прежний HEAD; затем edited обновляет его.
+        api = FakeAPI([pr(stale), pr(stale), pr(body), snapshot(files), snapshot(files), pr(body)])
+        message = check_event(REPOSITORY, 7, HEAD, api, clock=clock, sleep=clock.sleep, log=lambda _: None)
+        self.assertIn("Опубликованная пара", message)
+        self.assertEqual(clock.sleeps, [20, 20])
+        # Gist обновлён позже body: manifest с прежним HEAD из истории ветки.
+        _, old_files, old_manifest = fixture()
+        old_manifest["head_sha"] = BASE
+        old_files["manifest.md"] = manifest_text(old_manifest)
+        compare = {"status": "ahead", "behind_by": 0}
+        clock = FakeClock()
+        api = FakeAPI([pr(body), snapshot(old_files), compare,
+                       pr(body), snapshot(files), snapshot(files), pr(body)])
+        check_event(REPOSITORY, 7, HEAD, api, clock=clock, sleep=clock.sleep, log=lambda _: None)
+        self.assertIn(f"/repos/{REPOSITORY}/compare/{BASE}...{HEAD}?per_page=1", api.paths)
+
+    def test_event_fails_closed_without_false_success(self):
+        body, files, _ = fixture()
+        stale = body.replace(HEAD, BASE)
+        run = lambda api, clock: check_event(REPOSITORY, 7, HEAD, api, clock=clock, sleep=clock.sleep,
+                                             log=lambda _: None)
+        # Непримиримое устаревшее описание: отказ ровно по истечении окна.
+        clock = FakeClock()
+        with self.assertRaisesRegex(ContractError, "не согласовано за 180"):
+            run(FakeAPI([pr(stale)] * 20), clock)
+        self.assertEqual(sum(clock.sleeps), 180)
+        # HEAD сменился во время ожидания: успех для старого события невозможен.
+        moved = {**pr(body), "head": {"sha": BASE, "ref": "fix/contract"}}
+        clock = FakeClock()
+        with self.assertRaisesRegex(ContractError, "HEAD изменился после события"):
+            run(FakeAPI([pr(stale), moved]), clock)
+        # Устаревшее событие: HEAD уже другой, без ожидания.
+        clock = FakeClock()
+        with self.assertRaisesRegex(ContractError, "после события"):
+            run(FakeAPI([moved]), clock)
+        self.assertEqual(clock.sleeps, [])
+        # Постоянные дефекты не ждут: Gist, полномочия, невалидный body, чужой SHA.
+        _, foreign, foreign_manifest = fixture()
+        foreign_manifest["head_sha"] = "e" * 40
+        foreign["manifest.md"] = manifest_text(foreign_manifest)
+        for responses, pattern in (
+                ([pr(body), {"message": "Not Found"}], "Gist"),
+                ([pr(body), ContractError("GitHub API HTTP 403")], "HTTP 403"),
+                ([pr(body.replace("## CI", "## Не CI"))], "CI"),
+                ([pr(body), snapshot({**files, "details.md": "порча"})], "SHA-256|details"),
+                ([pr(body), snapshot(foreign), {"status": "diverged", "behind_by": 3}], "вне истории")):
+            clock = FakeClock()
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(ContractError, pattern):
+                run(FakeAPI(responses), clock)
+            self.assertEqual(clock.sleeps, [])
 
 
 if __name__ == "__main__":

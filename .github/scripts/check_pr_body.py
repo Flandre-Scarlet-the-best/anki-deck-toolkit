@@ -41,7 +41,7 @@ REVIEW_SECTION = "CodeRabbit review и disposition"
 
 
 def normalize_body(body: str) -> str:
-    """Unicode code points после единственной нормализации CRLF/CR → LF."""
+    """Текст для подсчёта кодовых точек Unicode после единственной нормализации CRLF/CR → LF."""
     return body.replace("\r\n", "\n").replace("\r", "\n")
 
 NO_EVIDENCE = ("Доказательство производительности", "отсутствует")
@@ -534,7 +534,7 @@ def validate_coderabbit(content: str) -> list[str]:
 
 
 def gist_links(content: str) -> list[re.Match[str]]:
-    """Только канонические видимые ссылки, без code, изображений и escaping."""
+    """Только канонические видимые ссылки: не в коде, не изображения и не экранированные."""
     visible = without_inline_code(mask_indented_code(content))
     return [
         link for link in CODERABBIT_GIST.finditer(visible)
