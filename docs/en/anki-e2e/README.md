@@ -1,11 +1,12 @@
 # Anki Desktop E2E stand
 
-[Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
+[Русский](../../ru/anki-e2e/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/anki-e2e/docs/ru/README.md)
 
-<!-- i18n-source-git-blob: e27c55c68fc36811d7c07499e65daab60c0238d8 -->
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/anki-e2e/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
+
 
 `anki-e2e` is a permanent local E2E stand for the `anki-repo anki` group
-([contract](../anki-repo/desktop.md)). A Rust runner on the host builds a
+([contract](../../ru/anki-repo/desktop.md)). A Rust runner on the host builds a
 reproducible Docker image with the **official Linux Anki Desktop**, starts
 **one isolated container** with an Xvfb virtual display and runs scenarios in it
 through the **real** `anki-repo`, Anki's native installer, AnkiConnect and
@@ -111,12 +112,12 @@ shows `BLOCKED` for scenarios that need installed add-ons.
 Two images labelled `io.github.anki-deck-toolkit.e2e=1`:
 
 - `anki-e2e/anki:<version>-<arch>-<sha12>-<key>` from
-  [`docker/anki.Dockerfile`](docker/anki.Dockerfile): Ubuntu 24.04 pinned by
+  [`docker/anki.Dockerfile`](../../../tools/anki-e2e/docker/anki.Dockerfile): Ubuntu 24.04 pinned by
   digest, the official build's dependencies, Xvfb, D-Bus and at-spi2-core, and
   the unpacked official archive (its SHA-256 is verified once more).
   **There are no add-ons in the image**: the initial installation is checked by
   a scenario.
-- `anki-e2e/run:<tree12>-<key>` from [`docker/run.Dockerfile`](docker/run.Dockerfile):
+- `anki-e2e/run:<tree12>-<key>` from [`docker/run.Dockerfile`](../../../tools/anki-e2e/docker/run.Dockerfile):
   `anki-repo` and `anki-e2e` are built inside Docker (`rust:<MSRV>-bookworm`,
   MSRV from the root `Cargo.toml`) from a snapshot of the working copy files
   that Git tracks or does not ignore. The tree hash is passed into the image
@@ -242,14 +243,14 @@ aarch64, network access to GitHub, AnkiWeb, Docker Hub and Ubuntu mirrors, and
 by default 4 CPUs and 6 GB of memory per container. In the measured environment,
 the stand's images, Cargo caches and archive occupied about 6.6 GB of disk;
 Docker base images, temporary build data and room for cache growth require
-additional space ([measurement details](performance.en.md)).
+additional space ([measurement details](performance.md)).
 The first run builds the images; later runs use the cache.
 
 ## Performance
 
 Phase timings, CPU, memory and disk of the stand, together with the measurement
-method, are on the [performance page](performance.en.md);
-the general measurement rules are in the [methodology](../../docs/performance/README.en.md).
+method, are on the [performance page](performance.md);
+the general measurement rules are in the [methodology](../performance/docs/ru/README.md).
 
 ## Boundaries
 

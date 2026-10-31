@@ -1,11 +1,11 @@
 # Производительность: `anki-e2e`
 
-**Русский** · [English](performance.en.md) · [简体中文](performance.zh-CN.md)
+**Русский** · [English](../../en/anki-e2e/performance.md) · [简体中文](../../zh-CN/anki-e2e/performance.md)
 
 Производительность и потребление ресурсов E2E-стенда Anki Desktop: последний
 подтверждённый снимок и прежнее ручное наблюдение
-([контракт стенда](README.md)). Общие правила замера и
-точность источников — в [методике](../../docs/performance/README.md).
+([контракт стенда](docs/ru/README.md)). Общие правила замера и
+точность источников — в [методике](../performance/docs/ru/README.md).
 
 ## Что измеряется
 

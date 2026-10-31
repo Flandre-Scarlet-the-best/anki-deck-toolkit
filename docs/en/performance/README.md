@@ -1,7 +1,8 @@
 # Performance and resource usage
 
-[Русский](README.md) · **English** · [简体中文](README.zh-CN.md)
-<!-- i18n-source-git-blob: 171a1e5f9d8c106babcac42beb9ace95055c4f97 -->
+[Русский](../../ru/performance/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/performance/docs/ru/README.md)
+
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/performance/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
 
 This directory provides the common methodology and links to the **last confirmed figures** for the performance and
 resource usage of the repository's modules: time, CPU, memory, disk. Each
@@ -18,7 +19,7 @@ different values.
 
 | What | Where | Who sees it |
 |---|---|---|
-| The full history of every measurement | the local [`benchmark-history`](../../tools/benchmark-history/README.en.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
+| The full history of every measurement | the local [`benchmark-history`](../benchmark-history/docs/ru/README.md) history: an immutable archive of original JSON and a SQLite index in the user's data directory | only its owner |
 | The full task report | the unchanged `benchmark-history report` in the task Gist with its manifest | everyone, via the PR link |
 | The public historical record | the PR's `## Производительность` (performance) section: a compact summary of the scenario, baseline, candidate, results, conclusions and significant regressions | everyone, through the PR history |
 | The current snapshot | the `tools/<module>/performance.md` pages: the last confirmed measurement of each scenario × profile pair | everyone |
@@ -35,10 +36,10 @@ explicit confirmation.
 
 | Module | Page | Snapshots from JSON results |
 |---|---|---|
-| `anki-repo` | [anki-repo/performance.en.md](../../tools/anki-repo/performance.en.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
-| `asset-store` | [asset-store/performance.en.md](../../tools/asset-store/performance.en.md) | `asset-store.*` · `warm` (`kanji-medium`) |
-| `anki-e2e` | [anki-e2e/performance.en.md](../../tools/anki-e2e/performance.en.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; a manual observation without original JSON for the other states |
-| `benchmark-runner` | [benchmark-runner/performance.en.md](../../tools/benchmark-runner/performance.en.md) | `benchmark-runner.calibration-*` · `warm` |
+| `anki-repo` | [anki-repo/performance.en.md](../anki-repo/performance.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store/performance.en.md](../asset-store/performance.md) | `asset-store.*` · `warm` (`kanji-medium`) |
+| `anki-e2e` | [anki-e2e/performance.en.md](../anki-e2e/performance.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; a manual observation without original JSON for the other states |
+| `benchmark-runner` | [benchmark-runner/performance.en.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
 A new module gets its own page `tools/<module>/performance.md` with
 translations, a `<!-- benchmark-snapshot:anchor -->` line where snapshots go and
@@ -50,8 +51,8 @@ Scenarios, execution-condition profiles, the boundary of the measured work and
 metrics with their scope are declared in machine-readable form in the
 `benchmarks/` catalog, and measurement results are recorded as versioned JSON.
 How to register a scenario and read a result is described in the
-[benchmark catalog](benchmarks.en.md); series are executed by
-[`benchmark-runner`](../../tools/benchmark-runner/README.en.md). The rules on this page also apply to
+[benchmark catalog](benchmarks.md); series are executed by
+[`benchmark-runner`](../benchmark-runner/docs/ru/README.md). The rules on this page also apply to
 catalog-driven measurements: the catalog requires the exact cache state to be
 declared for each scenario, and a snapshot remains evidence of an environment.
 
@@ -91,7 +92,7 @@ declared for each scenario, and a snapshot remains evidence of an environment.
 How an agent works on an optimisation or a suspected regression — hypothesis,
 a baseline of the previous implementation before the change, a comparable
 series after it, analysis and report — is described in the
-[`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md)
+[`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md)
 skill. It builds on these rules and on the regular `benchmark-runner` and
 `benchmark-history` without replacing them.
 
@@ -127,7 +128,7 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
 
 Permanent documentation contains no commit SHAs, PR numbers, absolute local
 paths, input identities or author names (a rule of
-[`AGENTS.md`](../../AGENTS.md)); those details belong in the task Gist, PR summary and
+[`AGENTS.md`](../../../AGENTS.md)); those details belong in the task Gist, PR summary and
 in the local history. Snapshots inside `benchmark-snapshot` markers are not
 edited by hand.
 

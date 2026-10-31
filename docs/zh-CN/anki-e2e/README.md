@@ -1,10 +1,11 @@
 # Anki Desktop E2E 测试台
 
-[Русский](README.md) · [English](README.en.md) · **简体中文**
+[Русский](../../ru/anki-e2e/docs/ru/README.md) · [English](../../en/anki-e2e/docs/ru/README.md) · **简体中文**
 
-<!-- i18n-source-git-blob: e27c55c68fc36811d7c07499e65daab60c0238d8 -->
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/anki-e2e/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
 
-`anki-e2e` 是 `anki-repo anki` 命令组（[契约](../anki-repo/desktop.md)）的常设本地
+
+`anki-e2e` 是 `anki-repo anki` 命令组（[契约](../../ru/anki-repo/desktop.md)）的常设本地
 E2E 测试台。主机上的 Rust runner 构建包含**官方 Linux Anki Desktop** 的可复现
 Docker 镜像，启动**一个隔离容器**（带 Xvfb 虚拟显示），并在其中通过**真实的**
 `anki-repo`、Anki 原生安装程序、AnkiConnect 和 CrowdAnki 运行场景。Anki 的窗口、
@@ -92,10 +93,10 @@ SIGINT，再 SIGKILL）。部分下载的归档会被删除，不会进入缓存
 两个带标签 `io.github.anki-deck-toolkit.e2e=1` 的镜像：
 
 - `anki-e2e/anki:<版本>-<arch>-<sha12>-<键>`，来自
-  [`docker/anki.Dockerfile`](docker/anki.Dockerfile)：按 digest 固定的
+  [`docker/anki.Dockerfile`](../../../tools/anki-e2e/docker/anki.Dockerfile)：按 digest 固定的
   Ubuntu 24.04、官方构建的依赖、Xvfb、D-Bus 和 at-spi2-core、解压后的官方归档
   （再次校验 SHA-256）。**镜像中没有插件**：首次安装由场景验证。
-- `anki-e2e/run:<树12>-<键>`，来自 [`docker/run.Dockerfile`](docker/run.Dockerfile)：
+- `anki-e2e/run:<树12>-<键>`，来自 [`docker/run.Dockerfile`](../../../tools/anki-e2e/docker/run.Dockerfile)：
   `anki-repo` 和 `anki-e2e` 在 Docker 内（`rust:<MSRV>-bookworm`，MSRV 取自根
   `Cargo.toml`）根据 Git 跟踪或未忽略的工作副本文件快照构建。测试台的工作目录（`--work-dir`：
   缓存、快照、报告）无论位于何处都不会进入快照，即使位于仓库内且未写入
@@ -189,13 +190,13 @@ Linux 或 WSL2，带 Docker Engine（rootful 或 rootless）和 BuildKit，架�
 aarch64，可访问 GitHub、AnkiWeb、Docker Hub 和 Ubuntu 镜像源，默认每个容器
 4 个 CPU 和 6 GB 内存。在测量环境中，测试台镜像、Cargo 缓存和归档占用约 6.6 GB
 磁盘；Docker 基础镜像、构建临时数据和缓存增长余量还需要额外空间
-（[测量详情](performance.zh-CN.md)）。首次运行构建镜像；之后的运行使用缓存。
+（[测量详情](performance.md)）。首次运行构建镜像；之后的运行使用缓存。
 
 ## 性能
 
 测试台各阶段的耗时、CPU、内存和磁盘占用及其测量方法记录在
-[性能页面](performance.zh-CN.md)中；通用测量规则见
-[方法说明](../../docs/performance/README.zh-CN.md)。
+[性能页面](performance.md)中；通用测量规则见
+[方法说明](../performance/docs/ru/README.md)。
 
 ## 边界
 

@@ -1,6 +1,6 @@
 # E2E-стенд Anki Desktop
 
-**Русский** · [English](README.en.md) · [简体中文](README.zh-CN.md)
+**Русский** · [English](../../en/anki-e2e/docs/ru/README.md) · [简体中文](../../zh-CN/anki-e2e/docs/ru/README.md)
 
 `anki-e2e` — постоянный локальный E2E-стенд для группы `anki-repo anki`
 ([контракт](../anki-repo/desktop.md)). Rust runner на хосте собирает
@@ -106,11 +106,11 @@ cargo run -p anki-e2e -- clean --images --cache
 Два образа с метками `io.github.anki-deck-toolkit.e2e=1`:
 
 - `anki-e2e/anki:<версия>-<arch>-<sha12>-<ключ>` из
-  [`docker/anki.Dockerfile`](docker/anki.Dockerfile): Ubuntu 24.04,
+  [`docker/anki.Dockerfile`](../../../tools/anki-e2e/docker/anki.Dockerfile): Ubuntu 24.04,
   закреплённая по digest, зависимости официальной сборки, Xvfb, D-Bus и
   at-spi2-core, распакованный официальный архив (SHA-256 сверяется ещё раз).
   **Аддонов в образе нет**: первоначальную установку проверяет сценарий.
-- `anki-e2e/run:<дерево12>-<ключ>` из [`docker/run.Dockerfile`](docker/run.Dockerfile):
+- `anki-e2e/run:<дерево12>-<ключ>` из [`docker/run.Dockerfile`](../../../tools/anki-e2e/docker/run.Dockerfile):
   `anki-repo` и `anki-e2e` собираются внутри Docker (`rust:<MSRV>-bookworm`,
   MSRV из корневого `Cargo.toml`) из снимка файлов рабочей копии, которые
   отслеживает или не игнорирует Git. Рабочий каталог стенда (`--work-dir`:
@@ -237,7 +237,7 @@ x86_64 или aarch64, сеть до GitHub, AnkiWeb, Docker Hub и зеркал
 
 Время по фазам, CPU, память и диск стенда с методикой замера — на
 [странице производительности](performance.md); общие правила
-замеров — в [методике](../../docs/performance/README.md).
+замеров — в [методике](../performance/docs/ru/README.md).
 
 ## Границы
 

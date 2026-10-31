@@ -1,20 +1,21 @@
 # Benchmark catalog and result contract
 
-[Русский](benchmarks.md) · **English** · [简体中文](benchmarks.zh-CN.md)
-<!-- i18n-source-git-blob: 9aa0b2a7b0e59177d2747befbb40927ecc1d262c -->
+[Русский](../../ru/performance/benchmarks.md) · **English** · [简体中文](../../zh-CN/performance/benchmarks.md)
 
-The catalog is the machine-readable form of what the [methodology](README.en.md)
+> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/performance/benchmarks.md) is authoritative. Corrections and translation contributions are welcome.
+
+The catalog is the machine-readable form of what the [methodology](docs/ru/README.md)
 describes in words: which scenarios are measured, under which conditions, what
 the measured interval contains, and which metrics with which scope are
 collected. The result contract is versioned JSON in which a runner records
 measurements. Both contracts are checked by `benchmark-contract`
-([CLI and exit codes](../../tools/benchmark-contract/README.en.md)).
+([CLI and exit codes](../benchmark-contract/docs/ru/README.md)).
 
 The catalog and its checks run and measure nothing. Series are executed by
-[`benchmark-runner`](../../tools/benchmark-runner/README.en.md): Hyperfine 2.0
+[`benchmark-runner`](../benchmark-runner/docs/ru/README.md): Hyperfine 2.0
 and Linux system metrics. It uses this contract instead of inventing its own.
 The local result history, baseline selection and reports are kept by
-[`benchmark-history`](../../tools/benchmark-history/README.en.md); the repository
+[`benchmark-history`](../benchmark-history/docs/ru/README.md); the repository
 holds no run history and no thresholds. Module snapshots
 (`tools/<module>/performance.md`) remain evidence of specific environments.
 
@@ -399,7 +400,7 @@ aggregates and rejects a mismatch and an aggregate without primary values.
 
 `provenance` keeps technical identifiers (commit SHA, tree hash) in the result
 record itself. They are not copied into permanent documentation, including
-module pages — that is a rule of [`AGENTS.md`](../../AGENTS.md).
+module pages — that is a rule of [`AGENTS.md`](../../../AGENTS.md).
 
 A published result contains no paths inside home directories, tokens, private
 keys, credentials or email addresses: validation inspects every string and key
@@ -481,7 +482,7 @@ the catalog and only then stores it. Comparisons use `compare`.
 
 There is no history storage, no regression computation and no CI thresholds
 here: history and reports live in
-[`benchmark-history`](../../tools/benchmark-history/README.en.md), without
+[`benchmark-history`](../benchmark-history/docs/ru/README.md), without
 thresholds. Numbers from module snapshots do not become thresholds.
 
 ## Block I/O

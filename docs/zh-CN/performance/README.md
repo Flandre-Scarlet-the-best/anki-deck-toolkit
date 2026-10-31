@@ -1,7 +1,8 @@
 # 性能与资源消耗
 
-[Русский](README.md) · [English](README.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 171a1e5f9d8c106babcac42beb9ace95055c4f97 -->
+[Русский](../../ru/performance/docs/ru/README.md) · [English](../../en/performance/docs/ru/README.md) · **简体中文**
+
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/performance/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
 
 本目录提供通用方法及指向各模块页面的链接，展示仓库各模块性能与资源消耗的**最近确认指标**：时间、CPU、内存、磁盘。每个模块有
 自己的页面，包含测量方法、指标定义，以及在明确命名的参考环境中按场景和配置划分的快照。
@@ -14,7 +15,7 @@
 
 | 内容 | 位置 | 谁能看到 |
 |---|---|---|
-| 每次测量的完整历史 | 本地 [`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 历史：用户数据目录中原始 JSON 的不可变归档和 SQLite 索引 | 仅其所有者 |
+| 每次测量的完整历史 | 本地 [`benchmark-history`](../benchmark-history/docs/ru/README.md) 历史：用户数据目录中原始 JSON 的不可变归档和 SQLite 索引 | 仅其所有者 |
 | 任务的完整报告 | 任务 Gist 中未修改的 `benchmark-history report` 及其 manifest | 所有人，通过 PR 链接 |
 | 公开的历史记录 | PR 的 `## Производительность`（性能）章节：场景、基线、候选版本、结果、结论和显著退化的简要摘要 | 所有人，通过 PR 历史 |
 | 当前快照 | 本目录的页面：每个场景 × 配置对的最近确认测量 | 所有人 |
@@ -27,10 +28,10 @@
 
 | 模块 | 页面 | 基于 JSON 结果的快照 |
 |---|---|---|
-| `anki-repo` | [anki-repo/performance.zh-CN.md](../../tools/anki-repo/performance.zh-CN.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
-| `asset-store` | [asset-store/performance.zh-CN.md](../../tools/asset-store/performance.zh-CN.md) | `asset-store.*` · `warm`（`kanji-medium`） |
-| `anki-e2e` | [anki-e2e/performance.zh-CN.md](../../tools/anki-e2e/performance.zh-CN.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
-| `benchmark-runner` | [benchmark-runner/performance.zh-CN.md](../../tools/benchmark-runner/performance.zh-CN.md) | `benchmark-runner.calibration-*` · `warm` |
+| `anki-repo` | [anki-repo/performance.zh-CN.md](../anki-repo/performance.md) | `anki-repo.validate` · `warm`、`offline-warm`；`anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store/performance.zh-CN.md](../asset-store/performance.md) | `asset-store.*` · `warm`（`kanji-medium`） |
+| `anki-e2e` | [anki-e2e/performance.zh-CN.md](../anki-e2e/performance.md) | `anki-e2e.smoke`、`anki-e2e.full` · `warm`；其他状态为无原始 JSON 的手动观测 |
+| `benchmark-runner` | [benchmark-runner/performance.zh-CN.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
 新模块需要单独的页面 `tools/<模块>/performance.md`（含翻译），在放置快照的位置加入
 `<!-- benchmark-snapshot:anchor -->` 一行，并在此表中增加一行。
@@ -39,8 +40,8 @@
 
 场景、执行条件配置、被测工作的边界以及带覆盖范围的指标，以机器可读的形式声明在
 `benchmarks/` 目录中；测量结果以带版本的 JSON 记录。如何注册场景以及如何解读
-结果，见[基准目录](benchmarks.zh-CN.md)；系列由
-[`benchmark-runner`](../../tools/benchmark-runner/README.zh-CN.md) 执行。本页规则同样适用于按目录进行的测量：
+结果，见[基准目录](benchmarks.md)；系列由
+[`benchmark-runner`](../benchmark-runner/docs/ru/README.md) 执行。本页规则同样适用于按目录进行的测量：
 目录要求每个场景声明确切的缓存状态，而快照仍然是环境的证据。
 
 ## 测量规则
@@ -67,7 +68,7 @@
    没有测量证明存在问题的优化，不作为改进发布。
 
 智能体处理优化或疑似回归的流程——假设、变更前旧实现的基线、变更后可比的系列、分析和报告——见
-skill [`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md)。
+skill [`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md)。
 它以这些规则以及常规的 `benchmark-runner` 和 `benchmark-history` 为基础，而不取代它们。
 
 ## 指标来源与精度
@@ -96,7 +97,7 @@ skill [`performance-benchmarking`](../../.agents/skills/performance-benchmarking
    PR 正文保留简洁摘要：场景、测量的基线和候选提交、关键数值、结论及所有显著回退。
 
 永久文档中不包含提交 SHA、PR 编号、本地绝对路径、输入标识和作者姓名
-（[`AGENTS.md`](../../AGENTS.md) 的规则）；这些细节属于任务 Gist、PR 摘要和本地历史。`benchmark-snapshot`
+（[`AGENTS.md`](../../../AGENTS.md) 的规则）；这些细节属于任务 Gist、PR 摘要和本地历史。`benchmark-snapshot`
 标记内的快照不手动编辑。
 
 在历史出现之前记录的手动观测保留在模块页面上，并明确标注其没有原始 JSON 结果：不得将其当作

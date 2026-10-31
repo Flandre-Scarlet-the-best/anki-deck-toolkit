@@ -1,6 +1,6 @@
 # Производительность и потребление ресурсов
 
-**Русский** · [English](README.en.md) · [简体中文](README.zh-CN.md)
+**Русский** · [English](../../en/performance/docs/ru/README.md) · [简体中文](../../zh-CN/performance/docs/ru/README.md)
 
 Здесь собраны общая методика и ссылки на **последние подтверждённые показатели** производительности и
 потребления ресурсов модулей репозитория: время, CPU, память, диск. У каждого
@@ -17,7 +17,7 @@ Docker дают другие значения.
 
 | Что | Где | Кто видит |
 |---|---|---|
-| Полная история каждого замера | локальная история [`benchmark-history`](../../tools/benchmark-history/README.md): неизменяемый архив исходных JSON и индекс SQLite в каталоге данных пользователя | только её владелец |
+| Полная история каждого замера | локальная история [`benchmark-history`](../benchmark-history/docs/ru/README.md): неизменяемый архив исходных JSON и индекс SQLite в каталоге данных пользователя | только её владелец |
 | Полный отчёт задачи | неизменённый `benchmark-history report` в Gist задачи с manifest | все, по ссылке в PR |
 | Публичная историческая запись | раздел `## Производительность` PR: компактная сводка сценария, базы, кандидата, результатов, выводов и существенных регрессий | все, через историю PR |
 | Актуальный снимок | страницы `tools/<модуль>/performance.md`: последнее подтверждённое измерение каждой пары «сценарий × профиль» | все |
@@ -33,10 +33,10 @@ Docker дают другие значения.
 
 | Модуль | Страница | Снимки по JSON-результатам |
 |---|---|---|
-| `anki-repo` | [anki-repo/performance.md](../../tools/anki-repo/performance.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
-| `asset-store` | [asset-store/performance.md](../../tools/asset-store/performance.md) | `asset-store.*` · `warm` (`kanji-medium`) |
-| `anki-e2e` | [anki-e2e/performance.md](../../tools/anki-e2e/performance.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; ручное наблюдение без первичных JSON для остальных состояний |
-| `benchmark-runner` | [benchmark-runner/performance.md](../../tools/benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
+| `anki-repo` | [anki-repo/performance.md](../anki-repo/performance.md) | `anki-repo.validate` · `warm`, `offline-warm`; `anki-repo.stats` · `warm` |
+| `asset-store` | [asset-store/performance.md](../asset-store/performance.md) | `asset-store.*` · `warm` (`kanji-medium`) |
+| `anki-e2e` | [anki-e2e/performance.md](../anki-e2e/performance.md) | `anki-e2e.smoke`, `anki-e2e.full` · `warm`; ручное наблюдение без первичных JSON для остальных состояний |
+| `benchmark-runner` | [benchmark-runner/performance.md](../benchmark-runner/performance.md) | `benchmark-runner.calibration-*` · `warm` |
 
 Новый модуль добавляется отдельной страницей `tools/<модуль>/performance.md` с
 переводами, строкой `<!-- benchmark-snapshot:anchor -->` в месте для снимков и
@@ -48,7 +48,7 @@ Docker дают другие значения.
 объявляются машинно в каталоге `benchmarks/`, а результаты измерений
 записываются в версионируемом JSON. Как зарегистрировать сценарий и читать
 результат — [каталог бенчмарков](benchmarks.md); выполняет серии
-[`benchmark-runner`](../../tools/benchmark-runner/README.md). Правила этой страницы
+[`benchmark-runner`](../benchmark-runner/docs/ru/README.md). Правила этой страницы
 применяются и к измерениям по каталогу: точное состояние кэша каталог требует
 объявить для каждого сценария, а снимок остаётся свидетельством окружения.
 
@@ -86,7 +86,7 @@ Docker дают другие значения.
 Порядок работы агента над оптимизацией или подозрением на регрессию —
 гипотеза, база прежней реализации до изменения, сопоставимая серия после
 него, анализ и отчёт — описан в skill
-[`performance-benchmarking`](../../.agents/skills/performance-benchmarking/SKILL.md).
+[`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md).
 Он опирается на эти правила и на штатные `benchmark-runner` и
 `benchmark-history`, не заменяя их.
 
@@ -120,7 +120,7 @@ Docker дают другие значения.
 
 В постоянной документации нет SHA коммитов, номеров PR, абсолютных локальных
 путей, идентичностей входов и имён авторов (правило
-[`AGENTS.md`](../../AGENTS.md)); эти детали — в Gist задачи, сводке PR и в локальной
+[`AGENTS.md`](../../../AGENTS.md)); эти детали — в Gist задачи, сводке PR и в локальной
 истории. Снимки внутри маркеров `benchmark-snapshot` вручную не правятся.
 
 Ручные наблюдения, записанные до появления истории, остаются на страницах

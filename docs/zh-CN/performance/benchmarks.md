@@ -1,17 +1,18 @@
 # 基准目录与结果契约
 
-[Русский](benchmarks.md) · [English](benchmarks.en.md) · **简体中文**
-<!-- i18n-source-git-blob: 9aa0b2a7b0e59177d2747befbb40927ecc1d262c -->
+[Русский](../../ru/performance/benchmarks.md) · [English](../../en/performance/benchmarks.md) · **简体中文**
 
-目录是[测量方法](README.zh-CN.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
+> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/performance/benchmarks.md)为准。欢迎提交翻译和校对改进。
+
+目录是[测量方法](docs/ru/README.md)用文字描述内容的机器可读形式：测量哪些场景、在什么
 条件下测量、被测区间包含什么，以及收集哪些指标及其覆盖范围。结果契约是带版本的 JSON，
 执行器在其中记录测量值。两个契约都由 `benchmark-contract` 校验
-（[CLI 与退出码](../../tools/benchmark-contract/README.zh-CN.md)）。
+（[CLI 与退出码](../benchmark-contract/docs/ru/README.md)）。
 
 目录及其校验既不运行也不测量任何东西。系列由
-[`benchmark-runner`](../../tools/benchmark-runner/README.zh-CN.md) 执行：Hyperfine 2.0
+[`benchmark-runner`](../benchmark-runner/docs/ru/README.md) 执行：Hyperfine 2.0
 与 Linux 系统指标。它使用本契约，而不是另起一套。本地结果历史、基线选择和报告由
-[`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 负责；仓库中没有运行历史
+[`benchmark-history`](../benchmark-history/docs/ru/README.md) 负责；仓库中没有运行历史
 和阈值。模块快照（`tools/<模块>/performance.md`）仍然是特定环境的证据。
 
 ## 文件位置
@@ -349,7 +350,7 @@ comparable = ["os", "arch", "cpu_model"]
 （n − 1），单个值时为 `null`。校验会重新计算聚合值，并拒绝不一致以及没有原始值的聚合。
 
 `provenance` 在结果记录本身中保存技术标识（提交 SHA、树哈希）。它们不会写入永久文档，
-包括模块页面 —— 这是 [`AGENTS.md`](../../AGENTS.md) 的规则。
+包括模块页面 —— 这是 [`AGENTS.md`](../../../AGENTS.md) 的规则。
 
 发布的结果不包含主目录内的路径、令牌、私钥、凭据和电子邮件地址：校验会检查文档的所有
 字符串和键。`record = false` 的参数值不会进入结果，进程的环境变量也不会。
@@ -413,7 +414,7 @@ cargo run -p benchmark-contract -- --json vocabulary
 ## 边界
 
 这里没有历史存储、没有回归计算，也没有 CI 阈值：历史和报告在
-[`benchmark-history`](../../tools/benchmark-history/README.zh-CN.md) 中，且没有阈值。模块快照中的
+[`benchmark-history`](../benchmark-history/docs/ru/README.md) 中，且没有阈值。模块快照中的
 数字不会成为阈值。
 
 ## 块 I/O
