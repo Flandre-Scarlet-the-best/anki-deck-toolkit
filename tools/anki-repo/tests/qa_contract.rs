@@ -343,7 +343,7 @@ fn human_mode_lists_every_rule_and_keeps_stdout_only() {
     assert!(stderr.is_empty());
     let mut needles = vec![
         "По кодам:".to_string(),
-        "Findings:".to_string(),
+        "Замечания:".to_string(),
         format!("Правила ({}):", QA_CODES.len()),
         "усечено".to_string(),
     ];

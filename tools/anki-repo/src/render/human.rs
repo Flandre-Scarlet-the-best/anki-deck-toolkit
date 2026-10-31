@@ -629,7 +629,7 @@ pub fn qa(result: &QaResult) -> String {
     }
 
     out.blank();
-    out.line("Findings:");
+    out.line("Замечания:");
     if result.findings.is_empty() {
         out.line("  —");
     }
