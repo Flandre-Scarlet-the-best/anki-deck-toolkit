@@ -102,6 +102,33 @@ async fn blocked_session_stops_candidates_and_retains_attempt_report() {
     let failure: batch::Failure = error.into();
     assert_eq!(failure.report.unwrap().attempts[0].code, "session_expired");
 }
+
+#[tokio::test]
+async fn cancelled_shutdown_future_is_awaited_by_session_close() {
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let marker = completed.clone();
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        marker.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    });
+    let mut session = ForvoSession {
+        browser: None,
+        pending_stop: Some(task),
+        pending_launch: None,
+        was_authenticated: false,
+        download_used: true,
+        profile: "/unused".into(),
+        visible: false,
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), session.stop_browser())
+            .await
+            .is_err()
+    );
+    session.close().await.unwrap();
+    assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
+}
 #[tokio::test]
 async fn throttling_has_bounded_retries_and_never_becomes_not_found() {
     let mut source = source(Vec::new());
@@ -113,6 +140,150 @@ async fn throttling_has_bounded_retries_and_never_becomes_not_found() {
     assert_eq!(source.candidate_calls, 3);
     assert!(source.calls.is_empty());
     assert_eq!(provider_code(&error), "rate_limited");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_reloads_revision_without_rehashing_unchanged_blobs() {
+    use super::batch::{FetchItem, FetchPlan, StoredAcquisition};
+    use crate::batch_runtime::{REFERENCED_BLOB_READS, SafeBatchRuntime};
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-cancel-poll").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let items = ["あ", "い", "う", "え"]
+        .into_iter()
+        .map(|word| FetchItem {
+            surface: word.into(),
+            reading: word.into(),
+            replace_expected_sha256: None,
+        })
+        .collect();
+    batch::start(
+        &store,
+        "poll",
+        FetchPlan {
+            schema_version: 1,
+            items,
+        },
+    )
+    .unwrap();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "poll").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    for (index, item) in state.items.iter_mut().enumerate() {
+        let bytes = vec![index as u8; 2 * 1024 * 1024];
+        let blob = runtime.persist_blob(&bytes, "mp3").unwrap();
+        let c = candidate("1", Some(1), Some(Gender::Female), None);
+        item.acquisition = Some(StoredAcquisition {
+            evidence: ForvoEvidence {
+                schema_version: 1,
+                page_url: word_url(&item.request.surface),
+                downloaded_sha256: blob.sha256.clone(),
+                selected_record_id: "1".into(),
+                ranking_policy: RANKING.into(),
+                candidates: vec![c],
+                attempts: vec![Attempt {
+                    record_id: "1".into(),
+                    code: "downloaded".into(),
+                }],
+            },
+            blob,
+        });
+    }
+    state.revision += 1;
+    runtime.save(&state).unwrap();
+    drop(runtime);
+    // Диагностика прежней границы: четыре полных load того же пакета.
+    let mut baseline = SafeBatchRuntime::open(store.root(), "poll").unwrap();
+    REFERENCED_BLOB_READS.with(|reads| reads.set(0));
+    for _ in 0..4 {
+        baseline.load::<batch::ForvoBatch>().unwrap().unwrap();
+        baseline.release_lock().unwrap();
+        baseline.reacquire_lock().unwrap();
+    }
+    REFERENCED_BLOB_READS.with(|reads| assert_eq!(reads.get(), 16));
+    drop(baseline);
+    REFERENCED_BLOB_READS.with(|reads| reads.set(0));
+    let cancelled_at = std::cell::Cell::new(None);
+    let (observed, ()) = tokio::join!(batch::cancellation(&store, "poll"), async {
+        tokio::time::sleep(Duration::from_millis(850)).await;
+        batch::cancel(&store, "poll").unwrap();
+        cancelled_at.set(Some(std::time::Instant::now()));
+    });
+    observed.unwrap();
+    assert!(cancelled_at.get().unwrap().elapsed() < Duration::from_secs(5));
+    // По четыре blob при первоначальной загрузке наблюдателя и команде cancel.
+    REFERENCED_BLOB_READS.with(|reads| assert_eq!(reads.get(), 8));
+}
+
+#[tokio::test]
+async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
+    use super::batch::{FetchItem, FetchPlan, StoredAcquisition};
+    use crate::batch_runtime::SafeBatchRuntime;
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-terminal-import").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let existing = Pronunciation::new("え", "え").unwrap();
+    let valid = synthetic_mp3();
+    crate::pronunciation::import_bytes(&store, &existing, &valid, "fixture.mp3", None).unwrap();
+    batch::start(
+        &store,
+        "terminal",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![
+                FetchItem {
+                    surface: "あ".into(),
+                    reading: "あ".into(),
+                    replace_expected_sha256: None,
+                },
+                FetchItem {
+                    surface: "え".into(),
+                    reading: "え".into(),
+                    replace_expected_sha256: Some("0".repeat(64)),
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "terminal").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    for (item, bytes) in state
+        .items
+        .iter_mut()
+        .zip([b"broken mp3".as_slice(), valid.as_slice()])
+    {
+        let blob = runtime.persist_blob(bytes, "mp3").unwrap();
+        item.acquisition = Some(StoredAcquisition {
+            evidence: evidence(bytes, &item.request),
+            blob,
+        });
+    }
+    state.revision += 1;
+    runtime.save(&state).unwrap();
+    drop(runtime);
+    let result = batch::resume(
+        &store,
+        "terminal",
+        &workspace.path().join("never-created"),
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(result.paused.is_none());
+    assert_eq!(
+        result.items[0].outcome.as_ref().unwrap().code,
+        "validator_failure"
+    );
+    assert_eq!(
+        result.items[1].outcome.as_ref().unwrap().code,
+        "identity_conflict"
+    );
+    assert!(!workspace.path().join("never-created").exists());
 }
 
 #[test]
@@ -375,4 +546,65 @@ async fn browser_multilingual_dom_and_view_all_are_structural() {
         .unwrap();
     assert_eq!(scan(browser.page()).await.code, "dom_changed");
     browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "нужен установленный Chromium; внешняя сеть не используется"]
+async fn browser_persistent_background_reuses_cookies_and_removes_staging() {
+    use chromiumoxide::cdp::browser_protocol::network::{CookieParam, TimeSinceEpoch};
+    let workspace =
+        crate::temp_workspace::TempWorkspace::create("forvo-persistent-browser-test").unwrap();
+    let profile = workspace.path().join("profile");
+    let browser =
+        BrowserSession::launch_persistent_background(BrowserRuntimeConfig::default(), &profile)
+            .await
+            .unwrap();
+    let staging = browser.download_staging().unwrap();
+    std::fs::write(staging.join("unfinished-guid"), b"partial").unwrap();
+    let cookie = CookieParam::builder()
+        .name("offline_test")
+        .value("persistent")
+        .url("https://example.test/")
+        .expires(TimeSinceEpoch::new(4_000_000_000_f64))
+        .build()
+        .unwrap();
+    browser.browser().set_cookies(vec![cookie]).await.unwrap();
+    assert!(
+        BrowserSession::launch_persistent_background(BrowserRuntimeConfig::default(), &profile)
+            .await
+            .is_err()
+    );
+    browser.close().await.unwrap();
+    assert!(!staging.exists());
+    let second =
+        BrowserSession::launch_persistent_background(BrowserRuntimeConfig::default(), &profile)
+            .await
+            .unwrap();
+    let cookies = second.browser().get_cookies().await.unwrap();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.name == "offline_test" && c.value == "persistent")
+    );
+    second.close().await.unwrap();
+    workspace.close().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "нужен установленный Chromium; внешняя сеть не используется"]
+async fn browser_cancelled_relaunch_is_joined_before_profile_reuse() {
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-cancel-relaunch").unwrap();
+    let profile = workspace.path().join("profile");
+    let mut session = ForvoSession::launch(&profile).await.unwrap();
+    session.stop_browser().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), session.start_browser(false))
+            .await
+            .is_err()
+    );
+    assert!(session.pending_launch.is_some());
+    session.close().await.unwrap();
+    let reopened = ForvoSession::launch(&profile).await.unwrap();
+    reopened.close().await.unwrap();
+    workspace.close().unwrap();
 }

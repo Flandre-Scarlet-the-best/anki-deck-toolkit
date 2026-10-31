@@ -890,7 +890,7 @@ fn json(output: &Output) -> serde_json::Value {
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
 }
 #[test]
-fn forvo_cli_without_gui_reports_a_blocker_before_creating_profile_or_store() {
+fn forvo_login_without_gui_reports_a_blocker_before_creating_profile_or_store() {
     let workspace = TempWorkspace::create("forvo-no-gui").unwrap();
     let profile = workspace.path().join("profile");
     let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
@@ -899,7 +899,7 @@ fn forvo_cli_without_gui_reports_a_blocker_before_creating_profile_or_store() {
         .arg("forvo")
         .arg("--profile")
         .arg(&profile)
-        .arg("check")
+        .arg("login")
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .output()
@@ -908,6 +908,103 @@ fn forvo_cli_without_gui_reports_a_blocker_before_creating_profile_or_store() {
     assert_eq!(json(&output)["error"]["details"]["code"], "gui_unavailable");
     assert!(!profile.exists());
     assert!(!workspace.path().join(".asset-store").exists());
+}
+
+#[test]
+fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
+    use asset_store::batch_runtime::SafeBatchRuntime;
+    use asset_store::forvo::batch as web;
+    let workspace = TempWorkspace::create("forvo-checkpoint-resume").unwrap();
+    let store = store(&workspace.path().join("store"));
+    let request = request();
+    let acquisition = web_acquisition(audio(), &request);
+    web::start(
+        &store,
+        "checkpoint",
+        web::FetchPlan {
+            schema_version: 1,
+            items: vec![web::FetchItem {
+                surface: request.surface.clone(),
+                reading: request.reading.clone(),
+                replace_expected_sha256: None,
+            }],
+        },
+    )
+    .unwrap();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "checkpoint").unwrap();
+    let mut batch: web::ForvoBatch = runtime.load().unwrap().unwrap();
+    let blob = runtime.persist_blob(&acquisition.bytes, "mp3").unwrap();
+    let sha = blob.sha256.clone();
+    batch.items[0].acquisition = Some(web::StoredAcquisition {
+        blob,
+        evidence: acquisition.evidence,
+    });
+    batch.revision += 1;
+    runtime.save(&batch).unwrap();
+    drop(runtime);
+    let tools = workspace.path().join("tools");
+    fs::create_dir(&tools).unwrap();
+    let run = |path: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+            .arg("--repository-root")
+            .arg(workspace.path())
+            .arg("--store")
+            .arg(store.root())
+            .args(["forvo", "batch-resume", "--batch-id", "checkpoint"])
+            .env("PATH", path)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .output()
+            .unwrap()
+    };
+    let blocked = run(&tools);
+    assert_eq!(
+        blocked.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&blocked.stdout)
+    );
+    let value = json(&blocked);
+    assert_eq!(value["outcome"], "paused");
+    assert_eq!(value["result"]["paused"]["code"], "audio_tool_missing");
+    assert!(value["result"]["items"][0]["outcome"].is_null());
+    assert_eq!(
+        value["result"]["items"][0]["acquisition"]["blob"]["sha256"],
+        sha
+    );
+    let first_log = value["result"]["diagnostic_log"].as_str().unwrap();
+    let lines = fs::read_to_string(first_log).unwrap();
+    assert!(
+        lines
+            .lines()
+            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+    );
+    assert!(lines.contains("browser_acquisition_stage"));
+    assert!(lines.contains("import_mp3"));
+    assert!(lines.contains("audio_tool_missing"));
+    assert!(!lines.contains("fixture-speaker"));
+    let restored = run(Path::new("/usr/bin:/bin"));
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stdout)
+    );
+    let value = json(&restored);
+    assert_eq!(value["result"]["items"][0]["outcome"]["code"], "imported");
+    assert_eq!(
+        value["result"]["items"][0]["acquisition"]["blob"]["sha256"],
+        sha
+    );
+    assert!(!workspace.path().join(".codex/local/forvo-profile").exists());
+    assert_ne!(value["result"]["diagnostic_log"], first_log);
+    let asset = store
+        .verify_integrity()
+        .unwrap()
+        .into_iter()
+        .find(|a| a.identity == request.identity())
+        .unwrap();
+    assert_eq!(asset.sha256, sha);
+    assert_eq!(asset.validation.unwrap().status, SemanticStatus::Uncertain);
 }
 #[test]
 fn forvo_cli_strict_plan_status_and_cancel_do_not_require_browser() {
@@ -951,6 +1048,21 @@ fn forvo_cli_strict_plan_status_and_cancel_do_not_require_browser() {
         ))["result"]["cancelled"],
         true
     );
+    let stopped = cli(
+        &workspace,
+        &["forvo", "batch-resume", "--batch-id", "offline-web"],
+    );
+    assert!(!stopped.status.success());
+    let stopped_json = json(&stopped);
+    let log = stopped_json["error"]["details"]["diagnostic_log"]
+        .as_str()
+        .unwrap();
+    let log = fs::read_to_string(log).unwrap();
+    assert!(
+        log.lines()
+            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+    );
+    assert!(log.contains("run_stopped"));
     fs::write(&plan,r#"{"schema_version":1,"schema_version":1,"items":[{"surface":"元気","reading":"げんき"}]}"#).unwrap();
     assert!(
         !cli(

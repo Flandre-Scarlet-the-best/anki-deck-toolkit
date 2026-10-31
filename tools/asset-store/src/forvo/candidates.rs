@@ -94,7 +94,7 @@ impl ForvoSession {
             serde_json::json!(action),
             serde_json::json!(id)
         );
-        self.browser
+        self.browser()
             .page()
             .evaluate_expression(
                 chromiumoxide::cdp::js_protocol::runtime::EvaluateParams::builder()
@@ -121,7 +121,7 @@ impl ForvoSession {
         self.require_authenticated().await?;
         // DOM слова может появиться до выполнения отложенных frontend-скриптов.
         // Ждём DOMContentLoaded, который нужен обычной кнопке сайта, а не рекламы/network idle.
-        let ready=self.browser.page().evaluate_expression(r#"new Promise(resolve=>{
+        let ready=self.browser().page().evaluate_expression(r#"new Promise(resolve=>{
             if(document.readyState==='complete'||performance.getEntriesByType('navigation')[0]?.domContentLoadedEventEnd>0){resolve(true);return;}
             const done=()=>{clearTimeout(timer);document.removeEventListener('DOMContentLoaded',done);resolve(true);};
             const timer=setTimeout(()=>{document.removeEventListener('DOMContentLoaded',done);resolve(false);},12000);
@@ -135,7 +135,7 @@ impl ForvoSession {
             ));
         }
         let expected = serde_json::json!(word_url(&request.surface));
-        let missing=self.browser.page().evaluate_expression(format!("location.href === {expected} && performance.getEntriesByType('navigation')[0]?.responseStatus === 404")).await
+        let missing=self.browser().page().evaluate_expression(format!("location.href === {expected} && performance.getEntriesByType('navigation')[0]?.responseStatus === 404")).await
             .map_err(|_|error("browser_recovery_required","Не удалось проверить ответ страницы слова"))?
             .into_value::<bool>().map_err(|_|error("dom_changed","Неизвестное состояние страницы слова"))?;
         if missing {

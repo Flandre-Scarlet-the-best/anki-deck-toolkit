@@ -175,6 +175,7 @@ struct BrowserProfile {
     workspace: Option<TempWorkspace>,
     closed: bool,
     persistent: Option<persistent::PersistentProfile>,
+    persistent_visible: bool,
 }
 
 /// Ошибка запуска сохраняет доказанность очистки до владельца восстановления.
@@ -290,6 +291,7 @@ impl BrowserProfile {
                                 workspace: None,
                                 closed: false,
                                 persistent: None,
+                                persistent_visible: false,
                             });
                         }
                         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -425,7 +427,8 @@ fn build_launch_spec(
         user_data_dir: profile.path.clone(),
         tmpdir: temp_directory.to_owned(),
         launch_timeout: config.launch_timeout,
-        persistent_visible: profile.persistent.is_some(),
+        persistent_visible: profile.persistent_visible,
+        persistent_profile: profile.persistent.is_some(),
     })
 }
 
@@ -922,8 +925,25 @@ impl BrowserSession {
         config: BrowserRuntimeConfig,
         path: &Path,
     ) -> Result<Self, BrowserLaunchError> {
+        Self::launch_persistent_mode(config, path, true).await
+    }
+
+    /// Фоновый сеанс использует тот же постоянный профиль без incognito и GUI.
+    pub async fn launch_persistent_background(
+        config: BrowserRuntimeConfig,
+        path: &Path,
+    ) -> Result<Self, BrowserLaunchError> {
+        Self::launch_persistent_mode(config, path, false).await
+    }
+
+    async fn launch_persistent_mode(
+        config: BrowserRuntimeConfig,
+        path: &Path,
+        visible: bool,
+    ) -> Result<Self, BrowserLaunchError> {
         config.validate().map_err(BrowserLaunchError::Setup)?;
-        if std::env::var_os("DISPLAY").is_none_or(|v| v.is_empty())
+        if visible
+            && std::env::var_os("DISPLAY").is_none_or(|v| v.is_empty())
             && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty())
         {
             return Err(BrowserLaunchError::Setup(
@@ -933,9 +953,24 @@ impl BrowserSession {
         let persistent = persistent::PersistentProfile::open(path)?;
         let mut profile = BrowserProfile::standalone()?;
         fs::remove_dir(&profile.path)?;
+        persistent.register_workspace(&profile.workspace_path)?;
         profile.path = persistent.path.clone();
         profile.persistent = Some(persistent);
+        profile.persistent_visible = visible;
         Self::launch_with_profile(config, profile).await
+    }
+
+    /// Staging живёт в том же дереве, что и TMPDIR Chromium, и удаляется его владельцем.
+    pub(crate) fn download_staging(&self) -> io::Result<PathBuf> {
+        let profile = self
+            .resources
+            .as_ref()
+            .and_then(|r| r.profile.as_ref())
+            .ok_or_else(|| io::Error::other("ресурсы браузера недоступны"))?;
+        let path = profile.workspace_path.join("forvo-download");
+        fs::create_dir(&path)?;
+        set_private_directory(&path)?;
+        Ok(path)
     }
 
     /// Browser-level CDP для корреляции загрузок в принадлежащем сеансе.
@@ -2144,6 +2179,46 @@ mod tests {
         assert!(!root.exists());
         assert!(!profile_path.exists());
         assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn staging_survives_failed_close_and_drop_while_a_process_uses_the_workspace() {
+        for explicit_close in [true, false] {
+            let profile = BrowserProfile::standalone().unwrap();
+            let root = profile.workspace_path.clone();
+            let staging = root.join("forvo-download");
+            fs::create_dir(&staging).unwrap();
+            let file = staging.join("unfinished-guid");
+            fs::write(&file, b"partial").unwrap();
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "exec 3< \"$1\"; read line", "forvo-test"])
+                .arg(&file)
+                .arg(format!("--user-data-dir={}", root.display()))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            assert!(child.try_wait().unwrap().is_none());
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !Path::new(&format!("/proc/{}/fd/3", child.id())).exists()
+                || !TempWorkspace::has_live_process_references(&root).unwrap()
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if explicit_close {
+                assert!(profile.close().is_err());
+            } else {
+                drop(profile);
+            }
+            assert_eq!(fs::read(&file).unwrap(), b"partial");
+            child.kill().unwrap();
+            child.wait().unwrap();
+            TempWorkspace::ensure_no_live_process_references(&root).unwrap();
+            // Владелец теста ещё жив; штатный orphan GC ждёт его завершения.
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

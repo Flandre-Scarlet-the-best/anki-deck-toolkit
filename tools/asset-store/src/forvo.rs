@@ -32,66 +32,228 @@ pub fn error(code: &str, action: &str) -> AssetError {
     )
 }
 pub struct ForvoSession {
-    pub(crate) browser: BrowserSession,
+    browser: Option<BrowserSession>,
+    pending_stop: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    pending_launch: Option<tokio::task::JoinHandle<Result<BrowserSession, AssetError>>>,
     was_authenticated: bool,
-    download_workspaces: Vec<crate::temp_workspace::TempWorkspace>,
+    download_used: bool,
     profile: PathBuf,
+    visible: bool,
 }
 
 impl ForvoSession {
     pub async fn launch(profile: &Path) -> Result<Self, AssetError> {
-        let launch = Self::launch_owned(profile);
+        Self::launch_mode(profile, false).await
+    }
+    pub async fn launch_interactive(profile: &Path) -> Result<Self, AssetError> {
+        Self::launch_mode(profile, true).await
+    }
+    async fn launch_mode(profile: &Path, visible: bool) -> Result<Self, AssetError> {
+        let launch = Self::launch_owned(profile, visible);
         tokio::pin!(launch);
         tokio::select! {
             result=&mut launch=>result,
             _=tokio::signal::ctrl_c()=>{
-                if let Ok(session)=launch.await {session.close().await?;}
+                match launch.await {
+                    Ok(session) => session.close().await?,
+                    Err(e) if provider_code(&e)=="browser_cleanup_failed" => return Err(e),
+                    Err(_) => (),
+                }
                 Err(AssetError::new(ErrorCode::Interrupted,"Запуск Forvo прерван; принадлежащий браузер закрыт"))
             }
         }
     }
-    async fn launch_owned(profile: &Path) -> Result<Self, AssetError> {
-        let browser = BrowserSession::launch_persistent(BrowserRuntimeConfig::default(), profile).await
-            .map_err(|e| { let message = e.to_string();
-                let code = ["gui_unavailable", "browser_profile_busy", "browser_profile_not_owned"].into_iter().find(|code| message.contains(code)).unwrap_or("browser_recovery_required");
-                error(code, "Проверьте GUI, Chromium и свободный собственный профиль; повторите forvo login")
-            })?;
+    async fn launch_owned(profile: &Path, visible: bool) -> Result<Self, AssetError> {
+        let browser = Self::open_browser(profile, visible).await?;
         Ok(Self {
-            browser,
+            browser: Some(browser),
+            pending_stop: None,
+            pending_launch: None,
             was_authenticated: std::fs::symlink_metadata(profile.join(".forvo-authenticated"))
                 .is_ok_and(|m| m.is_file()),
-            download_workspaces: Vec::new(),
+            download_used: false,
             profile: profile.to_path_buf(),
+            visible,
         })
     }
-    pub async fn close(self) -> Result<(), AssetError> {
-        let stopped = self.browser.close().await.map_err(|_| {
-            error(
-                "browser_cleanup_failed",
-                "Не удалось подтвердить закрытие принадлежащего Chromium",
-            )
-        });
-        let mut cleanup = Ok(());
-        for workspace in self.download_workspaces {
-            if workspace.close().is_err() {
-                cleanup = Err(error(
-                    "download_cleanup_failed",
-                    "Не удалось очистить staging после остановки браузера",
-                ));
-            }
+    async fn open_browser(profile: &Path, visible: bool) -> Result<BrowserSession, AssetError> {
+        tracing::info!(
+            event = "forvo_browser",
+            stage = "browser_launch",
+            mode = if visible { "visible" } else { "headless" },
+            "Запуск браузера Forvo"
+        );
+        if visible {
+            BrowserSession::launch_persistent(BrowserRuntimeConfig::default(), profile).await
+        } else {
+            BrowserSession::launch_persistent_background(BrowserRuntimeConfig::default(), profile)
+                .await
         }
-        stopped?;
-        cleanup
+        .map_err(|e| {
+            let cleanup_failed = matches!(
+                e,
+                crate::browser_runtime::BrowserLaunchError::CleanupFailed { .. }
+            );
+            let message = e.to_string();
+            let code = if cleanup_failed {
+                "browser_cleanup_failed"
+            } else {
+                [
+                    "gui_unavailable",
+                    "browser_profile_busy",
+                    "browser_profile_not_owned",
+                ]
+                .into_iter()
+                .find(|code| message.contains(code))
+                .unwrap_or("browser_recovery_required")
+            };
+            error(
+                code,
+                "Проверьте GUI, Chromium и свободный собственный профиль; повторите forvo login",
+            )
+        })
+    }
+    fn browser(&self) -> &BrowserSession {
+        self.browser.as_ref().expect("открытый сеанс Forvo")
+    }
+    async fn stop_browser(&mut self) -> Result<(), AssetError> {
+        use tracing::instrument::WithSubscriber;
+        if self.pending_stop.is_none()
+            && let Some(browser) = self.browser.take()
+        {
+            let dispatch = tracing::dispatcher::get_default(Clone::clone);
+            self.pending_stop = Some(tokio::spawn(
+                async move { browser.close().await }.with_subscriber(dispatch),
+            ));
+        }
+        let result = match self.pending_stop.as_mut() {
+            Some(task) => match task.await {
+                Ok(result) => result.map_err(|_| {
+                    error(
+                        "browser_cleanup_failed",
+                        "Не удалось подтвердить закрытие принадлежащего Chromium",
+                    )
+                }),
+                Err(_) => Err(error(
+                    "browser_cleanup_failed",
+                    "Задача остановки Chromium завершилась аварийно",
+                )),
+            },
+            None => Ok(()),
+        };
+        self.pending_stop.take();
+        result
+    }
+    async fn start_browser(&mut self, visible: bool) -> Result<(), AssetError> {
+        use tracing::instrument::WithSubscriber;
+        if self.pending_launch.is_none() {
+            let profile = self.profile.clone();
+            let dispatch = tracing::dispatcher::get_default(Clone::clone);
+            self.pending_launch = Some(tokio::spawn(
+                async move { Self::open_browser(&profile, visible).await }
+                    .with_subscriber(dispatch),
+            ));
+        }
+        let result = match self.pending_launch.as_mut().expect("запуск браузера").await
+        {
+            Ok(result) => result,
+            Err(_) => Err(error(
+                "browser_cleanup_failed",
+                "Задача запуска Chromium завершилась аварийно",
+            )),
+        };
+        self.pending_launch.take();
+        self.browser = Some(result?);
+        self.visible = visible;
+        Ok(())
+    }
+    async fn recycle_after_download(&mut self) -> Result<(), AssetError> {
+        if self.download_used {
+            self.stop_browser().await?;
+            self.start_browser(self.visible).await?;
+            self.download_used = false;
+        }
+        Ok(())
+    }
+    pub(crate) async fn recover_interactively(
+        &mut self,
+        surface: Option<&str>,
+    ) -> Result<bool, AssetError> {
+        if std::env::var_os("DISPLAY").is_none_or(|v| v.is_empty())
+            && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty())
+        {
+            return Ok(false);
+        }
+        self.stop_browser().await?;
+        tracing::info!(
+            event = "forvo_interaction",
+            stage = "authentication",
+            "Требуется ручное взаимодействие с Forvo"
+        );
+        eprintln!("Для продолжения войдите в Forvo или завершите проверку в открывшемся окне.");
+        self.start_browser(true).await?;
+        let result = self
+            .check_at(true, Duration::from_secs(300), surface)
+            .await
+            .and_then(|state| {
+                if state == AuthState::Authenticated {
+                    Ok(())
+                } else {
+                    Err(auth_error(state))
+                }
+            });
+        let stopped = self.stop_browser().await;
+        match (result, stopped) {
+            (Err(mut original), Err(cleanup)) => {
+                original.details["browser_cleanup"] =
+                    serde_json::json!({"code":provider_code(&cleanup), "message":cleanup.message});
+                return Err(original);
+            }
+            (Err(original), _) => return Err(original),
+            (_, Err(cleanup)) => return Err(cleanup),
+            _ => (),
+        }
+        self.start_browser(false).await?;
+        self.was_authenticated = true;
+        self.download_used = false;
+        Ok(true)
+    }
+    pub async fn close(mut self) -> Result<(), AssetError> {
+        let launch_result = if let Some(task) = self.pending_launch.take() {
+            match task.await {
+                Ok(Ok(browser)) => {
+                    self.browser = Some(browser);
+                    Ok(())
+                }
+                Ok(Err(error)) if provider_code(&error) != "browser_cleanup_failed" => Ok(()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(error(
+                    "browser_cleanup_failed",
+                    "Задача запуска Chromium завершилась аварийно",
+                )),
+            }
+        } else {
+            Ok(())
+        };
+        let stopped = self.stop_browser().await;
+        tracing::info!(
+            event = "forvo_browser",
+            stage = "browser_stop",
+            success = stopped.is_ok(),
+            "Остановка браузера Forvo завершена"
+        );
+        launch_result.and(stopped)
     }
     pub async fn navigate(&self, url: &str) -> Result<(), AssetError> {
-        self.browser.telemetry().begin_epoch();
+        self.browser().telemetry().begin_epoch();
         // Некоторые страницы не завершают load из-за рекламы или проверки доступа.
         // После ограниченного ожидания решение принимает наблюдаемая DOM/auth readiness.
-        let _ = tokio::time::timeout(Duration::from_secs(8), self.browser.page().goto(url)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(8), self.browser().page().goto(url)).await;
         Ok(())
     }
     pub async fn auth_state(&mut self) -> Result<AuthState, AssetError> {
-        let raw = observe_auth(self.browser.page()).await?;
+        let raw = observe_auth(self.browser().page()).await?;
+        tracing::debug!(event="forvo_auth", stage="authentication", state=?raw, "Проверено состояние входа Forvo");
         if raw == AuthState::Authenticated {
             self.was_authenticated = true;
             match std::fs::OpenOptions::new()
@@ -133,7 +295,7 @@ impl ForvoSession {
             if state != AuthState::PageUnstable || tokio::time::Instant::now() >= deadline {
                 return Err(auth_error(state));
             }
-            wait_dom(self.browser.page()).await;
+            wait_dom(self.browser().page()).await;
         }
     }
     pub async fn check(&mut self, login: bool, wait: Duration) -> Result<AuthState, AssetError> {
@@ -163,7 +325,7 @@ impl ForvoSession {
                 return Ok(state);
             }
             // Ожидание изменения DOM; при навигации старый execution context исчезает.
-            wait_dom(self.browser.page()).await;
+            wait_dom(self.browser().page()).await;
         }
     }
 }
@@ -251,7 +413,7 @@ pub(crate) fn auth_error(state: AuthState) -> AssetError {
         code.as_str().expect("string"),
         match state {
             AuthState::ChallengeRequired => {
-                "Пройдите проверку Forvo вручную в видимом окне; затем продолжите пакет"
+                "Запустите forvo login в среде с GUI, пройдите проверку вручную и продолжите пакет"
             }
             AuthState::LoginRequired | AuthState::SessionExpired => {
                 "Выполните forvo login, войдите вручную и продолжите пакет"
@@ -268,6 +430,12 @@ pub fn provider_code(error: &AssetError) -> &str {
         .as_str()
         .unwrap_or(error.code.as_str())
 }
+pub(crate) fn requires_interaction(error: &AssetError) -> bool {
+    matches!(
+        provider_code(error),
+        "challenge_required" | "login_required" | "session_expired"
+    )
+}
 pub fn pauses_batch(error: &AssetError) -> bool {
     matches!(
         provider_code(error),
@@ -280,6 +448,7 @@ pub fn pauses_batch(error: &AssetError) -> bool {
             | "rate_limited"
             | "navigation_timeout"
             | "browser_recovery_required"
+            | "browser_cleanup_failed"
             | "download_timeout"
             | "dom_changed"
             | "page_identity_mismatch"
