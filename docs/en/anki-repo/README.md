@@ -1,9 +1,8 @@
 # anki-repo
 
-[Русский](../../ru/anki-repo/docs/ru/README.md) · **English** · [简体中文](../../zh-CN/anki-repo/docs/ru/README.md)
+[Русский](../../ru/anki-repo/README.md) · **English** · [简体中文](../../zh-CN/anki-repo/README.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/anki-repo/docs/ru/README.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/anki-repo/README.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 
 `anki-repo` is a toolkit for deterministic analysis of CrowdAnki exports and strictly constrained edits to their contents in the `Anki-decks` repository. It gives agents fast, predictable access to the structure of `deck.json` without requiring them to read a multi-megabyte JSON file manually.
 
@@ -94,7 +93,7 @@ anki-repo maintenance disable
 
 `maintenance disable` does not report success until disablement has been verified: if the checkout binding is unverified, it retains unit files and returns `write_failed`. For a verified checkout, autostart, timer activity, and service shutdown are checked under one lock; `no` is not recorded if any check fails. Thus, saved `no` cannot mean “automatic cleanup is off” while cleanup is still active.
 
-The policy and cleanup implementation belong to `repository-maintenance`. See [`repository-maintenance` documentation](../repository-maintenance/docs/ru/README.md): `/tmp` and other users' data are not part of the measured size of managed artifacts.
+The policy and cleanup implementation belong to `repository-maintenance`. See [`repository-maintenance` documentation](../repository-maintenance/README.md): `/tmp` and other users' data are not part of the measured size of managed artifacts.
 
 ## Commands
 
@@ -1230,7 +1229,7 @@ cargo test --workspace --locked
 
 CI (`.github/workflows/ci.yml`) runs the same checks independently of local setup on `pull_request`, push to the default branch, and manual dispatch. It also verifies user-data boundaries: no path under the fully ignored `decks/` or `.asset-store/` may be tracked, and ignore rules must exist without re-inclusion (`.github/scripts/check_local_data_untracked.py`). It inspects the actual Git index because `.gitignore` cannot untrack already indexed files and can be bypassed by `git add -f`.
 
-CI deliberately does not validate user-owned content: those areas are absent in a clean checkout, and asserting their absence would not amount to testing private decks. Validate a real export locally with `anki-repo validate decks/output/<export_name>`, or a local corpus using `kanji-corpus-gate` / `pitch-corpus-gate` (see [`asset-store` documentation](../asset-store/docs/ru/README.md)). CI only reads the repository; adding or changing decks does not require CI changes.
+CI deliberately does not validate user-owned content: those areas are absent in a clean checkout, and asserting their absence would not amount to testing private decks. Validate a real export locally with `anki-repo validate decks/output/<export_name>`, or a local corpus using `kanji-corpus-gate` / `pitch-corpus-gate` (see [`asset-store` documentation](../asset-store/README.md)). CI only reads the repository; adding or changing decks does not require CI changes.
 
 Ordinary toolkit tests create synthetic exports and never read `decks/**`.
 

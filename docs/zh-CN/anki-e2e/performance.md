@@ -2,10 +2,9 @@
 
 [Русский](../../ru/anki-e2e/performance.md) · [English](../../en/anki-e2e/performance.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/anki-e2e/performance.md)为准。欢迎提交翻译和校对改进。
-
-Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](docs/ru/README.md)）。
-通用测量规则和来源精度见[方法说明](../performance/docs/ru/README.md)。
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/anki-e2e/performance.md)为准。欢迎提交翻译和校对改进。
+Anki Desktop E2E 测试台的性能与资源消耗：最近确认的快照和此前的手动观测（[测试台契约](README.md)）。
+通用测量规则和来源精度见[方法说明](../performance/README.md)。
 
 ## 测量内容
 

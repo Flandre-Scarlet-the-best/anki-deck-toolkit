@@ -1,6 +1,6 @@
 # E2E-стенд Anki Desktop
 
-**Русский** · [English](../../en/anki-e2e/docs/ru/README.md) · [简体中文](../../zh-CN/anki-e2e/docs/ru/README.md)
+**Русский** · [English](../../en/anki-e2e/README.md) · [简体中文](../../zh-CN/anki-e2e/README.md)
 
 `anki-e2e` — постоянный локальный E2E-стенд для группы `anki-repo anki`
 ([контракт](../anki-repo/desktop.md)). Rust runner на хосте собирает
@@ -237,7 +237,7 @@ x86_64 или aarch64, сеть до GitHub, AnkiWeb, Docker Hub и зеркал
 
 Время по фазам, CPU, память и диск стенда с методикой замера — на
 [странице производительности](performance.md); общие правила
-замеров — в [методике](../performance/docs/ru/README.md).
+замеров — в [методике](../performance/README.md).
 
 ## Границы
 

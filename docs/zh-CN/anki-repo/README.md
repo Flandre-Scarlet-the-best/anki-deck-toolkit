@@ -1,9 +1,8 @@
 # anki-repo
 
-[Русский](../../ru/anki-repo/docs/ru/README.md) · [English](../../en/anki-repo/docs/ru/README.md) · **简体中文**
+[Русский](../../ru/anki-repo/README.md) · [English](../../en/anki-repo/README.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/anki-repo/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
-
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/anki-repo/README.md)为准。欢迎提交翻译和校对改进。
 
 `anki-repo` 是一套用于确定性分析 CrowdAnki 导出数据、并对其内容实施严格受限修改的工具。它使智能体能够快速、可预测地了解 `deck.json` 的结构，而无需人工通读数 MB 的 JSON 文件。
 
@@ -91,7 +90,7 @@ anki-repo maintenance disable
 
 在确认禁用操作确实成功之前，`maintenance disable` 不会宣称成功。如果不能证实定时器归属于当前工作副本，它会保留 unit 文件并返回 `write_failed`。对于已经验证的工作副本，自动启动、定时器活动状态以及服务停止状态都在同一把锁下检查；失败时不会保存 `no`。因此，不能在自动清理仍然运行时错误地将保存的 `no` 解释为已关闭。
 
-策略和清理操作的权威来源是 `repository-maintenance`。参见[磁盘维护工具文档](../repository-maintenance/docs/ru/README.md)：`/tmp` 和其他用户的数据不计入受管理资源占用量。
+策略和清理操作的权威来源是 `repository-maintenance`。参见[磁盘维护工具文档](../repository-maintenance/README.md)：`/tmp` 和其他用户的数据不计入受管理资源占用量。
 
 ## 命令
 
@@ -1227,7 +1226,7 @@ cargo test --workspace --locked
 
 CI（`.github/workflows/ci.yml`）在 `pull_request`、推送到默认分支及手动触发时独立执行相同检查。另会验证用户数据边界：Git 不得跟踪被整体忽略的 `decks/` 或 `.asset-store/` 下任何路径，且忽略规则必须存在，不能通过再次纳入跟踪来削弱（`.github/scripts/check_local_data_untracked.py`）。检查读取真实 Git 索引，因为 `.gitignore` 不能自动取消已跟踪文件，也可能被 `git add -f` 绕过。
 
-CI 有意不验证用户自身的牌组和资源：这些区域在干净克隆中不存在，把“没有私人文件”当作测试成功并没有意义。应在本地通过 `anki-repo validate decks/output/<导出名称>` 检查具体导出，或通过 `kanji-corpus-gate`、`pitch-corpus-gate` 检查本地资源库（参见 [`asset-store` 文档](../asset-store/docs/ru/README.md)）。CI 只读取仓库，改变用户牌组的组成不要求修改 CI 流程。
+CI 有意不验证用户自身的牌组和资源：这些区域在干净克隆中不存在，把“没有私人文件”当作测试成功并没有意义。应在本地通过 `anki-repo validate decks/output/<导出名称>` 检查具体导出，或通过 `kanji-corpus-gate`、`pitch-corpus-gate` 检查本地资源库（参见 [`asset-store` 文档](../asset-store/README.md)）。CI 只读取仓库，改变用户牌组的组成不要求修改 CI 流程。
 
 常规工具测试自行构造合成导出，绝不读取 `decks/**`。
 

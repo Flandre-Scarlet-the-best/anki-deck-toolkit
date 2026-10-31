@@ -1,9 +1,8 @@
 # Anki Desktop E2E 测试台
 
-[Русский](../../ru/anki-e2e/docs/ru/README.md) · [English](../../en/anki-e2e/docs/ru/README.md) · **简体中文**
+[Русский](../../ru/anki-e2e/README.md) · [English](../../en/anki-e2e/README.md) · **简体中文**
 
-> **翻译提示：** 本译文可能未及时更新，请以[俄语文档](../../ru/anki-e2e/docs/ru/README.md)为准。欢迎提交翻译和校对改进。
-
+> **翻译提示：** 本译文可能未及时更新，技术内容以[俄语文档](../../ru/anki-e2e/README.md)为准。欢迎提交翻译和校对改进。
 
 `anki-e2e` 是 `anki-repo anki` 命令组（[契约](../../ru/anki-repo/desktop.md)）的常设本地
 E2E 测试台。主机上的 Rust runner 构建包含**官方 Linux Anki Desktop** 的可复现
@@ -196,7 +195,7 @@ aarch64，可访问 GitHub、AnkiWeb、Docker Hub 和 Ubuntu 镜像源，默认�
 
 测试台各阶段的耗时、CPU、内存和磁盘占用及其测量方法记录在
 [性能页面](performance.md)中；通用测量规则见
-[方法说明](../performance/docs/ru/README.md)。
+[方法说明](../performance/README.md)。
 
 ## 边界
 

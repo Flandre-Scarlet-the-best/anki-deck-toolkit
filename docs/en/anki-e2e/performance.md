@@ -2,12 +2,11 @@
 
 [Русский](../../ru/anki-e2e/performance.md) · **English** · [简体中文](../../zh-CN/anki-e2e/performance.md)
 
-> **Translation notice:** This translation is maintained on a best-effort basis and may be outdated. The [Russian documentation](../../ru/anki-e2e/performance.md) is authoritative. Corrections and translation contributions are welcome.
-
+> **Translation notice:** This translation may be outdated. The [Russian documentation](../../ru/anki-e2e/performance.md) is authoritative. Corrections, proofreading and translation contributions are welcome.
 Performance and resource usage of the Anki Desktop E2E stand: the last
 confirmed snapshot and an earlier manual observation
-([stand contract](docs/ru/README.md)). The general measurement
-rules and source accuracy are in the [methodology](../performance/docs/ru/README.md).
+([stand contract](README.md)). The general measurement
+rules and source accuracy are in the [methodology](../performance/README.md).
 
 ## What is measured
 
