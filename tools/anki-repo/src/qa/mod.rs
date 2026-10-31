@@ -14,7 +14,7 @@
 //! renderers менять не нужно.
 //!
 //! Каждое правило обязано быть детерминированным: одинаковый экспорт даёт
-//! одинаковый набор findings в одинаковом порядке. Порядок findings
+//! одинаковый набор замечаний в одинаковом порядке. Порядок замечаний
 //! канонический и не зависит от порядка обхода хеш-таблиц:
 //!
 //! ```text
@@ -32,7 +32,7 @@ use serde_json::Value;
 use crate::index::{ExportIndex, ResolvedField, resolve_named_fields};
 use crate::model::{Note, NoteModel};
 
-/// Серьёзность QA-finding'а.
+/// Серьёзность QA-замечания.
 ///
 /// Отдельный тип, а не [`crate::ops::validate::Severity`]: QA-серьёзность не
 /// участвует в решении о валидности экспорта и не должна случайно начать
@@ -168,7 +168,7 @@ fn is_addressable(index: &ExportIndex<'_>, entry: &crate::index::NoteRef<'_>) ->
 pub struct RawFinding {
     /// Позиция заметки в порядке экспорта.
     pub note_position: usize,
-    /// Имя поля, если finding относится к полю.
+    /// Имя поля, если замечание относится к полю.
     pub field: Option<String>,
     /// Позиция поля в модели, если применима.
     pub field_ord: Option<i64>,
@@ -177,20 +177,20 @@ pub struct RawFinding {
     /// Machine-readable детали; объём значения здесь не ограничен, размер
     /// выборок ограничивает само правило.
     pub evidence: Value,
-    /// Позиции остальных заметок группы, если finding — про группу.
+    /// Позиции остальных заметок группы, если замечание — про группу.
     ///
     /// Ограничено [`duplicate_rules::MAX_RELATED_NOTES`]: это структурированный
     /// ответ на вопрос «кто ещё в группе», и его читают и `qa`, и `review`.
     pub related: Vec<usize>,
     /// Была ли группа обрезана до [`duplicate_rules::MAX_RELATED_NOTES`].
     pub related_truncated: bool,
-    /// Размер группы целиком, если finding — про группу.
+    /// Размер группы целиком, если замечание — про группу.
     pub group_size: Option<usize>,
 }
 
 /// Одно зарегистрированное QA-правило.
 pub struct Rule {
-    /// Стабильный код finding'а.
+    /// Стабильный код замечания.
     pub code: &'static str,
     /// Серьёзность.
     pub severity: QaSeverity,
@@ -198,7 +198,7 @@ pub struct Rule {
     pub description: &'static str,
     /// Применимо ли правило к этому экспорту.
     ///
-    /// Неприменимое правило не выдаёт findings и не считается ошибкой: это
+    /// Неприменимое правило не выдаёт замечания и не считается ошибкой: это
     /// документированный нейтральный результат, а не структурная проблема.
     pub applicable: fn(&RuleContext<'_>) -> bool,
     /// Выполнение правила; результат обязан быть детерминированным.
@@ -206,7 +206,7 @@ pub struct Rule {
 }
 
 impl Rule {
-    /// Находит findings правила.
+    /// Находит замечания правила.
     #[must_use]
     pub fn findings(&self, context: &RuleContext<'_>) -> Vec<RawFinding> {
         if !(self.applicable)(context) {
@@ -255,13 +255,13 @@ pub const RULES: &[Rule] = &[
     },
 ];
 
-/// Индекс правила в реестре; он же приоритет в каноническом порядке findings.
+/// Индекс правила в реестре; он же приоритет в каноническом порядке замечаний.
 #[must_use]
 pub fn rule_index(code: &str) -> Option<usize> {
     RULES.iter().position(|rule| rule.code == code)
 }
 
-/// Известен ли такой код QA-finding'а.
+/// Известен ли такой код QA-замечания.
 #[must_use]
 pub fn is_known_code(code: &str) -> bool {
     rule_index(code).is_some()
@@ -272,7 +272,7 @@ pub fn codes() -> impl Iterator<Item = &'static str> {
     RULES.iter().map(|rule| rule.code)
 }
 
-/// Найденный QA-finding в канонической форме.
+/// Найденное QA-замечание в канонической форме.
 #[derive(Debug)]
 pub struct Finding {
     /// Стабильный код правила.
@@ -283,7 +283,7 @@ pub struct Finding {
     pub rule_index: usize,
     /// Позиция заметки в порядке экспорта.
     pub note_position: usize,
-    /// Имя поля, если finding относится к полю.
+    /// Имя поля, если замечание относится к полю.
     pub field: Option<String>,
     /// Позиция поля в модели, если применима.
     pub field_ord: Option<i64>,
@@ -291,7 +291,7 @@ pub struct Finding {
     pub message: String,
     /// Machine-readable детали.
     pub evidence: Value,
-    /// Можно ли адресовать заметку finding'а однозначно.
+    /// Можно ли адресовать заметку замечания однозначно.
     pub addressable: bool,
     /// Позиции остальных заметок группы.
     pub related: Vec<usize>,
@@ -301,7 +301,7 @@ pub struct Finding {
     pub group_size: Option<usize>,
 }
 
-/// Выполняет все применимые правила и возвращает findings в каноническом
+/// Выполняет все применимые правила и возвращает замечания в каноническом
 /// порядке.
 ///
 /// Порядок стабилизируется явной сортировкой, а не порядком работы правил:
@@ -397,7 +397,7 @@ mod tests {
     /// QA-правила судят о значениях, а не об именах полей конкретной модели.
     ///
     /// Один и тот же набор значений под разными именами полей и моделей обязан
-    /// дать один и тот же набор findings.
+    /// дать один и тот же набор замечаний.
     #[test]
     fn rules_are_independent_of_field_and_model_names() {
         let renamed = crate::test_support::export_with(MINIMAL_EXPORT, |value| {
@@ -429,7 +429,7 @@ mod tests {
         let baseline_findings = shape(&findings(&baseline));
         assert!(
             !baseline_findings.is_empty(),
-            "фикстура должна давать findings, иначе равенство ниже тривиально"
+            "фикстура должна давать замечания, иначе равенство ниже тривиально"
         );
         assert_eq!(baseline_findings, shape(&findings(&renamed)));
     }
@@ -448,7 +448,7 @@ mod tests {
             .collect();
         let mut sorted = keys.clone();
         sorted.sort();
-        assert_eq!(keys, sorted, "порядок findings должен быть каноническим");
+        assert_eq!(keys, sorted, "порядок замечаний должен быть каноническим");
 
         assert_eq!(
             found

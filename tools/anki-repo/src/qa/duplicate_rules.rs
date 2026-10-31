@@ -1,7 +1,7 @@
 //! Правило дубликатов содержимого: несколько заметок одной модели имеют
 //! полностью одинаковые значения `fields`.
 //!
-//! Правило групповое: finding адресуется группе, а не каждой её заметке, и
+//! Правило групповое: замечание адресуется группе, а не каждой её заметке, и
 //! несёт структурированный список участников ([`RawFinding::related`]), чтобы
 //! ревьюер видел всех участников сразу и не собирал тот же факт из нескольких
 //! записей. Участники — часть domain-результата, а не украшение evidence:
@@ -24,7 +24,7 @@ use serde_json::json;
 
 use crate::qa::{NoteView, RawFinding, RuleContext};
 
-/// Предел числа участников группы в finding'е.
+/// Предел числа участников группы в замечании.
 pub const MAX_RELATED_NOTES: usize = 20;
 
 /// Заметки двух разных участников группы.
@@ -78,7 +78,7 @@ pub fn duplicate_note_content(context: &RuleContext<'_>) -> Vec<RawFinding> {
 
 /// Ограниченный список участников группы.
 ///
-/// Позиции хранятся в порядке экспорта и включают саму заметку finding'а:
+/// Позиции хранятся в порядке экспорта и включают саму заметку замечания:
 /// потребитель (batch `review`) не должен досчитывать её сам.
 struct Related {
     positions: Vec<usize>,
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn identical_fields_are_grouped_once() {
         let found = findings_for(&duplicated_export(), "duplicate_note_content");
-        assert_eq!(found.len(), 1, "одна группа, а не три finding'а");
+        assert_eq!(found.len(), 1, "одна группа, а не три замечания");
         assert_eq!(found[0].note_position, 0);
         assert_eq!(found[0].field, None);
         assert_eq!(found[0].group_size, Some(2));
