@@ -379,7 +379,7 @@ workspace-набор; живой Anki и пользовательский `decks
 
 Обязательные контексты ruleset — «Форматирование и Clippy», «Код и тесты»,
 «Заявленная MSRV» (`ci.yml`) и «Структура PR» (`pr-body.yml`). Порядок активации
-доверенной «Пары PR и Gist» (`pr-gist-trusted.yml`) описан в
+доверенной «Доверенной структуры PR» (`pr-body-trusted.yml`) описан в
 [`anki-git-workflow`](../../.agents/skills/anki-git-workflow/references/pr-lifecycle.md#доверенная-проверка-ci).
 Имена обязательных заданий — часть
 контракта ruleset: переименование или удаление задания оставит PR в вечном
@@ -453,15 +453,15 @@ rustfmt и actionlint и на имя упавшего теста. Вывод т�
 Версии внешних инструментов (`ACTIONLINT_VERSION`, `CARGO_DENY_VERSION`) Renovate
 не отслеживает: версию и SHA-256 из официального релиза обновляют вместе вручную.
 
-Отдельный `.github/workflows/pr-body.yml` владеет только той проверкой, которой
-нужно событие PR: валидацией опубликованных body и Gist. Независимый
-`pr-gist-trusted.yml` использует только валидатор из base SHA на
-`pull_request_target`, без выполнения кода head и write permissions; его права —
-`contents: read` и `pull-requests: read`. Состояние required contexts
-проверяется по реальному ruleset. Распознанное переходное состояние публикации
-того же HEAD обе проверки перечитывают в ограниченном окне, а по его истечении
-отказывают; правила окна принадлежат `anki-git-workflow`
-(`references/pr-gist.md`). Тесты скриптов и метаданные
+Отдельный `.github/workflows/pr-body.yml` проверяет опубликованный body по
+контракту `.github/scripts/check_pr_body.py` валидатором из самого PR (проверка
+кандидата): лимит 10 000 символов, компактная производительность и структурно
+корректная таблица CodeRabbit при наличии раздела. Независимый
+`pr-body-trusted.yml` запускает тот же контракт на `pull_request_target`
+валидатором из base SHA, без checkout и выполнения кода head, секретов и write
+permissions; его права — `contents: read`. Ни одна проверка не требует Gist и не
+загружает содержимое по внешним ссылкам. Состояние required contexts
+проверяется по реальному ruleset. Тесты скриптов и метаданные
 Agent Skills здесь намеренно не дублируются — их выполняет `ci.yml`, который
 покрывает и push в основную ветку. Единственный владелец версии MSRV —
 `[workspace.package]` корневого `Cargo.toml`.
