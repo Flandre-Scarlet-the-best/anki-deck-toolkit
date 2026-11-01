@@ -889,7 +889,7 @@ pub fn setup(options: &SetupOptions) -> Result<Value, AssetError> {
         "state_file": options.state_dir.join(STATE_FILE),
         "migrated_from_v1": legacy.is_some(),
         "user_action": user_action,
-        "downloads_setting": format!("{}: «Спрашивать, куда сохранять каждый файл» должно быть выключено, иначе загрузка остановится с save_as_required", kind.downloads_settings_uri()),
+        "downloads_setting": kind.downloads_setting_hint(),
     }))
 }
 

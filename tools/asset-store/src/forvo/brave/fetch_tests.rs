@@ -779,3 +779,44 @@ fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
     v1_with.transport = None;
     assert!(v1_with.validate().is_err());
 }
+
+#[test]
+fn vivaldi_download_not_started_points_to_automatic_downloads() {
+    let state = |browser: super::super::BrowserKind| super::super::AdapterState {
+        target: browser.id().to_owned(),
+        browser,
+        port: 47613,
+        secret: encode_lower_hex(SECRET),
+        install_dir: "unused".into(),
+        load_unpacked_path: "unused".into(),
+        platform: Platform::Linux,
+        extension_id: Some(ID.into()),
+        instance_id: None,
+        executable: None,
+    };
+    let vivaldi = browser_auth_error(
+        bridge_error("download_not_started", "x"),
+        &state(super::super::BrowserKind::Vivaldi),
+    );
+    assert_eq!(provider_code(&vivaldi), "download_not_started");
+    let action = vivaldi.details["next_action"].as_str().unwrap();
+    assert!(action.contains("vivaldi://settings/downloads"), "{action}");
+    assert!(
+        action.contains("Начинать загрузки автоматически"),
+        "{action}"
+    );
+    assert!(
+        action.contains("forvo browser --target vivaldi batch-resume"),
+        "{action}"
+    );
+    // У других браузеров та же причина не получает подсказку Vivaldi.
+    let chrome = browser_auth_error(
+        bridge_error("download_not_started", "x"),
+        &state(super::super::BrowserKind::Chrome),
+    );
+    assert!(
+        !chrome.details["next_action"]
+            .to_string()
+            .contains("Начинать загрузки")
+    );
+}

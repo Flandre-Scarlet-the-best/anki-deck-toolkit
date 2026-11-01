@@ -70,7 +70,17 @@ impl Report {
         } else {
             Status::Fail
         };
+        // Причина, устранимая настройкой браузера цели (например, подтверждение загрузок
+        // Vivaldi), — BLOCKED с действием, а не неисправность адаптера.
+        let status = if status == Status::Fail && error.details["setting_required"] == true {
+            Status::Blocked
+        } else {
+            status
+        };
         let mut evidence = json!({"code":code,"message":error.message});
+        if let Some(action) = error.details.get("next_action") {
+            evidence["next_action"] = action.clone();
+        }
         if let Some(status) = error.details.get("status") {
             evidence["status"] = status.clone();
         }
@@ -976,7 +986,6 @@ async fn run_flow(
     options: &mut SmokeOptions,
     report: &mut Report,
 ) -> Result<(), AssetError> {
-    let platform = connection.state.platform;
     let bridge = &mut connection.bridge;
     let opened = bridge
         .call("open", json!({}), Duration::from_secs(15))
@@ -1030,7 +1039,13 @@ async fn run_flow(
     report.push("selection", Status::Pass, json!({"record_id":selected.record_id,"ranking_policy":RANKING,"surface":request.surface,"reading":request.reading}));
     let op_id = download::new_operation_id()?;
     let outcome = download_selected(
-        bridge, platform, request, &selected, &op_id, options, report,
+        bridge,
+        &connection.state,
+        request,
+        &selected,
+        &op_id,
+        options,
+        report,
     )
     .await;
     // Освобождение — при любом исходе, включая прерывание: только собственная связанная загрузка.
@@ -1061,7 +1076,7 @@ async fn run_flow(
 /// Свежая проверка строки, одна штатная загрузка, байты файла и копия-свидетельство.
 pub async fn download_selected(
     bridge: &mut Bridge,
-    platform: Platform,
+    state: &AdapterState,
     request: &Pronunciation,
     selected: &Candidate,
     op_id: &str,
@@ -1072,7 +1087,7 @@ pub async fn download_selected(
     // отчёт и копию-свидетельство.
     let acquired = super::fetch::download_candidate(
         bridge,
-        platform,
+        state.platform,
         request,
         selected,
         op_id,
@@ -1081,6 +1096,7 @@ pub async fn download_selected(
     )
     .await
     .and_then(|downloaded| download::probed(op_id, downloaded))
+    .map_err(|e| super::fetch::browser_auth_error(e, state))
     .inspect_err(|e| report.fail("site_download", e))?;
     let item = &acquired.item;
     report.push("site_download", Status::Pass, json!({"operation_id":op_id,"download_id":item.id,"file_name":item.file_name,
@@ -1102,7 +1118,15 @@ pub async fn download_selected(
         "byte_length":acquired.bytes.len(),"sha256":acquired.sha256,"signature":mp3_signature(&acquired.bytes),"probe":acquired.probe,
         "evidence_file":path,"source":"файл завершённой собственной загрузки браузера"}));
     if options.probe_downloads_api {
-        downloads_api_probe(platform, bridge, op_id, selected, &acquired.sha256, report).await;
+        downloads_api_probe(
+            state.platform,
+            bridge,
+            op_id,
+            selected,
+            &acquired.sha256,
+            report,
+        )
+        .await;
     } else {
         report.push(
             "downloads_api_file",

@@ -94,6 +94,19 @@ impl BrowserKind {
         }
     }
 
+    /// Что нужно настроить на странице загрузок браузера, чтобы загрузка шла без диалога.
+    pub fn downloads_setting_hint(self) -> String {
+        let page = self.downloads_settings_uri();
+        match self {
+            Self::Vivaldi => format!(
+                "{page}: «Начинать загрузки автоматически» должно быть включено, а «Спрашивать, куда сохранять» — выключено, иначе загрузка не начнётся (download_not_started)"
+            ),
+            _ => format!(
+                "{page}: «Спрашивать, куда сохранять каждый файл» должно быть выключено, иначе загрузка остановится с save_as_required"
+            ),
+        }
+    }
+
     /// Короткое точное действие первичной установки распакованного расширения.
     pub fn load_unpacked_action(self, path: &str) -> String {
         let developer = match self {
@@ -147,7 +160,7 @@ impl BrowserKind {
     pub fn support_note(self) -> Option<&'static str> {
         match self {
             Self::Vivaldi => Some(
-                "Поддержка не подтверждена: в изолированной проверке Vivaldi собственная фоновая вкладка получала нулевой viewport, и кнопка загрузки не нажималась (download_button_unavailable). Сопряжение, вход, кандидаты и диагностика работают; получение MP3 — нет",
+                "Частичная поддержка: в vivaldi://settings/downloads нужно включить «Начинать загрузки автоматически», иначе загрузка не начнётся (download_not_started). Получение MP3 подтверждено только изолированным стендом; живой Forvo в Vivaldi не проверен, а по брендам Vivaldi неотличим от Chrome",
             ),
             Self::Chromium => Some(
                 "Тестовые и открытые сборки (Chromium, Chrome for Testing): используются изолированным стендом",

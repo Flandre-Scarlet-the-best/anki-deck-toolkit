@@ -175,6 +175,9 @@ async fn pipe_call(
     Ok(value["result"].clone())
 }
 
+/// Начало ошибки, когда стенд не смог открыть вкладку «пользователя» через CDP.
+pub const USER_TAB_ERROR: &str = "вкладка пользователя";
+
 impl TestBrowser {
     pub async fn launch(options: LaunchOptions<'_>) -> Result<TestBrowser, String> {
         let profile = options.dir.join("profile");
@@ -190,6 +193,10 @@ impl TestBrowser {
                 "download": {"default_directory": downloads, "prompt_for_download": options.prompt_for_download, "directory_upgrade": true},
                 "profile": {"exit_type": "Normal"},
                 "extensions": {"ui": {"developer_mode": true}},
+                // Vivaldi по умолчанию подтверждает каждую загрузку в своём интерфейсе; профиль
+                // настроен как у пользователя, выполнившего указание setup. Другие браузеры
+                // этот ключ не читают.
+                "vivaldi": {"downloads": {"start_automatically": !options.prompt_for_download}},
             });
             if options.restore_session {
                 preferences["session"] = json!({"restore_on_startup": 1});
@@ -340,13 +347,20 @@ impl TestBrowser {
 
     /// Вкладка «пользователя», открытая не расширением.
     pub async fn user_tab(&self, url: &str) -> Result<chromiumoxide::Page, String> {
-        let page = self
-            .browser
-            .new_page(url)
+        let open = async {
+            let page = self
+                .browser
+                .new_page(url)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = page.wait_for_navigation().await;
+            Ok::<_, String>(page)
+        };
+        tokio::time::timeout(Duration::from_secs(30), open)
             .await
-            .map_err(|e| format!("вкладка пользователя: {e}"))?;
-        let _ = page.wait_for_navigation().await;
-        Ok(page)
+            .map_err(|_| "навигация не завершилась за 30 с".to_owned())
+            .and_then(|r| r)
+            .map_err(|e| format!("{USER_TAB_ERROR}: {e}"))
     }
 
     /// Обычный клик ссылки загрузки на странице пользователя.

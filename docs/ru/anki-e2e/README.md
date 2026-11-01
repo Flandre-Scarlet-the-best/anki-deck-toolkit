@@ -279,9 +279,13 @@ Chrome for Testing, Google Chrome, Microsoft Edge, Vivaldi и Brave для Linux
 `setup --repin` цели. Нужны `ffmpeg`/`ffprobe` и `openssl`; без них итог — `BLOCKED`
 с причиной.
 
-Под Vivaldi сценарии с нажатием кнопки загрузки не проходят: у собственной вкладки
-адаптера нулевой viewport, и итог — `download_button_unavailable`. Это известное
-ограничение поддержки Vivaldi, а не повод ослаблять проверку видимости кнопки.
+Временный профиль получает `vivaldi.downloads.start_automatically` в паре с
+`prompt_for_download` (другие браузеры этот ключ не читают): Vivaldi по умолчанию
+подтверждает каждую загрузку в своём интерфейсе. Под Vivaldi вкладка, к которой
+подключился CDP-клиент стенда, не завершает навигацию. Поэтому сценарии, открывающие
+«вкладку пользователя» через CDP (`extension_bridge_tab`, `concurrent_downloads`,
+`browser_restart`, `cli_fetch`, `cli_batch_recovery`, `cli_foreign_downloads`), для
+Vivaldi получают `BLOCKED` с этой причиной. Вкладка пользователя открывается не дольше 30 с.
 
 | Сценарий | Что доказывает |
 |---|---|
@@ -294,7 +298,7 @@ Chrome for Testing, Google Chrome, Microsoft Edge, Vivaldi и Brave для Linux
 | `bridge_reconnect` | разрыв bridge не теряет связанную операцию |
 | `own_tab_closed` | закрытие собственной вкладки до начала загрузки |
 | `interrupt` | прерывание как Ctrl+C: `INTERRUPTED`, собственная загрузка отменена |
-| `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` (Edge: `save_as_suspected`) |
+| `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` (Edge: `save_as_suspected`; Vivaldi без автоматического начала загрузок: `download_not_started` с действием) |
 | `browser_restart` | перезапуск браузера с восстановлением сессии: восстановленная группа адаптера закрыта перед первой командой, вкладка пользователя на `forvo.com` осталась, новая вкладка — в единственной группе |
 | `cli_fetch` | настоящий `pronunciation-assets forvo brave fetch`: импорт оригинального MP3 в отдельное тестовое хранилище (SHA, не `Verified`), одна сетевая загрузка, файл удалён, копий в `evidence/` нет; повтор тех же байтов; без `ffprobe` — `technical_validation_failed` без импорта |
 | `cli_batch` | пакет из трёх разных слов: не-MP3 лучшей записи → следующий кандидат с попытками в `ForvoEvidence`, ровно одна загрузка на попытку, resume без загрузок, `--max-items`, CDP-resume пакета Brave и Brave-resume состояния v1 → `transport_mismatch` без браузера |

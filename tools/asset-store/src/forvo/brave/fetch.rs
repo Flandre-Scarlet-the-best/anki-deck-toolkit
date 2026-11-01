@@ -102,10 +102,11 @@ pub async fn download_candidate(
 }
 
 /// Ошибка входа/проверки сайта с действием для обычного браузера цели, а не для CDP-профиля.
-fn browser_auth_error(mut error: AssetError, state: &super::AdapterState) -> AssetError {
+pub(crate) fn browser_auth_error(mut error: AssetError, state: &super::AdapterState) -> AssetError {
     let browser = state.browser.display();
     let resume = format!("{} batch-resume", state.command_prefix());
-    let action = match provider_code(&error) {
+    let code = provider_code(&error).to_owned();
+    let action = match code.as_str() {
         "challenge_required" => format!(
             "Откройте forvo.com в {browser}, пройдите проверку сайта вручную и повторите команду (пакет — {resume})"
         ),
@@ -119,11 +120,20 @@ fn browser_auth_error(mut error: AssetError, state: &super::AdapterState) -> Ass
             "Откройте {} в {browser}, выключите «Спрашивать, куда сохранять каждый файл» и повторите (пакет — {resume})",
             state.browser.downloads_settings_uri()
         ),
+        // Vivaldi по умолчанию спрашивает подтверждение каждой загрузки в своём интерфейсе;
+        // расширению этот запрос не виден, загрузка просто не начинается.
+        "download_not_started" if state.browser == super::BrowserKind::Vivaldi => format!(
+            "Откройте {} в {browser}, включите «Начинать загрузки автоматически», закройте окно подтверждения загрузки, если оно открыто, и повторите (пакет — {resume})",
+            state.browser.downloads_settings_uri()
+        ),
         _ => return error,
     };
     error.message = action.clone();
     error.details["provider"] = json!("forvo_brave");
     error.details["next_action"] = json!(action);
+    if code == "download_not_started" {
+        error.details["setting_required"] = json!(true);
+    }
     error
 }
 

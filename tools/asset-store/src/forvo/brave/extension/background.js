@@ -12,6 +12,8 @@ const KEEPALIVE_MS = 20000;
 const RETRY_MS = 3000;
 const QUICK_RETRIES = 5;
 const HANDSHAKE_MS = 10000;
+const WINDOW_LAYOUT_MS = 3000;
+const NAVIGATION_VISIBLE_MS = 5000;
 const VERSION = chrome.runtime.getManifest().version;
 
 let socket = null;
@@ -251,8 +253,10 @@ async function ensureTab() {
     const {own} = await chrome.storage.local.get('own');
     if (existing && !own?.download_used) return {tab: existing, created: false, replaced: false};
     const window = existing ? {id: existing.windowId} : await chrome.windows.getLastFocused({windowTypes: ['normal']});
+    await windowLaidOut(window.id);
     const tab = await chrome.tabs.create({windowId: window.id, url: FORVO_ORIGIN + '/', active: false});
     try {
+        await navigationVisible(tab.id);
         const groupId = existing
             ? await chrome.tabs.group({tabIds: [tab.id], groupId: existing.groupId})
             : await chrome.tabs.group({tabIds: [tab.id], createProperties: {windowId: window.id}});
@@ -264,6 +268,46 @@ async function ensureTab() {
     } catch (error) {
         await chrome.tabs.remove(tab.id).catch(() => {});
         throw new Failure('tab_group_failed', String(error?.message || error));
+    }
+}
+
+// Сразу после запуска браузера окно может быть ещё не размечено: у Vivaldi интерфейс
+// сам является веб-страницей, и вкладка, созданная до его разметки, навсегда остаётся
+// с нулевым viewport. Ждём, пока у активной вкладки окна появится размер; дольше
+// WINDOW_LAYOUT_MS не ждём, тогда проверка кнопки честно сообщит о недоступности.
+async function windowLaidOut(windowId) {
+    const deadline = Date.now() + WINDOW_LAYOUT_MS;
+    while (Date.now() < deadline) {
+        const [front] = await chrome.tabs.query({windowId, active: true});
+        if (!front || front.width > 0) return;
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+}
+
+// Новая вкладка проходит через начальную about:blank. Vivaldi фиксирует её уже после
+// начала навигации: на миг вкладка становится status=complete без url и pendingUrl.
+// Такая вкладка не доказуемо наша (адрес не виден), и следующая команда создала бы
+// вторую. Поэтому вкладка возвращается только после того, как на forvo.com
+// зафиксирован её url; потерянная навигация собственной вкладки повторяется один раз.
+async function navigationVisible(tabId) {
+    for (const attempt of [0, 1]) {
+        if (attempt) await chrome.tabs.update(tabId, {url: FORVO_ORIGIN + '/'});
+        const deadline = Date.now() + NAVIGATION_VISIBLE_MS;
+        while (Date.now() < deadline) {
+            const tab = await chrome.tabs.get(tabId);
+            if (committedForvo(tab)) return;
+            if (tab.status === 'complete' && !tab.url && !tab.pendingUrl && Date.now() > deadline - NAVIGATION_VISIBLE_MS / 2) break;
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+    }
+    throw new Failure('tab_group_failed', 'navigation_not_visible');
+}
+
+function committedForvo(tab) {
+    try {
+        return new URL(tab.url || 'about:blank').origin === FORVO_ORIGIN;
+    } catch {
+        return false;
     }
 }
 

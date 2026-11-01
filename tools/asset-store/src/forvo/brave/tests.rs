@@ -94,10 +94,15 @@ fn extension_manifest_is_minimal() {
 #[test]
 fn setup_writes_private_pairing_and_keeps_secret() {
     let temp = TempWorkspace::create("brave-setup").expect("temp");
+    // Фиксированный порт мог совпасть с эфемерным портом параллельного теста.
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|l| l.local_addr())
+        .expect("port")
+        .port();
     let options = SetupOptions {
         browser: Some(BrowserKind::Brave),
         install_dir: Some(temp.path().join("extension")),
-        port: Some(48000),
+        port: Some(port),
         platform: Some(Platform::Linux),
         discovery: Some(browsers::DiscoveryRoots::default()),
         ..SetupOptions::new(temp.path().join("state"))
@@ -116,7 +121,7 @@ fn setup_writes_private_pairing_and_keeps_secret() {
     let pairing: Value =
         serde_json::from_slice(&std::fs::read(temp.path().join("extension/pairing.json")).unwrap())
             .unwrap();
-    assert_eq!(pairing["port"], 48000);
+    assert_eq!(pairing["port"], port);
     assert_eq!(pairing["secret"], state.secret);
     for name in ["manifest.json", "background.js", "forvo_page.js"] {
         assert!(temp.path().join("extension").join(name).is_file());

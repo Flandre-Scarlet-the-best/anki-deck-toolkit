@@ -2,7 +2,7 @@
 //! и проверяет поведение: ответы настоящего расширения и bridge, фактические
 //! файлы каталога загрузок и их SHA-256, а не наличие строк в коде.
 
-use super::chrome::{LaunchOptions, TestBrowser, download_files};
+use super::chrome::{LaunchOptions, TestBrowser, USER_TAB_ERROR, download_files};
 use super::fixture::{self, Behavior, Gate};
 use super::{Ctx, Outcome};
 use crate::report::Status;
@@ -10,7 +10,7 @@ use crate::util::sha256_hex;
 use asset_store::AssetError;
 use asset_store::forvo::brave::acceptance::{self, Connection, SmokeOptions};
 use asset_store::forvo::brave::download::{self, Limits, Progress, StatusFacts};
-use asset_store::forvo::brave::{GROUP_TITLE, Platform};
+use asset_store::forvo::brave::{self as brave, GROUP_TITLE, Platform};
 use asset_store::forvo::{Candidate, provider_code};
 use asset_store::pronunciation::Pronunciation;
 use serde_json::{Value, json};
@@ -105,6 +105,12 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
     let result = tokio::select! {
         result = tokio::time::timeout(SCENARIO_LIMIT, body(name, &mut env)) => match result {
             Ok(Ok(())) => Ok(()),
+            // В Vivaldi вкладка, к которой подключён CDP-клиент стенда, не завершает
+            // навигацию: это ограничение стенда, а не проверяемого адаптера.
+            Ok(Err(e)) if env.ctx.kind == brave::BrowserKind::Vivaldi && e.starts_with(USER_TAB_ERROR) => Err((
+                Status::Blocked,
+                format!("{e} (Vivaldi не открывает вкладку пользователя через CDP стенда; сценарий не проверен)"),
+            )),
             Ok(Err(e)) => Err((Status::Fail, e)),
             Err(_) => Err((Status::Fail, format!("сценарий не завершился за {} с", SCENARIO_LIMIT.as_secs()))),
         },
@@ -1046,12 +1052,22 @@ async fn save_as_prompt(env: &mut Env<'_>) -> Result<()> {
     let value = json!(report);
     let site = step(&value, "site_download");
     let exit = acceptance::report_error(report).err();
+    // Edge ждёт выбора в окне сохранения с уже полученными байтами; Vivaldi с выключенным
+    // «Начинать загрузки автоматически» не начинает загрузку вовсе и получает действие.
+    let expected = match env.ctx.kind {
+        brave::BrowserKind::Edge => site["evidence"]["code"] == "save_as_suspected",
+        brave::BrowserKind::Vivaldi => {
+            site["evidence"]["code"] == "download_not_started"
+                && site["evidence"]["next_action"]
+                    .as_str()
+                    .is_some_and(|a| a.contains("Начинать загрузки автоматически"))
+        }
+        _ => false,
+    };
     env.out.check(
-        "профиль с «Спрашивать, куда сохранять» → BLOCKED save_as_required (Edge: save_as_suspected) с инструкцией",
+        "профиль с запросом места или подтверждения → BLOCKED save_as_required (Edge: save_as_suspected, Vivaldi: download_not_started) с инструкцией",
         site["status"] == "BLOCKED"
-            && (site["evidence"]["code"] == "save_as_required"
-                || env.ctx.kind == asset_store::forvo::brave::BrowserKind::Edge
-                    && site["evidence"]["code"] == "save_as_suspected")
+            && (site["evidence"]["code"] == "save_as_required" || expected)
             && exit
                 .as_ref()
                 .is_some_and(|e| provider_code(e) == "acceptance_blocked"),
