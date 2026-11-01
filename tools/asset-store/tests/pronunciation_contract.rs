@@ -1065,40 +1065,58 @@ fn forvo_cli_strict_plan_status_and_cancel_do_not_require_browser() {
     );
     assert!(log.contains("run_stopped"));
     fs::write(&plan,r#"{"schema_version":1,"schema_version":1,"items":[{"surface":"元気","reading":"げんき"}]}"#).unwrap();
+    let duplicate = cli(
+        &workspace,
+        &[
+            "forvo",
+            "batch-start",
+            "--batch-id",
+            "duplicate",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--max-items",
+            "0",
+        ],
+    );
+    assert!(!duplicate.status.success(), "{:?}", json(&duplicate));
+    assert_eq!(json(&duplicate)["error"]["code"], "invalid_identity");
+    let duplicate_status = cli(
+        &workspace,
+        &["forvo", "batch-status", "--batch-id", "duplicate"],
+    );
     assert!(
-        !cli(
-            &workspace,
-            &[
-                "forvo",
-                "batch-start",
-                "--batch-id",
-                "duplicate",
-                "--plan",
-                plan.to_str().unwrap(),
-                "--max-items",
-                "0"
-            ]
-        )
-        .status
-        .success()
+        !duplicate_status.status.success(),
+        "пакет с повторяющимся ключом не должен создаваться: {:?}",
+        json(&duplicate_status)
     );
     fs::write(&plan,r#"{"schema_version":1,"items":[{"surface":"元気","reading":"げんき","password":"forbidden"}]}"#).unwrap();
+    let unknown_field = cli(
+        &workspace,
+        &[
+            "forvo",
+            "batch-start",
+            "--batch-id",
+            "unknown-field",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--max-items",
+            "0",
+        ],
+    );
     assert!(
-        !cli(
-            &workspace,
-            &[
-                "forvo",
-                "batch-start",
-                "--batch-id",
-                "unknown-field",
-                "--plan",
-                plan.to_str().unwrap(),
-                "--max-items",
-                "0"
-            ]
-        )
-        .status
-        .success()
+        !unknown_field.status.success(),
+        "{:?}",
+        json(&unknown_field)
+    );
+    assert_eq!(json(&unknown_field)["error"]["code"], "invalid_identity");
+    let unknown_field_status = cli(
+        &workspace,
+        &["forvo", "batch-status", "--batch-id", "unknown-field"],
+    );
+    assert!(
+        !unknown_field_status.status.success(),
+        "пакет с неизвестным полем не должен создаваться: {:?}",
+        json(&unknown_field_status)
     );
 }
 #[test]
