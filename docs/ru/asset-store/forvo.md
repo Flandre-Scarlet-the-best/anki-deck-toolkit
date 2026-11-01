@@ -1,7 +1,8 @@
 # Forvo Web: японские произношения
 
 `pronunciation-assets forvo` получает оригинальные MP3 через обычные кнопки сайта
-в Chromium/CDP. Forvo API, скрытые аудио endpoints, ASR, DSP и автоматическое
+в Chromium/CDP. Прототип работы через обычный Brave пользователя описан в
+[forvo-brave.md](forvo-brave.md). Forvo API, скрытые аудио endpoints, ASR, DSP и автоматическое
 подтверждение чтения не используются. Нужны Linux/WSLg, Chromium и зависимости
 [технической проверки MP3](pronunciation.md).
 

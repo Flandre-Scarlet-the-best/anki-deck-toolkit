@@ -45,7 +45,7 @@
         const candidate = {record_id:id, username, votes, gender:speaker ? speaker[1].toLowerCase() : null,
             country:speaker ? speaker[2] : null, download_available:!!button};
         candidates.push(candidate);
-        if (action === 'click' && id === recordId) {
+        if ((action === 'click' || action === 'activate') && id === recordId) {
             if (!button) return fail('download_button_unavailable');
             row.querySelector('.pronunciationMoreMenu')?.click();
             button.scrollIntoView({block:'center',inline:'center',behavior:'instant'});
@@ -54,9 +54,11 @@
             if (box.width<=0 || box.height<=0 || point.x<0 || point.y<0 || point.x>=innerWidth || point.y>=innerHeight) return fail('download_button_unavailable');
             const hit=document.elementFromPoint(point.x,point.y);
             if (hit!==button && !button.contains(hit)) return fail('download_button_obscured');
+            // Расширение не имеет доверенного ввода CDP: обычный click() той же проверенной кнопки.
+            if (action === 'activate') {button.click(); return {code:'activated', candidates:[candidate]};}
             return {code:'prepared', candidates:[candidate], point};
         }
     }
-    if (action === 'click') return fail('candidate_disappeared');
+    if (action === 'click' || action === 'activate') return fail('candidate_disappeared');
     return {code:candidates.length ? 'ok' : 'no_usable_candidates', candidates};
 })
