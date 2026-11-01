@@ -144,28 +144,32 @@ impl ForvoSession {
                 "Forvo вернул 404 для точной страницы слова",
             ));
         }
-        let result = self.dom(&request.surface, "expand", "").await?;
-        if result.code != "ok" {
-            return Err(error(
-                &result.code,
-                "Проверьте японский раздел точного слова на Forvo",
-            ));
-        }
-        if result.candidates.len() > 128 {
-            return Err(error(
-                "too_many_candidates",
-                "Forvo вернул более 128 записей слова",
-            ));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for c in &result.candidates {
-            c.validate()?;
-            if !seen.insert(&c.record_id) {
-                return Err(error("dom_changed", "Повторяющийся ID записи Forvo"));
-            }
-        }
-        let mut candidates = result.candidates;
-        rank(&mut candidates);
-        Ok(candidates)
+        validated(self.dom(&request.surface, "expand", "").await?)
     }
+}
+
+/// Общая проверка и рейтинг наблюдённых строк для CDP и Brave-адаптера.
+pub(crate) fn validated(result: DomResult) -> Result<Vec<Candidate>, AssetError> {
+    if result.code != "ok" {
+        return Err(error(
+            &result.code,
+            "Проверьте японский раздел точного слова на Forvo",
+        ));
+    }
+    if result.candidates.len() > 128 {
+        return Err(error(
+            "too_many_candidates",
+            "Forvo вернул более 128 записей слова",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for c in &result.candidates {
+        c.validate()?;
+        if !seen.insert(&c.record_id) {
+            return Err(error("dom_changed", "Повторяющийся ID записи Forvo"));
+        }
+    }
+    let mut candidates = result.candidates;
+    rank(&mut candidates);
+    Ok(candidates)
 }

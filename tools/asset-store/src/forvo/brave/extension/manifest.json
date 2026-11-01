@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Anki Deck Toolkit: Forvo adapter",
+  "version": "0.1.0",
+  "description": "Локальный транспорт Forvo для pronunciation-assets. Решения принимает Rust-программа.",
+  "minimum_chrome_version": "116",
+  "incognito": "not_allowed",
+  "background": {"service_worker": "background.js", "type": "module"},
+  "permissions": ["alarms", "downloads", "scripting", "storage", "tabGroups"],
+  "host_permissions": ["https://forvo.com/*", "http://127.0.0.1/*"]
+}
