@@ -288,6 +288,16 @@ pub fn verify_file(platform: Platform, item: &ItemFacts) -> Result<(PathBuf, Vec
     Ok((local, bytes))
 }
 
+/// Байты завершённой собственной загрузки до технической проверки MP3.
+#[derive(Debug)]
+pub struct Downloaded {
+    pub item: ItemFacts,
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+    pub reconnects: u32,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Debug)]
 pub struct Acquired {
     pub item: ItemFacts,
@@ -329,7 +339,7 @@ async fn status(bridge: &mut Bridge, op_id: &str) -> Result<StatusFacts, AssetEr
 }
 
 /// Нажимает кнопку выбранной записи и доводит собственную загрузку до
-/// проверенных байтов. Операцию не освобождает: это делает вызывающий через
+/// проверенных байтов MP3. Операцию не освобождает: это делает вызывающий через
 /// [`release`] при любом исходе, в том числе после ошибки.
 pub async fn acquire(
     bridge: &mut Bridge,
@@ -340,6 +350,45 @@ pub async fn acquire(
     limits: &Limits,
     interrupt: &mut Option<watch::Receiver<bool>>,
 ) -> Result<Acquired, AssetError> {
+    probed(
+        op_id,
+        acquire_bytes(
+            bridge, platform, request, candidate, op_id, limits, interrupt,
+        )
+        .await?,
+    )
+}
+
+/// Техническая проверка MP3 байтов собственной загрузки.
+pub fn probed(op_id: &str, downloaded: Downloaded) -> Result<Acquired, AssetError> {
+    let probe = probe_mp3(&downloaded.bytes).map_err(|e| {
+        let mut error = failed("probe_failed");
+        error.details["probe"] = json!({"message":e.message,"details":e.details});
+        error
+    })?;
+    tracing::info!(event = "brave_download_validated", stage = "validation", operation_id = op_id, download_id = downloaded.item.id,
+        sha256 = %downloaded.sha256, bytes = downloaded.bytes.len(), codec = %probe.codec, "Файл собственной загрузки проверен");
+    Ok(Acquired {
+        item: downloaded.item,
+        bytes: downloaded.bytes,
+        sha256: downloaded.sha256,
+        probe,
+        reconnects: downloaded.reconnects,
+        elapsed_ms: downloaded.elapsed_ms,
+    })
+}
+
+/// Как [`acquire`], но без проверки MP3: production-путь проверяет байты один
+/// раз в общем порядке попыток кандидатов (`acquire_from`), как и CDP.
+pub async fn acquire_bytes(
+    bridge: &mut Bridge,
+    platform: Platform,
+    request: &Pronunciation,
+    candidate: &Candidate,
+    op_id: &str,
+    limits: &Limits,
+    interrupt: &mut Option<watch::Receiver<bool>>,
+) -> Result<Downloaded, AssetError> {
     let started = Instant::now();
     let begun = bridge
         .call(
@@ -437,18 +486,10 @@ pub async fn acquire(
         file_name = ?item.file_name, bytes = item.bytes_received, "Собственная загрузка завершена");
     let (_, bytes) = verify_file(platform, &item)?;
     let sha256 = sha256_hex(&bytes);
-    let probe = probe_mp3(&bytes).map_err(|e| {
-        let mut error = failed("probe_failed");
-        error.details["probe"] = json!({"message":e.message,"details":e.details});
-        error
-    })?;
-    tracing::info!(event = "brave_download_validated", stage = "validation", operation_id = op_id, download_id = item.id,
-        sha256 = %sha256, bytes = bytes.len(), codec = %probe.codec, "Файл собственной загрузки проверен");
-    Ok(Acquired {
+    Ok(Downloaded {
         item,
         bytes,
         sha256,
-        probe,
         reconnects,
         elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
     })

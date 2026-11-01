@@ -278,6 +278,16 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 | `interrupt` | прерывание как Ctrl+C: `INTERRUPTED`, собственная загрузка отменена |
 | `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` |
 | `browser_restart` | перезапуск браузера с восстановлением сессии: восстановленная группа адаптера закрыта перед первой командой, вкладка пользователя на `forvo.com` осталась, новая вкладка — в единственной группе |
+| `cli_fetch` | настоящий `pronunciation-assets forvo brave fetch`: импорт оригинального MP3 в отдельное тестовое хранилище (SHA, не `Verified`), одна сетевая загрузка, файл удалён, копий в `evidence/` нет; повтор тех же байтов; без `ffprobe` — `technical_validation_failed` без импорта |
+| `cli_batch` | пакет из трёх разных слов: не-MP3 лучшей записи → следующий кандидат с попытками в `ForvoEvidence`, ровно одна загрузка на попытку, resume без загрузок, `--max-items`, CDP-resume пакета Brave и Brave-resume состояния v1 → `transport_mismatch` без браузера |
+| `cli_batch_recovery` | Ctrl+C во время загрузки (отмена собственной загрузки, `paused interrupted`, resume), `batch-status` и `batch-cancel` во время работы при параллельной загрузке пользователя, второй исполнитель того же пакета, SIGKILL во время загрузки и освобождение операции следующим запуском, resume после checkpoint и после импорта без загрузок |
+| `cli_foreign_downloads` | загрузка той же записи из чужой вкладки во время пакета → `paused download_conflict`, файлы пользователя целы; повторный запуск завершает пакет |
+
+Сценарии `cli_*` запускают собранный `pronunciation-assets` (`--cli`,
+`PRONUNCIATION_ASSETS_BIN` или файл рядом с `anki-e2e`; без него — `BLOCKED`):
+`cargo build -p asset-store --bin pronunciation-assets`. Fixture содержит минимально
+необходимые независимые слова `水` и `山` с собственными записями и байтами. Каждое
+тестовое хранилище создаётся в каталоге сценария.
 
 Отчёт `target/anki-e2e/browser-runs/<run_id>/report.{json,md}` содержит:
 - ревизию, версию браузера и флаги;
@@ -299,7 +309,7 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 
 ```bash
 cargo run -p anki-e2e -- real-site up        # образ, контейнер, Brave; печатает адрес noVNC
-cargo run -p anki-e2e -- real-site run       # doctor --forvo и smoke 元気/げんき
+cargo run -p anki-e2e -- real-site run       # doctor --forvo, smoke 元気/げんき, fetch и пакет 元気+猫
 cargo run -p anki-e2e -- real-site down      # штатно закрыть Brave, удалить контейнер
 cargo run -p anki-e2e -- real-site purge --yes   # удалить также volumes с авторизацией и образы
 ```
@@ -343,7 +353,18 @@ evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузк�
 
 Отчёт `target/anki-e2e/real-site-runs/<run_id>/report.{json,md}` содержит:
 - версию Brave, образ и коммит исходников;
-- шаги `doctor`/`smoke` по их машинному контракту и подсказку для `BLOCKED`.
+- шаги `doctor`/`smoke` по их машинному контракту и подсказку для `BLOCKED`;
+- production-шаги после зелёного `smoke` (`--acceptance-only` их отключает):
+  - `fetch` в отдельное тестовое хранилище: SHA ресурса равен `downloaded_sha256`,
+    ресурс не `Verified`, вкладки пользователя не изменены, `verify` проходит;
+  - пакет из `--surface` и `--batch-surface` (по умолчанию `猫`/`ねこ`): `batch-start
+    --max-items 1` обрабатывает одно слово, `batch-resume` завершает второе. Число
+    начатых загрузок в журнале запуска равно числу попыток второго слова;
+  - повторный `batch-resume` не меняет ревизию и не начинает загрузок.
+
+Тестовые хранилища лежат в volume состояния
+(`/home/tester/state/real-site-stores/<run_id>`). Они не попадают в Git и
+пользовательский `AssetStore`.
 
 `up` и `run` проверяют песочницу: каждый renderer должен жить в собственном user namespace.
 Иначе `up` завершается ошибкой, а `run` получает `FAIL`. `smoke` запускается только после

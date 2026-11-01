@@ -4,8 +4,10 @@
 Brave пользователя (или другой Chromium с MV3), без отдельного профиля,
 `--remote-debugging-port`, Browser MCP и экспорта cookies. Отдельный профиль
 Cloudflare отклонял (`403`, `cf-mitigated: challenge`); основной профиль пользователя
-проходит. Состояние на сегодня: прототип одной записи. Пакетное получение и импорт
-в `AssetStore` по-прежнему идут через [CDP-провайдер](forvo.md).
+проходит. Через Brave работают одиночное получение с импортом в `AssetStore`
+(`forvo brave fetch`) и пакеты (`forvo brave batch-start|batch-resume`) поверх того же
+`forvo::batch`/`SafeBatchRuntime`, что у [CDP-провайдера](forvo.md). `doctor` и `smoke`
+остаются диагностикой транспорта и одной записи.
 
 ## Архитектура
 
@@ -136,6 +138,75 @@ Ctrl+C даёт работе до 20 секунд освободить собс�
 в `AnkiDeckToolkit/` и сравнивает SHA. Владение здесь доказывает ID, который вернул API.
 В рабочем пути вторая загрузка не нужна.
 
+## Production-получение и пакеты
+
+`forvo brave fetch` и пакеты Brave выдают тот же результат получения, что CDP:
+`Acquisition { bytes, evidence }` с единым `ForvoEvidence`. Сессия Brave
+(`forvo::brave::fetch::BraveSession`) реализует общий `CandidateSource`, поэтому
+действует один `acquire_from`:
+- рейтинг кандидатов;
+- переход к следующему кандидату при допустимом отказе;
+- попытки и provenance;
+- проверка MP3 (`probe_mp3` — один раз, в общем порядке попыток);
+- импорт через `import_acquisition`.
+
+Происхождение аудио для обоих путей одно: `provider=forvo_web`, `source_kind=forvo_web`.
+Транспорт — отдельное свойство пакета, а не источник. Техническая проверка не даёт
+фонетического доверия: ресурс остаётся `Uncertain`/карантином до человеческого одобрения.
+
+Одна команда (`fetch`) или один исполнитель пакета держит одно логическое сопряжение с
+расширением на всё выполнение. `doctor`/`smoke` и новый bridge на каждое слово не
+запускаются. При подключении освобождается операция, оставшаяся от прерванного
+запуска (`brave_operation_recovery`): затрагивается только связанная собственная загрузка.
+Каждое слово открывается в свежей собственной вкладке. Вкладка, уже нажавшая кнопку
+загрузки, заменяется расширением. Перед нажатием строка выбранного кандидата проверяется
+заново. Если строка изменилась или пропала, это `candidate_changed`, и выбирается
+следующий кандидат. После каждой загрузки собственная операция освобождается при любом
+исходе: незавершённая собственная загрузка отменяется, а завершённая — удаляется из
+загрузок и истории после чтения байтов. Копии в `evidence/` и smoke-отчёты production-путь
+не создаёт, второй HTTP-запрос и `chrome.downloads.download` ради перепроверки не делает.
+Если разрыв WebSocket случился между командами (перезапуск service worker), команда
+ждёт переподключения и повторяется один раз. Во время загрузки разрыв обрабатывается
+опросом операции, как в `smoke`.
+
+Отказ одной записи — не блокер. Не-MP3, обрыв ответа, неверный адрес, изменённая строка
+и прочие допустимые отказы ведут к следующему кандидату. Если подходящих кандидатов не
+осталось, слово получает отдельный исход `candidates_exhausted`, `word_not_found` или
+`japanese_pronunciation_not_found`. Блокирующие состояния останавливают перебор, а пакет
+переводят в `paused`. Это:
+- вход и проверка сайта: `login_required`, `challenge_required`;
+- недоступность расширения: `extension_not_connected`;
+- запрос места сохранения: `save_as_required`;
+- неоднозначное владение: `download_conflict`, `ownership_unproven`;
+- недоступность проверки MP3: `technical_validation_failed`.
+
+Слово при блокере не объявляется безнадёжным. Подсказка `next_action` указывает
+действие в Brave. После входа или прохождения проверки вручную выполните
+`forvo brave batch-resume`.
+
+Транспорт пакета закреплён в состоянии. Новые пакеты имеют `schema_version=2` и поле
+`transport`: `cdp_chromium` у `forvo batch-start`, `brave_extension` у
+`forvo brave batch-start`. Состояние версии 1, сохранённое до появления транспорта,
+читается без миграции и всегда означает CDP. Его ревизии сохраняются в версии 1.
+Resume другим транспортом отвергается до запуска браузера с кодом
+`transport_mismatch` и командой исходного транспорта в `next_action`. Поэтому пакет CDP
+не продолжится через Brave и наоборот. `forvo batch-status` и `forvo batch-cancel`
+одинаковы для обоих транспортов, работают без браузера и показывают
+`effective_transport`.
+
+Остановка исполнителя Brave не бросает операцию посреди загрузки. Ctrl+C или
+`batch-cancel` передаются сессии, та отменяет и стирает собственную незавершённую загрузку
+и только потом завершается. Если освобождение не уложилось в 30 секунд, операция
+освобождается при следующем подключении, а в паузе отмечается `recovery_required`.
+Проверенные байты, полученные до остановки, всё равно фиксируются в checkpoint. Порядок
+прежний: байты и provenance сначала попадают в неизменяемый blob, затем импортируются
+с CAS. После сбоя импорта или падения между импортом и итоговым состоянием resume
+берёт те же сохранённые байты, без браузера. Падение во время загрузки оставляет
+элемент без checkpoint, и resume скачивает его заново. Импортированные элементы не
+скачиваются повторно. По завершении CLI закрывает только соединение bridge. Brave
+и вкладки пользователя не закрываются. Собственная вкладка закрывается только по
+`--close-tab`.
+
 ## Диагностика
 
 Все этапы пишутся в журнал NDJSON общего `RunLogGuard` (`logs/` каталога состояния)
@@ -154,7 +225,21 @@ pronunciation-assets forvo brave setup                 # каталог расш
 pronunciation-assets forvo brave doctor [--forvo] [--reconnect] [--reload]
 pronunciation-assets forvo brave smoke --surface 元気 --reading げんき [--close-tab] [--keep-download] [--probe-downloads-api]
 pronunciation-assets forvo brave close
+pronunciation-assets forvo brave fetch --surface 元気 --reading げんき [--replace-expected-sha256 <SHA>] [--close-tab]
+pronunciation-assets forvo brave batch-start --batch-id jp-audio --plan plan.json [--max-items N] [--close-tab]
+pronunciation-assets forvo brave batch-resume --batch-id jp-audio [--max-items N]
+pronunciation-assets forvo batch-status --batch-id jp-audio     # без браузера, любой транспорт
+pronunciation-assets forvo batch-cancel --batch-id jp-audio     # без браузера, любой транспорт
 ```
+
+`--store` задаёт хранилище, как у остальных команд, а `--state-dir` (до подкоманды)
+задаёт каталог сопряжения. План пакета — тот же строгий JSON, что у CDP. Результат
+`fetch` содержит `asset`, `acquisition` (`ForvoEvidence`) и `browser`. В `browser`
+записаны ID и версия расширения, операции загрузок с освобождением, восстановленная
+операция прошлого запуска и `user_tabs_untouched`. Журнал `fetch` лежит в `logs/`
+каталога состояния, журнал пакета — в runtime пакета (`result.diagnostic_log`).
+Коды завершения общие: 0 — успех, 3 — пауза из-за блокера или отказ,
+130 — Ctrl+C или `cancelled`.
 
 В WSL `setup` кладёт расширение в `%LOCALAPPDATA%\AnkiDeckToolkit\forvo-brave-adapter`
 и выводит Windows-путь, в обычном Linux — в `$XDG_DATA_HOME/anki-deck-toolkit/forvo-brave-adapter`.
@@ -165,8 +250,8 @@ pronunciation-assets forvo brave close
 `doctor` и `smoke` возвращают шаги `PASS`/`FAIL`/`BLOCKED`/`NOT_TESTED`/`INTERRUPTED`
 с доказательствами. Внешний блокер (Challenge, вход, 429) даёт `BLOCKED` без повторов.
 Журнал NDJSON общего `RunLogGuard` лежит в `logs/` каталога состояния,
-проверенный MP3 `smoke` — в `evidence/` (0600). Хранилище ресурсов и колоды не
-меняются. Режим WSL2 NAT и нативный Linux Brave live не проверялись.
+проверенный MP3 `smoke` — в `evidence/` (0600). `doctor`/`smoke` хранилище ресурсов и
+колоды не меняют. Режим WSL2 NAT live не проверялся.
 
 ## Изолированный E2E
 

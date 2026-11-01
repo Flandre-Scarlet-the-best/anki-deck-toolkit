@@ -196,6 +196,12 @@ pub async fn open_word(bridge: &mut Bridge, surface: &str) -> Result<Value, Asse
     if state != AuthState::Authenticated {
         return Err(auth_error(state));
     }
+    if observation.status == 404 {
+        return Err(bridge_error(
+            "word_not_found",
+            "Forvo вернул 404 для точной страницы слова",
+        ));
+    }
     Ok(
         json!({"tab":opened,"load":navigation["load"],"path":navigation["path"],"status":observation.status}),
     )
@@ -527,7 +533,8 @@ pub struct SmokeOptions {
     pub interrupt: Option<watch::Receiver<bool>>,
 }
 
-fn structure(snapshot: &Value) -> Value {
+/// Структура вкладок и групп вне собственной: без URL и заголовков.
+pub(crate) fn structure(snapshot: &Value) -> Value {
     json!({"tabs":snapshot["tabs"],"groups":snapshot["groups"]})
 }
 
@@ -738,25 +745,9 @@ pub async fn download_selected(
     options: &mut SmokeOptions,
     report: &mut Report,
 ) -> Result<(), AssetError> {
-    let before = bridge
-        .call(
-            "dom",
-            json!({"surface":request.surface,"action":"inspect"}),
-            Duration::from_secs(15),
-        )
-        .await
-        .inspect_err(|e| report.fail("site_download", e))?;
-    let before: DomResult = serde_json::from_value(before)
-        .map_err(|_| bridge_error("dom_changed", "Неизвестная структура кандидатов Forvo"))?;
-    if before.code != "ok" || !before.candidates.contains(selected) {
-        let e = bridge_error(
-            "candidate_changed",
-            "Строка кандидата изменилась; повторите выбор",
-        );
-        report.fail("site_download", &e);
-        return Err(e);
-    }
-    let acquired = download::acquire(
+    // Та же узкая операция, что у production-получения; smoke лишь добавляет
+    // отчёт и копию-свидетельство.
+    let acquired = super::fetch::download_candidate(
         bridge,
         platform,
         request,
@@ -766,6 +757,7 @@ pub async fn download_selected(
         &mut options.interrupt,
     )
     .await
+    .and_then(|downloaded| download::probed(op_id, downloaded))
     .inspect_err(|e| report.fail("site_download", e))?;
     let item = &acquired.item;
     report.push("site_download", Status::Pass, json!({"operation_id":op_id,"download_id":item.id,"file_name":item.file_name,

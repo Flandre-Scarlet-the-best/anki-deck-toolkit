@@ -75,12 +75,20 @@ pub enum Action {
         #[arg(long, conflicts_with = "proxy")]
         no_proxy: bool,
     },
-    /// doctor --forvo и smoke на настоящем forvo.com; отчёт JSON/Markdown
+    /// doctor --forvo, smoke и production fetch/пакет на настоящем forvo.com; отчёт JSON/Markdown
     Run {
         #[arg(long, default_value = "元気")]
         surface: String,
         #[arg(long, default_value = "げんき")]
         reading: String,
+        /// Второе слово небольшого пакета (вместе с --surface)
+        #[arg(long, default_value = "猫")]
+        batch_surface: String,
+        #[arg(long, default_value = "ねこ")]
+        batch_reading: String,
+        /// Только doctor и smoke, без production fetch и пакета
+        #[arg(long)]
+        acceptance_only: bool,
     },
     /// Состояние контейнера, Brave и volumes
     Status,
@@ -372,7 +380,18 @@ pub fn run(args: &RealSiteArgs, interrupted: Arc<AtomicBool>) -> u8 {
             *no_proxy,
             &interrupted,
         ),
-        Action::Run { surface, reading } => acceptance(&stand, surface, reading, &interrupted),
+        Action::Run {
+            surface,
+            reading,
+            batch_surface,
+            batch_reading,
+            acceptance_only,
+        } => acceptance(
+            &stand,
+            [(surface, reading), (batch_surface, batch_reading)],
+            *acceptance_only,
+            &interrupted,
+        ),
         Action::Status => status(&stand),
         Action::Down => down(&stand),
         Action::Purge { yes } => purge(&stand, *yes),
@@ -574,7 +593,254 @@ fn hint(status: Status, steps: &[Value]) -> Option<&'static str> {
     }
 }
 
-fn acceptance(stand: &Stand, surface: &str, reading: &str, interrupted: &AtomicBool) -> Outcome {
+/// Итог production-команды (`fetch`, `batch-*`) по её машинному выводу.
+pub fn production_status(output: &Value) -> Status {
+    const BLOCKERS: &[&str] = &[
+        "challenge_required",
+        "login_required",
+        "session_expired",
+        "access_denied",
+        "rate_limited",
+        "extension_not_connected",
+        "save_as_required",
+        "download_conflict",
+    ];
+    let error = output["error"]["details"]["code"].as_str();
+    match output["outcome"].as_str() {
+        Some("ok") => Status::Pass,
+        Some("paused") if output["result"]["paused"]["code"] == "interrupted" => {
+            Status::Interrupted
+        }
+        Some("paused") => Status::Blocked,
+        Some("cancelled") => Status::Interrupted,
+        _ if output["error"]["code"] == "interrupted" => Status::Interrupted,
+        _ if error.is_some_and(|c| BLOCKERS.contains(&c)) => Status::Blocked,
+        _ => Status::Fail,
+    }
+}
+
+fn step(name: &str, ok: bool, evidence: Value) -> Value {
+    json!({"name": name, "status": if ok { "PASS" } else { "FAIL" }, "evidence": evidence})
+}
+
+/// Число собственных загрузок, начатых запуском, по его журналу в контейнере.
+fn downloads_started(stand: &Stand, output: &Value) -> Option<u64> {
+    let log = output["result"]["diagnostic_log"]
+        .as_str()
+        .or_else(|| output["error"]["details"]["diagnostic_log"].as_str())?;
+    let out = stand
+        .exec(&["grep", "-c", "brave_download_activated", log])
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn items(output: &Value) -> Vec<Value> {
+    output["result"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Production-путь на настоящем Forvo: одиночный fetch и пакет из двух слов
+/// в отдельные тестовые хранилища на volume состояния (не в Git и не в
+/// пользовательский AssetStore). Пакет начинается с `--max-items 1`, затем
+/// продолжается и повторно возобновляется: завершённое не скачивается снова.
+fn production(
+    stand: &Stand,
+    run_id: &str,
+    words: [(&str, &str); 2],
+    interrupted: &AtomicBool,
+) -> Vec<Value> {
+    let root = format!("/home/tester/state/real-site-stores/{run_id}");
+    let fetch_store = format!("{root}/fetch");
+    let batch_store = format!("{root}/batch");
+    let mut commands = Vec::new();
+    let mut entry = |name: &str, output: &std::result::Result<Value, String>, extra: Vec<Value>| {
+        let status = output.as_ref().map_or(Status::Error, production_status);
+        let status = if extra.iter().any(|s| s["status"] == "FAIL") && status == Status::Pass {
+            Status::Fail
+        } else {
+            status
+        };
+        let mut steps = vec![json!({"name": name, "status": status.as_str(),
+            "evidence": output.as_ref().map(|o| json!({"outcome": o["outcome"], "code": o["error"]["details"]["code"],
+                "paused": o["result"]["paused"]["code"], "next_action": o["error"]["details"]["next_action"]})).unwrap_or(Value::Null)})];
+        if status == Status::Pass || !extra.is_empty() {
+            steps.extend(extra);
+        }
+        commands.push(json!({"name": name, "status": status.as_str(), "steps": steps}));
+        status
+    };
+    let (surface, reading) = words[0];
+    let fetch = exec_cli(
+        stand,
+        &[
+            "--store",
+            &fetch_store,
+            "forvo",
+            "brave",
+            "fetch",
+            "--surface",
+            surface,
+            "--reading",
+            reading,
+        ],
+        interrupted,
+    );
+    let mut checks = Vec::new();
+    if let Ok(out) = &fetch
+        && out["outcome"] == "ok"
+    {
+        let r = &out["result"];
+        checks.push(step("fetch_imported", r["asset"]["sha256"] == r["acquisition"]["downloaded_sha256"]
+            && r["asset"]["lifecycle"] != "verified" && r["transport"] == "brave_extension",
+            json!({"sha256": r["asset"]["sha256"], "record_id": r["acquisition"]["selected_record_id"],
+                "attempts": r["acquisition"]["attempts"], "lifecycle": r["asset"]["lifecycle"],
+                "byte_length": r["asset"]["byte_length"], "store": fetch_store})));
+        checks.push(step("fetch_browser_clean", r["browser"]["user_tabs_untouched"] == true
+            && r["browser"]["operations"].as_array().is_some_and(|ops| ops.iter().all(|o| o["release"]["released"] == true)),
+            json!({"downloads": r["browser"]["downloads"], "user_tabs_untouched": r["browser"]["user_tabs_untouched"],
+                "recovered_previous": r["browser"]["recovered_previous"]})));
+        let verify = exec_cli(stand, &["--store", &fetch_store, "verify"], interrupted);
+        checks.push(step(
+            "store_verify",
+            verify.as_ref().is_ok_and(|v| v["outcome"] == "ok"),
+            json!({"outcome": verify.as_ref().ok().map(|v| v["outcome"].clone())}),
+        ));
+    }
+    if entry("fetch", &fetch, checks) != Status::Pass || interrupted.load(Ordering::SeqCst) {
+        return commands;
+    }
+    let plan = format!("{root}/plan.json");
+    let plan_json = json!({"schema_version": 1, "items": words.iter().map(|(s, r)| json!({"surface": s, "reading": r})).collect::<Vec<_>>()}).to_string();
+    if stand
+        .exec(&[
+            "sh",
+            "-c",
+            "mkdir -p \"$(dirname \"$1\")\" && printf '%s' \"$2\" > \"$1\"",
+            "sh",
+            &plan,
+            &plan_json,
+        ])
+        .map(|o| o.status.success())
+        != Ok(true)
+    {
+        entry(
+            "batch_start",
+            &Err("план пакета не записан".into()),
+            Vec::new(),
+        );
+        return commands;
+    }
+    let batch = ["--store", batch_store.as_str(), "forvo", "brave"];
+    let start = exec_cli(
+        stand,
+        &[
+            &batch[..],
+            &[
+                "batch-start",
+                "--batch-id",
+                "real-site",
+                "--plan",
+                &plan,
+                "--max-items",
+                "1",
+            ],
+        ]
+        .concat(),
+        interrupted,
+    );
+    let first = start.as_ref().map(items).unwrap_or_default();
+    let mut checks = Vec::new();
+    if start.as_ref().is_ok_and(|o| o["outcome"] == "ok") {
+        checks.push(step("partial_progress", first.len() == 2 && first[0]["outcome"]["code"] == "imported" && first[1]["outcome"].is_null(),
+            json!({"items": first.iter().map(|i| &i["outcome"]["code"]).collect::<Vec<_>>(),
+                "downloads_started": start.as_ref().ok().and_then(|o| downloads_started(stand, o))})));
+    }
+    if entry("batch_start", &start, checks) != Status::Pass || interrupted.load(Ordering::SeqCst) {
+        return commands;
+    }
+    let resume = exec_cli(
+        stand,
+        &[&batch[..], &["batch-resume", "--batch-id", "real-site"]].concat(),
+        interrupted,
+    );
+    let done = resume.as_ref().map(items).unwrap_or_default();
+    let mut checks = Vec::new();
+    if resume.as_ref().is_ok_and(|o| o["outcome"] == "ok") {
+        let started = resume
+            .as_ref()
+            .ok()
+            .and_then(|o| downloads_started(stand, o));
+        let attempts = done.get(1).and_then(|i| {
+            i["acquisition"]["evidence"]["attempts"]
+                .as_array()
+                .map(Vec::len)
+        });
+        checks.push(step("resume_completes_without_redownload",
+            done.iter().all(|i| i["outcome"]["code"] == "imported")
+                && done.first().map(|i| &i["acquisition"]) == first.first().map(|i| &i["acquisition"])
+                && started.is_some() && started.map(|n| n as usize) == attempts,
+            json!({"items": done.iter().map(|i| json!({"surface": i["request"]["surface"], "code": i["outcome"]["code"],
+                "sha256": i["acquisition"]["blob"]["sha256"], "record_id": i["acquisition"]["evidence"]["selected_record_id"]})).collect::<Vec<_>>(),
+                "downloads_started": started, "second_item_attempts": attempts})));
+    }
+    if entry("batch_resume", &resume, checks) != Status::Pass || interrupted.load(Ordering::SeqCst)
+    {
+        return commands;
+    }
+    let again = exec_cli(
+        stand,
+        &[&batch[..], &["batch-resume", "--batch-id", "real-site"]].concat(),
+        interrupted,
+    );
+    let status = exec_cli(
+        stand,
+        &[
+            "--store",
+            &batch_store,
+            "forvo",
+            "batch-status",
+            "--batch-id",
+            "real-site",
+        ],
+        interrupted,
+    );
+    let checks = vec![step(
+        "finished_batch_untouched",
+        again.as_ref().is_ok_and(|o| {
+            o["result"]["revision"]
+                == resume
+                    .as_ref()
+                    .map(|r| r["result"]["revision"].clone())
+                    .unwrap_or_default()
+        }) && again
+            .as_ref()
+            .ok()
+            .and_then(|o| downloads_started(stand, o))
+            == Some(0)
+            && status
+                .as_ref()
+                .is_ok_and(|s| s["result"]["effective_transport"] == "brave_extension"),
+        json!({"revision": again.as_ref().ok().map(|o| o["result"]["revision"].clone()),
+            "downloads_started": again.as_ref().ok().and_then(|o| downloads_started(stand, o)),
+            "transport": status.as_ref().ok().map(|s| s["result"]["effective_transport"].clone())}),
+    )];
+    let verify = exec_cli(stand, &["--store", &batch_store, "verify"], interrupted);
+    let mut checks = checks;
+    checks.push(step("store_verify", verify.as_ref().is_ok_and(|v| v["outcome"] == "ok"),
+        json!({"outcome": verify.as_ref().ok().map(|v| v["outcome"].clone()), "store": batch_store})));
+    entry("batch_resume_again", &again, checks);
+    commands
+}
+
+fn acceptance(
+    stand: &Stand,
+    words: [(&String, &String); 2],
+    acceptance_only: bool,
+    interrupted: &AtomicBool,
+) -> Outcome {
+    let (surface, reading) = (words[0].0.as_str(), words[0].1.as_str());
     if !stand.running() {
         return Err((
             Status::Blocked,
@@ -612,6 +878,17 @@ fn acceptance(stand: &Stand, surface: &str, reading: &str, interrupted: &AtomicB
         );
         let status = smoke.as_ref().map_or(Status::Error, command_status);
         commands.push(command_entry("smoke", &smoke, status));
+        if status == Status::Pass && !acceptance_only && !interrupted.load(Ordering::SeqCst) {
+            commands.extend(production(
+                stand,
+                &run_id,
+                [
+                    (surface, reading),
+                    (words[1].0.as_str(), words[1].1.as_str()),
+                ],
+                interrupted,
+            ));
+        }
     }
     let mut overall = crate::report::overall(
         commands
@@ -640,6 +917,8 @@ fn acceptance(stand: &Stand, surface: &str, reading: &str, interrupted: &AtomicB
         "status": overall.as_str(),
         "hint": hint(overall, &all_steps),
         "request": {"surface": surface, "reading": reading},
+        "batch_words": words.iter().map(|(s, r)| json!({"surface": s, "reading": r})).collect::<Vec<_>>(),
+        "test_stores": if acceptance_only { Value::Null } else { json!(format!("/home/tester/state/real-site-stores/{run_id}")) },
         "brave": stand.brave_version(),
         "sandbox": sandbox,
         "image": {"name": image["Image"], "source_commit": image["Labels"]["io.github.anki-deck-toolkit.e2e.source-commit"],
@@ -850,6 +1129,35 @@ mod tests {
             Some("http://proxy:8080".into())
         );
         assert_eq!(docker_proxy_url(&json!({"HTTPProxy":""})), None);
+    }
+
+    #[test]
+    fn production_outcomes_map_to_statuses() {
+        assert_eq!(production_status(&json!({"outcome":"ok"})), Status::Pass);
+        assert_eq!(
+            production_status(
+                &json!({"outcome":"paused","result":{"paused":{"code":"challenge_required"}}})
+            ),
+            Status::Blocked
+        );
+        assert_eq!(
+            production_status(
+                &json!({"outcome":"paused","result":{"paused":{"code":"interrupted"}}})
+            ),
+            Status::Interrupted
+        );
+        assert_eq!(
+            production_status(
+                &json!({"outcome":"error","error":{"code":"invalid_transition","details":{"code":"login_required"}}})
+            ),
+            Status::Blocked
+        );
+        assert_eq!(
+            production_status(
+                &json!({"outcome":"error","error":{"code":"invalid_transition","details":{"code":"candidates_exhausted"}}})
+            ),
+            Status::Fail
+        );
     }
 
     #[test]

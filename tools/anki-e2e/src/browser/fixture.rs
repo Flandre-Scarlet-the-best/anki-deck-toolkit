@@ -29,6 +29,15 @@ pub const WORD_LOGIN: &str = "未認証";
 pub const WORD_MISMATCHED_BUTTON: &str = "誤記";
 pub const WORD_WRONG_HREF: &str = "誤先";
 pub const USER_HOST: &str = "user-files.test";
+/// Независимые слова пакетных сценариев: свои записи и свои байты.
+pub const WORD_2: &str = "水";
+pub const READING_2: &str = "みず";
+/// Лучшая запись второго слова (ей сценарий подменяет ответ, проверяя переход к следующей).
+pub const RECORD_2_TOP: &str = "4100001";
+pub const RECORD_2_NEXT: &str = "4100002";
+pub const WORD_3: &str = "山";
+pub const READING_3: &str = "やま";
+pub const RECORD_3: &str = "4200001";
 
 /// Поведение ответа на загрузку записи.
 #[derive(Clone)]
@@ -69,6 +78,8 @@ pub struct Fixture {
     control: Arc<Mutex<Control>>,
     pub mp3_a: Arc<Vec<u8>>,
     pub mp3_b: Arc<Vec<u8>>,
+    /// Байты записей независимых слов (record_id → MP3).
+    pub extra: Arc<HashMap<String, Vec<u8>>>,
     pub user_file: Arc<Vec<u8>>,
     stop: watch::Sender<bool>,
 }
@@ -114,6 +125,9 @@ impl Fixture {
         false
     }
     pub fn bytes_for(&self, record: &str) -> Arc<Vec<u8>> {
+        if let Some(bytes) = self.extra.get(record) {
+            return Arc::new(bytes.clone());
+        }
         if record == RECORD_B {
             self.mp3_b.clone()
         } else {
@@ -129,6 +143,7 @@ impl Fixture {
         key: &Path,
         mp3_a: Vec<u8>,
         mp3_b: Vec<u8>,
+        extra: HashMap<String, Vec<u8>>,
     ) -> Result<Fixture, String> {
         let certs = CertificateDer::pem_file_iter(cert)
             .map_err(|e| format!("сертификат fixture: {e}"))?
@@ -154,6 +169,7 @@ impl Fixture {
             control: Arc::new(Mutex::new(Control::default())),
             mp3_a: Arc::new(mp3_a),
             mp3_b: Arc::new(mp3_b),
+            extra: Arc::new(extra),
             user_file: Arc::new(b"user notes: synthetic file, not audio\n".repeat(64)),
             stop,
         };
@@ -421,6 +437,8 @@ fn word_page(word: &str) -> Option<String> {
         WORD_PHRASES,
         WORD_MISMATCHED_BUTTON,
         WORD_WRONG_HREF,
+        WORD_2,
+        WORD_3,
     ]
     .into_iter()
     .find(|w| *w == word)?;
@@ -447,6 +465,44 @@ fn word_page(word: &str) -> Option<String> {
     Some(match word {
         WORD => page(&ja_section(word, &normal(word)), true),
         WORD_LOGIN => page(&ja_section(word, &normal(word)), false),
+        WORD_2 => page(
+            &ja_section(
+                word,
+                &[
+                    Row {
+                        id: RECORD_2_TOP,
+                        votes: 4,
+                        speaker: "Female from Japan",
+                        button_word: word,
+                        button_record: RECORD_2_TOP,
+                        href_record: RECORD_2_TOP,
+                    },
+                    Row {
+                        id: RECORD_2_NEXT,
+                        votes: 2,
+                        speaker: "Male from Japan",
+                        button_word: word,
+                        button_record: RECORD_2_NEXT,
+                        href_record: RECORD_2_NEXT,
+                    },
+                ],
+            ),
+            true,
+        ),
+        WORD_3 => page(
+            &ja_section(
+                word,
+                &[Row {
+                    id: RECORD_3,
+                    votes: 3,
+                    speaker: "Female from Japan",
+                    button_word: word,
+                    button_record: RECORD_3,
+                    href_record: RECORD_3,
+                }],
+            ),
+            true,
+        ),
         WORD_DOM_CHANGED => page(
             r#"<div id="language-container-ja" class="language-container"><article id="language-ja" class="pronunciations"><header class="header-pronunciation"><a href="https://forvo.com/languages/ja/">Japanese</a></header><div class="new-layout"></div></article></div>"#,
             true,
