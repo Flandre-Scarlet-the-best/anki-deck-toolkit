@@ -200,6 +200,9 @@ enum BraveAction {
         probe_downloads_api: bool,
         #[arg(long)]
         close_tab: bool,
+        /// Оставить собственный скачанный MP3 в загрузках браузера (по умолчанию удаляется после копии в свидетельства).
+        #[arg(long)]
+        keep_download: bool,
     },
     /// Закрыть собственную вкладку адаптера.
     Close {
@@ -725,6 +728,7 @@ async fn run_brave(
             Output::Text => OutputMode::Human,
         },
     );
+    let (interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
     let work = async {
         match action {
             BraveAction::Setup {
@@ -736,6 +740,7 @@ async fn run_brave(
                 install_dir: install_dir.clone(),
                 port: *port,
                 rotate_secret: *rotate_secret,
+                platform: None,
             }),
             BraveAction::Doctor {
                 wait_seconds,
@@ -758,14 +763,18 @@ async fn run_brave(
                 wait_seconds,
                 probe_downloads_api,
                 close_tab,
+                keep_download,
             } => acceptance::report_error(
-                acceptance::smoke(&acceptance::SmokeOptions {
+                acceptance::smoke(acceptance::SmokeOptions {
                     state_dir: state_dir.clone(),
                     wait: Duration::from_secs(*wait_seconds),
                     surface: surface.clone(),
                     reading: reading.clone(),
                     probe_downloads_api: *probe_downloads_api,
                     close_tab: *close_tab,
+                    keep_download: *keep_download,
+                    limits: brave::download::Limits::default(),
+                    interrupt: Some(interrupt_rx.clone()),
                 })
                 .await?,
             ),
@@ -774,10 +783,23 @@ async fn run_brave(
             }
         }
     };
-    // Ctrl+C закрывает только соединение bridge: Brave, вкладки и настройки не трогаются.
+    // Ctrl+C: работа получает сигнал и освобождает собственную операцию загрузки;
+    // повторный Ctrl+C или истечение отсрочки закрывают только соединение bridge.
+    // Brave, вкладки пользователя и настройки не трогаются.
+    let work = work.with_subscriber(guard.dispatch());
+    tokio::pin!(work);
     let result = tokio::select! {
-        result = work.with_subscriber(guard.dispatch()) => result,
-        _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана; соединение с расширением закрыто, браузер не изменён")),
+        result = &mut work => result,
+        _ = tokio::signal::ctrl_c() => {
+            let _ = interrupt_tx.send(true);
+            tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(20), &mut work) => match result {
+                    Ok(Err(error)) => Err(error),
+                    _ => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана; соединение с расширением закрыто, браузер не изменён")),
+                },
+                _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана повторно; соединение с расширением закрыто")),
+            }
+        }
     };
     let logged = guard.finish();
     let mut value = result.map_err(|mut error| {

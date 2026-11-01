@@ -67,17 +67,24 @@ fn extension_manifest_is_minimal() {
         json!(["https://forvo.com/*", "http://127.0.0.1/*"])
     );
     let permissions = manifest["permissions"].as_array().expect("permissions");
-    // Нет tabs/debugger/cookies/webRequest: только своя вкладка и наблюдение загрузок.
+    // Нет tabs/debugger/cookies и блокирующих сетевых API: webRequest только
+    // наблюдает tabId запроса выбранной записи и ничего не изменяет.
     for forbidden in [
         "tabs",
         "debugger",
         "cookies",
-        "webRequest",
+        "webRequestBlocking",
+        "declarativeNetRequest",
+        "declarativeNetRequestWithHostAccess",
         "<all_urls>",
         "nativeMessaging",
     ] {
         assert!(!permissions.iter().any(|p| p == forbidden), "{forbidden}");
     }
+    assert!(permissions.iter().any(|p| p == "webRequest"));
+    // Глобального перехватчика имён загрузок и отмены чужих загрузок нет.
+    assert!(!BACKGROUND.contains("onDeterminingFilename.addListener"));
+    assert!(!BACKGROUND.contains("'blocking'"));
     assert!(!BACKGROUND.contains("eval("));
     assert!(!BACKGROUND.contains("new Function"));
     assert!(BACKGROUND.contains(GROUP_TITLE));
@@ -92,6 +99,7 @@ fn setup_writes_private_pairing_and_keeps_secret() {
         install_dir: Some(temp.path().join("extension")),
         port: Some(48000),
         rotate_secret: false,
+        platform: None,
     };
     let first = setup(&options).expect("setup");
     assert_eq!(first["pairing"], "created");
@@ -162,6 +170,12 @@ fn browser_paths_map_per_platform() {
     );
     assert!(browser_path_to_local(Platform::Linux, "C:\\a.mp3").is_err());
     assert!(browser_path_to_local(Platform::Wsl, "relative.mp3").is_err());
+    assert!(browser_path_to_local(Platform::Wsl, "C:relative.mp3").is_err());
+    // Linux-браузер внутри WSL сообщает обычный абсолютный путь.
+    assert_eq!(
+        browser_path_to_local(Platform::Wsl, "/tmp/a.mp3").unwrap(),
+        PathBuf::from("/tmp/a.mp3")
+    );
 }
 
 // --- Синтетическое расширение -------------------------------------------

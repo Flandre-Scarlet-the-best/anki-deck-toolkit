@@ -25,13 +25,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 
 pub mod acceptance;
+pub mod download;
 
 pub const PROTOCOL: &str = "forvo-adapter/v1";
 pub const WS_PATH: &str = "/forvo-adapter/v1";
 pub const GROUP_TITLE: &str = "Anki Deck Toolkit";
 pub const DEFAULT_PORT: u16 = 47613;
-/// Единственный крупный ответ — байты MP3 в base64 (не больше 8 МиБ исходных).
-const MAX_INBOUND_MESSAGE: usize = 12 * 1024 * 1024;
+/// Байты MP3 через bridge не передаются: ответы — только состояния и безопасные метаданные.
+const MAX_INBOUND_MESSAGE: usize = 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MANIFEST: &str = include_str!("brave/extension/manifest.json");
 const BACKGROUND: &str = include_str!("brave/extension/background.js");
@@ -277,10 +278,17 @@ fn linux_to_windows(path: &Path) -> Result<String, AssetError> {
 }
 
 /// Путь, который браузер сообщает о файле, в путь текущей Linux-среды.
+/// Windows-путь допустим только в WSL и проходит через `wslpath`; абсолютный
+/// Linux-путь сообщает Linux-браузер и используется как есть.
 pub fn browser_path_to_local(platform: Platform, path: &str) -> Result<PathBuf, AssetError> {
+    let bytes = path.as_bytes();
+    let windows_drive = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
     match platform {
-        Platform::Wsl if path.as_bytes().get(1) == Some(&b':') => wsl_to_linux(path),
-        Platform::Linux if path.starts_with('/') => Ok(PathBuf::from(path)),
+        Platform::Wsl if windows_drive => wsl_to_linux(path),
+        _ if path.starts_with('/') && !path.contains('\0') => Ok(PathBuf::from(path)),
         _ => Err(bridge_error(
             "path_mapping_failed",
             "Неожиданный путь загрузки браузера",
@@ -391,12 +399,14 @@ pub struct SetupOptions {
     pub install_dir: Option<PathBuf>,
     pub port: Option<u16>,
     pub rotate_secret: bool,
+    /// Явная платформа браузера (изолированный E2E с Linux-Chromium внутри WSL).
+    pub platform: Option<Platform>,
 }
 
 /// Материализует расширение и сопряжение. Повторный вызов обновляет код,
 /// сохраняя секрет и закреплённый ID, если не запрошена ротация.
 pub fn setup(options: &SetupOptions) -> Result<serde_json::Value, AssetError> {
-    let platform = detect_platform();
+    let platform = options.platform.unwrap_or_else(detect_platform);
     let previous = load_state(&options.state_dir).ok();
     let install_dir = match (&options.install_dir, &previous) {
         (Some(dir), _) => {

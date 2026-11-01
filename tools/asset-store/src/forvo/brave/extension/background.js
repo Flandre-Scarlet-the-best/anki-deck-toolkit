@@ -8,12 +8,10 @@ const WS_PATH = '/forvo-adapter/v1';
 const GROUP_TITLE = 'Anki Deck Toolkit';
 const FORVO_ORIGIN = 'https://forvo.com';
 const MAX_INBOUND_CHARS = 64 * 1024;
-const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const KEEPALIVE_MS = 20000;
 const RETRY_MS = 3000;
 const QUICK_RETRIES = 5;
 const HANDSHAKE_MS = 10000;
-const OBSERVED_TTL_MS = 120000;
 const VERSION = chrome.runtime.getManifest().version;
 
 let socket = null;
@@ -25,8 +23,6 @@ let handshakeTimer = null;
 let operation = null;
 let ownNonce = null;
 let bridgeNonce = null;
-// Наблюдённые штатные загрузки: токен → URL. Rust не может передать сюда произвольный адрес.
-const observed = new Map();
 
 class Failure extends Error {
     constructor(code, message) {
@@ -173,9 +169,6 @@ function forvoUrl(value) {
 }
 const wordPath = surface => '/word/' + encodeURIComponent(surface) + '/';
 
-function aborted(signal) {
-    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Failure('aborted')), {once: true}));
-}
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -202,21 +195,34 @@ async function requireTab() {
     return tab;
 }
 
+// Chromium разрешает вкладке без жеста пользователя только первую загрузку
+// (DownloadRequestLimiter); следующие блокируются или вызывают панель «Скачать
+// несколько файлов». Поэтому вкладка, уже начавшая загрузку, заменяется свежей
+// в той же группе, а настройки браузера не меняются.
 async function ensureTab() {
     const existing = await ownTab();
-    if (existing) return {tab: existing, created: false};
-    const window = await chrome.windows.getLastFocused({windowTypes: ['normal']});
+    const {own} = await chrome.storage.local.get('own');
+    if (existing && !own?.download_used) return {tab: existing, created: false, replaced: false};
+    const window = existing ? {id: existing.windowId} : await chrome.windows.getLastFocused({windowTypes: ['normal']});
     const tab = await chrome.tabs.create({windowId: window.id, url: FORVO_ORIGIN + '/', active: false});
     try {
-        const groupId = await chrome.tabs.group({tabIds: [tab.id], createProperties: {windowId: window.id}});
+        const groupId = existing
+            ? await chrome.tabs.group({tabIds: [tab.id], groupId: existing.groupId})
+            : await chrome.tabs.group({tabIds: [tab.id], createProperties: {windowId: window.id}});
         await chrome.tabGroups.update(groupId, {title: GROUP_TITLE, color: 'blue', collapsed: true});
         await chrome.tabs.update(tab.id, {autoDiscardable: false});
-        await chrome.storage.local.set({own: {tabId: tab.id, groupId, windowId: window.id}});
-        return {tab: await chrome.tabs.get(tab.id), created: true};
+        await chrome.storage.local.set({own: {tabId: tab.id, groupId, windowId: window.id, download_used: false}});
+        if (existing) await chrome.tabs.remove(existing.id).catch(() => {});
+        return {tab: await chrome.tabs.get(tab.id), created: true, replaced: !!existing};
     } catch (error) {
         await chrome.tabs.remove(tab.id).catch(() => {});
         throw new Failure('tab_group_failed', String(error?.message || error));
     }
+}
+
+async function markTabUsed(tabId) {
+    const {own} = await chrome.storage.local.get('own');
+    if (own?.tabId === tabId) await chrome.storage.local.set({own: {...own, download_used: true}});
 }
 
 async function tabSummary(tab) {
@@ -258,7 +264,27 @@ function waitComplete(tabId, ms, signal) {
     });
 }
 
-// --- Штатная загрузка Forvo ------------------------------------------------
+// --- Загрузка выбранной записи ----------------------------------------------
+//
+// Один штатный download: обычная кнопка выбранной записи в собственной вкладке.
+// Расширение не регистрирует onDeterminingFilename и не отменяет, не
+// переименовывает и не удаляет загрузки, владение которыми не доказано.
+// У DownloadItem нет tabId, поэтому владение доказывает связка:
+//  1) запрос ожидаемого адреса выбранной записи пришёл из собственной вкладки
+//     (webRequest.onBeforeRequest без блокировки сообщает tabId);
+//  2) в окне операции ровно одна загрузка с этим адресом и ни одного такого же
+//     запроса из других вкладок;
+//  3) связывание выполняется, пока наблюдатель операции жив. После рестарта
+//     service worker несвязанная операция загрузку не усыновляет (fail closed).
+// Состояние операции хранится в chrome.storage.local: рестарт service worker и
+// переподключение bridge его не теряют, а таймеры service worker не считаются
+// гарантией — ход операции опрашивает Rust.
+
+const OP_KEY = 'operation';
+const API_KEY = 'apiDownloads';
+const DOWNLOAD_FILTER = {urls: [FORVO_ORIGIN + '/download/*']};
+const START_MARGIN_MS = 1000;
+const observers = new Map();
 
 function describeUrl(raw) {
     try {
@@ -269,186 +295,248 @@ function describeUrl(raw) {
     }
 }
 
-// Единый перехватчик штатных загрузок Forvo. Он включается на время операции и
-// ещё на GUARD_MS после неё: запоздавшая загрузка сайта иначе дошла бы до диалога
-// «Сохранить как», который не закрывается ни отменой, ни закрытием вкладки.
-const GUARD_MS = 180000;
-const interceptor = {pending: null, guardUntil: 0, since: 0, lateCancelled: 0, foreignSeen: 0, timer: null, installed: false};
-
-function forvoRelated(item) {
-    const origin = raw => {
-        try {
-            return new URL(raw).origin;
-        } catch {
-            return null;
-        }
-    };
-    return !item.byExtensionId && [item.referrer, item.url, item.finalUrl].some(raw => origin(raw) === FORVO_ORIGIN);
+function operationId(value) {
+    if (typeof value !== 'string' || !/^[0-9a-f]{32}$/.test(value)) throw new Failure('invalid_arguments');
+    return value;
 }
 
-function onDetermining(item, suggest) {
-    const started = Date.parse(item.startTime || '') || Date.now();
-    if (!forvoRelated(item) || started < interceptor.since) {
-        // Чужие загрузки: пустой suggest() немедленно, без изменения имени и диалога.
-        interceptor.foreignSeen += 1;
-        suggest();
+// Тот же контракт адреса, что matches_download в Rust: /download/mp3/<слово>/ja/<record_id>.
+function expectedDownload(raw, surface, id) {
+    let url;
+    try {
+        url = new URL(raw);
+    } catch {
         return false;
     }
-    const pending = interceptor.pending;
-    interceptor.pending = null;
-    // Отмена до подтверждения: диалог не открывается, URL взят из реального download flow.
-    chrome.downloads.cancel(item.id).catch(() => {}).finally(() => {
-        suggest();
-        chrome.downloads.erase({id: item.id}).catch(() => {});
-        if (pending) pending(item);
-        else interceptor.lateCancelled += 1;
-    });
-    return true;
-}
-
-function armInterceptor() {
-    clearTimeout(interceptor.timer);
-    interceptor.guardUntil = Date.now() + GUARD_MS;
-    if (!interceptor.installed) {
-        chrome.downloads.onDeterminingFilename.addListener(onDetermining);
-        interceptor.installed = true;
+    if (url.origin !== FORVO_ORIGIN || url.username || url.password || url.search || url.hash) return false;
+    let parts;
+    try {
+        parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    } catch {
+        return false;
     }
+    return parts.length === 5 && parts[0] === 'download' && parts[1] === 'mp3' && parts[2] === surface && parts[3] === 'ja' && parts[4] === id;
 }
 
-function releaseInterceptorLater() {
-    clearTimeout(interceptor.timer);
-    interceptor.timer = setTimeout(() => {
-        if (interceptor.pending || Date.now() < interceptor.guardUntil) return releaseInterceptorLater();
-        chrome.downloads.onDeterminingFilename.removeListener(onDetermining);
-        interceptor.installed = false;
-    }, Math.max(1000, interceptor.guardUntil - Date.now()));
+async function loadOp() {
+    return (await chrome.storage.local.get(OP_KEY))[OP_KEY] || null;
 }
 
-async function observeSiteDownload(args, signal) {
+// Изменения операции сериализуются: события webRequest и опрос Rust не теряют друг друга.
+let opQueue = Promise.resolve();
+function mutateOp(opId, change) {
+    const run = opQueue.then(async () => {
+        const op = await loadOp();
+        if (!op || op.op_id !== opId) return null;
+        if (change(op) !== false) await chrome.storage.local.set({[OP_KEY]: op});
+        return op;
+    });
+    opQueue = run.catch(() => {});
+    return run;
+}
+
+function trace(opId, event, fields = {}) {
+    console.info('forvo-adapter', JSON.stringify({operation_id: opId, event, ...fields}));
+}
+
+function observe(op) {
+    const onRequest = details => {
+        if (!expectedDownload(details.url, op.surface, op.record_id)) return;
+        const own = details.tabId === op.tab_id;
+        mutateOp(op.op_id, current => {
+            if (own) {
+                current.own_requests += 1;
+                current.first_request_at ??= Math.round(details.timeStamp);
+            } else {
+                current.foreign_requests += 1;
+            }
+        });
+        trace(op.op_id, own ? 'own_request' : 'foreign_request');
+    };
+    chrome.webRequest.onBeforeRequest.addListener(onRequest, DOWNLOAD_FILTER);
+    observers.set(op.op_id, onRequest);
+}
+
+function unobserve(opId) {
+    const listener = observers.get(opId);
+    if (listener) chrome.webRequest.onBeforeRequest.removeListener(listener);
+    observers.delete(opId);
+}
+
+function sanitizeItem(item, op) {
+    const name = item.filename ? item.filename.split(/[\\/]/).pop() : null;
+    return {id: item.id, state: item.state, error: item.error || null, danger: item.danger, exists: item.exists, paused: item.paused,
+        has_filename: !!item.filename, filename: item.filename || null, file_name: name, bytes_received: item.bytesReceived,
+        total_bytes: item.totalBytes, file_size: item.fileSize, mime: item.mime || null, url: describeUrl(item.url),
+        final_url: describeUrl(item.finalUrl), referrer_is_own_page: item.referrer === op.page_url,
+        referrer_origin_is_forvo: describeUrl(item.referrer)?.origin === FORVO_ORIGIN, by_extension: !!item.byExtensionId,
+        start_time: item.startTime || null, end_time: item.endTime || null};
+}
+
+async function downloadBegin(args) {
+    const opId = operationId(args.op_id);
     const surface = text(args.surface, 128);
     const id = recordId(args.record_id);
-    const timeout = duration(args.timeout_ms, 1000, 120000);
+    if (await loadOp()) throw new Failure('operation_pending');
     const tab = await requireTab();
+    const {own} = await chrome.storage.local.get('own');
+    if (own?.download_used) throw new Failure('own_tab_used');
     const page = new URL(tab.url);
     if (page.origin !== FORVO_ORIGIN || decodeURIComponent(page.pathname) !== decodeURIComponent(wordPath(surface))) throw new Failure('page_identity_mismatch');
-    const pageUrl = tab.url;
-    const popups = [];
-    const onCreatedTab = created => {
-        if (created.openerTabId === tab.id) popups.push(created.id);
-    };
-    const match = new Promise(resolve => {
-        interceptor.pending = resolve;
-    });
-    interceptor.since = Date.now() - 1000;
-    const lateBefore = interceptor.lateCancelled;
-    armInterceptor();
-    chrome.tabs.onCreated.addListener(onCreatedTab);
-    try {
-        const activated = await inject(tab.id, forvoDom, [surface, 'activate', id]);
-        if (activated?.code !== 'activated') return {code: activated?.code || 'dom_changed', candidates: activated?.candidates || []};
-        const timer = delay(timeout).then(() => null);
-        const item = await Promise.race([match, timer, aborted(signal)]);
-        if (!item) return {code: 'download_not_started', guard_ms: GUARD_MS, late_cancelled_before: interceptor.lateCancelled - lateBefore};
-        const token = randomHex();
-        observed.set(token, {url: item.finalUrl || item.url, expires: Date.now() + OBSERVED_TTL_MS, tabId: tab.id});
-        return {code: 'observed', token, download_id: item.id, url: describeUrl(item.url), final_url: describeUrl(item.finalUrl),
-            mime: item.mime || null, referrer_is_own_page: item.referrer === pageUrl,
-            referrer_origin_is_forvo: describeUrl(item.referrer)?.origin === FORVO_ORIGIN, cancelled_before_prompt: true,
-            new_tabs_from_own_page: popups.length};
-    } finally {
-        interceptor.pending = null;
-        interceptor.guardUntil = Date.now() + GUARD_MS;
-        releaseInterceptorLater();
-        chrome.tabs.onCreated.removeListener(onCreatedTab);
-        for (const popup of popups) await chrome.tabs.remove(popup).catch(() => {});
+    // Уже идущая загрузка того же адреса сделала бы владение неразличимым: кнопка не нажимается.
+    const active = await chrome.downloads.search({state: 'in_progress'});
+    if (active.some(item => expectedDownload(item.url, surface, id))) {
+        trace(opId, 'conflict_before_click');
+        return {code: 'download_conflict', phase: 'before_click'};
     }
-}
-
-function takeObserved(token) {
-    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) throw new Failure('invalid_arguments');
-    const entry = observed.get(token);
-    if (!entry || entry.expires < Date.now()) {
-        observed.delete(token);
-        throw new Failure('observation_expired');
-    }
-    return entry;
-}
-
-// Выполняется внутри собственной вкладки forvo.com: тот же origin и сессия,
-// cookies не покидают браузер. Возвращаются только байты и безопасные метаданные.
-async function pageFetch(url, max) {
+    const op = {op_id: opId, surface, record_id: id, tab_id: tab.id, page_url: tab.url, began_at: Date.now(), own_requests: 0,
+        foreign_requests: 0, first_request_at: null, bound: null, conflict: false, observer_lost: false};
+    await chrome.storage.local.set({[OP_KEY]: op});
+    await markTabUsed(tab.id);
+    observe(op);
+    trace(opId, 'begin', {tab_id: tab.id});
+    let activated;
     try {
-        const response = await fetch(url, {credentials: 'same-origin', cache: 'no-store', redirect: 'follow'});
-        const final = new URL(response.url);
-        const declared = Number(response.headers.get('content-length') || 0);
-        if (declared > max) return {code: 'too_large', status: response.status};
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.length > max) return {code: 'too_large', status: response.status};
-        let binary = '';
-        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-        return {code: 'ok', status: response.status, redirected: response.redirected, final_origin: final.origin, final_path: final.pathname,
-            final_has_query: final.search !== '', content_type: response.headers.get('content-type') || null, length: bytes.length, base64: btoa(binary)};
+        activated = await inject(tab.id, forvoDom, [surface, 'activate', id]);
     } catch (error) {
-        return {code: 'fetch_failed', name: String(error?.name || 'Error')};
+        await dropOp(opId);
+        throw error;
     }
+    if (activated?.code !== 'activated') {
+        await dropOp(opId);
+        return {code: activated?.code || 'dom_changed', candidates: activated?.candidates || []};
+    }
+    trace(opId, 'activated');
+    return {code: 'activated', op_id: opId, began_at: op.began_at};
 }
 
-async function fetchObserved(args) {
-    const entry = takeObserved(args.token);
-    const tab = await requireTab();
-    if (tab.id !== entry.tabId) throw new Failure('own_tab_changed');
-    return await inject(tab.id, pageFetch, [entry.url, MAX_AUDIO_BYTES]);
+async function dropOp(opId) {
+    unobserve(opId);
+    const op = await loadOp();
+    if (op?.op_id === opId) await chrome.storage.local.remove(OP_KEY);
 }
 
-// Эксперимент официального API: та же наблюдённая ссылка через chrome.downloads.
+async function downloadStatus(args) {
+    const opId = operationId(args.op_id);
+    const op = await loadOp();
+    if (!op || op.op_id !== opId) return {code: 'operation_unknown', op_id: opId};
+    const alive = observers.has(opId);
+    const tab = await ownTab();
+    const tabPresent = !!tab && tab.id === op.tab_id;
+    const items = (await chrome.downloads.search({startedAfter: new Date(op.began_at - START_MARGIN_MS).toISOString()}))
+        .filter(item => expectedDownload(item.url, op.surface, op.record_id));
+    const current = await mutateOp(opId, state => {
+        if (state.bound !== null) return false;
+        if (state.foreign_requests > 0 || items.length > 1) {
+            if (state.conflict) return false;
+            state.conflict = true;
+            trace(opId, 'conflict', {matching_downloads: items.length});
+            return;
+        }
+        if (!alive) {
+            if (state.observer_lost) return false;
+            state.observer_lost = true;
+            trace(opId, 'observer_lost');
+            return;
+        }
+        if (state.own_requests > 0 && items.length === 1 && !state.conflict && !state.observer_lost) {
+            state.bound = items[0].id;
+            state.bound_at = Date.now();
+            trace(opId, 'bound', {download_id: state.bound});
+            return;
+        }
+        return false;
+    });
+    if (!current) return {code: 'operation_unknown', op_id: opId};
+    const [item] = current.bound === null ? [] : await chrome.downloads.search({id: current.bound});
+    return {code: 'status', op_id: opId, observer_alive: alive, own_requests: current.own_requests,
+        foreign_requests: current.foreign_requests, matching_downloads: items.length, conflict: current.conflict,
+        observer_lost: current.observer_lost, bound_id: current.bound, bound_missing: current.bound !== null && !item,
+        item: item ? sanitizeItem(item, current) : null, tab_present: tabPresent,
+        page_unchanged: tabPresent && tab.url === current.page_url, elapsed_ms: Date.now() - current.began_at};
+}
+
+// Освобождение операции. Действия применяются только к загрузке, владение
+// которой доказано связыванием; несвязанная операция ничего не трогает.
+async function downloadRelease(args) {
+    const opId = operationId(args.op_id);
+    const action = args.action;
+    if (action !== 'remove' && action !== 'keep') throw new Failure('invalid_arguments');
+    unobserve(opId);
+    const op = await loadOp();
+    if (!op || op.op_id !== opId) return {released: false, reason: 'operation_unknown'};
+    const result = {released: true, bound: op.bound !== null, canceled: false, removed_file: false, erased: false};
+    if (op.bound !== null && action === 'remove') {
+        const [item] = await chrome.downloads.search({id: op.bound});
+        if (item && expectedDownload(item.url, op.surface, op.record_id)) {
+            if (item.state === 'in_progress') {
+                await chrome.downloads.cancel(item.id).catch(() => {});
+                result.canceled = true;
+            }
+            if (item.state === 'complete' && item.exists) {
+                await chrome.downloads.removeFile(item.id).then(() => {
+                    result.removed_file = true;
+                }).catch(() => {});
+            }
+            await chrome.downloads.erase({id: item.id});
+            result.erased = true;
+        }
+    }
+    await chrome.storage.local.remove(OP_KEY);
+    trace(opId, 'released', {action, ...result});
+    return result;
+}
+
+async function operationSummary() {
+    const op = await loadOp();
+    return op ? {op_id: op.op_id, bound: op.bound !== null, conflict: op.conflict, observer_alive: observers.has(op.op_id),
+        age_ms: Date.now() - op.began_at} : null;
+}
+
+// Эксперимент официального API для приёмки: повторная загрузка адреса уже
+// связанной собственной загрузки через chrome.downloads.download.
 async function downloadsApi(args, signal) {
-    const entry = takeObserved(args.token);
+    const opId = operationId(args.op_id);
+    const op = await loadOp();
+    if (!op || op.op_id !== opId || op.bound === null) throw new Failure('download_not_owned');
+    const [source] = await chrome.downloads.search({id: op.bound});
+    if (!source || source.state !== 'complete' || !expectedDownload(source.url, op.surface, op.record_id)) throw new Failure('download_not_owned');
     const stem = text(args.filename_stem, 80);
     if (!/^[a-z0-9-]+$/.test(stem)) throw new Failure('invalid_arguments');
     const promptMs = duration(args.prompt_ms, 1000, 60000);
     const timeout = duration(args.timeout_ms, 1000, 120000);
-    let created = null;
-    const events = [];
-    const onCreated = item => {
-        if (item.byExtensionId === chrome.runtime.id && item.url === entry.url) events.push('created');
-    };
-    chrome.downloads.onCreated.addListener(onCreated);
-    try {
-        created = await chrome.downloads.download({url: entry.url, filename: `AnkiDeckToolkit/${stem}.mp3`, saveAs: false, conflictAction: 'uniquify'});
-        const {downloadIds = []} = await chrome.storage.local.get('downloadIds');
-        await chrome.storage.local.set({downloadIds: [...downloadIds, created].slice(-32)});
-        const started = Date.now();
-        for (;;) {
-            if (signal.aborted) throw new Failure('aborted');
-            const [item] = await chrome.downloads.search({id: created});
-            if (!item) return {code: 'download_vanished', download_id: created};
-            if (item.state === 'complete') {
-                return {code: 'complete', download_id: created, filename: item.filename, file_size: item.fileSize, bytes_received: item.bytesReceived,
-                    total_bytes: item.totalBytes, mime: item.mime || null, exists: item.exists, danger: item.danger, final_url: describeUrl(item.finalUrl), events};
-            }
-            if (item.state === 'interrupted') return {code: 'interrupted', download_id: created, error: item.error || null, events};
-            const elapsed = Date.now() - started;
-            // Пока имя пусто, Chromium ждёт выбора пути пользователем.
-            if (!item.filename && elapsed >= promptMs) {
-                await chrome.downloads.cancel(created).catch(() => {});
-                await chrome.downloads.erase({id: created}).catch(() => {});
-                return {code: 'save_as_prompt_suspected', download_id: created, waited_ms: elapsed, events};
-            }
-            if (elapsed >= timeout) {
-                await chrome.downloads.cancel(created).catch(() => {});
-                return {code: 'download_timeout', download_id: created, events};
-            }
-            await delay(250);
+    const created = await chrome.downloads.download({url: source.url, filename: `AnkiDeckToolkit/${stem}.mp3`, saveAs: false, conflictAction: 'uniquify'});
+    const {[API_KEY]: owned = []} = await chrome.storage.local.get(API_KEY);
+    await chrome.storage.local.set({[API_KEY]: [...owned, created].slice(-32)});
+    const started = Date.now();
+    for (;;) {
+        if (signal.aborted) throw new Failure('aborted');
+        const [item] = await chrome.downloads.search({id: created});
+        if (!item) return {code: 'download_vanished', download_id: created};
+        if (item.state === 'complete') {
+            return {code: 'complete', download_id: created, filename: item.filename, file_size: item.fileSize, bytes_received: item.bytesReceived,
+                total_bytes: item.totalBytes, mime: item.mime || null, exists: item.exists, danger: item.danger, final_url: describeUrl(item.finalUrl)};
         }
-    } finally {
-        chrome.downloads.onCreated.removeListener(onCreated);
+        if (item.state === 'interrupted') return {code: 'interrupted', download_id: created, error: item.error || null, has_filename: !!item.filename};
+        const elapsed = Date.now() - started;
+        // Пока имя пусто, Chromium ждёт выбора пути пользователем.
+        if (!item.filename && elapsed >= promptMs) {
+            await chrome.downloads.cancel(created).catch(() => {});
+            await chrome.downloads.erase({id: created}).catch(() => {});
+            return {code: 'save_as_prompt_suspected', download_id: created, waited_ms: elapsed};
+        }
+        if (elapsed >= timeout) {
+            await chrome.downloads.cancel(created).catch(() => {});
+            return {code: 'download_timeout', download_id: created};
+        }
+        await delay(250);
     }
 }
 
 async function downloadCleanup(args) {
     if (!Number.isSafeInteger(args.download_id)) throw new Failure('invalid_arguments');
-    const {downloadIds = []} = await chrome.storage.local.get('downloadIds');
-    if (!downloadIds.includes(args.download_id)) throw new Failure('download_not_owned');
+    const {[API_KEY]: owned = []} = await chrome.storage.local.get(API_KEY);
+    if (!owned.includes(args.download_id)) throw new Failure('download_not_owned');
     const [item] = await chrome.downloads.search({id: args.download_id});
     let removed = false;
     if (item?.state === 'complete' && item.exists) {
@@ -456,7 +544,7 @@ async function downloadCleanup(args) {
         removed = true;
     }
     await chrome.downloads.erase({id: args.download_id});
-    await chrome.storage.local.set({downloadIds: downloadIds.filter(id => id !== args.download_id)});
+    await chrome.storage.local.set({[API_KEY]: owned.filter(id => id !== args.download_id)});
     return {removed_file: removed, erased: true};
 }
 
@@ -475,15 +563,18 @@ async function snapshot() {
 
 const OPERATIONS = {
     async ping() {
+        // hasListeners() — фактическое состояние API: глобального перехватчика имён загрузок нет.
         return {protocol: PROTOCOL, version: VERSION, extension_id: chrome.runtime.id, own_tab: await tabSummary(await ownTab()),
-            interceptor: {installed: interceptor.installed, late_cancelled: interceptor.lateCancelled}};
+            listeners: {determining_filename: chrome.downloads.onDeterminingFilename.hasListeners(),
+                web_request: chrome.webRequest.onBeforeRequest.hasListeners(), active_observers: observers.size},
+            operation: await operationSummary()};
     },
     async tab_status() {
         return await tabSummary(await ownTab());
     },
     async open() {
-        const {tab, created} = await ensureTab();
-        return {created, ...(await tabSummary(tab))};
+        const {tab, created, replaced} = await ensureTab();
+        return {created, replaced, ...(await tabSummary(tab))};
     },
     async navigate(args, signal) {
         const url = forvoUrl(args.url);
@@ -505,11 +596,14 @@ const OPERATIONS = {
         const tab = await requireTab();
         return await inject(tab.id, forvoDom, [surface, action, '']);
     },
-    async download(args, signal) {
-        return await observeSiteDownload(args, signal);
+    async download_begin(args) {
+        return await downloadBegin(args);
     },
-    async fetch_observed(args) {
-        return await fetchObserved(args);
+    async download_status(args) {
+        return await downloadStatus(args);
+    },
+    async download_release(args) {
+        return await downloadRelease(args);
     },
     async downloads_api(args, signal) {
         return await downloadsApi(args, signal);
@@ -533,8 +627,8 @@ const OPERATIONS = {
 };
 
 chrome.runtime.onStartup.addListener(async () => {
-    // Tab ID прошлой сессии браузера мог достаться чужой вкладке.
-    await chrome.storage.local.remove(['own', 'downloadIds']);
+    // Tab ID и download ID прошлой сессии браузера не доказывают владения.
+    await chrome.storage.local.remove(['own', OP_KEY, API_KEY]);
     connect();
 });
 chrome.runtime.onInstalled.addListener(() => connect());
