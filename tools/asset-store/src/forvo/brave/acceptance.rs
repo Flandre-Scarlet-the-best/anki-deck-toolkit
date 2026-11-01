@@ -289,26 +289,61 @@ fn proxy_names() -> Vec<&'static str> {
     .collect()
 }
 
-/// Проверяет, что порт bridge недоступен по нелокальным адресам этого хоста.
-fn exposure_check(port: u16) -> (Status, Value) {
-    let Ok(output) = std::process::Command::new("ip")
+/// Новую вкладку адаптер создаёт неактивной; повторно используемую мог
+/// активировать сам пользователь (например, проходя проверку сайта вручную).
+pub(crate) fn own_tab_grouped(opened: &Value) -> bool {
+    opened["group_title"] == GROUP_TITLE
+        && (opened["created"] == false || opened["active"] == false)
+}
+
+/// Локальные IPv4-адреса: `ip -j` или, где iproute2 нет (минимальный контейнер),
+/// таблица `/proc/net/fib_trie`.
+fn local_ipv4() -> Result<(Vec<std::net::Ipv4Addr>, &'static str), &'static str> {
+    if let Ok(output) = std::process::Command::new("ip")
         .args(["-j", "-4", "addr", "show"])
         .output()
-    else {
-        return (Status::NotTested, json!({"reason":"ip_unavailable"}));
+    {
+        let interfaces = serde_json::from_slice::<Vec<Value>>(&output.stdout)
+            .map_err(|_| "ip_output_unknown")?;
+        let addresses = interfaces
+            .iter()
+            .flat_map(|i| i["addr_info"].as_array().cloned().unwrap_or_default())
+            .filter_map(|a| a["local"].as_str().and_then(|s| s.parse().ok()))
+            .collect();
+        return Ok((addresses, "ip"));
+    }
+    let table = std::fs::read_to_string("/proc/net/fib_trie").map_err(|_| "ip_unavailable")?;
+    Ok((fib_trie_local(&table), "fib_trie"))
+}
+
+/// Адреса с пометкой `/32 host LOCAL` в `/proc/net/fib_trie`.
+pub(crate) fn fib_trie_local(table: &str) -> Vec<std::net::Ipv4Addr> {
+    let mut addresses = Vec::new();
+    let mut previous: Option<&str> = None;
+    for line in table.lines() {
+        let line = line.trim();
+        if line == "/32 host LOCAL"
+            && let Some(address) = previous
+                .and_then(|p| p.rsplit(' ').next())
+                .and_then(|a| a.parse().ok())
+            && !addresses.contains(&address)
+        {
+            addresses.push(address);
+        }
+        previous = Some(line);
+    }
+    addresses
+}
+
+/// Проверяет, что порт bridge недоступен по нелокальным адресам этого хоста.
+fn exposure_check(port: u16) -> (Status, Value) {
+    let (addresses, source) = match local_ipv4() {
+        Ok(found) => found,
+        Err(reason) => return (Status::NotTested, json!({"reason":reason})),
     };
-    let Ok(interfaces) = serde_json::from_slice::<Vec<Value>>(&output.stdout) else {
-        return (Status::NotTested, json!({"reason":"ip_output_unknown"}));
-    };
-    let addresses = interfaces
-        .iter()
-        .flat_map(|i| i["addr_info"].as_array().cloned().unwrap_or_default())
-        .filter_map(|a| {
-            a["local"]
-                .as_str()
-                .and_then(|s| s.parse::<std::net::Ipv4Addr>().ok())
-        })
-        .filter(|a| !a.is_loopback())
+    let addresses = addresses
+        .into_iter()
+        .filter(|a: &std::net::Ipv4Addr| !a.is_loopback())
         .collect::<Vec<_>>();
     let exposed = addresses
         .iter()
@@ -329,7 +364,7 @@ fn exposure_check(port: u16) -> (Status, Value) {
             } else {
                 Status::Fail
             },
-            json!({"listen":"127.0.0.1","non_loopback_addresses_checked":addresses.len(),"reachable":exposed}),
+            json!({"listen":"127.0.0.1","address_source":source,"non_loopback_addresses_checked":addresses.len(),"reachable":exposed}),
         )
     }
 }
@@ -398,7 +433,7 @@ pub async fn doctor(options: &DoctorOptions) -> Result<Report, AssetError> {
             Ok((opened, AuthState::Authenticated, observation)) => {
                 report.push(
                     "own_tab_group",
-                    if opened["group_title"] == GROUP_TITLE && opened["active"] == false {
+                    if own_tab_grouped(&opened) {
                         Status::Pass
                     } else {
                         Status::Fail
@@ -617,12 +652,13 @@ async fn run_flow(
         .call("open", json!({}), Duration::from_secs(15))
         .await
         .inspect_err(|e| report.fail("own_tab_group", e))?;
-    // Новую вкладку адаптер создаёт неактивной; повторно используемую мог открыть сам пользователь.
-    let grouped = opened["group_title"] == GROUP_TITLE
-        && (opened["created"] == false || opened["active"] == false);
     report.push(
         "own_tab_group",
-        if grouped { Status::Pass } else { Status::Fail },
+        if own_tab_grouped(&opened) {
+            Status::Pass
+        } else {
+            Status::Fail
+        },
         opened,
     );
     let page = word_url(&request.surface);
