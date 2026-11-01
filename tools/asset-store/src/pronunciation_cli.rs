@@ -204,6 +204,45 @@ enum BraveAction {
         #[arg(long)]
         keep_download: bool,
     },
+    /// Получить оригинальный MP3 одного слова через Brave и импортировать его
+    /// в AssetStore (уровень доверия прежний: техническая проверка ≠ Verified).
+    Fetch {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+        #[arg(long)]
+        replace_expected_sha256: Option<String>,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        /// Закрыть собственную вкладку адаптера по завершении.
+        #[arg(long)]
+        close_tab: bool,
+    },
+    /// Создать пакет, закреплённый за Brave, и начать его выполнение.
+    BatchStart {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        close_tab: bool,
+    },
+    /// Продолжить пакет Brave; пакет CDP этой командой не продолжается.
+    BatchResume {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        close_tab: bool,
+    },
     /// Закрыть собственную вкладку адаптера.
     Close {
         #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
@@ -556,16 +595,27 @@ fn execute_forvo(
     let runtime = tokio::runtime::Runtime::new().map_err(|e| AssetError::io("runtime", e))?;
     let result=runtime.block_on(async {
         match action {
-            ForvoAction::Brave{state_dir,action}=>run_brave(state_dir.as_deref(),action,output).await,
-            ForvoAction::BatchStatus{batch_id}=>Ok(serde_json::json!(forvo::batch::status(&open_store(false)?,batch_id)?)),
-            ForvoAction::BatchCancel{batch_id}=>Ok(serde_json::json!(forvo::batch::cancel(&open_store(false)?,batch_id)?)),
-            ForvoAction::BatchStart{batch_id,plan,max_items}=>{
-                let plan=serde_json::from_slice(&read_local(plan,protected,1024*1024)?).map_err(|_|AssetError::new(ErrorCode::InvalidIdentity,"неверный строгий JSON-план Forvo"))?;
+            ForvoAction::Brave{state_dir,action:BraveAction::BatchStart{batch_id,plan,max_items,wait_seconds,close_tab}}=>{
+                let options=brave_options(state_dir.as_deref(),*wait_seconds,*close_tab)?;
+                let plan=read_plan(plan,protected)?;
                 let store=open_store(true)?;
-                forvo::batch::start(&store,batch_id,plan)?;
-                run_forvo_batch_logged(&store,batch_id,profile,*max_items,output).await
+                forvo::batch::start(&store,batch_id,plan,forvo::batch::Transport::BraveExtension)?;
+                run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output).await
             }
-            ForvoAction::BatchResume{batch_id,max_items}=>run_forvo_batch_logged(&open_store(false)?,batch_id,profile,*max_items,output).await,
+            ForvoAction::Brave{state_dir,action:BraveAction::BatchResume{batch_id,max_items,wait_seconds,close_tab}}=>{
+                let options=brave_options(state_dir.as_deref(),*wait_seconds,*close_tab)?;
+                run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output).await
+            }
+            ForvoAction::Brave{state_dir,action}=>run_brave(state_dir.as_deref(),action,output,&open_store).await,
+            ForvoAction::BatchStatus{batch_id}=>Ok(batch_json(forvo::batch::status(&open_store(false)?,batch_id)?)),
+            ForvoAction::BatchCancel{batch_id}=>Ok(batch_json(forvo::batch::cancel(&open_store(false)?,batch_id)?)),
+            ForvoAction::BatchStart{batch_id,plan,max_items}=>{
+                let plan=read_plan(plan,protected)?;
+                let store=open_store(true)?;
+                forvo::batch::start(&store,batch_id,plan,forvo::batch::Transport::CdpChromium)?;
+                run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Cdp{profile},*max_items,output).await
+            }
+            ForvoAction::BatchResume{batch_id,max_items}=>run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Cdp{profile},*max_items,output).await,
             _=>{
                 // Проверяем входные пары до запуска браузера.
                 let request=match action {ForvoAction::Candidates{surface,reading}|ForvoAction::Fetch{surface,reading,..}=>Some(Pronunciation::new(surface,reading)?),_=>None};
@@ -621,17 +671,64 @@ fn execute_forvo(
     let paused = result.get("paused").is_some_and(|v| !v.is_null());
     let cancelled = matches!(
         action,
-        ForvoAction::BatchStart { .. } | ForvoAction::BatchResume { .. }
+        ForvoAction::BatchStart { .. }
+            | ForvoAction::BatchResume { .. }
+            | ForvoAction::Brave {
+                action: BraveAction::BatchStart { .. } | BraveAction::BatchResume { .. },
+                ..
+            }
     ) && result["cancelled"] == true;
     Ok(
         serde_json::json!({"schema_version":1,"outcome":if cancelled {"cancelled"} else if paused {"paused"} else {"ok"},"result":result}),
     )
 }
 
+fn read_plan(
+    plan: &Path,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<crate::forvo::batch::FetchPlan, AssetError> {
+    serde_json::from_slice(&read_local(plan, protected, 1024 * 1024)?).map_err(|_| {
+        AssetError::new(
+            ErrorCode::InvalidIdentity,
+            "неверный строгий JSON-план Forvo",
+        )
+    })
+}
+
+fn brave_state_dir(state_dir: Option<&Path>) -> Result<PathBuf, AssetError> {
+    match state_dir {
+        Some(dir) => {
+            std::path::absolute(dir).map_err(|e| AssetError::io("каталог состояния Brave", e))
+        }
+        None => crate::forvo::brave::default_state_dir(),
+    }
+}
+
+fn brave_options(
+    state_dir: Option<&Path>,
+    wait_seconds: u64,
+    close_tab: bool,
+) -> Result<crate::forvo::brave::fetch::BraveOptions, AssetError> {
+    Ok(crate::forvo::brave::fetch::BraveOptions {
+        state_dir: brave_state_dir(state_dir)?,
+        wait: std::time::Duration::from_secs(wait_seconds),
+        limits: crate::forvo::brave::download::Limits::default(),
+        close_tab,
+    })
+}
+
+/// Состояние пакета и его фактический транспорт (у состояния версии 1 — CDP).
+fn batch_json(batch: crate::forvo::batch::ForvoBatch) -> serde_json::Value {
+    let transport = batch.transport();
+    let mut value = serde_json::to_value(batch).expect("состояние Forvo сериализуется");
+    value["effective_transport"] = serde_json::json!(transport);
+    value
+}
+
 async fn run_forvo_batch_logged(
     store: &AssetStore,
     id: &str,
-    profile: &Path,
+    backend: crate::forvo::batch::Backend<'_>,
     max_items: usize,
     output: Output,
 ) -> Result<serde_json::Value, AssetError> {
@@ -655,7 +752,7 @@ async fn run_forvo_batch_logged(
             code = "forvo_batch_started",
             "Начата обработка пакета Forvo"
         );
-        let result = crate::forvo::batch::resume(store, id, profile, max_items).await;
+        let result = crate::forvo::batch::resume(store, id, backend, max_items).await;
         match &result {
             Ok(batch) => tracing::info!(
                 event = "run_finished",
@@ -686,7 +783,7 @@ async fn run_forvo_batch_logged(
         error.details["diagnostic_log"] = serde_json::json!(path);
         error
     })?;
-    let mut value = serde_json::to_value(batch).expect("состояние Forvo сериализуется");
+    let mut value = batch_json(batch);
     value["diagnostic_log"] = serde_json::json!(path);
     Ok(value)
 }
@@ -695,6 +792,7 @@ async fn run_brave(
     state_dir: Option<&Path>,
     action: &BraveAction,
     output: Output,
+    open_store: &dyn Fn(bool) -> Result<AssetStore, AssetError>,
 ) -> Result<serde_json::Value, AssetError> {
     use crate::diagnostics::{OutputMode, RunLogGuard};
     use crate::forvo::brave::{self, acceptance};
@@ -702,12 +800,7 @@ async fn run_brave(
     use std::time::Duration;
     use tracing::instrument::WithSubscriber;
 
-    let state_dir = match state_dir {
-        Some(dir) => {
-            std::path::absolute(dir).map_err(|e| AssetError::io("каталог состояния Brave", e))?
-        }
-        None => brave::default_state_dir()?,
-    };
+    let state_dir = brave_state_dir(state_dir)?;
     let logs = state_dir.join("logs");
     brave::private_dir(&logs)?;
     let stamp = std::time::SystemTime::now()
@@ -780,6 +873,28 @@ async fn run_brave(
             ),
             BraveAction::Close { wait_seconds } => {
                 acceptance::close(&state_dir, Duration::from_secs(*wait_seconds)).await
+            }
+            BraveAction::Fetch {
+                surface,
+                reading,
+                replace_expected_sha256,
+                wait_seconds,
+                close_tab,
+            } => {
+                // Пара проверяется до подключения к браузеру.
+                let request = Pronunciation::new(surface, reading)?;
+                let store = open_store(true)?;
+                brave::fetch::fetch(
+                    &store,
+                    &request,
+                    replace_expected_sha256.clone(),
+                    &brave_options(Some(&state_dir), *wait_seconds, *close_tab)?,
+                    Some(interrupt_rx.clone()),
+                )
+                .await
+            }
+            BraveAction::BatchStart { .. } | BraveAction::BatchResume { .. } => {
+                unreachable!("пакет Brave исполняется общим forvo::batch")
             }
         }
     };

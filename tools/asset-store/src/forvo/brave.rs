@@ -26,6 +26,7 @@ use tokio::time::Instant;
 
 pub mod acceptance;
 pub mod download;
+pub mod fetch;
 
 pub const PROTOCOL: &str = "forvo-adapter/v1";
 pub const WS_PATH: &str = "/forvo-adapter/v1";

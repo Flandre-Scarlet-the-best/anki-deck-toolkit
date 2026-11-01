@@ -8,6 +8,7 @@
 //! Docker-жизненный цикл: тот привязан к образу Anki и не нужен браузеру.
 
 mod chrome;
+mod cli_scenarios;
 mod fixture;
 mod scenarios;
 
@@ -33,6 +34,10 @@ pub const SCENARIOS: &[&str] = &[
     "interrupt",
     "save_as_prompt",
     "browser_restart",
+    "cli_fetch",
+    "cli_batch",
+    "cli_batch_recovery",
+    "cli_foreign_downloads",
 ];
 
 #[derive(Debug, Clone, Args)]
@@ -47,6 +52,10 @@ pub struct BrowserArgs {
     /// Каталог отчётов (по умолчанию <репозиторий>/target/anki-e2e).
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
+    /// Собранный `pronunciation-assets` для сценариев `cli_*` (иначе
+    /// PRONUNCIATION_ASSETS_BIN или файл рядом с `anki-e2e`).
+    #[arg(long)]
+    pub cli: Option<PathBuf>,
     /// Сохранить тестовые профили Chromium и каталог сопряжения после прогона.
     #[arg(long)]
     pub keep_profiles: bool,
@@ -85,6 +94,8 @@ impl Outcome {
 
 pub struct Ctx {
     pub chrome: PathBuf,
+    pub cli: Option<PathBuf>,
+    pub repo: PathBuf,
     pub run_dir: PathBuf,
     pub fixture: fixture::Fixture,
     pub state_dir: PathBuf,
@@ -147,6 +158,26 @@ fn certificate(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
         return Err("openssl не создал сертификат fixture".into());
     }
     Ok((cert, key))
+}
+
+fn find_cli(explicit: Option<&Path>) -> Option<PathBuf> {
+    let executable = |p: &Path| {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if let Some(path) = explicit {
+        return executable(path).then(|| path.to_owned());
+    }
+    std::env::var_os("PRONUNCIATION_ASSETS_BIN")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|d| d.join("pronunciation-assets"))),
+        )
+        .find(|p| executable(p))
 }
 
 fn chrome_version(path: &Path) -> Option<String> {
@@ -230,7 +261,14 @@ pub fn run(args: &BrowserArgs, interrupted: Arc<AtomicBool>) -> u8 {
             return Status::Error.exit_code();
         }
     };
-    let status = runtime.block_on(execute(args, &dir, &selected, &mut report, interrupted));
+    let status = runtime.block_on(execute(
+        args,
+        &repo,
+        &dir,
+        &selected,
+        &mut report,
+        interrupted,
+    ));
     finish(&dir, &mut report, status, started)
 }
 
@@ -268,6 +306,7 @@ fn finish(dir: &Path, report: &mut Value, status: Status, started: f64) -> u8 {
 
 async fn execute(
     args: &BrowserArgs,
+    repo: &Path,
     dir: &Path,
     selected: &[String],
     report: &mut Value,
@@ -317,10 +356,25 @@ async fn execute(
         std::fs::create_dir_all(&fixture_dir).map_err(|e| e.to_string())?;
         let a = synthetic_mp3(&fixture_dir.join("record-a.mp3"), 440, "0.6")?;
         let b = synthetic_mp3(&fixture_dir.join("record-b.mp3"), 660, "0.8")?;
+        let mut extra = std::collections::HashMap::new();
+        for (record, frequency, seconds) in [
+            (fixture::RECORD_2_TOP, 550, "0.7"),
+            (fixture::RECORD_2_NEXT, 770, "0.5"),
+            (fixture::RECORD_3, 880, "0.9"),
+        ] {
+            extra.insert(
+                record.to_owned(),
+                synthetic_mp3(
+                    &fixture_dir.join(format!("record-{record}.mp3")),
+                    frequency,
+                    seconds,
+                )?,
+            );
+        }
         let (cert, key) = certificate(&fixture_dir)?;
-        Ok::<_, String>((a, b, cert, key))
+        Ok::<_, String>((a, b, extra, cert, key))
     })();
-    let (mp3_a, mp3_b, cert, key) = match prepared {
+    let (mp3_a, mp3_b, extra, cert, key) = match prepared {
         Ok(v) => v,
         Err(e) => {
             return stop(
@@ -329,7 +383,7 @@ async fn execute(
             );
         }
     };
-    let fixture = match fixture::Fixture::start(&cert, &key, mp3_a, mp3_b).await {
+    let fixture = match fixture::Fixture::start(&cert, &key, mp3_a, mp3_b, extra).await {
         Ok(f) => f,
         Err(e) => return stop(report, Stop::error("fixture", "fixture_start_failed", e)),
     };
@@ -339,6 +393,7 @@ async fn execute(
         "port": fixture.port, "tls": "самоподписанный сертификат на время прогона",
         "record_a": {"record_id": fixture::RECORD_A, "sha256": util::sha256_hex(&fixture.mp3_a), "bytes": fixture.mp3_a.len()},
         "record_b": {"record_id": fixture::RECORD_B, "sha256": util::sha256_hex(&fixture.mp3_b), "bytes": fixture.mp3_b.len()},
+        "batch_records": fixture.extra.iter().map(|(id, bytes)| (id.clone(), json!({"sha256": util::sha256_hex(bytes), "bytes": bytes.len()}))).collect::<serde_json::Map<_, _>>(),
         "user_file_sha256": util::sha256_hex(&fixture.user_file),
         "generator": "ffmpeg lavfi sine → libmp3lame",
     });
@@ -375,8 +430,12 @@ async fn execute(
             }
         })
     };
+    let cli = find_cli(args.cli.as_deref());
+    report["cli"] = json!({"pronunciation_assets": cli, "used_by": "сценарии cli_*"});
     let ctx = Ctx {
         chrome,
+        cli,
+        repo: repo.to_owned(),
         run_dir: dir.to_owned(),
         fixture: fixture.clone(),
         state_dir,

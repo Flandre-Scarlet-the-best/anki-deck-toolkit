@@ -200,7 +200,13 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
             replace_expected_sha256: None,
         }],
     };
-    web_batch::start(&store, "web-resume", plan).unwrap();
+    web_batch::start(
+        &store,
+        "web-resume",
+        plan,
+        web_batch::Transport::CdpChromium,
+    )
+    .unwrap();
     let acquisition = web_acquisition(audio(), &request);
     {
         let mut runtime = SafeBatchRuntime::open(store.root(), "web-resume").unwrap();
@@ -220,7 +226,9 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
         .block_on(web_batch::resume(
             &store,
             "web-resume",
-            Path::new("/does-not-exist/no-browser-profile"),
+            web_batch::Backend::Cdp {
+                profile: Path::new("/does-not-exist/no-browser-profile"),
+            },
             1,
         ))
         .unwrap();
@@ -241,7 +249,9 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
         .block_on(web_batch::resume(
             &store,
             "web-resume",
-            Path::new("/does-not-exist/no-browser-profile"),
+            web_batch::Backend::Cdp {
+                profile: Path::new("/does-not-exist/no-browser-profile"),
+            },
             1,
         ))
         .unwrap();
@@ -252,7 +262,9 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
             .block_on(web_batch::resume(
                 &store,
                 "web-resume",
-                Path::new("/does-not-exist/no-browser-profile"),
+                web_batch::Backend::Cdp {
+                    profile: Path::new("/does-not-exist/no-browser-profile"),
+                },
                 1
             ))
             .unwrap()
@@ -265,7 +277,9 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
             .block_on(web_batch::resume(
                 &store,
                 "web-resume",
-                Path::new("/does-not-exist/no-browser-profile"),
+                web_batch::Backend::Cdp {
+                    profile: Path::new("/does-not-exist/no-browser-profile"),
+                },
                 1
             ))
             .is_err()
@@ -929,6 +943,7 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
                 replace_expected_sha256: None,
             }],
         },
+        web::Transport::CdpChromium,
     )
     .unwrap();
     let mut runtime = SafeBatchRuntime::open(store.root(), "checkpoint").unwrap();

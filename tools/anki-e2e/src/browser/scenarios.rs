@@ -27,7 +27,7 @@ pub struct Env<'a> {
     pub out: Outcome,
 }
 
-type Result<T> = std::result::Result<T, String>;
+pub(super) type Result<T> = std::result::Result<T, String>;
 
 fn err(e: AssetError) -> String {
     format!("{}: {}", provider_code(&e), e.message)
@@ -84,6 +84,14 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
         conn: None,
         out: Outcome::default(),
     };
+    if name.starts_with("cli_") && ctx.cli.is_none() {
+        let _ = env.browser.shutdown().await;
+        return (
+            Status::Blocked,
+            Some("нет pronunciation-assets: cargo build -p asset-store --bin pronunciation-assets или --cli".into()),
+            Outcome::default(),
+        );
+    }
     let mut interrupt = ctx.interrupt.clone();
     let result = tokio::select! {
         result = tokio::time::timeout(SCENARIO_LIMIT, body(name, &mut env)) => match result {
@@ -132,13 +140,17 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "interrupt" => interrupt(env).await,
         "save_as_prompt" => save_as_prompt(env).await,
         "browser_restart" => browser_restart(env).await,
+        "cli_fetch" => super::cli_scenarios::cli_fetch(env).await,
+        "cli_batch" => super::cli_scenarios::cli_batch(env).await,
+        "cli_batch_recovery" => super::cli_scenarios::cli_batch_recovery(env).await,
+        "cli_foreign_downloads" => super::cli_scenarios::cli_foreign_downloads(env).await,
         _ => Err(format!("нет сценария {name}")),
     }
 }
 
 // --- Помощники -------------------------------------------------------------
 
-fn files_json(dir: &Path) -> Value {
+pub(super) fn files_json(dir: &Path) -> Value {
     json!(
         download_files(dir)
             .into_iter()
@@ -148,7 +160,11 @@ fn files_json(dir: &Path) -> Value {
 }
 
 /// Ждёт, пока в каталоге загрузок не останется незавершённых файлов и появятся ожидаемые имена.
-async fn settle(dir: &Path, names: &[&str], timeout: Duration) -> Vec<(String, u64, String)> {
+pub(super) async fn settle(
+    dir: &Path,
+    names: &[&str],
+    timeout: Duration,
+) -> Vec<(String, u64, String)> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let files = download_files(dir);
@@ -165,7 +181,7 @@ async fn settle(dir: &Path, names: &[&str], timeout: Duration) -> Vec<(String, u
     }
 }
 
-fn sha_of(files: &[(String, u64, String)], name: &str) -> Option<String> {
+pub(super) fn sha_of(files: &[(String, u64, String)], name: &str) -> Option<String> {
     files
         .iter()
         .find(|(n, _, _)| n == name)
@@ -173,7 +189,7 @@ fn sha_of(files: &[(String, u64, String)], name: &str) -> Option<String> {
 }
 
 impl Env<'_> {
-    async fn connect(&mut self) -> Result<()> {
+    pub(super) async fn connect(&mut self) -> Result<()> {
         let conn = acceptance::connect(&self.ctx.state_dir, Duration::from_secs(30))
             .await
             .map_err(err)?;
@@ -189,7 +205,7 @@ impl Env<'_> {
             .call(op, args, Duration::from_secs(20))
             .await
     }
-    fn downloads(&self) -> PathBuf {
+    pub(super) fn downloads(&self) -> PathBuf {
         self.browser.downloads.clone()
     }
     fn sha_a(&self) -> String {
@@ -268,7 +284,7 @@ impl Env<'_> {
         .map_err(err)
     }
     /// В конце сценария у расширения нет перехватчиков и незавершённых операций.
-    async fn residual_clean(&mut self) -> Result<()> {
+    pub(super) async fn residual_clean(&mut self) -> Result<()> {
         let ping = self.call("ping", json!({})).await.map_err(err)?;
         let clean = ping["listeners"]["determining_filename"] == false
             && ping["listeners"]["web_request"] == false

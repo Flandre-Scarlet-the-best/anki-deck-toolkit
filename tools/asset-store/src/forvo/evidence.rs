@@ -223,7 +223,8 @@ async fn acquire_timed(
                 evidence.validate(request, &sha256_hex(&bytes))?;
                 return Ok(Acquisition { bytes, evidence });
             }
-            Err(mut e) if pauses_batch(&e) => {
+            // Прерывание пользователем останавливает перебор так же, как блокер.
+            Err(mut e) if pauses_batch(&e) || e.code == crate::ErrorCode::Interrupted => {
                 attempts.push(Attempt {
                     record_id: candidate.record_id.clone(),
                     code: provider_code(&e).into(),
