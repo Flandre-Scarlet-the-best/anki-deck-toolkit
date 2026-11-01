@@ -548,6 +548,40 @@ async fn browser_multilingual_dom_and_view_all_are_structural() {
     async fn scan(page: &chromiumoxide::Page) -> candidates::DomResult {
         page.evaluate_expression(format!("((location)=>{}('元気','expand',''))({{origin:'https://forvo.com',pathname:'/word/%E5%85%83%E6%B0%97/'}})",include_str!("dom.js"))).await.unwrap().into_value().unwrap()
     }
+    async fn click(page: &chromiumoxide::Page, record_id: &str) -> candidates::DomResult {
+        let record_id = serde_json::json!(record_id);
+        page.evaluate_expression(format!("((location)=>{}('元気','click',{record_id}))({{origin:'https://forvo.com',pathname:'/word/%E5%85%83%E6%B0%97/'}})",include_str!("dom.js"))).await.unwrap().into_value().unwrap()
+    }
+    let clicked = click(browser.page(), "102").await;
+    assert_eq!(clicked.code, "prepared");
+    assert_eq!(clicked.candidates[0].record_id, "102");
+    assert!(
+        browser
+            .page()
+            .evaluate_expression(
+                "document.getElementById('show-more-pronunciations-ja').dataset.expanded==='yes'"
+            )
+            .await
+            .unwrap()
+            .into_value::<bool>()
+            .unwrap()
+    );
+    browser
+        .page()
+        .evaluate_expression(
+            "document.querySelector('#play_103').closest('li').querySelector('.download').remove()",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        click(browser.page(), "103").await.code,
+        "download_button_unavailable"
+    );
+    browser
+        .page()
+        .set_content(include_str!("fixtures/multilingual.html"))
+        .await
+        .unwrap();
     let result = scan(browser.page()).await;
     assert_eq!(result.code, "ok");
     assert_eq!(result.candidates.len(), 3);
