@@ -1189,3 +1189,158 @@ description = "Учтённый ядром блочный I/O: сумма по �
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+[[scenario]]
+id = "asset-store.batch-resume-reload"
+title = "Повторное чтение состояния после ожидания"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "SafeBatchRuntime: исходная загрузка пакетного состояния, затем batch_entries повторных снятий и захватов блокировки с перечитыванием state.json и проверкой ссылок на batch_blobs. Сценарий сравнивает полную повторную сверку с безопасным переиспользованием кэша уже проверенных неизменяемых blob; сетевое ожидание не входит в операцию."
+measured = "Один запуск release-бинарника asset-store-bench: полная загрузка, затем заданное числом записей пакета число циклов release_lock, reacquire_lock и reload. Подготовка эталона, ожидание сети, прогрев и проверка постусловия в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["run", "batch-resume-reload", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "workload_spec"
+description = "Файл синтетического пакета. Путь не публикуется: идентичность входа — SHA-256 спецификации и размер из пробы."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "workload"
+kind = "external-path"
+role = "workload"
+identity = "file-sha256"
+parameter = "workload_spec"
+description = "Спецификация синтетического корпуса и пакетного состояния. Число элементов задаёт количество циклов возобновления; число blob и их размер — объём повторной проверки."
+size = [
+    { name = "batch_entries", unit = "count", description = "Циклов повторного захвата блокировки.", measure = { kind = "probe", pointer = "/batch_entries" } },
+    { name = "batch_blobs", unit = "count", description = "Ссылок на уже проверенные неизменяемые blob.", measure = { kind = "probe", pointer = "/batch_blobs" } },
+    { name = "batch_blob_bytes", unit = "byte", description = "Совокупный размер blob, доступных для повторной сверки.", measure = { kind = "probe", pointer = "/batch_blob_bytes" } },
+]
+
+[scenario.input.probe]
+description = "asset-store-bench describe порождает корпус в памяти и сообщает его объём; на диск не пишет."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["describe", "--spec", "{input.workload}"]
+touches = "read-only"
+timeout_seconds = 300
+
+[[scenario.setup]]
+description = "Эталон серии: синтетический корпус, состояние пакета и ссылки на blob. Эталон повторно используется только при совпадении сборки, спецификации и SHA-256 дерева."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["setup", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.cleanup]]
+description = "Удаление рабочей копии; эталон остаётся для следующей серии той же сборки и спецификации. Каталог без маркера asset-store-bench не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["clean", "--workdir", "target/benchmark-workloads/asset-store", "--keep-template"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 2
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 120
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Эталонный пакет и blob остаются в page cache после подготовки и прогревов. Глобальный page cache не сбрасывается."
+cleared = []
+retained = ["эталон серии", "page cache ОС"]
+
+[[scenario.profile.conclude]]
+description = "Постусловие: SHA-256 дерева эталона не изменился — операция только перечитывала состояние."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["verify", "batch-resume-reload", "--spec", "{input.workload}", "--workdir", "target/benchmark-workloads/asset-store"]
+touches = "read-only"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: файловые операции и блокировки."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "instructions"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Без доступа к perf_event метрика не поддерживается; причина указывается в результате."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "io_read_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O; байты из page cache сюда не входят."
+
+[[scenario.metric]]
+metric = "io_write_bytes"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Учтённый ядром блочный I/O; операция не должна менять хранилище."
+
+[[scenario.metric]]
+metric = "io_read_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[[scenario.metric]]
+metric = "io_write_operations"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]

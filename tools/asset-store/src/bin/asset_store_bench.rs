@@ -34,7 +34,7 @@ struct Location {
 #[derive(Debug, Args)]
 struct OperationArgs {
     /// verify-integrity, read-batch, read-single, ingest, ingest-contention,
-    /// batch-reopen или batch-checkpoint.
+    /// batch-reopen, batch-resume-reload или batch-checkpoint.
     operation: String,
     #[command(flatten)]
     location: Location,
