@@ -1176,7 +1176,9 @@ pub fn run(spec_path: &Path, workdir: &Path, operation: Operation) -> Result<Sum
             for _ in 0..spec.batch_entries {
                 runtime.release_lock()?;
                 runtime.reacquire_lock()?;
-                let state = load_batch(&mut runtime)?;
+                let state = runtime
+                    .reload_cached::<BenchBatchState>()?
+                    .ok_or_else(|| BenchError::failed("пакетное состояние отсутствует"))?;
                 if state.entries.len() != spec.batch_entries as usize {
                     return Err(BenchError::failed(
                         "число записей пакета отличается от эталона",
@@ -1510,7 +1512,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_resume_reload_repeats_full_verification_at_each_reacquisition() {
+    fn batch_resume_reload_reuses_verified_blob_cache() {
         use crate::batch_runtime::REFERENCED_BLOB_READS;
         use crate::temp_workspace::TempWorkspace;
 
@@ -1524,7 +1526,7 @@ mod tests {
         REFERENCED_BLOB_READS.with(|reads| reads.set(0));
         run(&spec_path, &workdir, Operation::BatchResumeReload).unwrap();
 
-        let expected_reads = spec.batch_blobs as usize * (spec.batch_entries as usize + 1);
+        let expected_reads = spec.batch_blobs as usize;
         REFERENCED_BLOB_READS.with(|reads| assert_eq!(reads.get(), expected_reads));
         verify(&spec_path, &workdir, Operation::BatchResumeReload).unwrap();
     }

@@ -217,6 +217,53 @@ async fn cancellation_reloads_revision_without_rehashing_unchanged_blobs() {
     REFERENCED_BLOB_READS.with(|reads| assert_eq!(reads.get(), 8));
 }
 
+#[test]
+fn resume_reload_after_acquisition_reuses_verified_blob_cache() {
+    use super::batch::{FetchItem, FetchPlan, StoredAcquisition};
+    use crate::batch_runtime::{REFERENCED_BLOB_READS, SafeBatchRuntime};
+
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-resume-reload").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    batch::start(
+        &store,
+        "resume-cache",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![FetchItem {
+                surface: "あ".into(),
+                reading: "あ".into(),
+                replace_expected_sha256: None,
+            }],
+        },
+    )
+    .unwrap();
+
+    let mut runtime = SafeBatchRuntime::open(store.root(), "resume-cache").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    let bytes = vec![0x5a; 1024];
+    let blob = runtime.persist_blob(&bytes, "mp3").unwrap();
+    let item_evidence = evidence(&bytes, &state.items[0].request);
+    state.items[0].acquisition = Some(StoredAcquisition {
+        evidence: item_evidence,
+        blob,
+    });
+    state.revision += 1;
+    runtime.save(&state).unwrap();
+
+    REFERENCED_BLOB_READS.with(|reads| reads.set(0));
+    runtime.release_lock().unwrap();
+    runtime.reacquire_lock().unwrap();
+    let resumed = batch::reload_after_acquisition(&mut runtime).unwrap();
+
+    assert_eq!(resumed.revision, state.revision);
+    assert!(resumed.items[0].acquisition.is_some());
+    REFERENCED_BLOB_READS.with(|reads| assert_eq!(reads.get(), 0));
+}
+
 #[tokio::test]
 async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
     use super::batch::{FetchItem, FetchPlan, StoredAcquisition};

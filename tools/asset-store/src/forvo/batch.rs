@@ -197,6 +197,11 @@ pub fn start(store: &AssetStore, id: &str, plan: FetchPlan) -> Result<ForvoBatch
 fn load(runtime: &mut SafeBatchRuntime) -> Result<ForvoBatch, AssetError> {
     runtime.load()?.ok_or_else(invalid)
 }
+pub(super) fn reload_after_acquisition(
+    runtime: &mut SafeBatchRuntime,
+) -> Result<ForvoBatch, AssetError> {
+    runtime.reload_cached()?.ok_or_else(invalid)
+}
 pub fn status(store: &AssetStore, id: &str) -> Result<ForvoBatch, AssetError> {
     load(&mut SafeBatchRuntime::open(store.root(), id)?)
 }
@@ -343,7 +348,7 @@ pub async fn resume(
                 };
                 match &acquisition { Ok(_) => stage.finish_success(), Err(e) => stage.finish_failure(provider_code(e), pauses_batch(e), None) }
                 runtime.reacquire_lock()?;
-                batch=load(&mut runtime)?;
+                batch=reload_after_acquisition(&mut runtime)?;
                 if let Err(e)=&acquisition && !e.details["browser_cleanup"].is_null() {
                     return Err(AssetError::with_details(e.code, e.message.clone(), e.details.clone()));
                 }
