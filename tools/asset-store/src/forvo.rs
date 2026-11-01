@@ -491,9 +491,21 @@ pub fn pauses_batch(error: &AssetError) -> bool {
             | "download_vanished"
             | "download_not_started"
             | "save_as_required"
+            | "save_as_suspected"
             | "file_missing"
             | "file_access_denied"
             | "path_mapping_failed"
+            // Выбор браузера и сопряжение цели: конфигурация, а не отсутствие записи.
+            | "browser_mismatch"
+            | "target_ambiguous"
+            | "target_unknown"
+            | "pairing_mismatch"
+            | "pairing_changed"
+            | "extension_id_mismatch"
+            | "instance_mismatch"
+            | "extension_reload_ineffective"
+            | "extension_files_missing"
+            | "install_dir_foreign"
     )
 }
 

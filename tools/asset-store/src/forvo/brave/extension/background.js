@@ -49,6 +49,52 @@ async function loadPairing() {
     return pairing;
 }
 
+// Экземпляр расширения в этом профиле: случайный ID в собственном storage.local.
+// Bridge закрепляет его при первом подключении и не принимает экземпляр из
+// другого профиля, даже если туда загружен тот же каталог (тот же ID расширения).
+const INSTANCE_KEY = 'instance';
+async function instanceId() {
+    const {[INSTANCE_KEY]: stored} = await chrome.storage.local.get(INSTANCE_KEY);
+    if (typeof stored === 'string' && /^[0-9a-f]{64}$/.test(stored)) return stored;
+    const created = randomHex();
+    await chrome.storage.local.set({[INSTANCE_KEY]: created});
+    return created;
+}
+
+const fn = value => typeof value === 'function';
+
+// Сведения о браузере только из собственных возможностей расширения: бренды
+// userAgentData и наличие нужных API. Настройки, профили и другие расширения не читаются.
+async function browserFacts() {
+    const data = self.navigator?.userAgentData;
+    const brands = (data?.brands || []).map(b => ({brand: String(b.brand), version: String(b.version)}));
+    let chromium = null;
+    try {
+        const high = await data?.getHighEntropyValues(['fullVersionList']);
+        chromium = high?.fullVersionList?.find(b => b.brand === 'Chromium')?.version || null;
+    } catch {
+        chromium = null;
+    }
+    chromium ??= brands.find(b => b.brand === 'Chromium')?.version || null;
+    return {
+        brands, chromium_version: chromium, platform: data?.platform || null,
+        manifest_version: chrome.runtime.getManifest().manifest_version,
+        capabilities: {
+            service_worker: typeof ServiceWorkerGlobalScope !== 'undefined' && self instanceof ServiceWorkerGlobalScope,
+            downloads: fn(chrome.downloads?.cancel) && fn(chrome.downloads?.erase) && fn(chrome.downloads?.removeFile),
+            downloads_search: fn(chrome.downloads?.search),
+            web_request_observe: fn(chrome.webRequest?.onBeforeRequest?.addListener),
+            tabs: fn(chrome.tabs?.create) && fn(chrome.tabs?.group) && fn(chrome.tabs?.query),
+            tab_groups: fn(chrome.tabGroups?.update) && fn(chrome.tabGroups?.query),
+            scripting: fn(chrome.scripting?.executeScript),
+            storage_local: fn(chrome.storage?.local?.get),
+            storage_session: fn(chrome.storage?.session?.get),
+            alarms: fn(chrome.alarms?.create),
+            websocket_hmac: fn(self.WebSocket) && fn(crypto?.subtle?.sign),
+        },
+    };
+}
+
 const macText = (role, first, second) => `${PROTOCOL}|${role}|${first}|${second}|${chrome.runtime.id}`;
 
 function send(message) {
@@ -120,7 +166,7 @@ async function handle(data) {
         phase = 'ready';
         quickRetries = 0;
         keepalive = setInterval(() => send({type: 'keepalive'}), KEEPALIVE_MS);
-        send({type: 'ready', version: VERSION});
+        send({type: 'ready', version: VERSION, instance: await instanceId(), browser: await browserFacts()});
         console.info('forvo-adapter: bridge подключён');
         return;
     }
@@ -604,7 +650,8 @@ async function snapshot() {
 const OPERATIONS = {
     async ping() {
         // hasListeners() — фактическое состояние API: глобального перехватчика имён загрузок нет.
-        return {protocol: PROTOCOL, version: VERSION, extension_id: chrome.runtime.id, own_tab: await tabSummary(await ownTab()),
+        return {protocol: PROTOCOL, version: VERSION, extension_id: chrome.runtime.id, instance: await instanceId(),
+            browser: await browserFacts(), own_tab: await tabSummary(await ownTab()),
             listeners: {determining_filename: chrome.downloads.onDeterminingFilename.hasListeners(),
                 web_request: chrome.webRequest.onBeforeRequest.hasListeners(), active_observers: observers.size},
             operation: await operationSummary(),

@@ -132,6 +132,9 @@ pub fn failure_message(code: &str) -> &'static str {
         "save_as_required" => {
             "Браузер требует выбрать место сохранения: выключите «Спрашивать, куда сохранять каждый файл» в настройках загрузок. Окно сохранения после отмены загрузки остаётся открытым — закройте его кнопкой «Отмена». В новом профиле Brave для Linux этот запрос включён по умолчанию"
         }
+        "save_as_suspected" => {
+            "Все байты получены, но браузер не завершил загрузку до предела: вероятно, открыт диалог выбора места сохранения (так ведёт себя Edge с «Спрашивать, где сохранять каждый файл»). Выключите эту настройку в загрузках браузера и закройте диалог кнопкой «Отмена»; собственная загрузка отменена и стёрта"
+        }
         "download_canceled" => "Загрузка отменена в браузере",
         "download_interrupted" => "Загрузка прервана браузером",
         "download_timeout" => "Загрузка не завершилась вовремя",
@@ -218,6 +221,16 @@ pub fn classify(
         "interrupted" => Progress::Failed("download_interrupted"),
         "in_progress" if !item.has_filename && elapsed >= limits.prompt => {
             Progress::Failed("save_as_required")
+        }
+        // Edge с «Спрашивать, где сохранять» заполняет имя файла заранее и держит
+        // полностью полученную загрузку в in_progress, пока открыт диалог.
+        "in_progress"
+            if elapsed >= limits.total
+                && !item.paused
+                && item.total_bytes > 0
+                && item.bytes_received == item.total_bytes =>
+        {
+            Progress::Failed("save_as_suspected")
         }
         "in_progress" if elapsed >= limits.total => Progress::Failed("download_timeout"),
         "in_progress" => Progress::Waiting("in_progress"),

@@ -1,5 +1,5 @@
 //! Forvo-пакет сохраняет полученные байты до импорта, используя единственный SafeBatchRuntime.
-use super::brave::fetch::{self as brave_fetch, BraveOptions, BraveSession};
+use super::brave::fetch::{self as brave_fetch, BraveOptions, BraveSession, BrowserBinding};
 use super::{
     Acquisition, ForvoEvidence, ForvoSession, acquire, import_acquisition, pauses_batch,
     provider_code,
@@ -22,7 +22,9 @@ use std::time::Duration;
 pub enum Transport {
     /// Собственный постоянный профиль Chromium через CDP (`forvo batch-*`).
     CdpChromium,
-    /// Обычный Brave пользователя через MV3-расширение (`forvo brave batch-*`).
+    /// Обычный браузер пользователя через MV3-расширение (`forvo brave|browser
+    /// batch-*`). Имя историческое: транспорт один для всех Chromium-целей,
+    /// а конкретная сессия закреплена полем `browser` пакета.
     BraveExtension,
 }
 impl Transport {
@@ -127,11 +129,16 @@ pub struct Item {
 #[serde(deny_unknown_fields)]
 pub struct ForvoBatch {
     /// 1 — пакет без поля `transport` (до Brave): всегда CDP, состояние не
-    /// переписывается в новую версию. 2 — транспорт закреплён явно.
+    /// переписывается в новую версию. 2 — транспорт закреплён явно. 3 —
+    /// транспорт расширения с закреплённой браузерной сессией (`browser`).
     pub schema_version: u32,
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<Transport>,
+    /// Браузерная сессия пакета расширения: заполняется при первом подключении
+    /// и дальше не меняется (кроме дополнения экземпляра того же расширения).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<BrowserBinding>,
     pub batch_id: String,
     pub revision: u64,
     pub cancelled: bool,
@@ -173,8 +180,8 @@ impl RuntimeBatchState for ForvoBatch {
     }
     fn validate(&self) -> Result<(), AssetError> {
         let transport_ok = matches!(
-            (self.schema_version, self.transport),
-            (1, None) | (2, Some(_))
+            (self.schema_version, self.transport, &self.browser),
+            (1, None, None) | (2, Some(_), None) | (3, Some(Transport::BraveExtension), _)
         );
         if !transport_ok
             || self.provider != "forvo_web"
@@ -235,9 +242,14 @@ pub fn start(
         })
         .collect::<Result<Vec<_>, AssetError>>()?;
     let batch = ForvoBatch {
-        schema_version: 2,
+        schema_version: if transport == Transport::BraveExtension {
+            3
+        } else {
+            2
+        },
         provider: "forvo_web".into(),
         transport: Some(transport),
+        browser: None,
         batch_id: id.into(),
         revision: 0,
         cancelled: false,
@@ -305,14 +317,52 @@ fn retryable_import(error: &AssetError) -> bool {
         })
 }
 
-fn transport_mismatch(id: &str, batch: Transport, requested: Transport) -> AssetError {
+fn transport_mismatch(id: &str, batch: &ForvoBatch, requested: Transport) -> AssetError {
+    let command = match (&batch.browser, batch.transport()) {
+        (Some(binding), Transport::BraveExtension) => format!(
+            "{} batch-resume",
+            super::brave::targets::command_prefix(&binding.target)
+        ),
+        (_, transport) => transport.resume_command().to_owned(),
+    };
     AssetError::with_details(
         ErrorCode::InvalidTransition,
         "Пакет закреплён за другим браузерным транспортом; продолжите его командой исходного транспорта",
         serde_json::json!({"provider":"forvo_web","code":"transport_mismatch","batch_id":id,
-            "batch_transport":batch,"requested_transport":requested,
-            "next_action":format!("{} --batch-id {id}", batch.resume_command())}),
+            "batch_transport":batch.transport(),"requested_transport":requested,
+            "next_action":format!("{command} --batch-id {id}")}),
     )
+}
+
+/// Цель и привязка для продолжения пакета расширения. Пакет версии 2 (до
+/// выбора браузера) выполнялся только целью `brave`; привязанный пакет —
+/// только своей целью и своим экземпляром расширения. Несовпадение — отказ
+/// до подключения к браузеру.
+fn bound_options(
+    id: &str,
+    batch: &ForvoBatch,
+    options: &BraveOptions,
+) -> Result<BraveOptions, AssetError> {
+    let required = match (&batch.browser, batch.schema_version) {
+        (Some(binding), _) => Some(binding.target.clone()),
+        (None, 2) => Some(super::brave::LEGACY_TARGET.to_owned()),
+        (None, _) => None,
+    };
+    if let (Some(required), Some(requested)) = (&required, &options.target)
+        && required != requested
+    {
+        return Err(AssetError::with_details(
+            ErrorCode::InvalidTransition,
+            "Пакет закреплён за другой целью браузера; продолжите его исходной целью",
+            serde_json::json!({"provider":"forvo_brave","code":"browser_mismatch","batch_id":id,
+                "batch_target":required,"requested_target":requested,
+                "next_action":format!("{} batch-resume --batch-id {id}", super::brave::targets::command_prefix(required))}),
+        ));
+    }
+    let mut options = options.clone();
+    options.target = options.target.or(required);
+    options.binding = batch.browser.clone();
+    Ok(options)
 }
 
 /// Сессия выбранного транспорта; открывается лениво, только если элементу нужны байты.
@@ -366,7 +416,7 @@ async fn launch(
         // браузере ничего не изменено.
         Backend::Brave(options) => tokio::select! {
             result = BraveSession::connect(options) => result.map(|s| Session::Brave(Box::new(s))),
-            _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Подключение к Brave прервано; продолжите через forvo brave batch-resume")),
+            _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Подключение к браузеру прервано; продолжите через batch-resume цели")),
             result = cancellation(store, id) => Err(result.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён"))),
         },
     }
@@ -402,7 +452,7 @@ async fn acquire_item(
             tokio::pin!(work);
             let stop = tokio::select! {
                 r = &mut work => return (r, None),
-                _ = tokio::signal::ctrl_c() => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через forvo brave batch-resume",
+                _ = tokio::signal::ctrl_c() => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume цели",
                     serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
                 r = cancellation(store, id) => match r {
                     Err(e) => e,
@@ -449,12 +499,16 @@ pub async fn resume(
     let _lease = runtime.execution_lease()?;
     let mut batch = load(&mut runtime)?;
     if batch.transport() != backend.transport() {
-        return Err(transport_mismatch(
-            id,
-            batch.transport(),
-            backend.transport(),
-        ));
+        return Err(transport_mismatch(id, &batch, backend.transport()));
     }
+    let adjusted;
+    let backend = match backend {
+        Backend::Brave(options) => {
+            adjusted = bound_options(id, &batch, options)?;
+            Backend::Brave(&adjusted)
+        }
+        other => other,
+    };
     if batch.cancelled {
         return Err(AssetError::new(
             ErrorCode::InvalidTransition,
@@ -506,6 +560,22 @@ pub async fn resume(
                 }
                 runtime.reacquire_lock()?;
                 batch = load(&mut runtime)?;
+                // Первая подключённая сессия закрепляется за пакетом.
+                if let Some(Session::Brave(brave)) = &session {
+                    let actual = brave.binding();
+                    let record = match &batch.browser {
+                        None => true,
+                        Some(bound) => bound.instance_id.is_none() && actual.instance_id.is_some() && bound.accepts(&actual),
+                    };
+                    if record {
+                        tracing::info!(event = "forvo_batch_browser_bound", stage = "acquire", target = %actual.target,
+                            browser = actual.browser.id(), "Пакет закреплён за браузерной сессией");
+                        batch.browser = Some(actual);
+                        batch.schema_version = 3;
+                        batch.revision += 1;
+                        runtime.save(&batch)?;
+                    }
+                }
                 if let Err(e) = &acquisition
                     && !e.details["browser_cleanup"].is_null()
                 {

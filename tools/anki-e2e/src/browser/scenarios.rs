@@ -29,11 +29,11 @@ pub struct Env<'a> {
 
 pub(super) type Result<T> = std::result::Result<T, String>;
 
-fn err(e: AssetError) -> String {
+pub(super) fn err(e: AssetError) -> String {
     format!("{}: {}", provider_code(&e), e.message)
 }
 
-fn code<T>(result: &std::result::Result<T, AssetError>) -> String {
+pub(super) fn code<T>(result: &std::result::Result<T, AssetError>) -> String {
     match result {
         Ok(_) => "ok".into(),
         Err(e) => provider_code(e).to_owned(),
@@ -63,10 +63,19 @@ async fn wait_true(rx: &mut tokio::sync::watch::Receiver<bool>) {
 
 pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
     let dir = ctx.run_dir.join("scenarios").join(name);
+    // Новый профиль сценария — новый экземпляр расширения: закрепление прошлого
+    // сценария снимается явно (как `setup --repin` у пользователя).
+    if let Err(e) = asset_store::forvo::brave::setup(&asset_store::forvo::brave::SetupOptions {
+        repin: true,
+        ..ctx.setup.clone()
+    }) {
+        return (Status::Error, Some(err(e)), Outcome::default());
+    }
     let browser = match TestBrowser::launch(LaunchOptions {
         executable: &ctx.chrome,
         dir: &dir,
-        extension: &ctx.extension_dir,
+        extensions: std::slice::from_ref(&ctx.extension_dir),
+        loader: ctx.loader,
         fixture_port: ctx.fixture.port,
         prompt_for_download: name == "save_as_prompt",
         restore_session: name == "browser_restart",
@@ -144,6 +153,9 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "cli_batch" => super::cli_scenarios::cli_batch(env).await,
         "cli_batch_recovery" => super::cli_scenarios::cli_batch_recovery(env).await,
         "cli_foreign_downloads" => super::cli_scenarios::cli_foreign_downloads(env).await,
+        "adapter_doctor" => super::target_scenarios::adapter_doctor(env).await,
+        "extension_update" => super::target_scenarios::extension_update(env).await,
+        "target_isolation" => super::target_scenarios::target_isolation(env).await,
         _ => Err(format!("нет сценария {name}")),
     }
 }
@@ -190,16 +202,24 @@ pub(super) fn sha_of(files: &[(String, u64, String)], name: &str) -> Option<Stri
 
 impl Env<'_> {
     pub(super) async fn connect(&mut self) -> Result<()> {
-        let conn = acceptance::connect(&self.ctx.state_dir, Duration::from_secs(30))
-            .await
-            .map_err(err)?;
+        let conn = acceptance::connect(
+            &self.ctx.state_dir,
+            Some(&self.ctx.target),
+            Duration::from_secs(30),
+        )
+        .await
+        .map_err(err)?;
         self.conn = Some(conn);
         Ok(())
     }
     fn conn(&mut self) -> &mut Connection {
         self.conn.as_mut().expect("сценарий подключил bridge")
     }
-    async fn call(&mut self, op: &str, args: Value) -> std::result::Result<Value, AssetError> {
+    pub(super) async fn call(
+        &mut self,
+        op: &str,
+        args: Value,
+    ) -> std::result::Result<Value, AssetError> {
         self.conn()
             .bridge
             .call(op, args, Duration::from_secs(20))
@@ -214,7 +234,7 @@ impl Env<'_> {
     fn sha_b(&self) -> String {
         sha256_hex(&self.ctx.fixture.mp3_b)
     }
-    async fn select(&mut self, word: &str, record: &str) -> Result<Candidate> {
+    pub(super) async fn select(&mut self, word: &str, record: &str) -> Result<Candidate> {
         let conn = self.conn.as_mut().expect("bridge");
         acceptance::open_word(&mut conn.bridge, word)
             .await
@@ -247,7 +267,7 @@ impl Env<'_> {
         .await;
         (op, result)
     }
-    async fn release(&mut self, op: &str) -> Value {
+    pub(super) async fn release(&mut self, op: &str) -> Value {
         let conn = self.conn.as_mut().expect("bridge");
         download::release(&mut conn.bridge, op, false)
             .await
@@ -260,7 +280,7 @@ impl Env<'_> {
             .map_err(err)?;
         serde_json::from_value(value).map_err(|e| e.to_string())
     }
-    async fn poll(
+    pub(super) async fn poll(
         &mut self,
         op: &str,
         timeout: Duration,
@@ -275,7 +295,7 @@ impl Env<'_> {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
-    async fn begin(&mut self, op: &str, word: &str, record: &str) -> Result<Value> {
+    pub(super) async fn begin(&mut self, op: &str, word: &str, record: &str) -> Result<Value> {
         self.call(
             "download_begin",
             json!({"op_id":op,"surface":word,"record_id":record}),
@@ -305,6 +325,7 @@ fn smoke_options(
 ) -> SmokeOptions {
     SmokeOptions {
         state_dir: env.ctx.state_dir.clone(),
+        target: Some(env.ctx.target.clone()),
         wait: Duration::from_secs(30),
         surface: fixture::WORD.into(),
         reading: fixture::READING.into(),
@@ -480,7 +501,7 @@ async fn full_download(env: &mut Env<'_>) -> Result<()> {
     env.out.check(
         "smoke (путь CLI) прошёл: клик → загрузка → владение → complete → байты → probe → очистка",
         failed.is_empty(),
-        json!({"not_passed":failed}),
+        json!({"not_passed":failed.iter().map(|n| step(&report, n)).collect::<Vec<_>>()}),
     );
     let mp3 = &step(&report, "mp3_bytes")["evidence"];
     let sha_a = env.sha_a();
@@ -1026,9 +1047,11 @@ async fn save_as_prompt(env: &mut Env<'_>) -> Result<()> {
     let site = step(&value, "site_download");
     let exit = acceptance::report_error(report).err();
     env.out.check(
-        "профиль с «Спрашивать, куда сохранять» → BLOCKED save_as_required с инструкцией",
+        "профиль с «Спрашивать, куда сохранять» → BLOCKED save_as_required (Edge: save_as_suspected) с инструкцией",
         site["status"] == "BLOCKED"
-            && site["evidence"]["code"] == "save_as_required"
+            && (site["evidence"]["code"] == "save_as_required"
+                || env.ctx.kind == asset_store::forvo::brave::BrowserKind::Edge
+                    && site["evidence"]["code"] == "save_as_suspected")
             && exit
                 .as_ref()
                 .is_some_and(|e| provider_code(e) == "acceptance_blocked"),
@@ -1064,7 +1087,8 @@ async fn browser_restart(env: &mut Env<'_>) -> Result<()> {
         .relaunch(LaunchOptions {
             executable: &env.ctx.chrome,
             dir: &env.dir,
-            extension: &env.ctx.extension_dir,
+            extensions: std::slice::from_ref(&env.ctx.extension_dir),
+            loader: env.ctx.loader,
             fixture_port: env.ctx.fixture.port,
             prompt_for_download: false,
             restore_session: true,

@@ -4,7 +4,8 @@
 //! `127.0.0.1`, выполняет фиксированный набор команд над собственной фоновой
 //! вкладкой и сообщает наблюдения. Выбор кандидата, проверка адреса загрузки,
 //! SHA и MP3 остаются в Rust и используют те же функции, что и CDP-провайдер.
-use crate::{AssetError, ErrorCode, hashing::encode_lower_hex};
+pub(crate) use crate::hashing::encode_lower_hex;
+use crate::{AssetError, ErrorCode};
 use async_tungstenite::WebSocketStream;
 use async_tungstenite::tokio::TokioAdapter;
 use async_tungstenite::tungstenite::{
@@ -25,8 +26,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 
 pub mod acceptance;
+pub mod browsers;
 pub mod download;
 pub mod fetch;
+pub mod targets;
 
 pub const PROTOCOL: &str = "forvo-adapter/v1";
 pub const WS_PATH: &str = "/forvo-adapter/v1";
@@ -35,8 +38,8 @@ pub const DEFAULT_PORT: u16 = 47613;
 /// Байты MP3 через bridge не передаются: ответы — только состояния и безопасные метаданные.
 const MAX_INBOUND_MESSAGE: usize = 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const MANIFEST: &str = include_str!("brave/extension/manifest.json");
-const BACKGROUND: &str = include_str!("brave/extension/background.js");
+pub(crate) const MANIFEST: &str = include_str!("brave/extension/manifest.json");
+pub(crate) const BACKGROUND: &str = include_str!("brave/extension/background.js");
 
 pub fn bridge_error(code: &str, action: &str) -> AssetError {
     AssetError::with_details(
@@ -84,7 +87,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0_u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn decode_hex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2)
         || !text
             .bytes()
@@ -98,7 +101,7 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn random_bytes() -> Result<[u8; 32], AssetError> {
+pub(crate) fn random_bytes() -> Result<[u8; 32], AssetError> {
     let mut bytes = [0_u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
@@ -119,33 +122,16 @@ pub(crate) fn origin_extension_id(origin: &str) -> Option<&str> {
 
 // --- Локальное состояние сопряжения -------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdapterState {
-    pub schema_version: u32,
-    pub port: u16,
-    /// Секрет сопряжения хранится только в приватном файле состояния и
-    /// в каталоге установленного расширения; в вывод не попадает.
-    pub secret: String,
-    pub install_dir: PathBuf,
-    pub load_unpacked_path: String,
-    pub platform: Platform,
-    pub extension_id: Option<String>,
-}
+pub use browsers::BrowserKind;
+pub use targets::{
+    AdapterState, LEGACY_TARGET, SetupOptions, load_state, load_target, save_state, setup,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
     Wsl,
     Linux,
-}
-
-impl AdapterState {
-    fn secret_bytes(&self) -> Result<Vec<u8>, AssetError> {
-        decode_hex(&self.secret)
-            .filter(|s| s.len() == 32)
-            .ok_or_else(|| bridge_error("pairing_invalid", "Повторите forvo brave setup"))
-    }
 }
 
 pub fn default_state_dir() -> Result<PathBuf, AssetError> {
@@ -158,13 +144,13 @@ pub fn default_state_dir() -> Result<PathBuf, AssetError> {
 }
 
 pub(crate) fn private_dir(path: &Path) -> Result<(), AssetError> {
-    std::fs::create_dir_all(path).map_err(|e| AssetError::io("каталог состояния Brave", e))?;
+    std::fs::create_dir_all(path).map_err(|e| AssetError::io("каталог состояния адаптера", e))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| AssetError::io("права каталога состояния Brave", e))
+        .map_err(|e| AssetError::io("права каталога состояния адаптера", e))
 }
 
 /// Атомарная запись: временный файл рядом и rename. `mode` применяется до записи данных.
-fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), AssetError> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), AssetError> {
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
@@ -182,39 +168,6 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<(), AssetError> 
     result.map_err(|e| AssetError::io(format!("запись {}", path.display()), e))
 }
 
-pub fn load_state(state_dir: &Path) -> Result<AdapterState, AssetError> {
-    let path = state_dir.join("state.json");
-    let bytes = std::fs::read(&path).map_err(|_| {
-        bridge_error(
-            "adapter_not_configured",
-            "Выполните pronunciation-assets forvo brave setup",
-        )
-    })?;
-    let meta = std::fs::metadata(&path).map_err(|e| AssetError::io("state.json", e))?;
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err(bridge_error(
-            "state_permissions",
-            "state.json доступен другим пользователям; повторите setup",
-        ));
-    }
-    let state: AdapterState = serde_json::from_slice(&bytes)
-        .map_err(|_| bridge_error("state_corrupt", "Повторите forvo brave setup"))?;
-    if state.schema_version != 1 {
-        return Err(bridge_error("state_corrupt", "Повторите forvo brave setup"));
-    }
-    state.secret_bytes()?;
-    Ok(state)
-}
-
-pub fn save_state(state_dir: &Path, state: &AdapterState) -> Result<(), AssetError> {
-    private_dir(state_dir)?;
-    write_atomic(
-        &state_dir.join("state.json"),
-        &serde_json::to_vec_pretty(state).expect("состояние сериализуется"),
-        0o600,
-    )
-}
-
 // --- Окружение -----------------------------------------------------------
 
 pub fn detect_platform() -> Platform {
@@ -229,7 +182,7 @@ pub fn detect_platform() -> Platform {
     }
 }
 
-fn windows_command(program: &str, args: &[&str]) -> Result<String, AssetError> {
+pub(crate) fn windows_command(program: &str, args: &[&str]) -> Result<String, AssetError> {
     // Рабочий каталог на DrvFs избавляет cmd/powershell от UNC-предупреждений.
     let output = Command::new(program)
         .args(args)
@@ -266,7 +219,7 @@ pub fn wsl_to_linux(windows: &str) -> Result<PathBuf, AssetError> {
     ))
 }
 
-fn linux_to_windows(path: &Path) -> Result<String, AssetError> {
+pub(crate) fn linux_to_windows(path: &Path) -> Result<String, AssetError> {
     let output = Command::new("wslpath")
         .arg("-w")
         .arg(path)
@@ -297,196 +250,43 @@ pub fn browser_path_to_local(platform: Platform, path: &str) -> Result<PathBuf, 
     }
 }
 
-fn default_install_dir(platform: Platform) -> Result<PathBuf, AssetError> {
-    match platform {
-        Platform::Wsl => {
-            let local = windows_command(
-                "powershell.exe",
-                &[
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "[Environment]::GetFolderPath('LocalApplicationData')",
-                ],
-            )?;
-            if local.as_bytes().get(1) != Some(&b':') {
-                return Err(bridge_error(
-                    "windows_profile_unknown",
-                    "Не найден LOCALAPPDATA",
-                ));
-            }
-            Ok(wsl_to_linux(&local)?.join("AnkiDeckToolkit/forvo-brave-adapter"))
-        }
-        Platform::Linux => {
-            let base = std::env::var_os("XDG_DATA_HOME")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-                .ok_or_else(|| bridge_error("install_dir_unknown", "Задайте --install-dir"))?;
-            Ok(base.join("anki-deck-toolkit/forvo-brave-adapter"))
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BraveInstall {
-    pub path: String,
-    pub version: Option<String>,
-}
-
-pub fn discover_brave(platform: Platform) -> Vec<BraveInstall> {
-    let mut found = Vec::new();
-    match platform {
-        Platform::Wsl => {
-            let mut roots = vec![
-                PathBuf::from("/mnt/c/Program Files/BraveSoftware/Brave-Browser/Application"),
-                PathBuf::from("/mnt/c/Program Files (x86)/BraveSoftware/Brave-Browser/Application"),
-            ];
-            if let Ok(local) = default_install_dir(platform)
-                && let Some(base) = local.parent().and_then(Path::parent)
-            {
-                roots.push(base.join("BraveSoftware/Brave-Browser/Application"));
-            }
-            for root in roots {
-                if root.join("brave.exe").is_file() {
-                    let version = std::fs::read_dir(&root)
-                        .into_iter()
-                        .flatten()
-                        .flatten()
-                        .filter_map(|e| e.file_name().into_string().ok())
-                        .filter(|n| {
-                            n.split('.').count() == 4
-                                && n.split('.').all(|p| p.parse::<u32>().is_ok())
-                        })
-                        .max_by_key(|n| {
-                            n.split('.')
-                                .map(|p| p.parse::<u32>().unwrap_or(0))
-                                .collect::<Vec<_>>()
-                        });
-                    found.push(BraveInstall {
-                        path: linux_to_windows(&root.join("brave.exe"))
-                            .unwrap_or_else(|_| root.join("brave.exe").display().to_string()),
-                        version,
-                    });
-                }
-            }
-        }
-        Platform::Linux => {
-            let path = std::env::var_os("PATH").unwrap_or_default();
-            for dir in std::env::split_paths(&path).chain([PathBuf::from("/opt/brave.com/brave")]) {
-                for name in ["brave-browser", "brave", "brave-browser-stable"] {
-                    let candidate = dir.join(name);
-                    if candidate.is_file()
-                        && !found
-                            .iter()
-                            .any(|f: &BraveInstall| f.path == candidate.display().to_string())
-                    {
-                        found.push(BraveInstall {
-                            path: candidate.display().to_string(),
-                            version: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    found
-}
-
-// --- Установка -----------------------------------------------------------
-
-pub struct SetupOptions {
-    pub state_dir: PathBuf,
-    pub install_dir: Option<PathBuf>,
-    pub port: Option<u16>,
-    pub rotate_secret: bool,
-    /// Явная платформа браузера (изолированный E2E с Linux-Chromium внутри WSL).
-    pub platform: Option<Platform>,
-}
-
-/// Материализует расширение и сопряжение. Повторный вызов обновляет код,
-/// сохраняя секрет и закреплённый ID, если не запрошена ротация.
-pub fn setup(options: &SetupOptions) -> Result<serde_json::Value, AssetError> {
-    let platform = options.platform.unwrap_or_else(detect_platform);
-    let previous = load_state(&options.state_dir).ok();
-    let install_dir = match (&options.install_dir, &previous) {
-        (Some(dir), _) => {
-            std::path::absolute(dir).map_err(|e| AssetError::io("каталог расширения", e))?
-        }
-        (None, Some(state)) => state.install_dir.clone(),
-        (None, None) => default_install_dir(platform)?,
-    };
-    let port = options
-        .port
-        .or(previous.as_ref().map(|s| s.port))
-        .unwrap_or(DEFAULT_PORT);
-    if port < 1024 {
-        return Err(bridge_error("invalid_port", "Порт должен быть 1024–65535"));
-    }
-    let keep = previous
-        .as_ref()
-        .filter(|s| !options.rotate_secret && s.install_dir == install_dir);
-    let secret = match keep {
-        Some(state) => state.secret.clone(),
-        None => encode_lower_hex(random_bytes()?),
-    };
-    std::fs::create_dir_all(&install_dir).map_err(|e| AssetError::io("каталог расширения", e))?;
-    let pairing = serde_json::json!({"schema_version":1,"port":port,"secret":secret});
-    for (name, content) in [
-        ("manifest.json", MANIFEST.to_owned()),
-        ("background.js", BACKGROUND.to_owned()),
-        ("forvo_page.js", page_module()),
-        (
-            "pairing.json",
-            serde_json::to_string(&pairing).expect("JSON"),
-        ),
-    ] {
-        write_atomic(&install_dir.join(name), content.as_bytes(), 0o600)?;
-    }
-    let load_unpacked_path = match platform {
-        Platform::Wsl => linux_to_windows(&install_dir)?,
-        Platform::Linux => install_dir.display().to_string(),
-    };
-    let state = AdapterState {
-        schema_version: 1,
-        port,
-        secret,
-        install_dir: install_dir.clone(),
-        load_unpacked_path: load_unpacked_path.clone(),
-        platform,
-        extension_id: keep.and_then(|s| s.extension_id.clone()),
-    };
-    save_state(&options.state_dir, &state)?;
-    tracing::info!(
-        event = "brave_adapter_setup",
-        stage = "setup",
-        port,
-        pairing_created = keep.is_none(),
-        "Расширение Forvo для Brave подготовлено"
-    );
-    Ok(serde_json::json!({
-        "platform": platform,
-        "brave": discover_brave(platform),
-        "install_dir": install_dir,
-        "load_unpacked_path": load_unpacked_path,
-        "bridge": format!("ws://127.0.0.1:{port}{WS_PATH}"),
-        "pairing": if keep.is_some() {"kept"} else {"created"},
-        "pinned_extension_id": state.extension_id,
-        "state_file": options.state_dir.join("state.json"),
-        "user_action": if state.extension_id.is_some() {
-            serde_json::Value::Null
-        } else {
-            serde_json::json!(format!("brave://extensions → Режим разработчика → Загрузить распакованное → {load_unpacked_path}"))
-        },
-    }))
-}
-
 // --- Bridge --------------------------------------------------------------
+
+/// Возможности браузера, от которых зависит расширение. Расширение сообщает
+/// их о себе в `ready`/`ping`; отсутствие любой — честный отказ, а не PASS.
+pub const REQUIRED_CAPABILITIES: [&str; 11] = [
+    "service_worker",
+    "downloads",
+    "downloads_search",
+    "web_request_observe",
+    "tabs",
+    "tab_groups",
+    "scripting",
+    "storage_local",
+    "storage_session",
+    "alarms",
+    "websocket_hmac",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Peer {
     pub extension_id: String,
     pub version: String,
+    /// Экземпляр расширения в профиле браузера; у версий до 0.3 его нет.
+    pub instance: Option<String>,
+    /// Безопасные сведения о браузере от самого расширения: бренды
+    /// `userAgentData`, версия Chromium и возможности API. `null` у старых версий.
+    pub browser: serde_json::Value,
+}
+
+/// Кому bridge доверяет: закреплённый ID (или допустимые ID каталога цели до
+/// закрепления) и закреплённый экземпляр расширения.
+#[derive(Debug, Clone, Default)]
+pub struct Trust {
+    pub pinned: Option<String>,
+    /// ID, вычисленные из пути каталога цели; пусто — любой (только до закрепления).
+    pub expected: Vec<String>,
+    pub instance: Option<String>,
 }
 
 type Socket = WebSocketStream<TokioAdapter<TcpStream>>;
@@ -495,10 +295,12 @@ pub struct Bridge {
     listener: TcpListener,
     port: u16,
     secret: Vec<u8>,
-    pinned: Option<String>,
+    trust: Trust,
     socket: Option<Socket>,
     next_id: u64,
     pub peer: Option<Peer>,
+    /// Отклонённые подключения по причинам: доказательство для диагностики.
+    rejections: std::collections::BTreeMap<&'static str, u32>,
 }
 
 #[derive(Deserialize)]
@@ -512,6 +314,47 @@ struct AuthMessage {
     mac: String,
 }
 
+fn short_text(value: &serde_json::Value, max: usize) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control))
+        .map(str::to_owned)
+}
+
+/// Оставляет из сведений расширения только известные поля ограниченного размера.
+pub(crate) fn sanitize_browser_facts(value: &serde_json::Value) -> serde_json::Value {
+    if !value.is_object() {
+        return serde_json::Value::Null;
+    }
+    let brands: Vec<serde_json::Value> = value["brands"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .take(8)
+                .filter_map(|b| {
+                    Some(serde_json::json!({"brand":short_text(&b["brand"],64)?,"version":short_text(&b["version"],32)?}))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let capabilities: serde_json::Map<String, serde_json::Value> = REQUIRED_CAPABILITIES
+        .iter()
+        .map(|k| {
+            (
+                (*k).to_owned(),
+                serde_json::Value::Bool(value["capabilities"][k] == true),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "brands": brands,
+        "chromium_version": short_text(&value["chromium_version"], 32),
+        "platform": short_text(&value["platform"], 32),
+        "manifest_version": value["manifest_version"].as_u64(),
+        "capabilities": capabilities,
+    })
+}
+
 impl Bridge {
     /// Слушает только loopback IPv4; `0.0.0.0` не используется ни в каком режиме.
     pub async fn bind(
@@ -519,11 +362,23 @@ impl Bridge {
         secret: Vec<u8>,
         pinned: Option<String>,
     ) -> Result<Self, AssetError> {
+        Self::bind_with(
+            port,
+            secret,
+            Trust {
+                pinned,
+                ..Trust::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn bind_with(port: u16, secret: Vec<u8>, trust: Trust) -> Result<Self, AssetError> {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
             .await
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::AddrInUse {
-                    bridge_error("bridge_port_busy", "Порт bridge занят другим процессом; завершите его или задайте другой порт в setup")
+                    bridge_error("bridge_port_busy", "Порт bridge занят: идёт другая команда этой цели или порт занят другой программой; дождитесь завершения или задайте другой порт в setup")
                 } else {
                     bridge_error("bridge_bind_failed", "Не удалось открыть loopback-порт bridge")
                 }
@@ -536,10 +391,11 @@ impl Bridge {
             listener,
             port,
             secret,
-            pinned,
+            trust,
             socket: None,
             next_id: 1,
             peer: None,
+            rejections: std::collections::BTreeMap::new(),
         })
     }
     pub fn port(&self) -> u16 {
@@ -548,49 +404,106 @@ impl Bridge {
     pub fn connected(&self) -> bool {
         self.socket.is_some()
     }
-    /// Принимает подключения до первого успешно сопряжённого расширения.
+    /// Закрепления действуют и для последующих переподключений этого bridge.
+    pub fn pin(&mut self, extension_id: &str, instance: Option<&str>) {
+        self.trust.pinned = Some(extension_id.to_owned());
+        if let Some(instance) = instance {
+            self.trust.instance = Some(instance.to_owned());
+        }
+    }
+    pub fn rejections(&self) -> serde_json::Value {
+        serde_json::json!(self.rejections)
+    }
+    fn reject(&mut self, reason: &'static str) {
+        *self.rejections.entry(reason).or_default() += 1;
+        tracing::warn!(
+            event = "brave_bridge_rejected",
+            stage = "transport",
+            reason,
+            "Отклонено подключение к bridge"
+        );
+    }
+    /// Принимает подключения до первого успешно сопряжённого расширения
+    /// закреплённого экземпляра.
     pub async fn accept(&mut self, deadline: Instant) -> Result<Peer, AssetError> {
         self.disconnect().await;
         loop {
-            let (stream, address) = tokio::time::timeout_at(deadline, self.listener.accept())
-                .await
-                .map_err(|_| {
-                    bridge_error(
-                        "extension_not_connected",
-                        "Расширение не подключилось; проверьте, что оно установлено и включено",
-                    )
-                })?
-                .map_err(|e| AssetError::io("accept bridge", e))?;
+            let accepted = tokio::time::timeout_at(deadline, self.listener.accept()).await;
+            let (stream, address) = match accepted {
+                Ok(result) => result.map_err(|e| AssetError::io("accept bridge", e))?,
+                Err(_) => return Err(self.not_connected()),
+            };
             if !address.ip().is_loopback() {
                 continue;
             }
             match tokio::time::timeout(HANDSHAKE_TIMEOUT, self.handshake(stream)).await {
                 Ok(Ok((socket, peer))) => {
-                    tracing::info!(event = "brave_bridge_connected", stage = "transport", extension_version = %peer.version, "Расширение Brave подключено");
+                    let instance_ok = match (&self.trust.instance, &peer.instance) {
+                        (Some(pinned), Some(seen)) => pinned == seen,
+                        (Some(_), None) => false,
+                        (None, _) => true,
+                    };
+                    if !instance_ok {
+                        let mut socket = socket;
+                        let _ =
+                            tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
+                        self.reject(if peer.instance.is_some() {
+                            "instance_mismatch"
+                        } else {
+                            "instance_missing"
+                        });
+                        continue;
+                    }
+                    tracing::info!(event = "brave_bridge_connected", stage = "transport", extension_version = %peer.version, "Расширение подключено");
                     self.socket = Some(socket);
                     self.peer = Some(peer.clone());
                     return Ok(peer);
                 }
-                Ok(Err(reason)) => tracing::warn!(
-                    event = "brave_bridge_rejected",
-                    stage = "transport",
-                    reason,
-                    "Отклонено подключение к bridge"
-                ),
-                Err(_) => tracing::warn!(
-                    event = "brave_bridge_rejected",
-                    stage = "transport",
-                    reason = "handshake_timeout",
-                    "Отклонено подключение к bridge"
-                ),
+                Ok(Err(reason)) => self.reject(reason),
+                Err(_) => self.reject("handshake_timeout"),
             }
         }
     }
+    /// Нет подключения: причина отказов (если были) превращается в точное действие.
+    fn not_connected(&self) -> AssetError {
+        let dominant = self
+            .rejections
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .map(|(reason, _)| *reason);
+        let (code, action) = match dominant {
+            None | Some("handshake_timeout" | "upgrade_rejected") => (
+                "extension_not_connected",
+                "Расширение не подключилось; проверьте, что оно установлено и включено",
+            ),
+            Some("pairing_mismatch") => (
+                "pairing_mismatch",
+                "Расширение подключилось с другим секретом: перезагрузите его на странице расширений браузера после setup",
+            ),
+            Some("extension_id_unexpected" | "extension_id_not_pinned") => (
+                "extension_id_mismatch",
+                "Подключилось расширение не из каталога этой цели (другой каталог или профиль); загрузите распакованное расширение из каталога цели",
+            ),
+            Some("instance_mismatch" | "instance_missing") => (
+                "instance_mismatch",
+                "Подключился другой экземпляр расширения (другой профиль или переустановка); оставьте расширение в одном профиле или выполните setup --repin",
+            ),
+            Some(_) => (
+                "extension_not_connected",
+                "Расширение не прошло сопряжение; повторите setup и перезагрузите расширение",
+            ),
+        };
+        let mut error = bridge_error(code, action);
+        error.details["rejections"] = self.rejections();
+        error
+    }
     async fn handshake(&self, stream: TcpStream) -> Result<(Socket, Peer), &'static str> {
         let origin = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let refused = std::sync::Arc::new(std::sync::Mutex::new(None::<&'static str>));
         let seen = origin.clone();
+        let why = refused.clone();
         let port = self.port;
-        let pinned = self.pinned.clone();
+        let trust = self.trust.clone();
         // Сигнатура задана трейтом Callback tungstenite.
         #[allow(clippy::result_large_err)]
         let callback =
@@ -600,12 +513,24 @@ impl Bridge {
                     h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
                 });
                 let id = header("origin").and_then(origin_extension_id);
-                let pinned_ok = match (&pinned, id) {
-                    (Some(p), Some(id)) => p == id,
-                    (None, Some(_)) => true,
-                    _ => false,
+                let identity = match (&trust.pinned, id) {
+                    (Some(p), Some(id)) if p == id => Ok(()),
+                    (Some(_), Some(_)) => Err("extension_id_not_pinned"),
+                    (None, Some(id))
+                        if trust.expected.is_empty() || trust.expected.iter().any(|e| e == id) =>
+                    {
+                        Ok(())
+                    }
+                    (None, Some(_)) => Err("extension_id_unexpected"),
+                    (_, None) => Err("origin_rejected"),
                 };
-                if request.uri().path() != WS_PATH || !host_ok || !pinned_ok {
+                let reason = if request.uri().path() != WS_PATH || !host_ok {
+                    Some("upgrade_rejected")
+                } else {
+                    identity.err()
+                };
+                if let Some(reason) = reason {
+                    *why.lock().expect("mutex") = Some(reason);
                     let mut reject = ErrorResponse::new(None);
                     *reject.status_mut() = StatusCode::FORBIDDEN;
                     return Err(reject);
@@ -616,10 +541,16 @@ impl Bridge {
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_INBOUND_MESSAGE))
             .max_frame_size(Some(MAX_INBOUND_MESSAGE));
-        let mut socket =
-            async_tungstenite::tokio::accept_hdr_async_with_config(stream, callback, Some(config))
-                .await
-                .map_err(|_| "upgrade_rejected")?;
+        let mut socket = match async_tungstenite::tokio::accept_hdr_async_with_config(
+            stream,
+            callback,
+            Some(config),
+        )
+        .await
+        {
+            Ok(socket) => socket,
+            Err(_) => return Err(refused.lock().expect("mutex").unwrap_or("upgrade_rejected")),
+        };
         let extension_id = origin
             .lock()
             .expect("mutex")
@@ -665,13 +596,15 @@ impl Bridge {
             ))
             .await
             .map_err(|_| "send_failed")?;
-        loop {
+        // `ready` приходит уже по взаимно проверенному каналу; старые версии
+        // присылают только версию, новые — экземпляр и сведения о браузере.
+        let ready = loop {
             match socket.next().await {
                 Some(Ok(Message::Text(text))) => {
                     let value: serde_json::Value =
                         serde_json::from_str(&text).map_err(|_| "ready_malformed")?;
                     match value["type"].as_str() {
-                        Some("ready") => break,
+                        Some("ready") => break value,
                         Some("keepalive") => continue,
                         _ => return Err("ready_malformed"),
                     }
@@ -679,12 +612,21 @@ impl Bridge {
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 _ => return Err("ready_missing"),
             }
-        }
+        };
+        let instance = match &ready["instance"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(id) if decode_hex(id).is_some_and(|b| b.len() == 32) => {
+                Some(id.clone())
+            }
+            _ => return Err("ready_malformed"),
+        };
         Ok((
             socket,
             Peer {
                 extension_id,
                 version: auth.version,
+                instance,
+                browser: sanitize_browser_facts(&ready["browser"]),
             },
         ))
     }

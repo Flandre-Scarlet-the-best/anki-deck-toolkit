@@ -43,6 +43,8 @@ struct World {
     releases: Vec<Value>,
     op: Option<(String, String, String)>,
     page: Option<String>,
+    /// Экземпляр расширения в `ready` (у старых версий его нет).
+    instance: Option<String>,
 }
 
 type Shared = Arc<Mutex<World>>;
@@ -194,7 +196,7 @@ async fn next_json(socket: &mut Client) -> Option<Value> {
     }
 }
 
-async fn pair(port: u16) -> Option<Client> {
+async fn pair(port: u16, instance: Option<String>) -> Option<Client> {
     let stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
     let mut request = format!("ws://127.0.0.1:{port}{}", super::super::WS_PATH)
         .into_client_request()
@@ -224,7 +226,9 @@ async fn pair(port: u16) -> Option<Client> {
         .await
         .filter(|v| v["type"] == "auth_ok")?;
     socket
-        .send(Message::text(json!({"type":"ready"}).to_string()))
+        .send(Message::text(
+            json!({"type":"ready","instance":instance}).to_string(),
+        ))
         .await
         .ok()?;
     Some(socket)
@@ -234,7 +238,8 @@ async fn pair(port: u16) -> Option<Client> {
 fn spawn_extension(port: u16, world: Shared, downloads: PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let Some(mut socket) = pair(port).await else {
+            let instance = lock(&world).instance.clone();
+            let Some(mut socket) = pair(port, instance).await else {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             };
@@ -283,13 +288,16 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
     super::super::save_state(
         &state_dir,
         &super::super::AdapterState {
-            schema_version: 1,
+            target: super::super::LEGACY_TARGET.into(),
+            browser: super::super::BrowserKind::Brave,
             port,
             secret: encode_lower_hex(SECRET),
             install_dir: root.join("extension"),
             load_unpacked_path: "unused".into(),
             platform: Platform::Linux,
             extension_id: Some(ID.into()),
+            instance_id: None,
+            executable: None,
         },
     )
     .unwrap();
@@ -302,6 +310,8 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
         _workspace: workspace,
         options: BraveOptions {
             state_dir,
+            target: None,
+            binding: None,
             wait: Duration::from_secs(10),
             limits: Limits {
                 start: Duration::from_secs(2),
@@ -614,6 +624,106 @@ async fn blocker_pauses_batch_and_resume_continues_after_recovery() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_is_bound_to_first_browser_session() {
+    let mp3 = synthetic_mp3();
+    let h = harness(vec![
+        ("元気", vec![record("11", 3, Body::Bytes(mp3.clone()))]),
+        ("水", vec![record("21", 3, Body::Bytes(mp3.clone()))]),
+    ]);
+    let mine = "aa".repeat(32);
+    lock(&h.world).instance = Some(mine.clone());
+    let store = store(&h.root);
+    batch::start(
+        &store,
+        "bound",
+        plan(&[("元気", "げんき"), ("水", "みず")]),
+        Transport::BraveExtension,
+    )
+    .unwrap();
+    let first = batch::resume(&store, "bound", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap();
+    assert_eq!(first.schema_version, 3);
+    let binding = first.browser.clone().expect("пакет закреплён за сессией");
+    assert_eq!(
+        (
+            binding.target.as_str(),
+            binding.extension_id.as_str(),
+            binding.instance_id.as_deref()
+        ),
+        ("brave", ID, Some(mine.as_str()))
+    );
+    // Другая цель — отказ до подключения к браузеру.
+    let other_target = batch::resume(
+        &store,
+        "bound",
+        Backend::Brave(&BraveOptions {
+            target: Some("chrome".into()),
+            ..h.options.clone()
+        }),
+        10,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(provider_code(&other_target), "browser_mismatch");
+    // Тот же каталог в другом профиле (другой экземпляр) не продолжает пакет:
+    // пакет приостанавливается, элемент не помечается неудачным.
+    lock(&h.world).instance = Some("bb".repeat(32));
+    let options = BraveOptions {
+        wait: Duration::from_secs(2),
+        ..h.options.clone()
+    };
+    let paused = batch::resume(&store, "bound", Backend::Brave(&options), 10)
+        .await
+        .unwrap();
+    assert_eq!(paused.paused.as_ref().unwrap().code, "instance_mismatch");
+    assert!(paused.items[1].outcome.is_none());
+    assert_eq!(lock(&h.world).begins, ["11"]);
+    lock(&h.world).instance = Some(mine);
+    let done = batch::resume(&store, "bound", Backend::Brave(&h.options), 10)
+        .await
+        .unwrap();
+    assert!(done.paused.is_none());
+    assert_eq!(done.browser, Some(binding));
+    assert_eq!(lock(&h.world).begins, ["11", "21"]);
+}
+
+#[test]
+fn unbound_pre_selection_batch_continues_only_with_brave_target() {
+    let workspace = TempWorkspace::create("forvo-v2-batch").unwrap();
+    let store = store(workspace.path());
+    let mut runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), "v2").unwrap();
+    let legacy = json!({"schema_version":2,"provider":"forvo_web","transport":"brave_extension","batch_id":"v2",
+        "revision":0,"cancelled":false,"paused":null,
+        "items":[{"request":Pronunciation::new("水","みず").unwrap(),"replace_expected_sha256":null,"acquisition":null,"outcome":null}]});
+    runtime
+        .save(&serde_json::from_value::<batch::ForvoBatch>(legacy).unwrap())
+        .unwrap();
+    drop(runtime);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(batch::resume(
+            &store,
+            "v2",
+            Backend::Brave(&BraveOptions {
+                state_dir: workspace.path().join("no-adapter"),
+                target: Some("edge".into()),
+                binding: None,
+                wait: Duration::from_secs(1),
+                limits: Limits::default(),
+                close_tab: false,
+            }),
+            10,
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(provider_code(&error), "browser_mismatch");
+    assert_eq!(error.details["batch_target"], "brave");
+    assert!(!workspace.path().join("no-adapter").exists());
+}
+
 #[test]
 fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
     use crate::batch_runtime::SafeBatchRuntime;
@@ -637,6 +747,8 @@ fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
             "old",
             Backend::Brave(&BraveOptions {
                 state_dir: workspace.path().join("no-adapter"),
+                target: None,
+                binding: None,
                 wait: Duration::from_secs(1),
                 limits: Limits::default(),
                 close_tab: false,
