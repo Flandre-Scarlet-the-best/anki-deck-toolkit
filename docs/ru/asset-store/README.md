@@ -2381,7 +2381,7 @@ SHA, generation, ревизии элемента, отпечатку запро�
 интервала), `clean` (удаление каталога; с `--keep-template` — только рабочей
 копии). Операции: `verify-integrity`, `read-batch`, `read-single`, `ingest`,
 `ingest-contention --writers N`, `batch-reopen`,
-`batch-checkpoint --change unchanged|modified`. Коды: `0` — успех, `1` —
+`batch-resume-reload`, `batch-checkpoint --change unchanged|modified`. Коды: `0` — успех, `1` —
 отказ операции или постусловия, `2` — неверное использование.
 
 Нагрузка задаётся спецификацией `benchmarks/workloads/asset-store/*.toml`:
