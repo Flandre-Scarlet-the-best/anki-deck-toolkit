@@ -15,7 +15,7 @@
     const list = article?.querySelector(':scope > ul#pronunciations-list-ja.pronunciations-list');
     const languageLink = article?.querySelector(':scope > header.header-pronunciation a[href]');
     if (!list || !languageLink || new URL(languageLink.href).origin !== location.origin || new URL(languageLink.href).pathname !== '/languages/ja/') return fail('dom_changed');
-    if (action === 'expand' || action === 'click') {
+    if (action === 'expand' || action === 'click' || action === 'activate') {
         const more = article.querySelector(':scope > #show-more-pronunciations-ja.active');
         if (more) more.click();
     }

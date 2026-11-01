@@ -577,6 +577,26 @@ async fn browser_multilingual_dom_and_view_all_are_structural() {
         click(browser.page(), "103").await.code,
         "download_button_unavailable"
     );
+    // Brave-адаптер нажимает ту же кнопку через `activate` и тоже раскрывает список.
+    browser
+        .page()
+        .set_content(include_str!("fixtures/multilingual.html"))
+        .await
+        .unwrap();
+    let activated: candidates::DomResult = browser.page().evaluate_expression(format!("((location)=>{}('元気','activate','103'))({{origin:'https://forvo.com',pathname:'/word/%E5%85%83%E6%B0%97/'}})",include_str!("dom.js"))).await.unwrap().into_value().unwrap();
+    assert_eq!(activated.code, "activated");
+    assert_eq!(activated.candidates[0].record_id, "103");
+    assert!(
+        browser
+            .page()
+            .evaluate_expression(
+                "document.getElementById('show-more-pronunciations-ja').dataset.expanded==='yes'"
+            )
+            .await
+            .unwrap()
+            .into_value::<bool>()
+            .unwrap()
+    );
     browser
         .page()
         .set_content(include_str!("fixtures/multilingual.html"))
