@@ -140,7 +140,7 @@ impl ForvoSession {
         let download_path = self.browser().download_staging().map_err(|_| {
             error(
                 "download_staging_failed",
-                "Не удалось создать приватный staging",
+                "Проверьте права и свободное место временного каталога; повторите команду или batch-resume",
             )
         })?;
         let browser = self.browser().browser();
@@ -151,7 +151,7 @@ impl ForvoSession {
             .map_err(|_| {
                 error(
                     "download_listener_failed",
-                    "CDP не предоставляет события загрузки",
+                    "CDP не предоставляет события загрузки; проверьте Chromium и повторите команду или batch-resume",
                 )
             })?;
         let mut progresses = browser
@@ -160,7 +160,7 @@ impl ForvoSession {
             .map_err(|_| {
                 error(
                     "download_listener_failed",
-                    "CDP не предоставляет прогресс загрузки",
+                    "CDP не предоставляет прогресс загрузки; проверьте Chromium и повторите команду или batch-resume",
                 )
             })?;
         browser
@@ -176,7 +176,7 @@ impl ForvoSession {
             .map_err(|_| {
                 error(
                     "download_not_supported",
-                    "Chromium не разрешил управляемую загрузку",
+                    "Проверьте поддержку управляемых загрузок Chromium и повторите команду или batch-resume",
                 )
             })?;
         let baseline = browser
@@ -216,13 +216,13 @@ impl ForvoSession {
             let point = chromiumoxide::layout::Point::new(point.x, point.y);
             self.browser().page().move_mouse(point).await.map_err(|_| {
                 error(
-                    "download_button_unavailable",
+                    "browser_recovery_required",
                     "Не удалось навести указатель на Download MP3",
                 )
             })?;
             self.browser().page().click(point).await.map_err(|_| {
                 error(
-                    "download_button_unavailable",
+                    "browser_recovery_required",
                     "Не удалось нажать Download MP3",
                 )
             })?;
@@ -236,12 +236,12 @@ impl ForvoSession {
                         .map_err(|_| {
                             error(
                                 "download_file_missing",
-                                "CDP завершил загрузку, но GUID-файл не доступен",
+                                "GUID-файл завершённой загрузки недоступен; проверьте временный каталог и повторите команду или batch-resume",
                             )
                         })?;
                     let metadata = file
                         .metadata()
-                        .map_err(|_| error("download_file_missing", "Не удалось проверить файл"))?;
+                        .map_err(|_| error("download_file_missing", "Не удалось проверить файл; проверьте временный каталог и повторите команду или batch-resume"))?;
                     if !metadata.is_file() || metadata.len() != length {
                         return Err(error(
                             "download_incomplete",
@@ -254,7 +254,7 @@ impl ForvoSession {
                         .map_err(|_| {
                             error(
                                 "download_read_failed",
-                                "Не удалось прочитать завершённую загрузку",
+                                "Проверьте доступ к завершённой загрузке и повторите команду или batch-resume",
                             )
                         })?;
                     if bytes.len() as u64 != length {

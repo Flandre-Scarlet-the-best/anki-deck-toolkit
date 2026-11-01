@@ -247,7 +247,7 @@ impl ForvoSession {
     pub async fn navigate(&self, url: &str) -> Result<(), AssetError> {
         self.browser().telemetry().begin_epoch();
         // Некоторые страницы не завершают load из-за рекламы или проверки доступа.
-        // После ограниченного ожидания решение принимает наблюдаемая DOM/auth readiness.
+        // После ограниченного ожидания решение принимается по наблюдаемой готовности DOM и признакам авторизации.
         let _ = tokio::time::timeout(Duration::from_secs(8), self.browser().page().goto(url)).await;
         Ok(())
     }
@@ -324,7 +324,7 @@ impl ForvoSession {
             {
                 return Ok(state);
             }
-            // Ожидание изменения DOM; при навигации старый execution context исчезает.
+            // Ожидание изменения DOM; при навигации прежний контекст выполнения исчезает.
             wait_dom(self.browser().page()).await;
         }
     }
@@ -436,6 +436,20 @@ pub(crate) fn requires_interaction(error: &AssetError) -> bool {
         "challenge_required" | "login_required" | "session_expired"
     )
 }
+/// Только доказанный отказ записи допускает переход к следующему диктору.
+/// Неизвестный сбой сохраняет свой код вместо маскировки исчерпанием кандидатов.
+fn rejects_candidate(error: &AssetError) -> bool {
+    matches!(
+        provider_code(error),
+        "download_aborted"
+            | "download_mismatch"
+            | "download_invalid"
+            | "download_incomplete"
+            | "download_button_unavailable"
+            | "invalid_mp3"
+    )
+}
+
 pub fn pauses_batch(error: &AssetError) -> bool {
     matches!(
         provider_code(error),
@@ -450,6 +464,13 @@ pub fn pauses_batch(error: &AssetError) -> bool {
             | "browser_recovery_required"
             | "browser_cleanup_failed"
             | "download_timeout"
+            | "download_staging_failed"
+            | "download_listener_failed"
+            | "download_not_supported"
+            | "download_file_missing"
+            | "download_read_failed"
+            | "candidate_changed"
+            | "candidate_disappeared"
             | "dom_changed"
             | "page_identity_mismatch"
             | "gui_unavailable"

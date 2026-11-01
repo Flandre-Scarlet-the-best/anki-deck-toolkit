@@ -486,7 +486,7 @@ fn evidence_binds_surface_sha_selected_record_and_order() {
     assert!(bad.validate(&request, &e.downloaded_sha256).is_err());
 }
 
-/// Offline Chromium: выполняет тот же адаптер над минимизированным наблюдённым DOM.
+/// Chromium без внешней сети: выполняет тот же адаптер над минимизированным наблюдённым DOM.
 #[tokio::test]
 #[ignore = "нужен установленный Chromium; внешняя сеть не используется"]
 async fn browser_multilingual_dom_and_view_all_are_structural() {
@@ -607,4 +607,160 @@ async fn browser_cancelled_relaunch_is_joined_before_profile_reuse() {
     let reopened = ForvoSession::launch(&profile).await.unwrap();
     reopened.close().await.unwrap();
     workspace.close().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_acquisition_and_import_keep_two_independent_full_checks() {
+    let bytes = synthetic_mp3();
+    let mut source = source(vec![Ok(bytes.clone())]);
+    let request = Pronunciation::new("こいつ", "こいつ").unwrap();
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-full-checks").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    crate::pronunciation::FULL_PROBES.with(|count| count.set(0));
+    let acquired = evidence::acquire_from(&mut source, &request).await.unwrap();
+    crate::pronunciation::FULL_PROBES.with(|count| assert_eq!(count.get(), 1));
+    let record = import_acquisition(&store, &request, &acquired, None).unwrap();
+    crate::pronunciation::FULL_PROBES.with(|count| assert_eq!(count.get(), 2));
+    assert_eq!(record.sha256, crate::hashing::sha256_hex(&bytes));
+    assert_eq!(
+        record.current_validation_status(),
+        Some(crate::SemanticStatus::Uncertain)
+    );
+    assert!(record.human_attestation.is_none());
+    let validation = record.validation.as_ref().unwrap();
+    assert_eq!(
+        validation.validator,
+        crate::pronunciation::technical_validator_identity()
+    );
+    assert_eq!(
+        validation.evidence[0].details.as_ref().unwrap()["probe"]["sha256"],
+        record.sha256
+    );
+    assert!(crate::pronunciation::read_trusted(store.root(), &[request]).is_err());
+}
+
+#[tokio::test]
+async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_repair() {
+    use crate::batch_runtime::SafeBatchRuntime;
+    for code in [
+        "download_staging_failed",
+        "download_listener_failed",
+        "download_not_supported",
+        "download_file_missing",
+        "download_read_failed",
+        "browser_recovery_required",
+        "candidate_changed",
+        "candidate_disappeared",
+        "download_timeout",
+        "technical_validation_failed",
+    ] {
+        let workspace =
+            crate::temp_workspace::TempWorkspace::create("forvo-download-recovery").unwrap();
+        let store = crate::AssetStore::open_with_policy(
+            crate::StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        batch::start(
+            &store,
+            "recovery",
+            batch::FetchPlan {
+                schema_version: 1,
+                items: vec![batch::FetchItem {
+                    surface: "あ".into(),
+                    reading: "あ".into(),
+                    replace_expected_sha256: None,
+                }],
+            },
+        )
+        .unwrap();
+        let mut source = source(vec![Err(error(
+            code,
+            "Исправьте окружение и повторите batch-resume",
+        ))]);
+        let mut runtime = SafeBatchRuntime::open(store.root(), "recovery").unwrap();
+        let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+        let result = evidence::acquire_from(&mut source, &state.items[0].request).await;
+        assert_eq!(source.calls, ["1"], "{code}");
+        assert!(matches!(
+            batch::checkpoint_acquisition(&mut runtime, &mut state, 0, result).unwrap(),
+            batch::AcquisitionProgress::Paused
+        ));
+        drop(runtime);
+        let paused = batch::status(&store, "recovery").unwrap();
+        let failure = paused.paused.unwrap();
+        assert_eq!(failure.code, code);
+        assert!(failure.message.contains("batch-resume"));
+        assert_eq!(failure.report.unwrap().attempts[0].code, code);
+        assert!(paused.items[0].outcome.is_none());
+        assert!(paused.items[0].acquisition.is_none());
+        // После ремонта окружения получаем исходные байты и сохраняем штатный checkpoint.
+        let bytes = synthetic_mp3();
+        source.responses.push_back(Ok(bytes.clone()));
+        let result = evidence::acquire_from(&mut source, &state.items[0].request).await;
+        assert_eq!(source.calls, ["1", "1"]);
+        let mut runtime = SafeBatchRuntime::open(store.root(), "recovery").unwrap();
+        state = runtime.load().unwrap().unwrap();
+        assert!(matches!(
+            batch::checkpoint_acquisition(&mut runtime, &mut state, 0, result).unwrap(),
+            batch::AcquisitionProgress::Ready
+        ));
+        drop(runtime);
+        let resumed = batch::resume(
+            &store,
+            "recovery",
+            &workspace.path().join("unused-profile"),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(resumed.paused.is_none());
+        assert_eq!(resumed.items[0].outcome.as_ref().unwrap().code, "imported");
+        assert_eq!(
+            resumed.items[0].acquisition.as_ref().unwrap().blob.sha256,
+            crate::hashing::sha256_hex(&bytes)
+        );
+        assert!(!workspace.path().join("unused-profile").exists());
+    }
+}
+
+#[tokio::test]
+async fn candidate_failures_exhaust_records_but_unknown_errors_keep_their_code() {
+    let request = Pronunciation::new("あ", "あ").unwrap();
+    let codes = [
+        "download_aborted",
+        "download_mismatch",
+        "download_invalid",
+        "download_incomplete",
+        "download_button_unavailable",
+    ];
+    for code in codes {
+        let mut source = source(
+            (0..3)
+                .map(|_| Err(error(code, "Запись отклонена")))
+                .collect(),
+        );
+        let failure = evidence::acquire_from(&mut source, &request)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(source.calls, ["1", "2", "3"]);
+        assert_eq!(provider_code(&failure), "candidates_exhausted");
+        assert!(!pauses_batch(&failure));
+        assert_eq!(failure.details["attempts"][2]["code"], code);
+    }
+    let mut source = source(vec![Err(error(
+        "unexpected_failure",
+        "Отдельная диагностика",
+    ))]);
+    let failure = evidence::acquire_from(&mut source, &request)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(provider_code(&failure), "unexpected_failure");
+    assert_eq!(source.calls, ["1"]);
 }

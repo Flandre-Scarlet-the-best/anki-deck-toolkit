@@ -1660,3 +1660,117 @@ fn cli_read_uses_the_streaming_store_boundary() {
     assert!(!read.contains("read_trusted("));
     assert!(!read.contains("VerifiedAssetBytes"));
 }
+
+#[test]
+fn forvo_cli_rejects_profile_store_overlap_before_any_writes() {
+    fn tree(path: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                entries.push((path.clone(), None));
+                entries.extend(tree(&path));
+            } else if kind.is_symlink() {
+                entries.push((
+                    path.clone(),
+                    Some(
+                        fs::read_link(path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    ),
+                ));
+            } else {
+                entries.push((path.clone(), Some(fs::read(path).unwrap())));
+            }
+        }
+        entries.sort();
+        entries
+    }
+    for existing in [false, true] {
+        let ws = TempWorkspace::create("forvo-path-overlap").unwrap();
+        let external = TempWorkspace::create("forvo-path-external").unwrap();
+        let corpus = external.path().join("corpus");
+        if existing {
+            let store = store(&corpus);
+            drop(store);
+        }
+        let alias = external.path().join("alias");
+        std::os::unix::fs::symlink(external.path(), &alias).unwrap();
+        let protected = ws.path().join("decks");
+        fs::create_dir(&protected).unwrap();
+        let decks_alias = external.path().join("protected-alias");
+        std::os::unix::fs::symlink(&protected, &decks_alias).unwrap();
+        let cases = [
+            (Some(corpus.clone()), corpus.join("profile")),
+            (Some(corpus.join("audio")), corpus.clone()),
+            (Some(corpus.clone()), corpus.clone()),
+            (Some(alias.join("corpus")), corpus.join("profile")),
+            (Some(alias.join("corpus/audio")), corpus.clone()),
+            (Some(corpus.clone()), alias.join("corpus/profile")),
+            (
+                None,
+                ws.path().join(".asset-store/pronunciation-audio/profile"),
+            ),
+            (None, ws.path().join(".asset-store")),
+            (Some(corpus.clone()), protected.join("profile")),
+            (Some(corpus.clone()), decks_alias.join("profile")),
+        ];
+        for (root, profile) in cases {
+            let before = (tree(ws.path()), tree(external.path()));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"));
+            command.arg("--repository-root").arg(ws.path());
+            if let Some(root) = root {
+                command.arg("--store").arg(root);
+            }
+            let output = command
+                .args(["forvo", "--profile"])
+                .arg(&profile)
+                .arg("login")
+                .env_remove("DISPLAY")
+                .env_remove("WAYLAND_DISPLAY")
+                .output()
+                .unwrap();
+            assert_eq!(
+                json(&output)["error"]["code"],
+                "boundary_violation",
+                "{}: {:?}",
+                profile.display(),
+                json(&output)
+            );
+            assert!(!output.status.success());
+            assert_eq!((tree(ws.path()), tree(external.path())), before);
+        }
+    }
+}
+
+#[test]
+fn forvo_cli_accepts_separate_external_private_profile_and_preserves_it() {
+    let ws = TempWorkspace::create("forvo-profile-repository").unwrap();
+    let external = TempWorkspace::create("forvo-profile-external").unwrap();
+    // Имя decks вне защищённого дерева репозитория допустимо.
+    let profile = external.path().join("decks/profile");
+    fs::create_dir_all(&profile).unwrap();
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        profile.join(".forvo-owner"),
+        "anki-asset-store/forvo-browser-profile/v1\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+        .arg("--repository-root")
+        .arg(ws.path())
+        .args(["forvo", "--profile"])
+        .arg(&profile)
+        .arg("login")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output()
+        .unwrap();
+    assert_eq!(json(&output)["error"]["details"]["code"], "gui_unavailable");
+    assert_eq!(fs::read_dir(&profile).unwrap().count(), 1);
+    assert!(!ws.path().join(".asset-store").exists());
+}

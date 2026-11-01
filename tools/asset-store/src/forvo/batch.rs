@@ -244,6 +244,50 @@ fn retryable_import(error: &AssetError) -> bool {
         })
 }
 
+/// Единая граница фиксации результата получения; до Ready импорт невозможен.
+pub(super) enum AcquisitionProgress {
+    Ready,
+    Paused,
+    Rejected,
+}
+pub(super) fn checkpoint_acquisition(
+    runtime: &mut SafeBatchRuntime,
+    batch: &mut ForvoBatch,
+    index: usize,
+    acquisition: Result<Acquisition, AssetError>,
+) -> Result<AcquisitionProgress, AssetError> {
+    let progress = match acquisition {
+        Ok(acquisition) => {
+            let blob =
+                runtime.persist_blob_with_limit(&acquisition.bytes, "mp3", MAX_AUDIO_BYTES)?;
+            batch.items[index].acquisition = Some(StoredAcquisition {
+                blob,
+                evidence: acquisition.evidence,
+            });
+            batch.paused = None;
+            AcquisitionProgress::Ready
+        }
+        Err(e) if pauses_batch(&e) || e.code == ErrorCode::Interrupted => {
+            tracing::warn!(
+                event = "forvo_batch_paused",
+                stage = "acquire",
+                code = provider_code(&e),
+                "Пакет Forvo приостановлен"
+            );
+            batch.paused = Some(e.into());
+            AcquisitionProgress::Paused
+        }
+        Err(e) => {
+            batch.items[index].outcome = Some(e.into());
+            batch.paused = None;
+            AcquisitionProgress::Rejected
+        }
+    };
+    batch.revision += 1;
+    runtime.save(batch)?;
+    Ok(progress)
+}
+
 pub async fn resume(
     store: &AssetStore,
     id: &str,
@@ -306,20 +350,17 @@ pub async fn resume(
                 if batch.cancelled {
                     break;
                 }
-                match acquisition {
-                    Ok(acquisition)=>{
-                        let blob=runtime.persist_blob_with_limit(&acquisition.bytes,"mp3",MAX_AUDIO_BYTES)?;
-                        batch.items[index].acquisition=Some(StoredAcquisition{blob,evidence:acquisition.evidence});
-                        batch.paused=None;batch.revision+=1;runtime.save(&batch)?;
+                let failure_code = acquisition.as_ref().err().map(|e| provider_code(e).to_owned());
+                match checkpoint_acquisition(&mut runtime, &mut batch, index, acquisition)? {
+                    AcquisitionProgress::Ready => (),
+                    AcquisitionProgress::Paused => {
+                        timer.finish_failure(failure_code.as_deref().expect("ошибка получения"), true, None);
+                        break;
                     }
-                    Err(e) if pauses_batch(&e)||e.code==ErrorCode::Interrupted=>{
-                        tracing::warn!(event="forvo_batch_paused", stage="acquire", code=provider_code(&e), "Пакет Forvo приостановлен");
-                        timer.finish_failure(provider_code(&e), true, None);
-                        batch.paused=Some(e.into());batch.revision+=1;runtime.save(&batch)?;break;
-                    }
-                    Err(e)=>{
-                        timer.finish_failure(provider_code(&e), false, None);
-                        batch.items[index].outcome=Some(e.into());batch.paused=None;batch.revision+=1;runtime.save(&batch)?;done+=1;continue;
+                    AcquisitionProgress::Rejected => {
+                        timer.finish_failure(failure_code.as_deref().expect("ошибка получения"), false, None);
+                        done += 1;
+                        continue;
                     }
                 }
             }

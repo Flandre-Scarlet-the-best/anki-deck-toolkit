@@ -259,6 +259,48 @@ fn read_local(
     }
     Ok(bytes)
 }
+// Существующий предок разрешается до создания каталогов. Так учитываются
+// symlink-алиасы корня хранилища и отсутствующие конечные компоненты пути.
+fn resolved_location(path: &Path) -> Result<PathBuf, AssetError> {
+    let absolute = std::path::absolute(path).map_err(|e| AssetError::io("абсолютный путь", e))?;
+    if absolute
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(AssetError::new(
+            ErrorCode::PathTraversal,
+            "путь не может содержать ..",
+        ));
+    }
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let mut resolved = std::fs::canonicalize(ancestor)
+                    .map_err(|e| AssetError::io("разрешение существующего предка", e))?;
+                for name in missing.into_iter().rev() {
+                    resolved.push(name);
+                }
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(ancestor.file_name().ok_or_else(|| {
+                    AssetError::io(
+                        "предок пути",
+                        std::io::Error::other("нет существующего предка"),
+                    )
+                })?);
+                ancestor = ancestor.parent().expect("абсолютный путь имеет родителя");
+            }
+            Err(e) => return Err(AssetError::io("проверка предка пути", e)),
+        }
+    }
+}
+fn overlaps(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     let repository = std::fs::canonicalize(&cli.repository_root)
         .map_err(|e| AssetError::io("корень репозитория", e))?;
@@ -280,11 +322,25 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
                 .unwrap_or_else(|| repository.join(".codex/local/forvo-profile")),
         )
         .map_err(|e| AssetError::io("путь профиля", e))?;
-        if protected.iter().any(|p| profile.starts_with(p)) {
+        let resolved_profile = resolved_location(&profile)?;
+        let resolved_store = resolved_location(&root)?;
+        if overlaps(&resolved_profile, &resolved_store) {
             return Err(AssetError::new(
                 ErrorCode::BoundaryViolation,
-                "профиль Forvo не может находиться внутри decks/**",
+                "профиль Forvo и аудиохранилище должны находиться в отдельных каталогах без вложенности",
             ));
+        }
+        for path in &protected {
+            if overlaps(
+                &profile,
+                &std::path::absolute(path).map_err(|e| AssetError::io("защищённый путь", e))?,
+            ) || overlaps(&resolved_profile, &resolved_location(path)?)
+            {
+                return Err(AssetError::new(
+                    ErrorCode::BoundaryViolation,
+                    "профиль Forvo не может пересекаться с decks/**",
+                ));
+            }
         }
         return execute_forvo(&root, &profile, action, &protected, cli.output);
     }

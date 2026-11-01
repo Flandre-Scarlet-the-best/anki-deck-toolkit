@@ -1,4 +1,4 @@
-// Адаптер проверенной разметки обычной страницы Forvo. Никаких аудио endpoints из Play().
+// Адаптер проверенной разметки обычной страницы Forvo. Аудиоадреса из Play() не используются.
 ((surface, action, recordId) => {
     const fail = code => ({code, candidates: []});
     const wordPath = '/word/' + encodeURIComponent(surface) + '/';
@@ -40,7 +40,7 @@
         const voteMatch = rawVotes.match(/^(-?\d+)(?:\s|$)/);
         const votes = voteMatch && Number.isSafeInteger(Number(voteMatch[1])) ? Number(voteMatch[1]) : null;
         const from = row.querySelector(':scope > .from')?.textContent.trim().replace(/^\(|\)$/g, '') || '';
-        // Интерфейс фиксирован на forvo.com (English); неизвестные формы остаются unknown.
+        // Адаптер использует англоязычную версию forvo.com; неизвестные формы не угадываются.
         const speaker = from.match(/^(Female|Male) from (.+)$/);
         const candidate = {record_id:id, username, votes, gender:speaker ? speaker[1].toLowerCase() : null,
             country:speaker ? speaker[2] : null, download_available:!!button};
