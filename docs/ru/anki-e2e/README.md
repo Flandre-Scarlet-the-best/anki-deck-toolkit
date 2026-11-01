@@ -241,8 +241,8 @@ x86_64 или aarch64, сеть до GitHub, AnkiWeb, Docker Hub и зеркал
 
 ## Браузерный набор Forvo-Brave
 
-`cargo run -p anki-e2e -- browser [--scenarios a,b] [--chrome <путь>] [--keep-profiles]` —
-отдельный явный набор для адаптера [Forvo через обычный Brave](../asset-store/forvo-brave.md).
+`cargo run -p anki-e2e -- browser [--scenarios a,b] [--chrome <путь>] [--extension-loader flag|cdp-pipe] [--keep-profiles]` —
+отдельный явный набор для адаптера [Forvo через обычный браузер](../asset-store/forvo-brave.md).
 Он не требует Docker, Anki Desktop, персонального Brave, профиля и аккаунта Forvo и не
 выходит во внешнюю сеть. Это минимальная изолированная граница внутри того же runner.
 Docker-жизненный цикл стенда привязан к образу Anki, и встраивание браузера в контейнер
@@ -258,12 +258,30 @@ Docker-жизненный цикл стенда привязан к образу
 - самоподписанный сертификат допускается только в этом профиле.
 
 В браузер устанавливается то же production-расширение, что ставит `pronunciation-assets
-forvo brave setup`: manifest и ограничение `https://forvo.com` не расширяются. Bridge
+forvo browser setup`: manifest и ограничение `https://forvo.com` не расширяются. Bridge
 настоящий, проверки — Rust-контракты `asset-store`. CDP управляет только тестовым
 браузером: действиями «пользователя» в других вкладках и остановкой service worker.
-Нужны совместимый Chromium (Chromium или Chrome for Testing: брендированный Chrome
-не принимает `--load-extension`), `ffmpeg`/`ffprobe` и `openssl`. Без них итог —
-`BLOCKED` с причиной.
+
+Браузер задаётся `--chrome` (или `CHROME_BIN`, `CHROMIUM_BIN`, `PATH`). Его разновидность
+определяется по `--version` так же, как у `forvo browser discover`. Подходят Chromium,
+Chrome for Testing, Google Chrome, Microsoft Edge, Vivaldi и Brave для Linux. Цель
+адаптера — `brave` для Chromium и Brave (сценарии `cli_*` вызывают прежний
+`forvo brave`), иначе имя браузера (`forvo browser --target <имя>`). Способ
+установки расширения во **временный** профиль:
+- `flag` — `--load-extension`: Chromium, Chrome for Testing, Edge, Vivaldi, Brave;
+- `cdp-pipe` — CDP `Extensions.loadUnpacked` через `--remote-debugging-pipe` и
+  `--enable-unsafe-extension-debugging`, как «Загрузить распакованное». Это значение по
+  умолчанию для Google Chrome, который с версии 137 игнорирует `--load-extension`.
+
+Это способ только для тестового профиля стенда. Пользовательским способом установки он не
+является. Профиль создаётся с включённым режимом разработчика. У каждого сценария свой
+профиль, а значит, свой экземпляр расширения, поэтому перед сценарием выполняется
+`setup --repin` цели. Нужны `ffmpeg`/`ffprobe` и `openssl`; без них итог — `BLOCKED`
+с причиной.
+
+Под Vivaldi сценарии с нажатием кнопки загрузки не проходят: у собственной вкладки
+адаптера нулевой viewport, и итог — `download_button_unavailable`. Это известное
+ограничение поддержки Vivaldi, а не повод ослаблять проверку видимости кнопки.
 
 | Сценарий | Что доказывает |
 |---|---|
@@ -276,12 +294,15 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 | `bridge_reconnect` | разрыв bridge не теряет связанную операцию |
 | `own_tab_closed` | закрытие собственной вкладки до начала загрузки |
 | `interrupt` | прерывание как Ctrl+C: `INTERRUPTED`, собственная загрузка отменена |
-| `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` |
+| `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` (Edge: `save_as_suspected`) |
 | `browser_restart` | перезапуск браузера с восстановлением сессии: восстановленная группа адаптера закрыта перед первой командой, вкладка пользователя на `forvo.com` осталась, новая вкладка — в единственной группе |
 | `cli_fetch` | настоящий `pronunciation-assets forvo brave fetch`: импорт оригинального MP3 в отдельное тестовое хранилище (SHA, не `Verified`), одна сетевая загрузка, файл удалён, копий в `evidence/` нет; повтор тех же байтов; без `ffprobe` — `technical_validation_failed` без импорта |
 | `cli_batch` | пакет из трёх разных слов: не-MP3 лучшей записи → следующий кандидат с попытками в `ForvoEvidence`, ровно одна загрузка на попытку, resume без загрузок, `--max-items`, CDP-resume пакета Brave и Brave-resume состояния v1 → `transport_mismatch` без браузера |
 | `cli_batch_recovery` | Ctrl+C во время загрузки (отмена собственной загрузки, `paused interrupted`, resume), `batch-status` и `batch-cancel` во время работы при параллельной загрузке пользователя, второй исполнитель того же пакета, SIGKILL во время загрузки и освобождение операции следующим запуском, resume после checkpoint и после импорта без загрузок |
 | `cli_foreign_downloads` | загрузка той же записи из чужой вкладки во время пакета → `paused download_conflict`, файлы пользователя целы; повторный запуск завершает пакет |
+| `adapter_doctor` | `doctor --forvo --reconnect --reload` цели: ID из каталога цели, закреплённый экземпляр, версия как у CLI, установка по исполняемому файлу, бренды браузера (`PASS`; у Vivaldi — `NOT_TESTED`), все нужные API от самого браузера, `download_settings` — `NOT_TESTED` |
+| `extension_update` | установлена старая версия → следующая команда обновляет файлы и штатно перезагружает расширение с тем же ID, экземпляром и секретом; при незавершённой связанной загрузке перезагрузка откладывается, операция освобождается восстановлением, обновление выполняет следующая команда |
+| `target_isolation` | вторая цель в том же `state.json`: свои каталог, порт, секрет и ID; оба расширения в одном профиле подключаются каждое к своей цели; тот же каталог в другом профиле → `instance_mismatch`; `setup --repin` закрепляет новый экземпляр с прежним секретом |
 
 Сценарии `cli_*` запускают собранный `pronunciation-assets` (`--cli`,
 `PRONUNCIATION_ASSETS_BIN` или файл рядом с `anki-e2e`; без него — `BLOCKED`):
@@ -296,8 +317,8 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 
 `PASS` получает только завершённый сценарий, в котором все проверки истинны. Итог — худший
 статус, код завершения — как у стенда. Профили и каталог сопряжения с тестовым секретом
-удаляются после прогона, если не задан `--keep-profiles`. Живой Forvo в основном Brave
-этим набором не заменяется.
+удаляются после прогона, если не задан `--keep-profiles`. Живой Forvo в основном браузере
+пользователя этим набором не заменяется.
 
 ## Real-Site стенд Forvo-Brave
 

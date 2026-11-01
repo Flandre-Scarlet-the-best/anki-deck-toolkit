@@ -95,11 +95,12 @@ fn extension_manifest_is_minimal() {
 fn setup_writes_private_pairing_and_keeps_secret() {
     let temp = TempWorkspace::create("brave-setup").expect("temp");
     let options = SetupOptions {
-        state_dir: temp.path().join("state"),
+        browser: Some(BrowserKind::Brave),
         install_dir: Some(temp.path().join("extension")),
         port: Some(48000),
-        rotate_secret: false,
-        platform: None,
+        platform: Some(Platform::Linux),
+        discovery: Some(browsers::DiscoveryRoots::default()),
+        ..SetupOptions::new(temp.path().join("state"))
     };
     let first = setup(&options).expect("setup");
     assert_eq!(first["pairing"], "created");
@@ -141,13 +142,16 @@ fn setup_writes_private_pairing_and_keeps_secret() {
 fn state_with_open_permissions_is_rejected() {
     let temp = TempWorkspace::create("brave-state").expect("temp");
     let state = AdapterState {
-        schema_version: 1,
+        target: LEGACY_TARGET.into(),
+        browser: BrowserKind::Brave,
         port: 48001,
         secret: "00".repeat(32),
         install_dir: temp.path().join("x"),
         load_unpacked_path: "x".into(),
         platform: Platform::Linux,
         extension_id: None,
+        instance_id: None,
+        executable: None,
     };
     save_state(temp.path(), &state).expect("save");
     assert_eq!(load_state(temp.path()).expect("load"), state);
@@ -216,6 +220,15 @@ async fn send(socket: &mut Client, value: Value) {
 
 /// Повторяет протокол background.js: hello → auth → auth_ok (проверка) → ready.
 async fn paired_client(port: u16, secret: &[u8], id: &str) -> Result<Client, &'static str> {
+    paired_client_ready(port, secret, id, json!({"type":"ready","version":"0.1.0"})).await
+}
+
+async fn paired_client_ready(
+    port: u16,
+    secret: &[u8],
+    id: &str,
+    ready: Value,
+) -> Result<Client, &'static str> {
     let mut socket = client(port, &format!("chrome-extension://{id}"))
         .await
         .map_err(|_| "upgrade")?;
@@ -242,7 +255,7 @@ async fn paired_client(port: u16, secret: &[u8], id: &str) -> Result<Client, &'s
     if hex(ok["mac"].as_str().unwrap()) != expected {
         return Err("bridge_not_paired");
     }
-    send(&mut socket, json!({"type":"ready","version":"0.1.0"})).await;
+    send(&mut socket, ready).await;
     Ok(socket)
 }
 
@@ -290,7 +303,9 @@ async fn paired_extension_executes_typed_commands() {
         peer,
         Peer {
             extension_id: ID.into(),
-            version: "0.1.0".into()
+            version: "0.1.0".into(),
+            instance: None,
+            browser: Value::Null,
         }
     );
     assert_eq!(
@@ -327,10 +342,9 @@ async fn wrong_secret_is_never_accepted() {
         .accept(Instant::now() + Duration::from_secs(2))
         .await
         .unwrap_err();
-    assert_eq!(
-        crate::forvo::provider_code(&error),
-        "extension_not_connected"
-    );
+    // Причина отказа превращается в точное действие, секрет в вывод не попадает.
+    assert_eq!(crate::forvo::provider_code(&error), "pairing_mismatch");
+    assert!(error.details["rejections"]["pairing_mismatch"].as_u64() >= Some(1));
     assert!(extension.await.unwrap().is_some());
     assert!(!bridge.connected());
 }
@@ -403,4 +417,132 @@ fn reused_own_tab_may_be_activated_by_user() {
     let mut foreign = tab(false, false);
     foreign["group_title"] = json!("Другая группа");
     assert!(!own_tab_grouped(&foreign));
+}
+
+fn ready_with(instance: &str) -> Value {
+    json!({"type":"ready","version":"0.3.0","instance":instance,
+        "browser":{"brands":[{"brand":"Google Chrome","version":"156"},{"brand":"Chromium","version":"156"}],
+            "chromium_version":"156.0.1.2","platform":"Linux","manifest_version":3,"secret":"must-not-pass",
+            "capabilities":{"service_worker":true,"downloads":true,"downloads_search":true,"web_request_observe":true,
+                "tabs":true,"tab_groups":true,"scripting":true,"storage_local":true,"storage_session":true,"alarms":true,
+                "websocket_hmac":true,"extra":true}}})
+}
+
+#[tokio::test]
+async fn pinned_instance_rejects_same_extension_from_other_profile() {
+    let mine = "aa".repeat(32);
+    let other = "bb".repeat(32);
+    let mut bridge = Bridge::bind_with(
+        0,
+        secret(),
+        Trust {
+            pinned: Some(ID.into()),
+            expected: vec![],
+            instance: Some(mine.clone()),
+        },
+    )
+    .await
+    .expect("bind");
+    let port = bridge.port();
+    // Тот же каталог в другом профиле: тот же ID и секрет, но другой экземпляр.
+    let foreign = tokio::spawn(async move {
+        let first = paired_client_ready(port, &secret(), ID, ready_with(&other)).await;
+        let legacy = paired_client(port, &secret(), ID).await;
+        (first.is_ok(), legacy.is_ok())
+    });
+    let error = bridge
+        .accept(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    foreign.await.unwrap();
+    assert_eq!(crate::forvo::provider_code(&error), "instance_mismatch");
+    assert_eq!(error.details["rejections"]["instance_mismatch"], 1);
+    assert_eq!(error.details["rejections"]["instance_missing"], 1);
+    let good = mine.clone();
+    let client = tokio::spawn(async move {
+        paired_client_ready(port, &secret(), ID, ready_with(&good))
+            .await
+            .map(|_| ())
+    });
+    let peer = bridge
+        .accept(Instant::now() + Duration::from_secs(2))
+        .await
+        .expect("свой экземпляр");
+    assert_eq!(peer.instance.as_deref(), Some(mine.as_str()));
+    // Из сведений о браузере остаются только известные поля.
+    assert_eq!(peer.browser["chromium_version"], "156.0.1.2");
+    assert!(peer.browser.get("secret").is_none());
+    assert!(peer.browser["capabilities"].get("extra").is_none());
+    assert_eq!(peer.browser["capabilities"]["tab_groups"], true);
+    let _ = client.await;
+}
+
+#[tokio::test]
+async fn unpinned_bridge_accepts_only_ids_of_target_directory() {
+    let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let mut bridge = Bridge::bind_with(
+        0,
+        secret(),
+        Trust {
+            pinned: None,
+            expected: vec![ID.into()],
+            instance: None,
+        },
+    )
+    .await
+    .expect("bind");
+    let port = bridge.port();
+    let attempt = tokio::spawn(async move { paired_client(port, &secret(), other).await.is_err() });
+    let error = bridge
+        .accept(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    assert!(attempt.await.unwrap());
+    assert_eq!(crate::forvo::provider_code(&error), "extension_id_mismatch");
+    let ok = tokio::spawn(async move { paired_client(port, &secret(), ID).await.map(|_| ()) });
+    assert_eq!(
+        bridge
+            .accept(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("свой каталог")
+            .extension_id,
+        ID
+    );
+    let _ = ok.await;
+}
+
+#[test]
+fn browser_identity_and_capabilities_are_not_assumed() {
+    use super::acceptance::{Status, capabilities_check, identity_check};
+    let facts = |brands: &[&str], tab_groups: bool, chromium: &str| {
+        sanitize_browser_facts(
+            &json!({"brands":brands.iter().map(|b| json!({"brand":b,"version":"1"})).collect::<Vec<_>>(),
+            "chromium_version":chromium,"manifest_version":3,
+            "capabilities":REQUIRED_CAPABILITIES.iter().map(|k| ((*k).to_owned(), json!(*k != "tab_groups" || tab_groups))).collect::<serde_json::Map<_,_>>()}),
+        )
+    };
+    let chrome = facts(&["Chromium", "Google Chrome"], true, "156.0.1.1");
+    assert_eq!(identity_check(BrowserKind::Chrome, &chrome).0, Status::Pass);
+    assert_eq!(identity_check(BrowserKind::Edge, &chrome).0, Status::Fail);
+    // Vivaldi представляется брендом Google Chrome: не подтверждено, но не FAIL.
+    assert_eq!(
+        identity_check(BrowserKind::Vivaldi, &chrome).0,
+        Status::NotTested
+    );
+    let edge = facts(&["Microsoft Edge", "Chromium"], true, "155.0.1.1");
+    assert_eq!(identity_check(BrowserKind::Edge, &edge).0, Status::Pass);
+    assert_eq!(identity_check(BrowserKind::Vivaldi, &edge).0, Status::Fail);
+    assert_eq!(identity_check(BrowserKind::Brave, &edge).0, Status::Fail);
+    assert_eq!(
+        identity_check(BrowserKind::Brave, &Value::Null).0,
+        Status::NotTested
+    );
+    assert_eq!(capabilities_check(&chrome).0, Status::Pass);
+    let (status, evidence) = capabilities_check(&facts(&["Chromium"], false, "156.0.1.1"));
+    assert_eq!(status, Status::Blocked);
+    assert_eq!(evidence["missing"], json!(["tab_groups"]));
+    let (status, evidence) = capabilities_check(&facts(&["Chromium"], true, "110.0.1.1"));
+    assert_eq!(status, Status::Blocked);
+    assert_eq!(evidence["code"], "browser_version_unsupported");
+    assert_eq!(capabilities_check(&Value::Null).0, Status::NotTested);
 }

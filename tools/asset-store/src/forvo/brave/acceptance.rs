@@ -1,9 +1,10 @@
-//! Живые проверки адаптера Brave: `doctor` (транспорт и вкладка) и `smoke`
+//! Живые проверки адаптера браузера: `doctor` (транспорт и вкладка) и `smoke`
 //! (одна японская запись до проверенных байтов MP3). Хранилище ресурсов не меняется.
 use super::download::{self, Limits};
+use super::targets::{self, bundled_version};
 use super::{
-    AdapterState, Bridge, GROUP_TITLE, Peer, Platform, bridge_error, browser_path_to_local,
-    load_state, save_state,
+    AdapterState, Bridge, GROUP_TITLE, Peer, Platform, REQUIRED_CAPABILITIES, Trust, bridge_error,
+    browser_path_to_local, load_target,
 };
 use crate::forvo::candidates::{DomResult, validated};
 use crate::forvo::{
@@ -42,7 +43,7 @@ pub struct Report {
 }
 impl Report {
     fn push(&mut self, name: &'static str, status: Status, evidence: Value) {
-        tracing::info!(event = "brave_acceptance_step", stage = "acceptance", step = name, status = ?status, "Шаг проверки адаптера Brave");
+        tracing::info!(event = "brave_acceptance_step", stage = "acceptance", step = name, status = ?status, "Шаг проверки адаптера браузера");
         self.steps.push(Step {
             name,
             status,
@@ -62,6 +63,7 @@ impl Report {
                 | "rate_limited"
                 | "extension_not_connected"
                 | "save_as_required"
+                | "save_as_suspected"
                 | "download_conflict"
         ) {
             Status::Blocked
@@ -85,41 +87,154 @@ fn duration_ms(value: Duration) -> u64 {
     value.as_millis().min(u64::MAX as u128) as u64
 }
 
-/// Bridge, подключённое расширение и закрепление его ID после первого сопряжения.
+/// Bridge, подключённое расширение выбранной цели и закрепление его ID и
+/// экземпляра после первого сопряжения.
 pub struct Connection {
     pub bridge: Bridge,
     pub state: AdapterState,
     pub peer: Peer,
+    /// Что сделано для приведения расширения к версии этого CLI.
+    pub update: Value,
 }
 
-pub async fn connect(state_dir: &Path, wait: Duration) -> Result<Connection, AssetError> {
-    let mut state = load_state(state_dir)?;
-    let mut bridge = Bridge::bind(
+/// Режим сети WSL2 (`mirrored`/`nat`/…); `None` — вне WSL или неизвестно.
+pub fn wsl_networking_mode() -> Option<String> {
+    let output = std::process::Command::new("wslinfo")
+        .arg("--networking-mode")
+        .output()
+        .ok()?;
+    let mode = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success() && !mode.is_empty() && mode.len() <= 32).then_some(mode)
+}
+
+fn connect_action(state: &AdapterState) -> String {
+    let mut action = if state.extension_id.is_none() {
+        state.user_action()
+    } else {
+        format!(
+            "Запустите {} и проверьте, что расширение «Anki Deck Toolkit: Forvo adapter» включено на {}",
+            state.browser.display(),
+            state.browser.extensions_uri()
+        )
+    };
+    if state.platform == Platform::Wsl && wsl_networking_mode().as_deref() == Some("nat") {
+        action.push_str(
+            ". WSL2 работает в режиме NAT: браузер Windows достигает bridge только через localhost forwarding WSL (localhostForwarding=true); если он выключен, включите networkingMode=mirrored или localhostForwarding в .wslconfig сами — программа сетевые настройки не меняет",
+        );
+    }
+    action
+}
+
+/// Подключает расширение выбранной цели. Пока порт bridge занят этим
+/// процессом, другая команда этой цели не работает, поэтому здесь же
+/// обновляются файлы установленного расширения и, если версия отличается,
+/// расширение штатно перезагружается командой `reload` — но только когда у
+/// него нет незавершённой операции загрузки.
+pub async fn connect(
+    state_dir: &Path,
+    target: Option<&str>,
+    wait: Duration,
+) -> Result<Connection, AssetError> {
+    let state = load_target(state_dir, target)?;
+    let mut bridge = Bridge::bind_with(
         state.port,
         state.secret_bytes()?,
-        state.extension_id.clone(),
+        Trust {
+            pinned: state.extension_id.clone(),
+            expected: state.expected_extension_ids(),
+            instance: state.instance_id.clone(),
+        },
     )
     .await?;
+    let files = targets::sync_installed_files(&state)?;
+    let with_action = |mut e: AssetError, state: &AdapterState| {
+        if e.details["user_action"].is_null() {
+            e.details["user_action"] = json!(connect_action(state));
+        }
+        e.details["target"] = json!(state.target);
+        e.details["browser"] = json!(state.browser);
+        e
+    };
     let peer = bridge
         .accept(Instant::now() + wait)
         .await
-        .map_err(|mut e| {
-            e.details["user_action"] = json!(format!(
-                "brave://extensions → Режим разработчика → Загрузить распакованное → {}",
-                state.load_unpacked_path
-            ));
-            e
-        })?;
-    if state.extension_id.is_none() {
-        // Единственный акт доверия — установка расширения с секретом; ID закрепляется.
-        state.extension_id = Some(peer.extension_id.clone());
-        save_state(state_dir, &state)?;
+        .map_err(|e| with_action(e, &state))?;
+    let mut state = pin(state_dir, &state, &mut bridge, &peer)?;
+    let bundled = bundled_version();
+    let mut update = json!({"files_changed":files,"extension_version":peer.version,"bundled_version":bundled,"reload":"not_needed"});
+    let mut peer = peer;
+    if peer.version != bundled {
+        if files.is_none() {
+            update["reload"] = json!("files_not_installed");
+        } else {
+            let ping = bridge
+                .call("ping", json!({}), Duration::from_secs(5))
+                .await?;
+            if !ping["operation"].is_null() {
+                // Незавершённую операцию сначала освобождает обычный путь
+                // восстановления; обновление откладывается до следующего запуска.
+                update["reload"] = json!("deferred_operation_pending");
+            } else {
+                let started = Instant::now();
+                tracing::info!(event = "extension_update_reload", stage = "transport", from = %peer.version, to = %bundled,
+                    "Расширение перезагружается для обновления до версии CLI");
+                bridge
+                    .call("reload", json!({}), Duration::from_secs(5))
+                    .await?;
+                peer = bridge
+                    .accept(Instant::now() + Duration::from_secs(60))
+                    .await
+                    .map_err(|e| with_action(e, &state))?;
+                state = pin(state_dir, &state, &mut bridge, &peer)?;
+                if peer.version != bundled {
+                    let mut e = bridge_error(
+                        "extension_reload_ineffective",
+                        "После перезагрузки расширение осталось прежней версии: браузер загрузил его не из каталога цели или не перечитал файлы",
+                    );
+                    e.details["user_action"] = json!(format!(
+                        "Нажмите «Обновить» у расширения на {} или загрузите распакованное из {}",
+                        state.browser.extensions_uri(),
+                        state.load_unpacked_path
+                    ));
+                    e.details["extension_version"] = json!(peer.version);
+                    return Err(e);
+                }
+                update["reload"] = json!("reloaded");
+                update["reload_ms"] = json!(duration_ms(started.elapsed()));
+                update["extension_version"] = json!(peer.version);
+            }
+        }
     }
     Ok(Connection {
         bridge,
         state,
         peer,
+        update,
     })
+}
+
+/// Закрепляет ID и экземпляр расширения (первое подключение — единственный акт
+/// доверия после установки из каталога цели).
+fn pin(
+    state_dir: &Path,
+    state: &AdapterState,
+    bridge: &mut Bridge,
+    peer: &Peer,
+) -> Result<AdapterState, AssetError> {
+    let unchanged = state.extension_id.as_deref() == Some(peer.extension_id.as_str())
+        && (peer.instance.is_none() || state.instance_id == peer.instance);
+    let state = if unchanged {
+        state.clone()
+    } else {
+        targets::pin_peer(
+            state_dir,
+            state,
+            &peer.extension_id,
+            peer.instance.as_deref(),
+        )?
+    };
+    bridge.pin(&peer.extension_id, state.instance_id.as_deref());
+    Ok(state)
 }
 
 async fn ping_stats(bridge: &mut Bridge, count: usize) -> Result<Value, AssetError> {
@@ -275,6 +390,8 @@ fn unix_ms() -> u128 {
 
 pub struct DoctorOptions {
     pub state_dir: PathBuf,
+    /// Цель; `None` — цель по умолчанию (или единственная).
+    pub target: Option<String>,
     pub wait: Duration,
     pub forvo: bool,
     pub reconnect: bool,
@@ -375,27 +492,231 @@ fn exposure_check(port: u16) -> (Status, Value) {
     }
 }
 
+/// Установка браузера цели: ранее подтверждённый файл или обнаружение.
+fn installation_check(state: &AdapterState) -> (Status, Value) {
+    use super::browsers;
+    let wsl = super::detect_platform() == Platform::Wsl;
+    match &state.executable {
+        Some(path) => match browsers::identify(path, wsl) {
+            Ok(found) if found.browser == state.browser => (Status::Pass, json!(found)),
+            Ok(found) => (
+                Status::Fail,
+                json!({"code":"browser_kind_mismatch","expected":state.browser,"found":found,
+                    "next_action":format!("Исполняемый файл цели теперь другой браузер; выполните setup с --executable {} нужного браузера", state.browser.id())}),
+            ),
+            Err(e) => (
+                Status::Blocked,
+                json!({"code":crate::forvo::provider_code(&e),"executable":path,
+                    "next_action":"Браузер цели не найден по сохранённому пути; переустановите его или выполните setup с --executable"}),
+            ),
+        },
+        None => {
+            let found: Vec<_> = browsers::discover(&browsers::DiscoveryRoots::system(
+                state.platform == Platform::Wsl,
+            ))
+            .into_iter()
+            .filter(|i| i.browser == state.browser && i.platform == state.platform)
+            .collect();
+            if found.is_empty() {
+                (
+                    Status::NotTested,
+                    json!({"reason":"установка не найдена в каталогах по умолчанию; при нестандартном пути выполните setup с --executable"}),
+                )
+            } else {
+                (Status::Pass, json!({"discovered":found}))
+            }
+        }
+    }
+}
+
+/// Сверяет браузер, о котором сообщает само расширение, с браузером цели.
+pub(crate) fn identity_check(kind: super::BrowserKind, facts: &Value) -> (Status, Value) {
+    use super::BrowserKind;
+    if facts.is_null() {
+        return (
+            Status::NotTested,
+            json!({"reason":"расширение до версии 0.3 не сообщает сведений о браузере"}),
+        );
+    }
+    let brands: Vec<&str> = facts["brands"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|b| b["brand"].as_str()).collect())
+        .unwrap_or_default();
+    let known = ["Brave", "Google Chrome", "Microsoft Edge"];
+    let foreign: Vec<&str> = brands
+        .iter()
+        .copied()
+        .filter(|b| known.contains(b) && Some(*b) != kind.brand())
+        .collect();
+    let evidence = json!({"browser":kind,"brands":brands});
+    let mismatch = || {
+        (
+            Status::Fail,
+            json!({"code":"browser_kind_mismatch","browser":kind,"brands":brands,
+                "next_action":"Расширение этой цели загружено в другой браузер; загрузите его в браузер цели или настройте отдельную цель"}),
+        )
+    };
+    match kind {
+        BrowserKind::Vivaldi => {
+            if brands.contains(&"Brave") || brands.contains(&"Microsoft Edge") {
+                mismatch()
+            } else {
+                (
+                    Status::NotTested,
+                    json!({"browser":kind,"brands":brands,"reason":"Vivaldi представляется брендом Google Chrome и по userAgentData неотличим; принадлежность подтверждают каталог цели и закреплённый экземпляр"}),
+                )
+            }
+        }
+        BrowserKind::Chromium => {
+            if foreign.is_empty() {
+                (Status::Pass, evidence)
+            } else {
+                mismatch()
+            }
+        }
+        _ => {
+            let own = kind.brand().is_some_and(|b| brands.contains(&b));
+            // Brave и Edge добавляют свой бренд, «Google Chrome» — только Chrome и Vivaldi.
+            let conflicting = foreign
+                .iter()
+                .any(|b| !(kind == BrowserKind::Brave && *b == "Google Chrome"));
+            if own && !conflicting {
+                let mut evidence = evidence;
+                if kind == BrowserKind::Chrome {
+                    evidence["note"] = json!("бренд Google Chrome сообщает и Vivaldi");
+                }
+                (Status::Pass, evidence)
+            } else if conflicting || !brands.is_empty() {
+                mismatch()
+            } else {
+                (
+                    Status::NotTested,
+                    json!({"browser":kind,"reason":"браузер не сообщил бренды userAgentData"}),
+                )
+            }
+        }
+    }
+}
+
+/// Минимальная версия Chromium из manifest расширения.
+pub(crate) fn minimum_chromium() -> u32 {
+    serde_json::from_str::<Value>(super::MANIFEST).expect("manifest")["minimum_chrome_version"]
+        .as_str()
+        .and_then(|v| v.parse().ok())
+        .expect("minimum_chrome_version")
+}
+
+/// Возможности API, которые сообщил сам браузер. Недостаток — `BLOCKED` с
+/// точной причиной, а не предположение «раз Chromium, значит работает».
+pub(crate) fn capabilities_check(facts: &Value) -> (Status, Value) {
+    if facts.is_null() {
+        return (
+            Status::NotTested,
+            json!({"reason":"расширение до версии 0.3 не сообщает возможностей браузера"}),
+        );
+    }
+    let missing: Vec<&str> = REQUIRED_CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|k| facts["capabilities"][k] != true)
+        .collect();
+    let chromium: Option<u32> = facts["chromium_version"]
+        .as_str()
+        .and_then(|v| v.split('.').next())
+        .and_then(|v| v.parse().ok());
+    let minimum = minimum_chromium();
+    let evidence = json!({"chromium_version":facts["chromium_version"],"minimum_chromium":minimum,
+        "manifest_version":facts["manifest_version"],"capabilities":facts["capabilities"],"missing":missing});
+    if !missing.is_empty() {
+        let mut evidence = evidence;
+        evidence["code"] = json!("browser_capability_missing");
+        return (Status::Blocked, evidence);
+    }
+    match chromium {
+        Some(major) if major >= minimum => (Status::Pass, evidence),
+        Some(_) => {
+            let mut evidence = evidence;
+            evidence["code"] = json!("browser_version_unsupported");
+            (Status::Blocked, evidence)
+        }
+        None => {
+            let mut evidence = evidence;
+            evidence["reason"] = json!("версия Chromium не сообщена");
+            (Status::NotTested, evidence)
+        }
+    }
+}
+
 pub async fn doctor(options: &DoctorOptions) -> Result<Report, AssetError> {
     let mut report = Report::default();
-    let state = load_state(&options.state_dir)?;
-    report.push("configuration", Status::Pass, json!({"platform":state.platform,"brave":super::discover_brave(state.platform),
-        "load_unpacked_path":state.load_unpacked_path,"pinned_extension_id":state.extension_id,"port":state.port}));
+    let state = load_target(&options.state_dir, options.target.as_deref())?;
+    let expected = state.expected_extension_ids();
+    report.push("configuration", Status::Pass, json!({"target":state.target,"browser":state.browser,"platform":state.platform,
+        "executable":state.executable,"load_unpacked_path":state.load_unpacked_path,"extensions_page":state.browser.extensions_uri(),
+        "expected_extension_id":expected.first(),"pinned_extension_id":state.extension_id,
+        "instance_pinned":state.instance_id.is_some(),"port":state.port,"command":state.command_prefix(),
+        "support_note":state.browser.support_note()}));
+    let (status, evidence) = installation_check(&state);
+    report.push("installation", status, evidence);
+    let files = targets::files_status(&state);
+    report.push(
+        "extension_files",
+        if files["present"] == true && files["error"].is_null() {
+            Status::Pass
+        } else {
+            Status::Fail
+        },
+        json!({"before_connect":files,"install_dir":state.install_dir,
+            "next_action":if files["present"] == true {Value::Null} else {json!(format!("Выполните {} setup", state.command_prefix()))}}),
+    );
+    let networking = (state.platform == Platform::Wsl).then(wsl_networking_mode);
     report.push("proxy_environment", Status::Pass, json!({"proxy_variables":proxy_names(),
         "note":"bridge только принимает loopback-подключения и сам не делает исходящих HTTP-запросов; Chromium не проксирует 127.0.0.1"}));
-    let mut connection = match connect(&options.state_dir, options.wait).await {
+    let mut connection = match connect(&options.state_dir, options.target.as_deref(), options.wait)
+        .await
+    {
         Ok(connection) => connection,
         Err(e) => {
+            if let Some(mode) = &networking {
+                report.push("wsl_networking", if mode.as_deref() == Some("nat") {Status::Blocked} else {Status::NotTested},
+                    json!({"mode":mode,"note":"браузер Windows не подключился к bridge в WSL; в NAT это зависит от localhost forwarding, программа сетевые настройки не меняет"}));
+            }
             report.fail("extension_connected", &e);
+            if let Some(last) = report.steps.last_mut() {
+                last.evidence["rejections"] = e.details["rejections"].clone();
+                last.evidence["user_action"] = e.details["user_action"].clone();
+            }
             return Ok(report);
         }
     };
+    if let Some(mode) = &networking {
+        report.push("wsl_networking", Status::Pass, json!({"mode":mode,
+            "evidence":"браузер Windows подключился к bridge на 127.0.0.1 в WSL и прошёл взаимную проверку HMAC"}));
+    }
     let (status, evidence) = exposure_check(connection.bridge.port());
     report.push("loopback_only", status, evidence);
+    let peer = &connection.peer;
     report.push(
         "extension_connected",
         Status::Pass,
-        json!({"extension_id":connection.peer.extension_id,"version":connection.peer.version}),
+        json!({"extension_id":peer.extension_id,"version":peer.version,"from_target_directory":expected.contains(&peer.extension_id),
+            "instance_pinned":connection.state.instance_id.is_some(),"rejected_connections":connection.bridge.rejections()}),
     );
+    report.push(
+        "extension_version",
+        if peer.version == bundled_version() {
+            Status::Pass
+        } else {
+            Status::Fail
+        },
+        connection.update.clone(),
+    );
+    let (status, evidence) = identity_check(connection.state.browser, &peer.browser);
+    report.push("browser_identity", status, evidence);
+    let (status, evidence) = capabilities_check(&peer.browser);
+    report.push("browser_capabilities", status, evidence);
+    report.push("download_settings", Status::NotTested, json!({"setting":connection.state.browser.downloads_settings_uri(),
+        "reason":"расширение не читает настройки браузера; «Спрашивать, куда сохранять каждый файл» должно быть выключено. Фактическое поведение проверяет smoke (save_as_required)"}));
     let stats = match ping_stats(&mut connection.bridge, 5).await {
         Ok(stats) => stats,
         Err(e) => {
@@ -521,6 +842,7 @@ pub async fn doctor(options: &DoctorOptions) -> Result<Report, AssetError> {
 
 pub struct SmokeOptions {
     pub state_dir: PathBuf,
+    pub target: Option<String>,
     pub wait: Duration,
     pub surface: String,
     pub reading: String,
@@ -554,13 +876,14 @@ pub async fn recover_previous(
 pub async fn smoke(mut options: SmokeOptions) -> Result<Report, AssetError> {
     let request = Pronunciation::new(&options.surface, &options.reading)?;
     let mut report = Report::default();
-    let mut connection = match connect(&options.state_dir, options.wait).await {
-        Ok(connection) => connection,
-        Err(e) => {
-            report.fail("transport", &e);
-            return Ok(report);
-        }
-    };
+    let mut connection =
+        match connect(&options.state_dir, options.target.as_deref(), options.wait).await {
+            Ok(connection) => connection,
+            Err(e) => {
+                report.fail("transport", &e);
+                return Ok(report);
+            }
+        };
     match ping_stats(&mut connection.bridge, 5).await {
         Ok(stats) => {
             if let Some(recovered) = recover_previous(&mut connection.bridge, &stats["ping"]).await
@@ -570,7 +893,7 @@ pub async fn smoke(mut options: SmokeOptions) -> Result<Report, AssetError> {
                     Err(e) => report.fail("previous_operation", &e),
                 }
             }
-            report.push("transport", Status::Pass, json!({"extension_id":connection.peer.extension_id,"version":connection.peer.version,"latency":stats}));
+            report.push("transport", Status::Pass, json!({"target":connection.state.target,"browser":connection.state.browser,"extension_id":connection.peer.extension_id,"version":connection.peer.version,"update":connection.update,"latency":stats}));
         }
         Err(e) => {
             report.fail("transport", &e);
@@ -836,8 +1159,12 @@ async fn downloads_api_probe(
     }
 }
 
-pub async fn close(state_dir: &Path, wait: Duration) -> Result<Value, AssetError> {
-    let mut connection = connect(state_dir, wait).await?;
+pub async fn close(
+    state_dir: &Path,
+    target: Option<&str>,
+    wait: Duration,
+) -> Result<Value, AssetError> {
+    let mut connection = connect(state_dir, target, wait).await?;
     let value = connection
         .bridge
         .call("close", json!({}), Duration::from_secs(10))
@@ -854,7 +1181,7 @@ pub fn report_error(report: Report) -> Result<Value, AssetError> {
         if report.steps.iter().any(|s| s.status == Status::Interrupted) {
             return Err(AssetError::with_details(
                 ErrorCode::Interrupted,
-                "Проверка адаптера Brave прервана; собственная операция освобождена",
+                "Проверка адаптера браузера прервана; собственная операция освобождена",
                 json!({"provider":"forvo_brave","code":"acceptance_interrupted","report":value}),
             ));
         }
@@ -862,9 +1189,9 @@ pub fn report_error(report: Report) -> Result<Value, AssetError> {
         Err(AssetError::with_details(
             ErrorCode::InvalidTransition,
             if blocked {
-                "Проверка адаптера Brave заблокирована внешним условием"
+                "Проверка адаптера браузера заблокирована внешним условием"
             } else {
-                "Проверка адаптера Brave не пройдена"
+                "Проверка адаптера браузера не пройдена"
             },
             json!({"provider":"forvo_brave","code":if blocked {"acceptance_blocked"} else {"acceptance_failed"},"report":value}),
         ))

@@ -47,10 +47,25 @@ pub fn find_chrome(explicit: Option<&Path>) -> Option<PathBuf> {
     })
 }
 
+/// Как тестовый профиль получает распакованное расширение.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Loader {
+    /// `--load-extension` (Chromium, Chrome for Testing, Edge, Vivaldi, Brave).
+    Flag,
+    /// CDP `Extensions.loadUnpacked` через `--remote-debugging-pipe` и
+    /// `--enable-unsafe-extension-debugging`: установка как «Загрузить
+    /// распакованное». Нужна брендированному Chrome 137+, который игнорирует
+    /// `--load-extension`. Только для временного тестового профиля.
+    CdpPipe,
+}
+
 pub struct LaunchOptions<'a> {
     pub executable: &'a Path,
     pub dir: &'a Path,
-    pub extension: &'a Path,
+    /// Каталоги распакованных расширений (у каждой цели свой).
+    pub extensions: &'a [PathBuf],
+    pub loader: Loader,
     pub fixture_port: u16,
     /// Настройка «Спрашивать, куда сохранять каждый файл» тестового профиля.
     pub prompt_for_download: bool,
@@ -60,6 +75,12 @@ pub struct LaunchOptions<'a> {
 
 pub struct TestBrowser {
     child: Child,
+    /// Канал `--remote-debugging-pipe` (запись команд и чтение ответов); держится
+    /// открытым всё время жизни браузера.
+    #[allow(dead_code)]
+    pipe: Option<(tokio::process::ChildStdin, tokio::process::ChildStdout)>,
+    /// ID, которые браузер назначил загруженным распакованным расширениям.
+    pub loaded_extensions: Vec<String>,
     pub browser: Browser,
     pub downloads: PathBuf,
     handler: tokio::task::JoinHandle<()>,
@@ -68,7 +89,7 @@ pub struct TestBrowser {
 
 fn flags(options: &LaunchOptions, profile: &Path) -> Vec<String> {
     let port = options.fixture_port;
-    vec![
+    let mut flags = vec![
         "--headless=new".into(),
         format!("--user-data-dir={}", profile.display()),
         "--no-first-run".into(),
@@ -85,15 +106,73 @@ fn flags(options: &LaunchOptions, profile: &Path) -> Vec<String> {
         ),
         // Самоподписанный сертификат fixture допустим только в этом временном профиле.
         "--ignore-certificate-errors".into(),
-        format!("--load-extension={}", options.extension.display()),
-        format!(
-            "--disable-extensions-except={}",
-            options.extension.display()
-        ),
+    ];
+    let list = options
+        .extensions
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    match options.loader {
+        Loader::Flag => {
+            flags.push(format!("--load-extension={list}"));
+            flags.push(format!("--disable-extensions-except={list}"));
+        }
+        Loader::CdpPipe => {
+            flags.push("--remote-debugging-pipe".into());
+            flags.push("--enable-unsafe-extension-debugging".into());
+        }
+    }
+    flags.extend([
         "--remote-debugging-port=0".into(),
         "--window-size=1280,900".into(),
         "about:blank".into(),
-    ]
+    ]);
+    flags
+}
+
+/// Одна команда CDP по `--remote-debugging-pipe` (сообщения JSON, разделитель NUL).
+async fn pipe_call(
+    pipe: &mut (tokio::process::ChildStdin, tokio::process::ChildStdout),
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut message = json!({"id":id,"method":method,"params":params})
+        .to_string()
+        .into_bytes();
+    message.push(0);
+    pipe.0
+        .write_all(&message)
+        .await
+        .map_err(|e| format!("CDP pipe: {e}"))?;
+    let mut buffer = Vec::new();
+    let read = async {
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let n = pipe.1.read(&mut chunk).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                return Err("CDP pipe закрыт".to_owned());
+            }
+            buffer.extend_from_slice(&chunk[..n]);
+            while let Some(end) = buffer.iter().position(|b| *b == 0) {
+                let frame: Vec<u8> = buffer.drain(..=end).collect();
+                let value: Value =
+                    serde_json::from_slice(&frame[..end]).map_err(|e| e.to_string())?;
+                if value["id"] == id {
+                    return Ok(value);
+                }
+            }
+        }
+    };
+    let value = tokio::time::timeout(Duration::from_secs(20), read)
+        .await
+        .map_err(|_| format!("CDP {method}: нет ответа за 20 с"))??;
+    if !value["error"].is_null() {
+        return Err(format!("CDP {method}: {}", value["error"]));
+    }
+    Ok(value["result"].clone())
 }
 
 impl TestBrowser {
@@ -106,9 +185,11 @@ impl TestBrowser {
         // Повторный запуск того же профиля сохраняет состояние, записанное браузером.
         let preferences_path = profile.join("Default/Preferences");
         if !preferences_path.exists() {
+            // Режим разработчика включён, как у пользователя, загрузившего распакованное расширение.
             let mut preferences = json!({
                 "download": {"default_directory": downloads, "prompt_for_download": options.prompt_for_download, "directory_upgrade": true},
                 "profile": {"exit_type": "Normal"},
+                "extensions": {"ui": {"developer_mode": true}},
             });
             if options.restore_session {
                 preferences["session"] = json!({"restore_on_startup": 1});
@@ -128,15 +209,54 @@ impl TestBrowser {
             .append(true)
             .open(options.dir.join("chromium.log"))
             .map_err(|e| format!("chromium.log: {e}"))?;
-        let mut child = Command::new(options.executable)
+        let mut command = if options.loader == Loader::CdpPipe {
+            // Браузер читает команды из fd 3 и пишет ответы в fd 4: оболочка
+            // переназначает на них stdin/stdout дочернего процесса и сразу exec.
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg(r#"exec "$0" "$@" 3<&0 4>&1 0</dev/null 1>/dev/null"#)
+                .arg(options.executable)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped());
+            command
+        } else {
+            let mut command = Command::new(options.executable);
+            command.stdin(Stdio::null()).stdout(Stdio::null());
+            command
+        };
+        let mut child = command
             .args(&flags)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
             .stderr(Stdio::from(log))
             .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("запуск Chromium: {e}"))?;
+        let mut pipe = match (child.stdin.take(), child.stdout.take()) {
+            (Some(input), Some(output)) => Some((input, output)),
+            _ => None,
+        };
+        let mut loaded_extensions = Vec::new();
+        if let Some(pipe) = pipe.as_mut() {
+            for (i, extension) in options.extensions.iter().enumerate() {
+                match pipe_call(
+                    pipe,
+                    i as u64 + 1,
+                    "Extensions.loadUnpacked",
+                    json!({"path":extension}),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        loaded_extensions.push(result["id"].as_str().unwrap_or_default().to_owned())
+                    }
+                    Err(e) => {
+                        kill_group(&mut child).await;
+                        return Err(format!("загрузка распакованного расширения: {e}"));
+                    }
+                }
+            }
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let ws = loop {
             if let Ok(text) = std::fs::read_to_string(&active)
@@ -163,6 +283,8 @@ impl TestBrowser {
         let handler = tokio::spawn(async move { while handler.next().await.is_some() {} });
         Ok(TestBrowser {
             child,
+            pipe,
+            loaded_extensions,
             browser,
             downloads,
             handler,

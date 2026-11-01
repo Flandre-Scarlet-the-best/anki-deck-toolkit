@@ -165,6 +165,23 @@ fn download_states_are_distinguished() {
         classify_default(&facts(Some(dialog.clone()), 9000)),
         Progress::Failed("save_as_required")
     );
+    // Edge: имя файла заполнено, все байты получены, загрузка ждёт диалога.
+    let mut edge = item("in_progress");
+    edge.total_bytes = edge.bytes_received;
+    edge.end_time = None;
+    assert_eq!(
+        classify_default(&facts(Some(edge.clone()), 9000)),
+        Progress::Waiting("in_progress")
+    );
+    assert_eq!(
+        classify_default(&facts(Some(edge.clone()), 91_000)),
+        Progress::Failed("save_as_suspected")
+    );
+    edge.paused = true;
+    assert_eq!(
+        classify_default(&facts(Some(edge), 91_000)),
+        Progress::Failed("download_timeout")
+    );
     let mut dismissed = dialog;
     dismissed.state = "interrupted".into();
     dismissed.error = Some("USER_CANCELED".into());
@@ -184,8 +201,10 @@ fn download_states_are_distinguished() {
         classify_default(&facts(Some(network), 100)),
         Progress::Failed("download_interrupted")
     );
+    let mut stalled = item("in_progress");
+    stalled.bytes_received = 1;
     assert_eq!(
-        classify_default(&facts(Some(item("in_progress")), 100_000)),
+        classify_default(&facts(Some(stalled), 100_000)),
         Progress::Failed("download_timeout")
     );
     let mut dangerous = item("complete");

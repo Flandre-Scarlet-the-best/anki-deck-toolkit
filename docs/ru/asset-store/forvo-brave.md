@@ -1,13 +1,111 @@
-# Forvo через обычный Brave: адаптер-расширение
+# Forvo через обычный браузер: адаптер-расширение
 
-`pronunciation-assets forvo brave` работает с Forvo через обычный авторизованный
-Brave пользователя (или другой Chromium с MV3), без отдельного профиля,
-`--remote-debugging-port`, Browser MCP и экспорта cookies. Отдельный профиль
-Cloudflare отклонял (`403`, `cf-mitigated: challenge`); основной профиль пользователя
-проходит. Через Brave работают одиночное получение с импортом в `AssetStore`
-(`forvo brave fetch`) и пакеты (`forvo brave batch-start|batch-resume`) поверх того же
+`pronunciation-assets forvo browser` и прежний `forvo brave` работают с Forvo через
+обычный авторизованный браузер пользователя — Brave, Google Chrome, Microsoft Edge или
+Vivaldi — без отдельного профиля, `--remote-debugging-port`, Browser MCP и экспорта
+cookies. Отдельный профиль Cloudflare отклонял (`403`, `cf-mitigated: challenge`);
+основной профиль пользователя проходит. Через браузер работают одиночное получение с
+импортом в `AssetStore` (`fetch`) и пакеты (`batch-start|batch-resume`) поверх того же
 `forvo::batch`/`SafeBatchRuntime`, что у [CDP-провайдера](forvo.md). `doctor` и `smoke`
 остаются диагностикой транспорта и одной записи.
+
+Браузеры различаются только обнаружением, развёртыванием, подсказками и проверкой
+возможностей. Расширение, bridge, выбор записи, загрузка MP3, `ForvoEvidence` и пакеты
+у всех одни; копий Forvo-кода по браузерам нет.
+
+## Браузеры и цели
+
+**Цель** — одно независимое сопряжение с одной установкой браузера: свой каталог
+распакованного расширения (а значит, свой ID), свой секрет, свой порт bridge и свой
+закреплённый экземпляр расширения. Все цели лежат в одном приватном `state.json`
+каталога состояния (`schema_version=2`). Имя цели по умолчанию — имя браузера
+(`brave`, `chrome`, `edge`, `vivaldi`); для второго профиля того же браузера
+настройте отдельную цель (`--target chrome-work`).
+
+- **Обнаружение** (`forvo browser discover`) подтверждает разновидность по самому
+  исполняемому файлу, а не по имени каталога: у Windows-браузеров из WSL — по
+  `ProductName` и `FileVersion` ресурса версии PE, у Linux-браузеров — по выводу
+  `--version`. Каталог без исполняемого файла или файл с чужим продуктом установкой
+  не считается. Версия, которую нельзя прочитать надёжно, выводится как `null`. У
+  Vivaldi своя нумерация, поэтому версия Chromium для него до подключения неизвестна.
+  Нестандартный путь задаётся `--executable` (путь Windows `C:\…\chrome.exe` в WSL или
+  Linux-путь). Cookies, история и профили браузера не читаются.
+- **Выбор однозначен.** `forvo browser` без `--target` использует цель по умолчанию
+  (`select`) или единственную настроенную. При нескольких целях без выбора — отказ
+  `target_ambiguous` со списком. При нескольких найденных браузерах `setup` без
+  `--browser` отказывает `browser_ambiguous`, при нескольких установках одного
+  браузера — `installation_ambiguous`. «Первое ответившее» расширение не выбирается
+  никогда.
+- **`forvo brave` — совместимый способ работы с целью `brave`.** Он не зависит от цели
+  по умолчанию и не переключается на другой браузер.
+- **Цели не делят сопряжение.** `setup` отказывает, если каталог (`install_dir_conflict`)
+  или порт (`port_conflict`) уже принадлежат другой цели. Порт новой цели выбирается
+  свободным, начиная с 47613.
+
+### Что подтверждено
+
+Разновидность браузера и возможности его API ещё не означают, что Forvo работает.
+Ниже — что проверено фактически, а что нет; при расхождении источник истины —
+`doctor` и `smoke` на конкретной установке.
+
+| Браузер | Изолированный E2E (временный профиль, fixture) | Живой Forvo в профиле пользователя |
+|---|---|---|
+| Brave | весь набор | подтверждён на Windows из WSL2 `mirrored`: миграция v1, автообновление расширения, `doctor`, `fetch`, пакет с возобновлением |
+| Chromium / Chrome for Testing | весь набор | не применимо (тестовые сборки) |
+| Google Chrome | весь набор (Linux; расширение загружается через CDP pipe только во временном профиле) | не проверен |
+| Microsoft Edge | весь набор; запрос места сохранения распознаётся как `save_as_suspected` | `doctor` подтверждён в отдельном временном профиле Windows, загрузка с Forvo не проверялась |
+| Vivaldi | подключение, рукопожатие, кандидаты, `doctor`, изоляция целей; **загрузка заблокирована**: у собственной вкладки нулевой viewport, нажатие кнопки даёт `download_button_unavailable` | не проверен; `setup` выводит предупреждение `support_note` |
+
+- WSL2 в режиме NAT не проверен: подключение зависит от localhost forwarding, `doctor`
+  показывает режим и безопасные варианты.
+- `browser_identity` для Vivaldi всегда `NOT_TESTED`: по брендам он неотличим от Chrome.
+- Настройка «Спрашивать, куда сохранять» не читается заранее (`download_settings`
+  остаётся `NOT_TESTED`) и проявляется только при загрузке.
+
+## Первый запуск, обновление и переход к другому браузеру
+
+```bash
+pronunciation-assets forvo browser discover                    # что установлено (без изменений)
+pronunciation-assets forvo browser setup --browser chrome      # каталог расширения и сопряжение
+pronunciation-assets forvo browser --target chrome doctor      # подключение и проверка браузера
+```
+
+1. **Первый запуск.** `setup` выводит `user_action` с точной страницей и путём, например:
+   «Откройте `chrome://extensions` в Google Chrome, включите „Режим разработчика“,
+   нажмите „Загрузить распакованное“ и выберите `C:\Users\…\AnkiDeckToolkit\forvo-chrome-adapter`».
+   Для Edge — `edge://extensions`, для Vivaldi — `vivaldi://extensions`, для Brave —
+   `brave://extensions`. Это единственное ручное действие. Программа не ставит
+   расширение сама: в личный Chrome, Edge и Vivaldi распакованное расширение
+   устанавливается только через режим разработчика. Enterprise policy, реестр Windows,
+   права администратора, CDP пользовательского профиля и обход интерфейса установки не
+   используются. Обычный Google Chrome 137+ игнорирует `--load-extension`, поэтому этот
+   флаг пользовательским способом не является. «Установлено» не сообщается, пока
+   расширение не подключилось и не прошло проверку ID и секрета.
+2. **Обновление.** Повторный `setup` идемпотентен: секрет, ID, каталог, порт и
+   закрепления сохраняются, отличающиеся файлы заменяются атомарно (manifest — последним).
+   Повреждённый `state.json` даёт отказ `state_corrupt`, а не новую «чистую» настройку.
+   Если порт цели занят — идёт `fetch` или пакет этой цели, — `setup` отказывает
+   `adapter_busy` и файлов не трогает. Ручная перезагрузка не нужна. Любая команда цели
+   (`doctor`, `smoke`, `fetch`, пакет), заняв порт bridge, приводит файлы установленного
+   расширения к версии CLI. Если подключилось расширение другой версии, она штатно
+   перезагружает **своё** расширение (`chrome.runtime.reload`) и проверяет новую версию.
+   При незавершённой собственной загрузке перезагрузка откладывается
+   (`deferred_operation_pending`): операция освобождается обычным восстановлением, а
+   обновление выполняется при следующей команде. Браузер не перезапускается, его
+   настройки не меняются.
+3. **Другой браузер.** `setup --browser edge` добавляет цель `edge`, не трогая прежние.
+   `select --target edge` делает её целью по умолчанию для `forvo browser`. Пакет
+   продолжается только своей браузерной сессией (см. ниже).
+4. **Переустановка расширения.** После «Удалить» и повторной «Загрузить распакованное»
+   у расширения новый экземпляр, и bridge его отвергает (`instance_mismatch`).
+   Выполните `setup --repin`: секрет и каталог прежние, закрепление снимается и
+   восстанавливается при следующем подключении. `--rotate-secret` создаёт новый
+   секрет; расширение подхватит его после перезагрузки.
+
+Старое состояние единственного Brave (`schema_version=1`) читается как цель `brave` с
+прежними секретом, ID, каталогом и портом. Первая запись переводит его в версию 2, а
+исходный файл сохраняется рядом как `state.v1.json` (0600). Повторная установка
+расширения не нужна.
 
 ## Архитектура
 
@@ -27,18 +125,34 @@ Cloudflare отклонял (`403`, `cf-mitigated: challenge`); основной
 
 ## Сопряжение и безопасность
 
-`setup` создаёт 32-байтный секрет и записывает его в `pairing.json` каталога
+`setup` создаёт для цели 32-байтный секрет и записывает его в `pairing.json` каталога
 расширения и в приватный `state.json` (0600) каталога состояния
-(`$XDG_CONFIG_HOME/anki-deck-toolkit/forvo-brave/`, `--state-dir`). Единственный акт
-доверия — установка расширения из этого каталога. Bridge:
+(`$XDG_CONFIG_HOME/anki-deck-toolkit/forvo-brave/`, `--state-dir`; имя каталога
+историческое). Единственный акт доверия — установка расширения из каталога цели. Bridge:
 
 - слушает только `127.0.0.1` (не `0.0.0.0`); `doctor` проверяет недоступность порта
   по нелокальным адресам (список из `ip -j addr`, а без iproute2 — из `/proc/net/fib_trie`);
-- до upgrade проверяет путь, `Host` и `Origin: chrome-extension://<id>`; после первого
-  сопряжения ID расширения закрепляется (смена каталога или ID — `setup --rotate-secret`);
+- до upgrade проверяет путь, `Host` и `Origin: chrome-extension://<id>`. ID
+  распакованного расширения Chromium вычисляется из пути его каталога (SHA-256 пути,
+  в Windows — UTF-16LE). До первого сопряжения принимается только ID каталога цели, так
+  что расширение, загруженное из другого каталога, отвергается
+  (`extension_id_mismatch`). После первого сопряжения ID закрепляется;
 - проводит взаимную проверку HMAC-SHA256 по одноразовым nonce: расширение не
-  исполняет команды bridge, не знающего секрета, а bridge отвергает клиента без секрета;
+  исполняет команды bridge, не знающего секрета, а bridge отвергает клиента без секрета
+  (`pairing_mismatch`);
+- закрепляет **экземпляр** расширения. Расширение версии 0.3+ хранит случайный ID в
+  собственном `chrome.storage.local` профиля и сообщает его в `ready` после взаимной
+  проверки. Тот же каталог, загруженный во второй профиль, даёт тот же ID расширения и
+  секрет, но другой экземпляр, и отвергается (`instance_mismatch`). Экземпляр
+  закрепляется при первом подключении версии 0.3+. Ограничение: если расширение одного
+  каталога в этот момент уже загружено в два профиля, закрепится первый подключившийся
+  экземпляр. Остальные будут отвергаться, а `doctor` покажет число отказов;
 - ограничивает размер сообщений и принимает только известные типы и операции.
+
+Причины отказов подключений учитываются. Если расширение так и не подключилось,
+код ошибки называет причину (`pairing_mismatch`, `extension_id_mismatch`,
+`instance_mismatch`, иначе `extension_not_connected`), а `user_action` — точное
+действие для браузера цели.
 
 Секрет, cookies, HTML и заголовки не попадают в stdout, журналы и отчёты. Bridge
 не делает исходящих HTTP-запросов, поэтому `HTTP_PROXY`/`HTTPS_PROXY` в WSL на него
@@ -116,6 +230,7 @@ Ctrl+C, отключение и перезапуск bridge закрывают �
 | `ownership_unproven` | рестарт service worker до связывания, совпадение без запроса своей вкладки | ничего не трогается |
 | `download_not_started` | ответ не стал загрузкой, адрес не совпал или браузер заблокировал загрузку | посторонние загрузки не трогаются |
 | `save_as_required` | связанная загрузка без имени файла дольше 8 с или окно выбора закрыто без сохранения | собственная отменяется и стирается; итог `BLOCKED` с инструкцией выключить настройку. Уже показанное окно сохранения Chromium после отмены не закрывает, его закрывает пользователь. В новом профиле Brave для Linux запрос места включён по умолчанию |
+| `save_as_suspected` | связанная загрузка уже получила имя и все байты, но браузер держит её в `in_progress` дольше общего таймаута — так ведёт себя Edge, ожидая выбора в окне сохранения | собственная отменяется и стирается; итог `BLOCKED` с той же инструкцией выключить «Спрашивать, куда сохранять» на странице загрузок браузера цели. Код означает подозрение, а не доказанный диалог |
 | `download_interrupted` / `download_canceled` / `download_dangerous` / `download_timeout` | состояние `DownloadItem` | собственная стирается |
 | `own_tab_closed`, `download_mismatch`, `file_missing`, `file_access_denied`, `download_incomplete`, `download_invalid`, `probe_failed` | соответствующая проверка | только связанная собственная |
 
@@ -176,17 +291,26 @@ Ctrl+C даёт работе до 20 секунд освободить собс�
 переводят в `paused`. Это:
 - вход и проверка сайта: `login_required`, `challenge_required`;
 - недоступность расширения: `extension_not_connected`;
-- запрос места сохранения: `save_as_required`;
+- запрос места сохранения: `save_as_required` или `save_as_suspected`;
 - неоднозначное владение: `download_conflict`, `ownership_unproven`;
 - недоступность проверки MP3: `technical_validation_failed`.
 
 Слово при блокере не объявляется безнадёжным. Подсказка `next_action` указывает
-действие в Brave. После входа или прохождения проверки вручную выполните
-`forvo brave batch-resume`.
+действие в браузере цели (для `save_as_required` — его страницу настроек загрузок).
+После входа или прохождения проверки вручную выполните `batch-resume` той же цели.
 
-Транспорт пакета закреплён в состоянии. Новые пакеты имеют `schema_version=2` и поле
-`transport`: `cdp_chromium` у `forvo batch-start`, `brave_extension` у
-`forvo brave batch-start`. Состояние версии 1, сохранённое до появления транспорта,
+Транспорт пакета закреплён в состоянии. Новые пакеты CDP имеют `schema_version=2` и
+`transport=cdp_chromium`. Пакеты расширения имеют `schema_version=3`,
+`transport=brave_extension` (имя историческое, транспорт один для всех браузеров) и поле
+`browser`: цель, браузер, ID расширения и экземпляр. Оно заполняется при первом
+подключении и дальше не меняется. Resume другой целью отвергается до подключения
+(`browser_mismatch` с командой исходной цели в `next_action`). Другим экземпляром того же
+расширения (другой профиль, переустановка) — при подключении, без единой команды
+браузеру. Пакет при этом приостанавливается, а элементы не помечаются неудачными.
+`forvo browser batch-resume` без `--target` сам берёт цель пакета. Пакет версии 2 из
+адаптера до выбора браузера продолжается только целью `brave` и при первом подключении
+получает привязку. Незавершённая загрузка другого экземпляра новой сессией не
+«усыновляется»: операции хранятся в расширении своего профиля. Состояние версии 1, сохранённое до появления транспорта,
 читается без миграции и всегда означает CDP. Его ревизии сохраняются в версии 1.
 Resume другим транспортом отвергается до запуска браузера с кодом
 `transport_mismatch` и командой исходного транспорта в `next_action`. Поэтому пакет CDP
@@ -221,43 +345,80 @@ Resume другим транспортом отвергается до запу�
 ## Команды
 
 ```bash
-pronunciation-assets forvo brave setup                 # каталог расширения и сопряжение
-pronunciation-assets forvo brave doctor [--forvo] [--reconnect] [--reload]
-pronunciation-assets forvo brave smoke --surface 元気 --reading げんき [--close-tab] [--keep-download] [--probe-downloads-api]
-pronunciation-assets forvo brave close
-pronunciation-assets forvo brave fetch --surface 元気 --reading げんき [--replace-expected-sha256 <SHA>] [--close-tab]
-pronunciation-assets forvo brave batch-start --batch-id jp-audio --plan plan.json [--max-items N] [--close-tab]
-pronunciation-assets forvo brave batch-resume --batch-id jp-audio [--max-items N]
+# Выбор и настройка браузера
+pronunciation-assets forvo browser discover
+pronunciation-assets forvo browser targets
+pronunciation-assets forvo browser setup --browser brave|chrome|edge|vivaldi [--target <имя>] [--executable <путь>] [--install-dir <каталог>] [--port N] [--make-default] [--repin] [--rotate-secret]
+pronunciation-assets forvo browser --target <имя> select
+
+# Работа с целью (без --target — цель по умолчанию или единственная)
+pronunciation-assets forvo browser [--target <имя>] doctor [--forvo] [--reconnect] [--reload]
+pronunciation-assets forvo browser [--target <имя>] smoke --surface 元気 --reading げんき [--close-tab] [--keep-download] [--probe-downloads-api]
+pronunciation-assets forvo browser [--target <имя>] fetch --surface 元気 --reading げんき [--replace-expected-sha256 <SHA>] [--close-tab]
+pronunciation-assets forvo browser [--target <имя>] batch-start --batch-id jp-audio --plan plan.json [--max-items N] [--close-tab]
+pronunciation-assets forvo browser [--target <имя>] batch-resume --batch-id jp-audio [--max-items N]
+pronunciation-assets forvo browser [--target <имя>] close
+
+# Прежний интерфейс: всегда цель brave
+pronunciation-assets forvo brave setup [--executable <путь>] [--repin] [--rotate-secret]
+pronunciation-assets forvo brave doctor|smoke|fetch|batch-start|batch-resume|close …
+
 pronunciation-assets forvo batch-status --batch-id jp-audio     # без браузера, любой транспорт
 pronunciation-assets forvo batch-cancel --batch-id jp-audio     # без браузера, любой транспорт
 ```
 
-`--store` задаёт хранилище, как у остальных команд, а `--state-dir` (до подкоманды)
-задаёт каталог сопряжения. План пакета — тот же строгий JSON, что у CDP. Результат
+`--store` задаёт хранилище, как у остальных команд, а `--state-dir` задаёт каталог
+сопряжения (у `forvo brave` — до подкоманды). План пакета — тот же строгий JSON, что у CDP. Результат
 `fetch` содержит `asset`, `acquisition` (`ForvoEvidence`) и `browser`. В `browser`
-записаны ID и версия расширения, операции загрузок с освобождением, восстановленная
+записаны цель, браузер, ID и версия расширения, выполненное обновление, операции загрузок с освобождением, восстановленная
 операция прошлого запуска и `user_tabs_untouched`. Журнал `fetch` лежит в `logs/`
 каталога состояния, журнал пакета — в runtime пакета (`result.diagnostic_log`).
 Коды завершения общие: 0 — успех, 3 — пауза из-за блокера или отказ,
 130 — Ctrl+C или `cancelled`.
 
-В WSL `setup` кладёт расширение в `%LOCALAPPDATA%\AnkiDeckToolkit\forvo-brave-adapter`
-и выводит Windows-путь, в обычном Linux — в `$XDG_DATA_HOME/anki-deck-toolkit/forvo-brave-adapter`.
-Единственное ручное действие: `brave://extensions` → «Режим разработчика» →
-«Загрузить распакованное» → этот каталог. Повторный `setup` обновляет код, а
-`doctor --reload` перезагружает расширение командой без участия пользователя.
+В WSL `setup` кладёт расширение Windows-браузера в
+`%LOCALAPPDATA%\AnkiDeckToolkit\forvo-<цель>-adapter` и выводит Windows-путь. В
+обычном Linux (и для Linux-браузера в WSL) — в
+`$XDG_DATA_HOME/anki-deck-toolkit/forvo-<цель>-adapter`. Каталог цели `brave` совпадает
+с прежним `forvo-brave-adapter`, поэтому ID установленного расширения сохраняется.
 
 `doctor` и `smoke` возвращают шаги `PASS`/`FAIL`/`BLOCKED`/`NOT_TESTED`/`INTERRUPTED`
 с доказательствами. Внешний блокер (Challenge, вход, 429) даёт `BLOCKED` без повторов.
 Журнал NDJSON общего `RunLogGuard` лежит в `logs/` каталога состояния,
 проверенный MP3 `smoke` — в `evidence/` (0600). `doctor`/`smoke` хранилище ресурсов и
-колоды не меняют. Режим WSL2 NAT live не проверялся.
+колоды не меняют.
+
+Шаги `doctor`, кроме транспорта и задержки:
+
+| Шаг | Что проверяет |
+|---|---|
+| `installation` | исполняемый файл цели существует и это тот же браузер (PE/`--version`); без сохранённого пути — обнаружение; не найдено — `NOT_TESTED` |
+| `extension_files` | файлы каталога цели и их отличие от версии CLI до подключения |
+| `wsl_networking` | режим сети WSL2 (`wslinfo`) и факт подключения браузера Windows к bridge в WSL |
+| `extension_connected` | ID из каталога цели, закреплённый экземпляр, число отклонённых подключений по причинам |
+| `extension_version` | версия расширения совпадает с CLI после автоматического обновления |
+| `browser_identity` | бренды `navigator.userAgentData`, сообщённые самим расширением, против браузера цели. Vivaldi представляется брендом «Google Chrome» и по нему неотличим — `NOT_TESTED`, а не `PASS` |
+| `browser_capabilities` | MV3 service worker, `chrome.downloads` (с `search`), неблокирующий `webRequest`, `tabs`, `tabGroups`, `scripting`, `storage.local/session`, `alarms`, WebSocket + WebCrypto HMAC и версия Chromium ≥ `minimum_chrome_version`. Недостаток — `BLOCKED browser_capability_missing`/`browser_version_unsupported` |
+| `download_settings` | всегда `NOT_TESTED`: настройку «Спрашивать, куда сохранять» расширение не читает; фактическое поведение показывает `smoke` (`save_as_required` со страницей настроек браузера) |
+
+Сведения о браузере расширение берёт только о себе: бренды `userAgentData` и наличие
+API. Разрешений на управление другими расширениями, чтение всех сайтов, профилей или
+истории у него нет (`tabs`, `management`, `<all_urls>` и `history` отсутствуют).
+
+**WSL2.** Bridge всегда слушает `127.0.0.1` в WSL. В режиме `mirrored` браузер Windows
+достигает его напрямую. В режиме NAT — только через localhost forwarding WSL
+(`localhostForwarding=true`, по умолчанию). Программа не расширяет слушатель, не
+меняет `.wslconfig`, firewall и portproxy. Если браузер Windows не подключился, `doctor`
+показывает режим и безопасные варианты: включить `networkingMode=mirrored` или
+localhost forwarding самостоятельно.
 
 ## Изолированный E2E
 
 Поведение расширения, bridge и Rust-контрактов проверяет явный набор
-`cargo run -p anki-e2e -- browser`. Он запускает настоящий Chromium с временным профилем
-и этим же расширением, а локальный HTTPS fixture выдаёт себя за `forvo.com` только в
+`cargo run -p anki-e2e -- browser [--chrome <путь>]`. Он запускает настоящий браузер
+(Chromium, Chrome for Testing, Google Chrome, Edge или Vivaldi) с временным профилем и
+этим же расширением, а локальный HTTPS fixture выдаёт себя за `forvo.com` только в
 тестовом профиле. Набор не требует живого Forvo, авторизации и профиля пользователя.
 Его контракт описан в [документации стенда](../anki-e2e/README.md#браузерный-набор-forvo-brave).
-Живая проверка в основном Brave остаётся отдельной ручной проверкой по разрешению пользователя.
+Живая проверка в основном браузере пользователя остаётся отдельной ручной проверкой по
+разрешению пользователя.
