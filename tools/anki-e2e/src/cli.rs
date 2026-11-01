@@ -57,6 +57,8 @@ pub enum Command {
     /// Браузерный набор Forvo-Brave: тестовый Chromium с расширением, fixture и bridge (без Docker и Anki).
     #[cfg(feature = "browser")]
     Browser(crate::browser::BrowserArgs),
+    /// Real-Site стенд Forvo-Brave: настоящий Brave в Docker на настоящем forvo.com (ручной запуск).
+    RealSite(crate::real_site::RealSiteArgs),
     /// Внутренний режим исполнителя в контейнере (запускается runner).
     #[command(hide = true)]
     Agent(AgentArgs),

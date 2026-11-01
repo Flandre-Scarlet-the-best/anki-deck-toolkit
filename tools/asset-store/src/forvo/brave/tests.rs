@@ -381,3 +381,26 @@ fn observed_url_requires_clean_forvo_download_contract() {
     query["has_query"] = json!(true);
     assert!(observed_url(&query).is_none());
 }
+
+#[test]
+fn fib_trie_yields_unique_local_host_addresses() {
+    use super::acceptance::fib_trie_local;
+    let table = "Main:\n  +-- 0.0.0.0/0 3 0 5\n     |-- 0.0.0.0\n        /0 universe UNICAST\n     +-- 127.0.0.0/8 2 0 2\n        |-- 127.0.0.1\n           /32 host LOCAL\n     |-- 172.17.0.2\n        /32 host LOCAL\n     |-- 172.17.255.255\n        /32 link BROADCAST\nLocal:\n     |-- 172.17.0.2\n        /32 host LOCAL\n";
+    assert_eq!(
+        fib_trie_local(table),
+        vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(172, 17, 0, 2)]
+    );
+    assert!(fib_trie_local("").is_empty());
+}
+
+#[test]
+fn reused_own_tab_may_be_activated_by_user() {
+    use super::acceptance::own_tab_grouped;
+    let tab = |created: bool, active: bool| json!({"group_title":GROUP_TITLE,"created":created,"active":active});
+    assert!(own_tab_grouped(&tab(true, false)));
+    assert!(own_tab_grouped(&tab(false, true)));
+    assert!(!own_tab_grouped(&tab(true, true)));
+    let mut foreign = tab(false, false);
+    foreign["group_title"] = json!("Другая группа");
+    assert!(!own_tab_grouped(&foreign));
+}

@@ -138,6 +138,7 @@ async function command(id, op, args) {
     const controller = new AbortController();
     operation = controller;
     try {
+        await cleanupRestoredGroups();
         const result = await handler(args, controller.signal);
         send({type: 'res', id, ok: true, result});
     } catch (error) {
@@ -220,6 +221,43 @@ async function ensureTab() {
     }
 }
 
+// После перезапуска браузера восстановление сессии возвращает вкладку прошлой
+// группы, а tab ID и group ID уже новые. Закрываются только вкладки групп,
+// которые выглядят собственными по всем признакам: наш заголовок, группа свёрнута,
+// каждая вкладка неактивна, не закреплена и открыта на forvo.com. Адреса других
+// сайтов расширению не видны, поэтому любая посторонняя вкладка исключает группу.
+// Проверка идёт один раз за сессию браузера: storage.session очищается при
+// перезапуске браузера и перезагрузке расширения. Действующая собственная группа
+// исключается.
+async function cleanupRestoredGroups() {
+    const {[SESSION_CLEANUP_KEY]: done} = await chrome.storage.session.get(SESSION_CLEANUP_KEY);
+    if (done) return;
+    await chrome.storage.session.set({[SESSION_CLEANUP_KEY]: true});
+    const current = await ownTab();
+    let groups = 0, tabs = 0, kept = 0;
+    for (const group of await chrome.tabGroups.query({title: GROUP_TITLE})) {
+        if (group.id === current?.groupId) continue;
+        const members = await chrome.tabs.query({groupId: group.id});
+        const restored = group.collapsed && members.length > 0 && members.every(t => !t.active && !t.pinned && isForvo(t));
+        if (!restored) {
+            kept += 1;
+            continue;
+        }
+        await chrome.tabs.remove(members.map(t => t.id)).catch(() => {});
+        groups += 1;
+        tabs += members.length;
+    }
+    await chrome.storage.local.set({[CLEANUP_KEY]: {groups_closed: groups, tabs_closed: tabs, groups_kept: kept}});
+}
+
+function isForvo(tab) {
+    try {
+        return new URL(tab.url || tab.pendingUrl || 'about:blank').origin === FORVO_ORIGIN;
+    } catch {
+        return false;
+    }
+}
+
 async function markTabUsed(tabId) {
     const {own} = await chrome.storage.local.get('own');
     if (own?.tabId === tabId) await chrome.storage.local.set({own: {...own, download_used: true}});
@@ -282,6 +320,8 @@ function waitComplete(tabId, ms, signal) {
 
 const OP_KEY = 'operation';
 const API_KEY = 'apiDownloads';
+const SESSION_CLEANUP_KEY = 'restoredCleanupDone';
+const CLEANUP_KEY = 'restoredCleanup';
 const DOWNLOAD_FILTER = {urls: [FORVO_ORIGIN + '/download/*']};
 const START_MARGIN_MS = 1000;
 const observers = new Map();
@@ -567,7 +607,8 @@ const OPERATIONS = {
         return {protocol: PROTOCOL, version: VERSION, extension_id: chrome.runtime.id, own_tab: await tabSummary(await ownTab()),
             listeners: {determining_filename: chrome.downloads.onDeterminingFilename.hasListeners(),
                 web_request: chrome.webRequest.onBeforeRequest.hasListeners(), active_observers: observers.size},
-            operation: await operationSummary()};
+            operation: await operationSummary(),
+            restored_cleanup: (await chrome.storage.local.get(CLEANUP_KEY))[CLEANUP_KEY] ?? null};
     },
     async tab_status() {
         return await tabSummary(await ownTab());

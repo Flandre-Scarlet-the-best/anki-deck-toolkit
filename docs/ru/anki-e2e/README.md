@@ -277,6 +277,7 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 | `own_tab_closed` | закрытие собственной вкладки до начала загрузки |
 | `interrupt` | прерывание как Ctrl+C: `INTERRUPTED`, собственная загрузка отменена |
 | `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` |
+| `browser_restart` | перезапуск браузера с восстановлением сессии: восстановленная группа адаптера закрыта перед первой командой, вкладка пользователя на `forvo.com` осталась, новая вкладка — в единственной группе |
 
 Отчёт `target/anki-e2e/browser-runs/<run_id>/report.{json,md}` содержит:
 - ревизию, версию браузера и флаги;
@@ -287,6 +288,69 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 статус, код завершения — как у стенда. Профили и каталог сопряжения с тестовым секретом
 удаляются после прогона, если не задан `--keep-profiles`. Живой Forvo в основном Brave
 этим набором не заменяется.
+
+## Real-Site стенд Forvo-Brave
+
+`cargo run -p anki-e2e -- real-site <up|run|status|down|purge>` — ручной стенд для
+адаптера [Forvo через обычный Brave](../asset-store/forvo-brave.md) на **настоящем**
+`forvo.com`: без fixture, моков и подмены ответов. Он дополняет изолированный браузерный
+набор и не заменяет его. Вход в аккаунт и проверки сайта (Cloudflare) пользователь
+проходит вручную, поэтому стенд не запускается в CI и `cargo test`.
+
+```bash
+cargo run -p anki-e2e -- real-site up        # образ, контейнер, Brave; печатает адрес noVNC
+cargo run -p anki-e2e -- real-site run       # doctor --forvo и smoke 元気/げんき
+cargo run -p anki-e2e -- real-site down      # штатно закрыть Brave, удалить контейнер
+cargo run -p anki-e2e -- real-site purge --yes   # удалить также volumes с авторизацией и образы
+```
+
+Устройство:
+- образ `anki-e2e/real-site`: закреплённый Ubuntu 24.04, Brave Stable для Linux из
+  [официального репозитория](https://brave.com/linux/), Xvfb, x11vnc и noVNC,
+  `pronunciation-assets`, собранный внутри Docker из снимка исходников (как образ запуска Anki);
+- Brave запускается без CDP и `--remote-debugging-port`. `up` сначала выполняет
+  `pronunciation-assets forvo brave setup`, затем запускает Brave с `--load-extension`
+  каталога адаптера (Brave для Linux этот флаг принимает, режим разработчика не нужен).
+  ID расширения тот же, что при ручной загрузке. bridge работает на `127.0.0.1`
+  в собственном network namespace контейнера;
+- управляемая политика **только этого образа** выключает менеджер паролей (в контейнере
+  нет связки ключей, Brave работает с `--password-store=basic`) и запрос места сохранения
+  (`PromptForDownloadLocation`). Пользовательский Brave не меняется;
+- noVNC (`--vnc-port`, по умолчанию 6080) и VNC для нативного клиента (`--rfb-port`,
+  по умолчанию 5900) публикуются только на `127.0.0.1` хоста. Пароль VNC случайный,
+  хранится в volume состояния (0600): `docker exec anki-e2e-real-site cat /home/tester/state/vnc.txt`.
+  Нативный клиент (например, TigerVNC Viewer) надёжнее браузерного noVNC передаёт буфер
+  обмена и раскладку. x11vnc запущен с `-skip_lockkeys`: регистр берётся из символа клиента,
+  и Caps Lock не применяется повторно;
+- прокси для Brave берётся из `docker info` (Docker Desktop), явно — `--proxy`,
+  отключается `--no-proxy`.
+
+Изоляция контейнера: `--cap-drop ALL --cap-add SYS_CHROOT`, `no-new-privileges`, без
+`privileged` и без `seccomp=unconfined`. Процесс Brave работает от uid 1000 без действующих
+capabilities. `SYS_CHROOT` в bounding set нужен песочнице только внутри её user namespace:
+без него zygote падает на `chroot`. Стандартный профиль seccomp не даёт песочнице Chromium создать
+namespaces, а отключать песочницу (`--no-sandbox`) стенд не стал. Поэтому runner берёт профиль Docker
+по умолчанию ([moby/profiles](https://github.com/moby/profiles), закреплён коммитом и
+SHA-256) и добавляет одно правило: `clone` и `unshare` разрешены только без флагов
+mount-, cgroup-, UTS- и IPC-namespaces. Brave получает user-, PID- и network-namespaces,
+`setns` не разрешается. Профиль лежит в `target/anki-e2e/real-site/`.
+
+**Volumes — чувствительные локальные данные.** `anki-e2e-real-site-profile` хранит профиль
+Brave с авторизацией Forvo, `anki-e2e-real-site-state` — сопряжение адаптера, журналы,
+evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузки. Ресурсы помечены
+собственной меткой `io.github.anki-deck-toolkit.e2e.real-site`. `clean` их не трогает,
+`down` сохраняет volumes, удаляет их только `purge --yes`. В образ, отчёты и Git они не попадают.
+
+Отчёт `target/anki-e2e/real-site-runs/<run_id>/report.{json,md}` содержит:
+- версию Brave, образ и коммит исходников;
+- шаги `doctor`/`smoke` по их машинному контракту и подсказку для `BLOCKED`.
+
+`up` и `run` проверяют песочницу: каждый renderer должен жить в собственном user namespace.
+Иначе `up` завершается ошибкой, а `run` получает `FAIL`. `smoke` запускается только после
+зелёного `doctor`. Перед записью отчёт сверяется с секретом
+сопряжения: при совпадении отчёт не пишется (`ERROR`). Коды завершения — как у стенда.
+Внешние ограничения (`login_required`, `challenge_required`, 429) дают `BLOCKED` и не
+считаются дефектом адаптера.
 
 ## Границы
 
