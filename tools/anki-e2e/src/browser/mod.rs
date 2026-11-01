@@ -32,6 +32,7 @@ pub const SCENARIOS: &[&str] = &[
     "own_tab_closed",
     "interrupt",
     "save_as_prompt",
+    "browser_restart",
 ];
 
 #[derive(Debug, Clone, Args)]

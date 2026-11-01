@@ -54,6 +54,8 @@ pub struct LaunchOptions<'a> {
     pub fixture_port: u16,
     /// Настройка «Спрашивать, куда сохранять каждый файл» тестового профиля.
     pub prompt_for_download: bool,
+    /// «Продолжить с того же места»: восстановление вкладок и групп при запуске.
+    pub restore_session: bool,
 }
 
 pub struct TestBrowser {
@@ -101,17 +103,30 @@ impl TestBrowser {
         for dir in [&profile.join("Default"), &downloads] {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let preferences = json!({
-            "download": {"default_directory": downloads, "prompt_for_download": options.prompt_for_download, "directory_upgrade": true},
-            "profile": {"exit_type": "Normal"},
-        });
-        std::fs::write(
-            profile.join("Default/Preferences"),
-            serde_json::to_vec(&preferences).expect("JSON"),
-        )
-        .map_err(|e| format!("Preferences: {e}"))?;
+        // Повторный запуск того же профиля сохраняет состояние, записанное браузером.
+        let preferences_path = profile.join("Default/Preferences");
+        if !preferences_path.exists() {
+            let mut preferences = json!({
+                "download": {"default_directory": downloads, "prompt_for_download": options.prompt_for_download, "directory_upgrade": true},
+                "profile": {"exit_type": "Normal"},
+            });
+            if options.restore_session {
+                preferences["session"] = json!({"restore_on_startup": 1});
+            }
+            std::fs::write(
+                &preferences_path,
+                serde_json::to_vec(&preferences).expect("JSON"),
+            )
+            .map_err(|e| format!("Preferences: {e}"))?;
+        }
         let flags = flags(&options, &profile);
-        let log = std::fs::File::create(options.dir.join("chromium.log"))
+        let active = profile.join("DevToolsActivePort");
+        // Файл прошлого запуска того же профиля указывал бы на закрытый порт.
+        let _ = std::fs::remove_file(&active);
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(options.dir.join("chromium.log"))
             .map_err(|e| format!("chromium.log: {e}"))?;
         let mut child = Command::new(options.executable)
             .args(&flags)
@@ -122,7 +137,6 @@ impl TestBrowser {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("запуск Chromium: {e}"))?;
-        let active = profile.join("DevToolsActivePort");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let ws = loop {
             if let Ok(text) = std::fs::read_to_string(&active)
@@ -158,6 +172,17 @@ impl TestBrowser {
 
     /// Закрывает только собственный процесс и его группу.
     pub async fn shutdown(mut self) -> Value {
+        self.stop().await
+    }
+
+    /// Штатно закрывает браузер и запускает его снова на том же профиле.
+    pub async fn relaunch(&mut self, options: LaunchOptions<'_>) -> Result<Value, String> {
+        let stopped = self.stop().await;
+        *self = TestBrowser::launch(options).await?;
+        Ok(stopped)
+    }
+
+    async fn stop(&mut self) -> Value {
         let graceful = tokio::time::timeout(Duration::from_secs(5), self.browser.close())
             .await
             .is_ok_and(|r| r.is_ok());
