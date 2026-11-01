@@ -21,16 +21,22 @@ dependencies = [
 name = "anki-e2e"
 version = "0.1.0"
 dependencies = [
+ "asset-store",
  "base64 0.23.1",
+ "chromiumoxide",
  "clap",
  "ctrlc",
+ "futures",
  "getrandom 0.4.3",
  "png",
  "reqwest",
  "rustix",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
+ "tokio-rustls",
  "x11rb",
  "zbus",
 ]

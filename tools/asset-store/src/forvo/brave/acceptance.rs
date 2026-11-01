@@ -1,23 +1,22 @@
 //! Живые проверки адаптера Brave: `doctor` (транспорт и вкладка) и `smoke`
 //! (одна японская запись до проверенных байтов MP3). Хранилище ресурсов не меняется.
+use super::download::{self, Limits};
 use super::{
     AdapterState, Bridge, GROUP_TITLE, Peer, Platform, bridge_error, browser_path_to_local,
     load_state, save_state,
 };
 use crate::forvo::candidates::{DomResult, validated};
-use crate::forvo::download::matches_download;
 use crate::forvo::{
     AuthObservation, AuthState, Candidate, RANKING, auth_error, provider_code, word_url,
 };
 use crate::pronunciation::{MAX_AUDIO_BYTES, Pronunciation, probe_mp3};
 use crate::{AssetError, ErrorCode, hashing::sha256_hex};
-use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -27,6 +26,7 @@ pub enum Status {
     Fail,
     Blocked,
     NotTested,
+    Interrupted,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,7 +51,9 @@ impl Report {
     }
     fn fail(&mut self, name: &'static str, error: &AssetError) {
         let code = provider_code(error).to_owned();
-        let status = if matches!(
+        let status = if code == "interrupted" || error.code == ErrorCode::Interrupted {
+            Status::Interrupted
+        } else if matches!(
             code.as_str(),
             "challenge_required"
                 | "login_required"
@@ -59,12 +61,18 @@ impl Report {
                 | "access_denied"
                 | "rate_limited"
                 | "extension_not_connected"
+                | "save_as_required"
+                | "download_conflict"
         ) {
             Status::Blocked
         } else {
             Status::Fail
         };
-        self.push(name, status, json!({"code":code,"message":error.message}));
+        let mut evidence = json!({"code":code,"message":error.message});
+        if let Some(status) = error.details.get("status") {
+            evidence["status"] = status.clone();
+        }
+        self.push(name, status, evidence);
     }
     pub fn passed(&self) -> bool {
         self.steps
@@ -171,6 +179,28 @@ pub(crate) async fn wait_auth(
     }
 }
 
+/// Собственная вкладка на точной странице слова с подтверждённой авторизацией.
+/// Блокировка доступа возвращается типизированной ошибкой без повторов.
+pub async fn open_word(bridge: &mut Bridge, surface: &str) -> Result<Value, AssetError> {
+    let opened = bridge
+        .call("open", json!({}), Duration::from_secs(15))
+        .await?;
+    let navigation = bridge
+        .call(
+            "navigate",
+            json!({"url":word_url(surface),"timeout_ms":30000}),
+            Duration::from_secs(40),
+        )
+        .await?;
+    let (state, observation) = wait_auth(bridge, Duration::from_secs(20)).await?;
+    if state != AuthState::Authenticated {
+        return Err(auth_error(state));
+    }
+    Ok(
+        json!({"tab":opened,"load":navigation["load"],"path":navigation["path"],"status":observation.status}),
+    )
+}
+
 pub async fn candidates(
     bridge: &mut Bridge,
     request: &Pronunciation,
@@ -187,18 +217,7 @@ pub async fn candidates(
     validated(result)
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Observed {
-    #[serde(skip)]
-    pub token: String,
-    pub download_id: i64,
-    pub url_path: String,
-    pub final_url: Value,
-    pub mime: Value,
-    pub cancelled_before_prompt: bool,
-    pub new_tabs_from_own_page: u64,
-}
-
+/// Адрес загрузки без query/fragment/учётных данных из безопасного описания расширения.
 pub(crate) fn observed_url(value: &Value) -> Option<String> {
     let clean = value["has_query"] == false
         && value["has_fragment"] == false
@@ -213,132 +232,6 @@ pub(crate) fn observed_url(value: &Value) -> Option<String> {
     ))
 }
 
-/// Rust повторно сверяет строку и контракт адреса: URL выводится не из
-/// предположения, а из загрузки, которую начала обычная кнопка сайта.
-pub async fn observe_download(
-    bridge: &mut Bridge,
-    request: &Pronunciation,
-    candidate: &Candidate,
-) -> Result<Observed, AssetError> {
-    let before = bridge
-        .call(
-            "dom",
-            json!({"surface":request.surface,"action":"inspect"}),
-            Duration::from_secs(15),
-        )
-        .await?;
-    let before: DomResult = serde_json::from_value(before)
-        .map_err(|_| bridge_error("dom_changed", "Неизвестная структура кандидатов Forvo"))?;
-    if before.code != "ok" || !before.candidates.contains(candidate) {
-        return Err(bridge_error(
-            "candidate_changed",
-            "Строка кандидата изменилась; повторите выбор",
-        ));
-    }
-    let value = bridge
-        .call(
-            "download",
-            json!({"surface":request.surface,"record_id":candidate.record_id,"timeout_ms":60000}),
-            Duration::from_secs(75),
-        )
-        .await?;
-    let code = value["code"].as_str().unwrap_or("protocol_error");
-    if code != "observed" {
-        if code == "download_not_started" {
-            // Блокировка доступа не должна выглядеть как отсутствие загрузки.
-            let (state, _) = wait_auth(bridge, Duration::from_secs(2)).await?;
-            if state != AuthState::Authenticated {
-                return Err(auth_error(state));
-            }
-        }
-        return Err(bridge_error(
-            code,
-            "Обычная кнопка выбранной записи не начала загрузку",
-        ));
-    }
-    let url = observed_url(&value["url"]).ok_or_else(|| {
-        bridge_error(
-            "download_mismatch",
-            "Адрес загрузки содержит query/fragment/учётные данные",
-        )
-    })?;
-    if !matches_download(&url, &request.surface, &candidate.record_id) {
-        return Err(bridge_error(
-            "download_mismatch",
-            "Загрузка не связана однозначно с выбранной записью",
-        ));
-    }
-    // Политика referrer сайта может сократить его до origin; другой страницы в окне операции нет.
-    if value["referrer_is_own_page"] != true && value["referrer_origin_is_forvo"] != true {
-        return Err(bridge_error(
-            "download_mismatch",
-            "Загрузка начата не собственной страницей",
-        ));
-    }
-    Ok(Observed {
-        token: value["token"]
-            .as_str()
-            .filter(|t| t.len() == 64)
-            .ok_or_else(|| bridge_error("protocol_error", "Нет токена наблюдения"))?
-            .to_owned(),
-        download_id: value["download_id"].as_i64().unwrap_or(-1),
-        url_path: url::Url::parse(&url)
-            .map(|u| u.path().to_owned())
-            .unwrap_or_default(),
-        final_url: value["final_url"].clone(),
-        mime: value["mime"].clone(),
-        cancelled_before_prompt: value["cancelled_before_prompt"] == true,
-        new_tabs_from_own_page: value["new_tabs_from_own_page"].as_u64().unwrap_or(0),
-    })
-}
-
-pub struct Fetched {
-    pub bytes: Vec<u8>,
-    pub evidence: Value,
-}
-
-pub async fn fetch_observed(
-    bridge: &mut Bridge,
-    observed: &Observed,
-) -> Result<Fetched, AssetError> {
-    let value = bridge
-        .call(
-            "fetch_observed",
-            json!({"token":observed.token}),
-            Duration::from_secs(90),
-        )
-        .await?;
-    if value["code"] != "ok" {
-        return Err(bridge_error(
-            value["code"].as_str().unwrap_or("fetch_failed"),
-            "Не удалось прочитать наблюдённую загрузку в собственной вкладке",
-        ));
-    }
-    if value["status"] != 200 {
-        return Err(bridge_error("download_invalid", "Ответ загрузки не 200"));
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(value["base64"].as_str().unwrap_or_default())
-        .map_err(|_| bridge_error("protocol_error", "Неверный base64 байтов MP3"))?;
-    if bytes.is_empty()
-        || bytes.len() as u64 > MAX_AUDIO_BYTES
-        || value["length"].as_u64() != Some(bytes.len() as u64)
-    {
-        return Err(bridge_error(
-            "download_incomplete",
-            "Размер байтов MP3 противоречив",
-        ));
-    }
-    if bytes.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'<') {
-        return Err(bridge_error("download_invalid", "Вместо MP3 получен HTML"));
-    }
-    Ok(Fetched {
-        evidence: json!({"status":value["status"],"redirected":value["redirected"],"final_origin":value["final_origin"],"final_path":value["final_path"],
-            "final_has_query":value["final_has_query"],"content_type":value["content_type"]}),
-        bytes,
-    })
-}
-
 fn mp3_signature(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"ID3") {
         "id3"
@@ -347,35 +240,6 @@ fn mp3_signature(bytes: &[u8]) -> &'static str {
     } else {
         "unknown"
     }
-}
-
-fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, AssetError> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
-        .map_err(|e| AssetError::io("файл загрузки браузера", e))?;
-    if !file
-        .metadata()
-        .map_err(|e| AssetError::io("файл загрузки браузера", e))?
-        .is_file()
-    {
-        return Err(bridge_error(
-            "download_invalid",
-            "Загрузка не является обычным файлом",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| AssetError::io("файл загрузки браузера", e))?;
-    if bytes.len() as u64 > limit {
-        return Err(bridge_error(
-            "download_invalid",
-            "Файл загрузки слишком велик",
-        ));
-    }
-    Ok(bytes)
 }
 
 fn write_evidence(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, AssetError> {
@@ -491,13 +355,26 @@ pub async fn doctor(options: &DoctorOptions) -> Result<Report, AssetError> {
         Status::Pass,
         json!({"extension_id":connection.peer.extension_id,"version":connection.peer.version}),
     );
-    match ping_stats(&mut connection.bridge, 5).await {
-        Ok(stats) => report.push("command_latency", Status::Pass, stats),
+    let stats = match ping_stats(&mut connection.bridge, 5).await {
+        Ok(stats) => stats,
         Err(e) => {
             report.fail("command_latency", &e);
             return Ok(report);
         }
-    }
+    };
+    report.push("command_latency", Status::Pass, stats.clone());
+    // Фактическое состояние событий браузера: у расширения нет перехватчика имён
+    // загрузок, а наблюдатель запросов существует только во время собственной операции.
+    let listeners = &stats["ping"]["listeners"];
+    let operation = &stats["ping"]["operation"];
+    let clean = listeners["determining_filename"] == false
+        && (listeners["web_request"] == false || !operation.is_null());
+    report.push(
+        "download_listeners",
+        if clean { Status::Pass } else { Status::Fail },
+        json!({"listeners":listeners,"pending_operation":operation,
+            "note":"onDeterminingFilename не регистрируется; webRequest только наблюдает адрес выбранной записи во время операции"}),
+    );
     if options.forvo {
         let result = async {
             let opened = connection
@@ -608,13 +485,31 @@ pub struct SmokeOptions {
     pub reading: String,
     pub probe_downloads_api: bool,
     pub close_tab: bool,
+    /// Оставить собственный скачанный файл в загрузках браузера (по умолчанию удаляется после копии в свидетельства).
+    pub keep_download: bool,
+    pub limits: Limits,
+    /// Сигнал прерывания: операция освобождается до выхода.
+    pub interrupt: Option<watch::Receiver<bool>>,
 }
 
 fn structure(snapshot: &Value) -> Value {
     json!({"tabs":snapshot["tabs"],"groups":snapshot["groups"]})
 }
 
-pub async fn smoke(options: &SmokeOptions) -> Result<Report, AssetError> {
+/// Освобождает операцию, оставшуюся от прерванного запуска. Расширение
+/// затрагивает только связанную собственную загрузку; несвязанную — нет.
+pub async fn recover_previous(
+    bridge: &mut Bridge,
+    ping: &Value,
+) -> Option<Result<Value, AssetError>> {
+    let op_id = ping["operation"]["op_id"].as_str()?.to_owned();
+    tracing::warn!(event = "brave_operation_recovery", stage = "recovery", operation_id = %op_id, "Найдена незавершённая операция прошлого запуска");
+    Some(download::release(bridge, &op_id, false).await.map(
+        |released| json!({"operation_id":op_id,"previous":ping["operation"],"release":released}),
+    ))
+}
+
+pub async fn smoke(mut options: SmokeOptions) -> Result<Report, AssetError> {
     let request = Pronunciation::new(&options.surface, &options.reading)?;
     let mut report = Report::default();
     let mut connection = match connect(&options.state_dir, options.wait).await {
@@ -625,7 +520,16 @@ pub async fn smoke(options: &SmokeOptions) -> Result<Report, AssetError> {
         }
     };
     match ping_stats(&mut connection.bridge, 5).await {
-        Ok(stats) => report.push("transport", Status::Pass, json!({"extension_id":connection.peer.extension_id,"version":connection.peer.version,"latency":stats})),
+        Ok(stats) => {
+            if let Some(recovered) = recover_previous(&mut connection.bridge, &stats["ping"]).await
+            {
+                match recovered {
+                    Ok(value) => report.push("previous_operation", Status::Pass, value),
+                    Err(e) => report.fail("previous_operation", &e),
+                }
+            }
+            report.push("transport", Status::Pass, json!({"extension_id":connection.peer.extension_id,"version":connection.peer.version,"latency":stats}));
+        }
         Err(e) => {
             report.fail("transport", &e);
             return Ok(report);
@@ -635,14 +539,22 @@ pub async fn smoke(options: &SmokeOptions) -> Result<Report, AssetError> {
         .bridge
         .call("snapshot", json!({}), Duration::from_secs(5))
         .await;
-    let flow = run_flow(&mut connection, &request, options, &mut report).await;
-    if let Err(e) = flow {
+    let flow = run_flow(&mut connection, &request, &mut options, &mut report).await;
+    if let Err(e) = &flow {
         tracing::warn!(
             event = "brave_smoke_stopped",
             stage = "acceptance",
-            code = provider_code(&e),
+            code = provider_code(e),
             "Живая проверка остановлена"
         );
+    }
+    if flow
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.code == ErrorCode::Interrupted)
+    {
+        connection.bridge.disconnect().await;
+        return Ok(report);
     }
     let after = connection
         .bridge
@@ -662,6 +574,23 @@ pub async fn smoke(options: &SmokeOptions) -> Result<Report, AssetError> {
         }
         (Err(e), _) | (_, Err(e)) => report.fail("user_tabs_untouched", &e),
     }
+    match connection
+        .bridge
+        .call("ping", json!({}), Duration::from_secs(5))
+        .await
+    {
+        Ok(ping) => {
+            let clean = ping["listeners"]["determining_filename"] == false
+                && ping["listeners"]["web_request"] == false
+                && ping["operation"].is_null();
+            report.push(
+                "no_residual_listeners",
+                if clean { Status::Pass } else { Status::Fail },
+                json!({"listeners":ping["listeners"],"operation":ping["operation"]}),
+            );
+        }
+        Err(e) => report.fail("no_residual_listeners", &e),
+    }
     if options.close_tab {
         match connection
             .bridge
@@ -679,9 +608,10 @@ pub async fn smoke(options: &SmokeOptions) -> Result<Report, AssetError> {
 async fn run_flow(
     connection: &mut Connection,
     request: &Pronunciation,
-    options: &SmokeOptions,
+    options: &mut SmokeOptions,
     report: &mut Report,
 ) -> Result<(), AssetError> {
+    let platform = connection.state.platform;
     let bridge = &mut connection.bridge;
     let opened = bridge
         .call("open", json!({}), Duration::from_secs(15))
@@ -732,15 +662,80 @@ async fn run_flow(
         return Err(e);
     };
     report.push("selection", Status::Pass, json!({"record_id":selected.record_id,"ranking_policy":RANKING,"surface":request.surface,"reading":request.reading}));
-    let observed = observe_download(bridge, request, &selected)
+    let op_id = download::new_operation_id()?;
+    let outcome = download_selected(
+        bridge, platform, request, &selected, &op_id, options, report,
+    )
+    .await;
+    // Освобождение — при любом исходе, включая прерывание: только собственная связанная загрузка.
+    let keep = outcome.is_ok() && options.keep_download;
+    match tokio::time::timeout(
+        Duration::from_secs(15),
+        download::release(bridge, &op_id, keep),
+    )
+    .await
+    {
+        Ok(Ok(value)) => report.push(
+            "download_cleanup",
+            Status::Pass,
+            json!({"operation_id":op_id,"keep_download":keep,"release":value}),
+        ),
+        Ok(Err(e)) => report.fail("download_cleanup", &e),
+        Err(_) => report.fail(
+            "download_cleanup",
+            &bridge_error(
+                "extension_timeout",
+                "Расширение не освободило операцию вовремя",
+            ),
+        ),
+    }
+    outcome
+}
+
+/// Свежая проверка строки, одна штатная загрузка, байты файла и копия-свидетельство.
+pub async fn download_selected(
+    bridge: &mut Bridge,
+    platform: Platform,
+    request: &Pronunciation,
+    selected: &Candidate,
+    op_id: &str,
+    options: &mut SmokeOptions,
+    report: &mut Report,
+) -> Result<(), AssetError> {
+    let before = bridge
+        .call(
+            "dom",
+            json!({"surface":request.surface,"action":"inspect"}),
+            Duration::from_secs(15),
+        )
         .await
-        .inspect_err(|e| report.fail("site_download_observed", e))?;
-    report.push("site_download_observed", Status::Pass, json!(observed));
-    let fetched = fetch_observed(bridge, &observed)
-        .await
-        .inspect_err(|e| report.fail("mp3_bytes", e))?;
-    let sha = sha256_hex(&fetched.bytes);
-    let probe = probe_mp3(&fetched.bytes).inspect_err(|e| report.fail("mp3_bytes", e))?;
+        .inspect_err(|e| report.fail("site_download", e))?;
+    let before: DomResult = serde_json::from_value(before)
+        .map_err(|_| bridge_error("dom_changed", "Неизвестная структура кандидатов Forvo"))?;
+    if before.code != "ok" || !before.candidates.contains(selected) {
+        let e = bridge_error(
+            "candidate_changed",
+            "Строка кандидата изменилась; повторите выбор",
+        );
+        report.fail("site_download", &e);
+        return Err(e);
+    }
+    let acquired = download::acquire(
+        bridge,
+        platform,
+        request,
+        selected,
+        op_id,
+        &options.limits,
+        &mut options.interrupt,
+    )
+    .await
+    .inspect_err(|e| report.fail("site_download", e))?;
+    let item = &acquired.item;
+    report.push("site_download", Status::Pass, json!({"operation_id":op_id,"download_id":item.id,"file_name":item.file_name,
+        "state":item.state,"danger":item.danger,"mime":item.mime,"url":item.url,"final_url":item.final_url,
+        "referrer_is_own_page":item.referrer_is_own_page,"reconnects":acquired.reconnects,"elapsed_ms":acquired.elapsed_ms,
+        "method":"одна штатная загрузка обычной кнопки выбранной записи; владение — запрос собственной вкладки и единственная совпавшая загрузка"}));
     let evidence_dir = options.state_dir.join("evidence");
     let path = write_evidence(
         &evidence_dir,
@@ -748,23 +743,15 @@ async fn run_flow(
             "{}-forvo-{}-{}.mp3",
             unix_ms(),
             selected.record_id,
-            &sha[..12]
+            &acquired.sha256[..12]
         ),
-        &fetched.bytes,
+        &acquired.bytes,
     )?;
-    report.push("mp3_bytes", Status::Pass, json!({"record_id":selected.record_id,"download_id":observed.download_id,"byte_length":fetched.bytes.len(),"sha256":sha,
-        "signature":mp3_signature(&fetched.bytes),"probe":probe,"response":fetched.evidence,"evidence_file":path,
-        "method":"fetch наблюдённого адреса штатной загрузки в собственной вкладке forvo.com"}));
+    report.push("mp3_bytes", Status::Pass, json!({"operation_id":op_id,"record_id":selected.record_id,"download_id":item.id,
+        "byte_length":acquired.bytes.len(),"sha256":acquired.sha256,"signature":mp3_signature(&acquired.bytes),"probe":acquired.probe,
+        "evidence_file":path,"source":"файл завершённой собственной загрузки браузера"}));
     if options.probe_downloads_api {
-        downloads_api_probe(
-            connection.state.platform,
-            bridge,
-            &observed,
-            &selected,
-            &sha,
-            report,
-        )
-        .await;
+        downloads_api_probe(platform, bridge, op_id, selected, &acquired.sha256, report).await;
     } else {
         report.push(
             "downloads_api_file",
@@ -778,18 +765,18 @@ async fn run_flow(
 async fn downloads_api_probe(
     platform: Platform,
     bridge: &mut Bridge,
-    observed: &Observed,
+    op_id: &str,
     selected: &Candidate,
     sha: &str,
     report: &mut Report,
 ) {
-    let stem = format!(
-        "forvo-{}-{}",
-        selected.record_id,
-        &super::encode_lower_hex(super::random_bytes().unwrap_or([0; 32]))[..12]
-    );
+    let stem = format!("forvo-{}-{}", selected.record_id, &op_id[..12]);
     let result = bridge
-        .call("downloads_api", json!({"token":observed.token,"filename_stem":stem,"prompt_ms":8000,"timeout_ms":60000}), Duration::from_secs(75))
+        .call(
+            "downloads_api",
+            json!({"op_id":op_id,"filename_stem":stem,"prompt_ms":8000,"timeout_ms":60000}),
+            Duration::from_secs(75),
+        )
         .await;
     let value = match result {
         Ok(value) => value,
@@ -800,7 +787,7 @@ async fn downloads_api_probe(
             let id = value["download_id"].clone();
             let checked = (|| {
                 let path = browser_path_to_local(platform, value["filename"].as_str().unwrap_or_default())?;
-                let bytes = read_regular(&path, MAX_AUDIO_BYTES)?;
+                let bytes = download::read_regular(&path, MAX_AUDIO_BYTES)?;
                 let probe = probe_mp3(&bytes)?;
                 Ok::<_, AssetError>((path, bytes.len(), sha256_hex(&bytes), probe))
             })();
@@ -808,8 +795,9 @@ async fn downloads_api_probe(
             match checked {
                 Ok((path, length, file_sha, probe)) => {
                     let same = file_sha == sha;
-                    report.push("downloads_api_file", if same { Status::Pass } else { Status::Fail }, json!({"download_id":id,"browser_path":value["filename"],"local_path":path,
-                        "byte_length":length,"sha256":file_sha,"matches_fetched":same,"probe_codec":probe.codec,"cleanup":cleanup.as_ref().ok(),"file_removed":!path.exists()}));
+                    report.push("downloads_api_file", if same { Status::Pass } else { Status::Fail }, json!({"download_id":id,
+                        "file_name":path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        "byte_length":length,"sha256":file_sha,"matches_site_download":same,"probe_codec":probe.codec,"cleanup":cleanup.as_ref().ok(),"file_removed":!path.exists()}));
                 }
                 Err(e) => report.fail("downloads_api_file", &e),
             }
@@ -835,6 +823,13 @@ pub fn report_error(report: Report) -> Result<Value, AssetError> {
     if report.passed() {
         Ok(value)
     } else {
+        if report.steps.iter().any(|s| s.status == Status::Interrupted) {
+            return Err(AssetError::with_details(
+                ErrorCode::Interrupted,
+                "Проверка адаптера Brave прервана; собственная операция освобождена",
+                json!({"provider":"forvo_brave","code":"acceptance_interrupted","report":value}),
+            ));
+        }
         let blocked = report.steps.iter().any(|s| s.status == Status::Blocked);
         Err(AssetError::with_details(
             ErrorCode::InvalidTransition,
