@@ -119,8 +119,8 @@ impl ForvoSession {
     ) -> Result<Vec<Candidate>, AssetError> {
         self.navigate(&word_url(&request.surface)).await?;
         self.require_authenticated().await?;
-        // DOM слова может появиться до выполнения отложенных frontend-скриптов.
-        // Ждём DOMContentLoaded, который нужен обычной кнопке сайта, а не рекламы/network idle.
+        // DOM слова может появиться до выполнения отложенных скриптов интерфейса.
+        // Ждём DOMContentLoaded, который нужен обычной кнопке сайта, а не завершения сетевых запросов рекламы.
         let ready=self.browser().page().evaluate_expression(r#"new Promise(resolve=>{
             if(document.readyState==='complete'||performance.getEntriesByType('navigation')[0]?.domContentLoadedEventEnd>0){resolve(true);return;}
             const done=()=>{clearTimeout(timer);document.removeEventListener('DOMContentLoaded',done);resolve(true);};

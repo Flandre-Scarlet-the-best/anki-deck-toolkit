@@ -208,7 +208,14 @@ fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
     Ok(output)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static FULL_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn probe_mp3(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+    #[cfg(test)]
+    FULL_PROBES.with(|count| count.set(count.get() + 1));
     probe_inner(bytes).map_err(|mut error| {
         error.details["schema_version"] = serde_json::json!(1);
         error.details["sha256"] = serde_json::json!(sha256_hex(bytes));
@@ -218,11 +225,15 @@ pub fn probe_mp3(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
     })
 }
 
-fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+pub(super) fn inspect_frames(bytes: &[u8]) -> Result<(u32, u32, u32, u64), AssetError> {
     if bytes.is_empty() || bytes.len() as u64 > MAX_AUDIO_BYTES {
         return Err(failure("MP3 должен содержать 1–8388608 байт"));
     }
-    let (sample_rate, channels, frame_count, encoded_samples) = frames(bytes)?;
+    frames(bytes)
+}
+
+fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+    let (sample_rate, channels, frame_count, encoded_samples) = inspect_frames(bytes)?;
     let workspace = TempWorkspace::create("pronunciation-probe")
         .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
     let path = workspace.path().join("input.mp3");

@@ -14,6 +14,8 @@ use crate::hashing::sha256_hex;
 use crate::temp_workspace::TempWorkspace;
 use crate::*;
 
+#[cfg(test)]
+pub(crate) use probe::FULL_PROBES;
 pub use probe::{AudioProbe, probe_mp3};
 pub const MAX_AUDIO_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_DURATION_SECONDS: f64 = 30.0;
@@ -354,7 +356,15 @@ fn import_source(
     {
         return Err(invalid("нужно имя источника без пути"));
     }
-    probe_mp3(bytes)?;
+    if forvo.is_some() {
+        // Выбор диктора уже включает декодирование. Здесь проверяем структуру,
+        // в том числе для восстановленного checkpoint, не доверяя provenance
+        // как техническому свидетельству. Фактические байты нового кандидата
+        // полностью проверит AudioTechnicalValidator через AssetStore.
+        probe::inspect_frames(bytes)?;
+    } else {
+        probe_mp3(bytes)?;
+    }
     let workspace = TempWorkspace::create("pronunciation-import")
         .map_err(|e| AssetError::io("временный MP3", e))?;
     let snapshot = workspace.path().join("candidate.mp3");

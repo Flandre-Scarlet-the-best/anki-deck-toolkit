@@ -92,7 +92,7 @@ pub struct Acquisition {
     pub evidence: ForvoEvidence,
 }
 
-/// Один порядок попыток для браузера и изолированных offline-сценариев.
+/// Один порядок попыток для браузера и изолированных автономных сценариев.
 pub(super) trait CandidateSource {
     async fn candidates(&mut self, request: &Pronunciation) -> Result<Vec<Candidate>, AssetError>;
     async fn download(
@@ -179,7 +179,7 @@ async fn acquire_timed(
             Err(e) => return Err(e),
         }
     }
-    let candidates = candidates.expect("bounded attempts");
+    let candidates = candidates.expect("ограниченное число попыток");
     let mut attempts = Vec::new();
     for candidate in candidates.iter().filter(|c| c.download_available) {
         let stage = timer.stage("download_and_validate_mp3");
@@ -223,7 +223,7 @@ async fn acquire_timed(
                 evidence.validate(request, &sha256_hex(&bytes))?;
                 return Ok(Acquisition { bytes, evidence });
             }
-            Err(mut e) if pauses_batch(&e) => {
+            Err(mut e) if !super::rejects_candidate(&e) => {
                 attempts.push(Attempt {
                     record_id: candidate.record_id.clone(),
                     code: provider_code(&e).into(),
