@@ -1,4 +1,5 @@
 use super::*;
+use crate::forvo::brave::windows_drive_path;
 use crate::forvo::provider_code;
 use crate::temp_workspace::TempWorkspace;
 
@@ -286,4 +287,19 @@ fn pinning_refuses_concurrent_pairing_change() {
         provider_code(&pin_peer(&state_dir, &pinned, &id, Some(&"12".repeat(32))).unwrap_err()),
         "pairing_changed"
     );
+}
+
+#[test]
+fn windows_install_dir_is_not_a_relative_linux_path() {
+    let temp = TempWorkspace::create("targets-windows-dir").unwrap();
+    let windows = Path::new(r"C:\Users\Example\AppData\Local\Temp\forvo-chrome-adapter");
+    let mut opts = options(&temp.path().join("state"), BrowserKind::Chrome, windows);
+    opts.port = Some(free_port());
+    let error = setup(&opts).unwrap_err();
+    assert_eq!(provider_code(&error), "path_mapping_failed");
+    // Ни каталога с именем «C:\…» в текущем каталоге, ни состояния цели.
+    assert!(!Path::new(windows.as_os_str()).exists());
+    assert!(!temp.path().join("state/state.json").exists());
+    assert!(windows_drive_path(r"C:\x") && windows_drive_path("d:/x"));
+    assert!(!windows_drive_path("/mnt/c/x") && !windows_drive_path("C:"));
 }

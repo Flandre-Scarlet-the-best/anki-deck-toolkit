@@ -529,6 +529,23 @@ pub(crate) fn windows_local_app_data() -> Result<PathBuf, AssetError> {
     super::wsl_to_linux(&local)
 }
 
+/// Каталог `--install-dir` в путь текущей Linux-среды. Путь Windows с буквой диска
+/// допустим только для браузера Windows из WSL и переводится через `wslpath`; иначе
+/// он стал бы относительным Linux-путём с таким странным именем в текущем каталоге.
+fn local_install_dir(dir: &Path, platform: Platform) -> Result<PathBuf, AssetError> {
+    let text = dir.to_string_lossy();
+    if super::windows_drive_path(&text) {
+        return match platform {
+            Platform::Wsl => super::wsl_to_linux(&text),
+            Platform::Linux => Err(bridge_error(
+                "path_mapping_failed",
+                "Каталог Windows допустим только для браузера Windows из WSL; для Linux-браузера задайте Linux-путь",
+            )),
+        };
+    }
+    std::path::absolute(dir).map_err(|e| AssetError::io("каталог расширения", e))
+}
+
 fn default_install_dir(platform: Platform, target: &str) -> Result<PathBuf, AssetError> {
     // Каталог цели `brave` совпадает с прежним: ID установленного расширения сохраняется.
     let name = format!("forvo-{target}-adapter");
@@ -746,9 +763,7 @@ pub fn setup(options: &SetupOptions) -> Result<Value, AssetError> {
         ));
     }
     let install_dir = match (&options.install_dir, &previous) {
-        (Some(dir), _) => {
-            std::path::absolute(dir).map_err(|e| AssetError::io("каталог расширения", e))?
-        }
+        (Some(dir), _) => local_install_dir(dir, platform)?,
         (None, Some(state)) if state.platform == platform => state.install_dir.clone(),
         _ => default_install_dir(platform, &name)?,
     };

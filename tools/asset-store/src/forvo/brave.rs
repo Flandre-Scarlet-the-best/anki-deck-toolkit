@@ -219,6 +219,15 @@ pub fn wsl_to_linux(windows: &str) -> Result<PathBuf, AssetError> {
     ))
 }
 
+/// Абсолютный путь Windows с буквой диска (`C:\\…` или `C:/…`).
+pub(crate) fn windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
 pub(crate) fn linux_to_windows(path: &Path) -> Result<String, AssetError> {
     let output = Command::new("wslpath")
         .arg("-w")
@@ -235,13 +244,8 @@ pub(crate) fn linux_to_windows(path: &Path) -> Result<String, AssetError> {
 /// Windows-путь допустим только в WSL и проходит через `wslpath`; абсолютный
 /// Linux-путь сообщает Linux-браузер и используется как есть.
 pub fn browser_path_to_local(platform: Platform, path: &str) -> Result<PathBuf, AssetError> {
-    let bytes = path.as_bytes();
-    let windows_drive = bytes.len() > 2
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/');
     match platform {
-        Platform::Wsl if windows_drive => wsl_to_linux(path),
+        Platform::Wsl if windows_drive_path(path) => wsl_to_linux(path),
         _ if path.starts_with('/') && !path.contains('\0') => Ok(PathBuf::from(path)),
         _ => Err(bridge_error(
             "path_mapping_failed",

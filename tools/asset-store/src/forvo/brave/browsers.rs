@@ -516,11 +516,7 @@ fn identify_linux(path: &Path) -> Result<Installation, AssetError> {
 /// `/mnt/…/*.exe` разбирается как исполняемый файл Windows (только в WSL),
 /// остальное — как Linux-браузер.
 pub fn identify(path: &str, wsl: bool) -> Result<Installation, AssetError> {
-    let bytes = path.as_bytes();
-    let windows_drive = bytes.len() > 2
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/');
+    let windows_drive = super::windows_drive_path(path);
     let is_exe = path.to_ascii_lowercase().ends_with(".exe");
     if windows_drive || is_exe {
         if !wsl {
