@@ -39,7 +39,7 @@ fn source(responses: Vec<Result<Vec<u8>, AssetError>>) -> FakeSource {
         candidate_error: None,
     }
 }
-fn synthetic_mp3() -> Vec<u8> {
+pub(crate) fn synthetic_mp3() -> Vec<u8> {
     let workspace = crate::temp_workspace::TempWorkspace::create("forvo-synthetic-mp3").unwrap();
     let path = workspace.path().join("fixture.mp3");
     let status = std::process::Command::new("ffmpeg")
@@ -167,6 +167,7 @@ async fn cancellation_reloads_revision_without_rehashing_unchanged_blobs() {
             schema_version: 1,
             items,
         },
+        batch::Transport::CdpChromium,
     )
     .unwrap();
     let mut runtime = SafeBatchRuntime::open(store.root(), "poll").unwrap();
@@ -239,6 +240,7 @@ fn resume_reload_after_acquisition_reuses_verified_blob_cache() {
                 replace_expected_sha256: None,
             }],
         },
+        batch::Transport::CdpChromium,
     )
     .unwrap();
 
@@ -295,6 +297,7 @@ async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
                 },
             ],
         },
+        batch::Transport::CdpChromium,
     )
     .unwrap();
     let mut runtime = SafeBatchRuntime::open(store.root(), "terminal").unwrap();
@@ -316,7 +319,9 @@ async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
     let result = batch::resume(
         &store,
         "terminal",
-        &workspace.path().join("never-created"),
+        batch::Backend::Cdp {
+            profile: &workspace.path().join("never-created"),
+        },
         10,
     )
     .await
@@ -350,7 +355,7 @@ fn execution_lease_survives_releasing_state_lock_and_rejects_another_runner() {
     assert!(second.execution_lease().is_ok());
 }
 
-fn candidate(
+pub(crate) fn candidate(
     id: &str,
     votes: Option<i64>,
     gender: Option<Gender>,
@@ -777,6 +782,7 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
                     replace_expected_sha256: None,
                 }],
             },
+            batch::Transport::CdpChromium,
         )
         .unwrap();
         let mut source = source(vec![Err(error(
@@ -814,7 +820,9 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
         let resumed = batch::resume(
             &store,
             "recovery",
-            &workspace.path().join("unused-profile"),
+            batch::Backend::Cdp {
+                profile: &workspace.path().join("unused-profile"),
+            },
             1,
         )
         .await

@@ -158,6 +158,14 @@ lease сохраняет единственного исполнителя. `sta
 Формат прежних команд `batch-*` локального импорта сохранён. Один batch ID нельзя
 использовать для разных форматов.
 
+Транспорт пакета закреплён в его состоянии: `forvo batch-start` создаёт пакет
+`cdp_chromium`, а `forvo brave batch-start` — пакет `brave_extension` (обычный Brave,
+см. [адаптер Brave](forvo-brave.md#production-получение-и-пакеты)). Состояние
+`schema_version=1` без поля `transport` остаётся читаемым и означает CDP. Resume другим
+транспортом отвергается до запуска браузера (`transport_mismatch`). `batch-status` и
+`batch-cancel` показывают `effective_transport`. Происхождение аудио (`forvo_web`,
+`ForvoEvidence`) от транспорта не зависит.
+
 ## Диагностика и проверки
 
 Общий JSON-конверт содержит `schema_version`, `outcome` и `result`/`error`.
@@ -181,7 +189,7 @@ cookies, токенов, HTML и содержимого профиля.
 `download_listener_failed`, `download_not_supported`, `download_file_missing`,
 `download_read_failed`, `candidate_changed`, `candidate_disappeared`, `invalid_mp3`,
 `technical_validation_failed`,
-`rate_limited`, `browser_recovery_required`, `candidates_exhausted`.
+`rate_limited`, `browser_recovery_required`, `candidates_exhausted`, `transport_mismatch`.
 
 Offline-тесты адаптера требуют Chromium, но не обращаются к Forvo:
 
