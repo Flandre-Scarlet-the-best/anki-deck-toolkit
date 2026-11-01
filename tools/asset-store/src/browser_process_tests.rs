@@ -18,6 +18,8 @@ fn fake_browser(workspace: &TempWorkspace, name: &str, body: &str) -> BrowserLau
         executable: path,
         user_data_dir: workspace.path().join("profile"),
         tmpdir: workspace.path().display().to_string(),
+        persistent_visible: false,
+        persistent_profile: false,
         launch_timeout: Duration::from_secs(5),
     }
 }
@@ -311,6 +313,8 @@ async fn missing_executable_is_a_setup_error_without_process() {
         executable: workspace.path().join("missing"),
         user_data_dir: workspace.path().join("profile"),
         tmpdir: workspace.path().display().to_string(),
+        persistent_visible: false,
+        persistent_profile: false,
         launch_timeout: Duration::from_secs(1),
     };
     let failure = OwnedBrowserProcess::spawn(&spec).await.unwrap_err();
@@ -342,6 +346,8 @@ fn arguments_keep_chromiumoxide_defaults_and_session_options() {
         executable: "/bin/true".into(),
         user_data_dir: "/tmp/профиль".into(),
         tmpdir: "t".into(),
+        persistent_visible: false,
+        persistent_profile: false,
         launch_timeout: Duration::from_secs(1),
     };
     let arguments = spec.arguments();
@@ -361,6 +367,40 @@ fn arguments_keep_chromiumoxide_defaults_and_session_options() {
         );
     }
     assert!(!arguments.iter().any(|argument| argument == "--no-sandbox"));
+}
+
+#[test]
+fn persistent_visible_arguments_do_not_enable_incognito_or_headless() {
+    let spec = BrowserLaunchSpec {
+        executable: "/bin/true".into(),
+        user_data_dir: "/tmp/own-profile".into(),
+        tmpdir: "t".into(),
+        launch_timeout: Duration::from_secs(1),
+        persistent_visible: true,
+        persistent_profile: true,
+    };
+    let arguments = spec.arguments();
+    assert!(
+        !arguments
+            .iter()
+            .any(|a| matches!(a.as_str(), "--headless" | "--incognito"))
+    );
+    assert!(arguments.iter().any(|a| a == "--remote-debugging-port=0"));
+}
+
+#[test]
+fn persistent_background_is_headless_without_incognito() {
+    let spec = BrowserLaunchSpec {
+        executable: "/bin/true".into(),
+        user_data_dir: "/tmp/own-profile".into(),
+        tmpdir: "t".into(),
+        launch_timeout: Duration::from_secs(1),
+        persistent_visible: false,
+        persistent_profile: true,
+    };
+    let arguments = spec.arguments();
+    assert!(arguments.iter().any(|a| a == "--headless"));
+    assert!(!arguments.iter().any(|a| a == "--incognito"));
 }
 
 #[test]

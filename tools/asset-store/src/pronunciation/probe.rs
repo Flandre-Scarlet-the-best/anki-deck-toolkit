@@ -25,6 +25,14 @@ fn failure(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::ValidatorFailure, message)
 }
 
+fn infrastructure_failure(code: &str, message: impl Into<String>) -> AssetError {
+    AssetError::with_details(
+        ErrorCode::ValidatorFailure,
+        message,
+        serde_json::json!({"blocker":code}),
+    )
+}
+
 /// Полный обход границ MPEG Layer III отвергает усечённые кадры, мусор и
 /// изменяемые параметры потока ещё до запуска внешнего декодера.
 fn frames(bytes: &[u8]) -> Result<(u32, u32, u32, u64), AssetError> {
@@ -138,9 +146,10 @@ fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| {
-            failure(format!(
-                "не удалось запустить {tool}: требуются FFmpeg/ffprobe и prlimit в PATH"
-            ))
+            infrastructure_failure(
+                "audio_tool_start_failed",
+                format!("не удалось запустить {tool}: требуются FFmpeg/ffprobe и prlimit в PATH"),
+            )
         })?;
     let out = child.stdout.take().expect("pipe");
     let err = child.stderr.take().expect("pipe");
@@ -162,23 +171,35 @@ fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
             result => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(failure(if result.is_err() {
-                    "ошибка ожидания декодера"
-                } else {
-                    "декодер превысил 15 секунд"
-                }));
+                break Err(infrastructure_failure(
+                    "audio_tool_runtime_failed",
+                    if result.is_err() {
+                        "ошибка ожидания декодера"
+                    } else {
+                        "декодер превысил 15 секунд"
+                    },
+                ));
             }
         }
     };
     let output = stdout
         .join()
-        .map_err(|_| failure("сбой чтения stdout"))?
-        .map_err(|e| failure(e.to_string()))?;
+        .map_err(|_| infrastructure_failure("audio_tool_runtime_failed", "сбой чтения stdout"))?
+        .map_err(|e| infrastructure_failure("audio_tool_runtime_failed", e.to_string()))?;
     let errors = stderr
         .join()
-        .map_err(|_| failure("сбой чтения stderr"))?
-        .map_err(|e| failure(e.to_string()))?;
-    if !status?.success() || !errors.is_empty() || output.len() as u64 > limit {
+        .map_err(|_| infrastructure_failure("audio_tool_runtime_failed", "сбой чтения stderr"))?
+        .map_err(|e| infrastructure_failure("audio_tool_runtime_failed", e.to_string()))?;
+    let status = status?;
+    // prlimit использует 126/127, когда не удалось выполнить целевую программу;
+    // ошибки декодирования самого ffmpeg остаются предметными отказами.
+    if matches!(status.code(), Some(126 | 127)) {
+        return Err(infrastructure_failure(
+            "audio_tool_start_failed",
+            format!("не удалось выполнить {tool} через prlimit"),
+        ));
+    }
+    if !status.success() || !errors.is_empty() || output.len() as u64 > limit {
         // Не сохраняем stderr внешнего процесса: он может содержать пути/теги.
         return Err(failure(format!(
             "{tool}: ошибка декодирования, отсутствует инструмент или превышен предел вывода"
@@ -187,7 +208,14 @@ fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
     Ok(output)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static FULL_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn probe_mp3(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+    #[cfg(test)]
+    FULL_PROBES.with(|count| count.set(count.get() + 1));
     probe_inner(bytes).map_err(|mut error| {
         error.details["schema_version"] = serde_json::json!(1);
         error.details["sha256"] = serde_json::json!(sha256_hex(bytes));
@@ -197,15 +225,20 @@ pub fn probe_mp3(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
     })
 }
 
-fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+pub(super) fn inspect_frames(bytes: &[u8]) -> Result<(u32, u32, u32, u64), AssetError> {
     if bytes.is_empty() || bytes.len() as u64 > MAX_AUDIO_BYTES {
         return Err(failure("MP3 должен содержать 1–8388608 байт"));
     }
-    let (sample_rate, channels, frame_count, encoded_samples) = frames(bytes)?;
-    let workspace =
-        TempWorkspace::create("pronunciation-probe").map_err(|e| failure(e.to_string()))?;
+    frames(bytes)
+}
+
+fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+    let (sample_rate, channels, frame_count, encoded_samples) = inspect_frames(bytes)?;
+    let workspace = TempWorkspace::create("pronunciation-probe")
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
     let path = workspace.path().join("input.mp3");
-    std::fs::write(&path, bytes).map_err(|e| failure(e.to_string()))?;
+    std::fs::write(&path, bytes)
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
     let name = path
         .to_str()
         .ok_or_else(|| failure("временный путь должен быть UTF-8"))?;

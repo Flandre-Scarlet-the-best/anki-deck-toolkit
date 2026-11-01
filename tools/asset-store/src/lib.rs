@@ -19,6 +19,7 @@ pub mod cli;
 pub mod diagnostics;
 pub mod domain;
 pub mod error;
+pub mod forvo;
 pub mod hashing;
 mod inference;
 mod inference_cli;

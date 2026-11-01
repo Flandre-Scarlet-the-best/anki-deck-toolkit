@@ -44,6 +44,7 @@ JSON, в котором исполнитель записывает измере
 | `asset-store.ingest` | `short-cli` | `warm` |
 | `asset-store.ingest-contention` | `short-cli` | `warm` |
 | `asset-store.batch-reopen` | `short-cli` | `warm` |
+| `asset-store.batch-resume-reload` | `short-cli` | `warm` |
 | `asset-store.batch-checkpoint` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-noop` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-cpu` | `short-cli` | `warm` |

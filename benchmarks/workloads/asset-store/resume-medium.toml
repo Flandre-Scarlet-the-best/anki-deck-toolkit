@@ -1,0 +1,12 @@
+# Пакет Forvo: 64 цикла повторного захвата блокировки, 64 blob по 16 KiB.
+generator = 1
+domain = "generic"
+seed = 41
+assets = 1
+png_every = 0
+image_side = 8
+reads = 1
+ingest = 1
+batch_entries = 64
+batch_blobs = 64
+blob_bytes = 16384

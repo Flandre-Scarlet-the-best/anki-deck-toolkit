@@ -54,6 +54,7 @@ assert_included() {
 # приватный журнал операций. Имена экспортов здесь синтетические: проверка
 # принадлежит `.gitignore`, а не составу рабочих колод пользователя.
 ignored_paths=(
+  '.codex/local/forvo-profile/Default/Cookies'
   '.asset-store/kanji/.owner.json'
   '.asset-store/kanji/manifest.json'
   '.asset-store/kanji/.lock'
