@@ -112,6 +112,14 @@ enum Action {
 
 #[derive(Subcommand)]
 enum ForvoAction {
+    /// Обычный Brave пользователя через собственное расширение и loopback bridge.
+    Brave {
+        /// Приватный каталог сопряжения, журналов и свидетельств вне репозитория.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        action: BraveAction,
+    },
     /// Войдите вручную в открывшемся окне; пароль не передаётся CLI.
     Login {
         #[arg(long, default_value_t = 300, value_parser=clap::value_parser!(u64).range(1..=1800))]
@@ -155,6 +163,51 @@ enum ForvoAction {
     BatchCancel {
         #[arg(long)]
         batch_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BraveAction {
+    /// Подготовить каталог расширения и секрет сопряжения; повтор обновляет код.
+    Setup {
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
+        #[arg(long, value_parser=clap::value_parser!(u16).range(1024..))]
+        port: Option<u16>,
+        #[arg(long)]
+        rotate_secret: bool,
+    },
+    /// Проверить соединение, задержку, loopback и (по флагам) Forvo и восстановление.
+    Doctor {
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        forvo: bool,
+        #[arg(long)]
+        reconnect: bool,
+        #[arg(long)]
+        reload: bool,
+    },
+    /// Живая проверка одной записи: вкладка, вход, кандидаты, загрузка и MP3.
+    Smoke {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        probe_downloads_api: bool,
+        #[arg(long)]
+        close_tab: bool,
+        /// Оставить собственный скачанный MP3 в загрузках браузера (по умолчанию удаляется после копии в свидетельства).
+        #[arg(long)]
+        keep_download: bool,
+    },
+    /// Закрыть собственную вкладку адаптера.
+    Close {
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
     },
 }
 
@@ -559,6 +612,7 @@ fn execute_forvo(
     let runtime = tokio::runtime::Runtime::new().map_err(|e| AssetError::io("runtime", e))?;
     let result=runtime.block_on(async {
         match action {
+            ForvoAction::Brave{state_dir,action}=>run_brave(state_dir.as_deref(),action,output).await,
             ForvoAction::BatchStatus{batch_id}=>Ok(serde_json::json!(forvo::batch::status(&open_store(false)?,batch_id)?)),
             ForvoAction::BatchCancel{batch_id}=>Ok(serde_json::json!(forvo::batch::cancel(&open_store(false)?,batch_id)?)),
             ForvoAction::BatchStart{batch_id,plan,max_items}=>{
@@ -689,6 +743,131 @@ async fn run_forvo_batch_logged(
         error
     })?;
     let mut value = serde_json::to_value(batch).expect("состояние Forvo сериализуется");
+    value["diagnostic_log"] = serde_json::json!(path);
+    Ok(value)
+}
+
+async fn run_brave(
+    state_dir: Option<&Path>,
+    action: &BraveAction,
+    output: Output,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::diagnostics::{OutputMode, RunLogGuard};
+    use crate::forvo::brave::{self, acceptance};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::time::Duration;
+    use tracing::instrument::WithSubscriber;
+
+    let state_dir = match state_dir {
+        Some(dir) => {
+            std::path::absolute(dir).map_err(|e| AssetError::io("каталог состояния Brave", e))?
+        }
+        None => brave::default_state_dir()?,
+    };
+    let logs = state_dir.join("logs");
+    brave::private_dir(&logs)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = logs.join(format!("{stamp}-{}.ndjson", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| AssetError::io("журнал адаптера Brave", e))?;
+    let guard = RunLogGuard::new(
+        file,
+        match output {
+            Output::Json => OutputMode::Json,
+            Output::Text => OutputMode::Human,
+        },
+    );
+    let (interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
+    let work = async {
+        match action {
+            BraveAction::Setup {
+                install_dir,
+                port,
+                rotate_secret,
+            } => brave::setup(&brave::SetupOptions {
+                state_dir: state_dir.clone(),
+                install_dir: install_dir.clone(),
+                port: *port,
+                rotate_secret: *rotate_secret,
+                platform: None,
+            }),
+            BraveAction::Doctor {
+                wait_seconds,
+                forvo,
+                reconnect,
+                reload,
+            } => acceptance::report_error(
+                acceptance::doctor(&acceptance::DoctorOptions {
+                    state_dir: state_dir.clone(),
+                    wait: Duration::from_secs(*wait_seconds),
+                    forvo: *forvo,
+                    reconnect: *reconnect,
+                    reload: *reload,
+                })
+                .await?,
+            ),
+            BraveAction::Smoke {
+                surface,
+                reading,
+                wait_seconds,
+                probe_downloads_api,
+                close_tab,
+                keep_download,
+            } => acceptance::report_error(
+                acceptance::smoke(acceptance::SmokeOptions {
+                    state_dir: state_dir.clone(),
+                    wait: Duration::from_secs(*wait_seconds),
+                    surface: surface.clone(),
+                    reading: reading.clone(),
+                    probe_downloads_api: *probe_downloads_api,
+                    close_tab: *close_tab,
+                    keep_download: *keep_download,
+                    limits: brave::download::Limits::default(),
+                    interrupt: Some(interrupt_rx.clone()),
+                })
+                .await?,
+            ),
+            BraveAction::Close { wait_seconds } => {
+                acceptance::close(&state_dir, Duration::from_secs(*wait_seconds)).await
+            }
+        }
+    };
+    // Ctrl+C: работа получает сигнал и освобождает собственную операцию загрузки;
+    // повторный Ctrl+C или истечение отсрочки закрывают только соединение bridge.
+    // Brave, вкладки пользователя и настройки не трогаются.
+    let work = work.with_subscriber(guard.dispatch());
+    tokio::pin!(work);
+    let result = tokio::select! {
+        result = &mut work => result,
+        _ = tokio::signal::ctrl_c() => {
+            let _ = interrupt_tx.send(true);
+            tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(20), &mut work) => match result {
+                    Ok(Err(error)) => Err(error),
+                    _ => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана; соединение с расширением закрыто, браузер не изменён")),
+                },
+                _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана повторно; соединение с расширением закрыто")),
+            }
+        }
+    };
+    let logged = guard.finish();
+    let mut value = result.map_err(|mut error| {
+        error.details["diagnostic_log"] = serde_json::json!(path);
+        error
+    })?;
+    if logged.is_err() {
+        return Err(AssetError::new(
+            ErrorCode::IoFailure,
+            "Не удалось сохранить диагностический журнал адаптера Brave",
+        ));
+    }
     value["diagnostic_log"] = serde_json::json!(path);
     Ok(value)
 }

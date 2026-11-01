@@ -263,6 +263,96 @@ pub fn render_markdown(report: &Value) -> String {
     out
 }
 
+/// Сводка браузерного набора Forvo-Brave из того же JSON, что сохраняется рядом.
+#[cfg(feature = "browser")]
+pub fn render_browser_markdown(report: &Value) -> String {
+    let mut out = String::new();
+    let s = |v: &Value| {
+        v.as_str().map(str::to_owned).unwrap_or_else(|| {
+            if v.is_null() {
+                "—".into()
+            } else {
+                v.to_string()
+            }
+        })
+    };
+    let _ = writeln!(out, "# Отчёт E2E браузерного адаптера Forvo-Brave\n");
+    let _ = writeln!(out, "- Итог: **{}**", s(&report["status"]));
+    let _ = writeln!(out, "- Прогон: `{}`", s(&report["run_id"]));
+    let _ = writeln!(
+        out,
+        "- Начало / конец: {} / {}",
+        s(&report["started_at"]),
+        s(&report["finished_at"])
+    );
+    let _ = writeln!(
+        out,
+        "- Ревизия: `{}`, dirty={}",
+        s(&report["source"]["commit"]),
+        s(&report["source"]["dirty"])
+    );
+    let _ = writeln!(out, "- Граница: {}", s(&report["boundary"]));
+    if let Some(stop) = report.get("stop").filter(|v| !v.is_null()) {
+        let _ = writeln!(
+            out,
+            "- Остановка: **{}** на стадии `{}` — `{}`: {}",
+            s(&stop["status"]),
+            s(&stop["stage"]),
+            s(&stop["reason"]),
+            s(&stop["message"])
+        );
+    }
+    let _ = writeln!(out, "\n## Окружение\n");
+    let _ = writeln!(
+        out,
+        "- Браузер: `{}` ({})",
+        s(&report["browser"]["version"]),
+        s(&report["browser"]["executable"])
+    );
+    let _ = writeln!(out, "- Fixture: {}", s(&report["fixture"]["origin"]));
+    let _ = writeln!(
+        out,
+        "- Запись A `{}`: SHA-256 `{}`",
+        s(&report["fixture"]["record_a"]["record_id"]),
+        s(&report["fixture"]["record_a"]["sha256"])
+    );
+    let _ = writeln!(
+        out,
+        "- Запись B `{}`: SHA-256 `{}`",
+        s(&report["fixture"]["record_b"]["record_id"]),
+        s(&report["fixture"]["record_b"]["sha256"])
+    );
+    let _ = writeln!(out, "- Bridge: `{}`", s(&report["adapter"]["bridge"]));
+    if let Some(scenarios) = report["scenarios"].as_array() {
+        let _ = writeln!(out, "\n## Сценарии\n");
+        let _ = writeln!(out, "| Сценарий | Статус | Длительность, с | Причина |");
+        let _ = writeln!(out, "|---|---|---|---|");
+        for sc in scenarios {
+            let _ = writeln!(
+                out,
+                "| `{}` | **{}** | {:.1} | {} |",
+                s(&sc["name"]),
+                s(&sc["status"]),
+                sc["duration_s"].as_f64().unwrap_or(0.0),
+                markdown_cell(&s(&sc["reason"]))
+            );
+        }
+        for sc in scenarios {
+            let _ = writeln!(out, "\n### `{}` — {}\n", s(&sc["name"]), s(&sc["status"]));
+            for check in sc["checks"].as_array().into_iter().flatten() {
+                let mark = if check["ok"] == true { "✔" } else { "✘" };
+                let _ = writeln!(out, "- {mark} {}", s(&check["what"]));
+            }
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\n## Уборка\n\n- {}",
+        serde_json::to_string(&report["cleanup"]).unwrap_or_default()
+    );
+    out
+}
+
 fn markdown_cell(text: &str) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let short: String = flat.chars().take(220).collect();
@@ -286,6 +376,21 @@ mod tests {
         assert_eq!(overall([Status::Fail, Status::Error]), Status::Error);
         assert_eq!(overall([]), Status::Skipped);
         assert_ne!(overall([Status::Skipped]).exit_code(), 0);
+    }
+
+    #[cfg(feature = "browser")]
+    #[test]
+    fn browser_markdown_lists_every_scenario_and_failed_check() {
+        let report = json!({
+            "status":"FAIL","run_id":"r","source":{"commit":"c","dirty":false},
+            "scenarios":[{"name":"full_download","status":"FAIL","duration_s":1.0,"reason":"проверка не выполнена",
+                "checks":[{"what":"байты совпадают","ok":false},{"what":"очистка","ok":true}]}]
+        });
+        let text = render_browser_markdown(&report);
+        assert!(text.contains("Итог: **FAIL**"));
+        assert!(text.contains("| `full_download` | **FAIL** |"));
+        assert!(text.contains("- ✘ байты совпадают"));
+        assert!(text.contains("- ✔ очистка"));
     }
 
     #[test]

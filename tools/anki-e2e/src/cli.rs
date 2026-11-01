@@ -54,6 +54,9 @@ pub enum Command {
         #[arg(long)]
         work_dir: Option<PathBuf>,
     },
+    /// Браузерный набор Forvo-Brave: тестовый Chromium с расширением, fixture и bridge (без Docker и Anki).
+    #[cfg(feature = "browser")]
+    Browser(crate::browser::BrowserArgs),
     /// Внутренний режим исполнителя в контейнере (запускается runner).
     #[command(hide = true)]
     Agent(AgentArgs),
@@ -209,6 +212,27 @@ mod tests {
         let (_, scenarios, args) = cli.command.suite().unwrap();
         assert_eq!(scenarios, ["smoke", "patch"]);
         assert_eq!(args.release.anki_version.as_deref(), Some("26.09.2"));
+    }
+
+    #[cfg(feature = "browser")]
+    #[test]
+    fn browser_suite_is_a_separate_command_with_scenario_list() {
+        let cli = Cli::try_parse_from([
+            "anki-e2e",
+            "browser",
+            "--scenarios",
+            "full_download,save_as_prompt",
+            "--chrome",
+            "/opt/chromium/chrome",
+        ])
+        .unwrap();
+        let Command::Browser(args) = &cli.command else {
+            panic!("expected browser command");
+        };
+        assert_eq!(args.scenarios, ["full_download", "save_as_prompt"]);
+        assert!(!args.keep_profiles);
+        // Браузерный набор не выбирает Docker-сценарии Anki.
+        assert!(cli.command.suite().is_none());
     }
 
     #[test]

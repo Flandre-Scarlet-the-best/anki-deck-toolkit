@@ -16,11 +16,12 @@ ENV RUSTUP_TOOLCHAIN=${RUST_VERSION} \
     CARGO_TERM_COLOR=never
 WORKDIR /src
 COPY src/ /src/
+# Браузерный набор Forvo-Brave исполняется на хосте; в образ Anki его feature не входит.
 RUN --mount=type=cache,id=anki-e2e-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=anki-e2e-cargo-target,target=/src/target,sharing=locked \
     find /src/target -mindepth 1 -maxdepth 1 -type d -name '????????????????????????????????????????????????????????????????' -print -exec rm -rf -- {} + \
  && cargo clean --locked -p anki-repo -p anki-e2e \
- && cargo build --locked -p anki-repo -p anki-e2e \
+ && cargo build --locked -p anki-repo -p anki-e2e --no-default-features \
  && mkdir -p /out \
  && cp /src/target/debug/anki-repo /src/target/debug/anki-e2e /out/
 
