@@ -5,6 +5,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 pub mod batch;
+pub mod brave;
 mod candidates;
 mod download;
 mod evidence;
@@ -330,17 +331,18 @@ impl ForvoSession {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct AuthObservation {
-    same_origin: bool,
-    status: u16,
-    challenge: bool,
-    logout: bool,
-    login: bool,
-    ready: bool,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthObservation {
+    pub same_origin: bool,
+    pub status: u16,
+    pub challenge: bool,
+    pub logout: bool,
+    pub login: bool,
+    pub ready: bool,
 }
 impl AuthObservation {
-    fn state(&self) -> AuthState {
+    pub(crate) fn state(&self) -> AuthState {
         if !self.same_origin {
             return AuthState::SiteUnavailable;
         }
