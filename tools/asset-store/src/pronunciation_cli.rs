@@ -276,8 +276,8 @@ enum RunAction {
         #[arg(long)]
         close_tab: bool,
     },
-    /// Создать пакет расширения и начать его выполнение; пакет закрепляется
-    /// за первой подключённой браузерной сессией.
+    /// Создать пакет расширения и начать его выполнение; выбранная цель
+    /// сохраняется до подключения, затем пакет закрепляется за сессией.
     BatchStart {
         #[arg(long)]
         batch_id: String,
@@ -795,10 +795,15 @@ fn execute_forvo(
                 let (state_dir,target,command)=adapter_command(action)?.expect("команда адаптера");
                 match command {
                     AdapterCommand::Run(RunAction::BatchStart{batch_id,plan,max_items,wait_seconds,close_tab})=>{
-                        let options=brave_options(&state_dir,target,*wait_seconds,*close_tab);
+                        let mut options=brave_options(&state_dir,target,*wait_seconds,*close_tab);
                         let plan=read_plan(plan,protected)?;
+                        let resolved_target=forvo::brave::targets::load_target(
+                            &state_dir,
+                            options.target.as_deref(),
+                        )?.target;
+                        options.target=Some(resolved_target.clone());
                         let store=open_store(true)?;
-                        forvo::batch::start(&store,batch_id,plan,forvo::batch::Transport::BraveExtension)?;
+                        forvo::batch::start_with_browser_target(&store,batch_id,plan,resolved_target)?;
                         run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output).await
                     }
                     AdapterCommand::Run(RunAction::BatchResume{batch_id,max_items,wait_seconds,close_tab})=>{

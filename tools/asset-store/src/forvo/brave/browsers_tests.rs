@@ -363,9 +363,8 @@ fn version_script(temp: &TempWorkspace, name: &str, body: &str) -> std::path::Pa
     path
 }
 
-/// Тот же запуск, что у `version_output_within`, но с повтором только при
-/// ETXTBSY до создания процесса: параллельный тест мог унаследовать дескриптор
-/// записи недавно созданной фикстуры. Время меряется от успешного запуска.
+/// Тестовый запуск с настраиваемым timeout; повтор нужен здесь, потому что
+/// помощник вызывает `version_command` напрямую, минуя `version_output_within`.
 fn timed_version(path: &std::path::Path, timeout: Duration) -> (Option<String>, Duration) {
     let retry_until = std::time::Instant::now() + Duration::from_secs(1);
     let child = loop {
@@ -382,6 +381,24 @@ fn timed_version(path: &std::path::Path, timeout: Duration) -> (Option<String>, 
     let started = std::time::Instant::now();
     let output = read_version(child, started + timeout);
     (output, started.elapsed())
+}
+
+#[test]
+fn version_output_retries_text_file_busy_until_executable_is_available() {
+    use std::fs::OpenOptions;
+
+    let temp = TempWorkspace::create("browser-version-etxtbsy").unwrap();
+    let path = version_script(&temp, "brave", "echo 'Brave Browser 156.1.98.63'");
+    let writable = OpenOptions::new().write(true).open(&path).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        drop(writable);
+    });
+
+    let output = super::version_output_within(&path, Duration::from_secs(2));
+    release.join().unwrap();
+
+    assert_eq!(output.as_deref(), Some("Brave Browser 156.1.98.63\n"));
 }
 
 #[test]

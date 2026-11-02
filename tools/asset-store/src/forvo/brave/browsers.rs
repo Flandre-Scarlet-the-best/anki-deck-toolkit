@@ -419,7 +419,18 @@ const VERSION_EXIT_GRACE: Duration = Duration::from_millis(500);
 /// pipe не блокирует процесс, а память не растёт без предела.
 fn version_output_within(path: &Path, timeout: Duration) -> Option<String> {
     let deadline = std::time::Instant::now() + timeout;
-    read_version(version_command(path).spawn().ok()?, deadline)
+    let child = loop {
+        match version_command(path).spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(rustix::io::Errno::TXTBSY.raw_os_error())
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => break result.ok()?,
+        }
+    };
+    read_version(child, deadline)
 }
 
 fn version_command(path: &Path) -> std::process::Command {

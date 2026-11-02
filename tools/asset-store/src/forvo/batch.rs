@@ -133,7 +133,8 @@ pub struct Item {
 pub struct ForvoBatch {
     /// 1 — пакет без поля `transport` (до Brave): всегда CDP, состояние не
     /// переписывается в новую версию. 2 — транспорт закреплён явно. 3 —
-    /// транспорт расширения с закреплённой браузерной сессией (`browser`).
+    /// транспорт расширения с закреплённой браузерной сессией (`browser`). 4 —
+    /// цель расширения (`target`) сохраняется ещё до первого подключения.
     pub schema_version: u32,
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +143,9 @@ pub struct ForvoBatch {
     /// и дальше не меняется (кроме дополнения экземпляра того же расширения).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<BrowserBinding>,
+    /// Выбранная цель пакета версии 4; сохраняется до подключения расширения.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     pub batch_id: String,
     pub revision: u64,
     pub cancelled: bool,
@@ -182,10 +186,22 @@ impl RuntimeBatchState for ForvoBatch {
             .collect()
     }
     fn validate(&self) -> Result<(), AssetError> {
-        let transport_ok = matches!(
-            (self.schema_version, self.transport, &self.browser),
-            (1, None, None) | (2, Some(_), None) | (3, Some(Transport::BraveExtension), _)
-        );
+        let transport_ok = match (
+            self.schema_version,
+            self.transport,
+            &self.browser,
+            self.target.as_deref(),
+        ) {
+            (1, None, None, None) | (2, Some(_), None, None) => true,
+            (3, Some(Transport::BraveExtension), _, None) => true,
+            (4, Some(Transport::BraveExtension), browser, Some(target)) => {
+                super::brave::targets::valid_target_name(target)
+                    && browser
+                        .as_ref()
+                        .is_none_or(|binding| binding.target == target)
+            }
+            _ => false,
+        };
         if !transport_ok
             || self.provider != "forvo_web"
             || self.items.is_empty()
@@ -229,7 +245,36 @@ pub fn start(
     plan: FetchPlan,
     transport: Transport,
 ) -> Result<ForvoBatch, AssetError> {
+    start_inner(store, id, plan, transport, None)
+}
+
+/// Создаёт пакет расширения с уже разрешённой целью до первого подключения.
+pub(crate) fn start_with_browser_target(
+    store: &AssetStore,
+    id: &str,
+    plan: FetchPlan,
+    target: String,
+) -> Result<ForvoBatch, AssetError> {
+    if !super::brave::targets::valid_target_name(&target) {
+        return Err(AssetError::new(
+            ErrorCode::InvalidIdentity,
+            "некорректная цель браузера для Forvo-пакета",
+        ));
+    }
+    start_inner(store, id, plan, Transport::BraveExtension, Some(target))
+}
+
+fn start_inner(
+    store: &AssetStore,
+    id: &str,
+    plan: FetchPlan,
+    transport: Transport,
+    target: Option<String>,
+) -> Result<ForvoBatch, AssetError> {
     if plan.schema_version != 1 || plan.items.is_empty() || plan.items.len() > MAX_BATCH_ITEMS {
+        return Err(invalid());
+    }
+    if transport != Transport::BraveExtension && target.is_some() {
         return Err(invalid());
     }
     let items = plan
@@ -245,14 +290,15 @@ pub fn start(
         })
         .collect::<Result<Vec<_>, AssetError>>()?;
     let batch = ForvoBatch {
-        schema_version: if transport == Transport::BraveExtension {
-            3
-        } else {
-            2
+        schema_version: match transport {
+            Transport::BraveExtension if target.is_some() => 4,
+            Transport::BraveExtension => 3,
+            Transport::CdpChromium => 2,
         },
         provider: "forvo_web".into(),
         transport: Some(transport),
         browser: None,
+        target,
         batch_id: id.into(),
         revision: 0,
         cancelled: false,
@@ -326,12 +372,20 @@ fn retryable_import(error: &AssetError) -> bool {
 }
 
 fn transport_mismatch(id: &str, batch: &ForvoBatch, requested: Transport) -> AssetError {
-    let command = match (&batch.browser, batch.transport()) {
-        (Some(binding), Transport::BraveExtension) => format!(
-            "{} batch-resume",
-            super::brave::targets::command_prefix(&binding.target)
-        ),
-        (_, transport) => transport.resume_command().to_owned(),
+    let command = match batch.transport() {
+        Transport::CdpChromium => Transport::CdpChromium.resume_command().to_owned(),
+        Transport::BraveExtension => batch
+            .browser
+            .as_ref()
+            .map(|binding| binding.target.as_str())
+            .or(batch.target.as_deref())
+            .map(|target| {
+                format!(
+                    "{} batch-resume",
+                    super::brave::targets::command_prefix(target)
+                )
+            })
+            .unwrap_or_else(|| Transport::BraveExtension.resume_command().to_owned()),
     };
     AssetError::with_details(
         ErrorCode::InvalidTransition,
@@ -354,6 +408,7 @@ fn bound_options(
     let required = match (&batch.browser, batch.schema_version) {
         (Some(binding), _) => Some(binding.target.clone()),
         (None, 2) => Some(super::brave::LEGACY_TARGET.to_owned()),
+        (None, 4) => batch.target.clone(),
         (None, _) => None,
     };
     if let (Some(required), Some(requested)) = (&required, &options.target)
@@ -683,7 +738,9 @@ pub async fn resume(
                         tracing::info!(event = "forvo_batch_browser_bound", stage = "acquire", target = %actual.target,
                             browser = actual.browser.id(), "Пакет закреплён за браузерной сессией");
                         batch.browser = Some(actual);
-                        batch.schema_version = 3;
+                        if batch.schema_version == 2 {
+                            batch.schema_version = 3;
+                        }
                         batch.revision += 1;
                         runtime.save(&batch)?;
                     }
@@ -945,5 +1002,65 @@ mod cleanup_tests {
             serde_json::from_value(serde_json::json!({"code":"interrupted","message":"остановка"}))
                 .unwrap();
         assert!(!old.recovery_required);
+    }
+}
+
+#[cfg(test)]
+mod browser_target_tests {
+    use super::*;
+
+    #[test]
+    fn extension_batch_persists_target_before_first_connection() {
+        let workspace = crate::temp_workspace::TempWorkspace::create("forvo-batch-target").unwrap();
+        let store = AssetStore::open_with_policy(
+            crate::StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let plan = FetchPlan {
+            schema_version: 1,
+            items: vec![FetchItem {
+                surface: "水".into(),
+                reading: "みず".into(),
+                replace_expected_sha256: None,
+            }],
+        };
+
+        let batch = start_with_browser_target(&store, "targeted", plan, "chrome".into()).unwrap();
+
+        assert_eq!(batch.schema_version, 4);
+        assert_eq!(batch.target.as_deref(), Some("chrome"));
+        assert!(batch.browser.is_none());
+        let saved = status(&store, "targeted").unwrap();
+        assert_eq!(saved.target.as_deref(), Some("chrome"));
+        assert!(saved.browser.is_none());
+
+        let options = BraveOptions {
+            state_dir: workspace.path().join("adapter"),
+            target: None,
+            binding: None,
+            wait: Duration::from_secs(1),
+            limits: super::super::brave::download::Limits::default(),
+            close_tab: false,
+        };
+        let adjusted = bound_options("targeted", &saved, &options).unwrap();
+        assert_eq!(adjusted.target.as_deref(), Some("chrome"));
+
+        let wrong_target = BraveOptions {
+            target: Some("brave".into()),
+            ..options
+        };
+        let error = bound_options("targeted", &saved, &wrong_target).unwrap_err();
+        assert_eq!(provider_code(&error), "browser_mismatch");
+        assert_eq!(
+            error.details["next_action"],
+            "pronunciation-assets forvo browser --target chrome batch-resume --batch-id targeted"
+        );
+
+        let error = transport_mismatch("targeted", &saved, Transport::CdpChromium);
+        assert_eq!(
+            error.details["next_action"],
+            "pronunciation-assets forvo browser --target chrome batch-resume --batch-id targeted"
+        );
     }
 }
