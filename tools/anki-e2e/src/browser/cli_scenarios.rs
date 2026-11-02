@@ -21,6 +21,7 @@ use std::time::Duration;
 /// Запуск CLI с отдельным тестовым хранилищем сценария и каталогом сопряжения прогона.
 pub struct Cli {
     bin: PathBuf,
+    target: String,
     repo: PathBuf,
     pub store: PathBuf,
     state: PathBuf,
@@ -53,6 +54,7 @@ impl Cli {
     pub fn new(env: &Env) -> Option<Cli> {
         Some(Cli {
             bin: env.ctx.cli.clone()?,
+            target: env.ctx.target.clone(),
             repo: env.ctx.repo.clone(),
             store: env.dir.join("store"),
             state: env.ctx.state_dir.clone(),
@@ -70,8 +72,16 @@ impl Cli {
             .arg("--store")
             .arg(&self.store)
             .arg("forvo");
-        if brave {
+        if brave && self.target == asset_store::forvo::brave::LEGACY_TARGET {
+            // Прежний интерфейс `forvo brave` остаётся рабочим для цели brave.
             command.arg("brave").arg("--state-dir").arg(&self.state);
+        } else if brave {
+            command
+                .arg("browser")
+                .arg("--state-dir")
+                .arg(&self.state)
+                .arg("--target")
+                .arg(&self.target);
         } else {
             command.arg("--profile").arg(&self.profile);
         }
