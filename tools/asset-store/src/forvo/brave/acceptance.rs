@@ -789,12 +789,21 @@ async fn downloads_api_probe(
         Some("complete") => {
             let id = value["download_id"].clone();
             let checked = (|| {
-                let path = browser_path_to_local(platform, value["filename"].as_str().unwrap_or_default())?;
+                let path = browser_path_to_local(
+                    platform,
+                    value["filename"].as_str().unwrap_or_default(),
+                )?;
                 let bytes = download::read_regular(&path, MAX_AUDIO_BYTES)?;
                 let probe = probe_mp3(&bytes)?;
                 Ok::<_, AssetError>((path, bytes.len(), sha256_hex(&bytes), probe))
             })();
-            let cleanup = bridge.call("download_cleanup", json!({"download_id":id}), Duration::from_secs(10)).await;
+            let cleanup = bridge
+                .call(
+                    "download_cleanup",
+                    json!({"download_id":id}),
+                    Duration::from_secs(10),
+                )
+                .await;
             match checked {
                 Ok((path, length, file_sha, probe)) => {
                     let same = file_sha == sha;
@@ -802,7 +811,9 @@ async fn downloads_api_probe(
                     let status = downloads_api_file_status(same, &cleanup, file_removed);
                     let cleanup_evidence = match &cleanup {
                         Ok(value) => value.clone(),
-                        Err(error) => json!({"error":{"code":error.code.as_str(),"message":error.message}}),
+                        Err(error) => {
+                            json!({"error":{"code":error.code.as_str(),"message":error.message}})
+                        }
                     };
                     report.push("downloads_api_file", status, json!({"download_id":id,
                         "file_name":path.file_name().map(|n| n.to_string_lossy().into_owned()),
@@ -812,10 +823,37 @@ async fn downloads_api_probe(
                 Err(e) => report.fail("downloads_api_file", &e),
             }
         }
-        Some("save_as_prompt_suspected") => report.push("downloads_api_file", Status::Blocked, json!({"code":"save_as_prompt_suspected","api":"chrome.downloads.download({saveAs:false})",
-            "observed":value,"meaning":"настройка «Спрашивать, куда сохранять» открывает выбор пути; загрузка отменена и удалена из истории"})),
-        _ => report.push("downloads_api_file", Status::Fail, value),
+        Some("save_as_prompt_suspected") => {
+            let cleanup = cleanup_download_if_present(bridge, &value).await;
+            report.push("downloads_api_file", Status::Blocked, json!({"code":"save_as_prompt_suspected","api":"chrome.downloads.download({saveAs:false})",
+                "observed":value,"cleanup":cleanup,"meaning":"настройка «Спрашивать, куда сохранять» открывает выбор пути; загрузка отменена, очистка истории проверена отдельно"}));
+        }
+        _ => {
+            let cleanup = cleanup_download_if_present(bridge, &value).await;
+            report.push(
+                "downloads_api_file",
+                Status::Fail,
+                json!({"observed":value,"cleanup":cleanup}),
+            );
+        }
     }
+}
+
+async fn cleanup_download_if_present(bridge: &mut Bridge, value: &Value) -> Option<Value> {
+    let id = value["download_id"].as_u64()?;
+    Some(
+        match bridge
+            .call(
+                "download_cleanup",
+                json!({"download_id":id}),
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => json!({"error":{"code":provider_code(&error),"message":error.message}}),
+        },
+    )
 }
 
 fn downloads_api_file_status(

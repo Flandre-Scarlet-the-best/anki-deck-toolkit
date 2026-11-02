@@ -570,7 +570,6 @@ async function downloadsApi(args, signal) {
         // Пока имя пусто, Chromium ждёт выбора пути пользователем.
         if (!item.filename && elapsed >= promptMs) {
             await chrome.downloads.cancel(created).catch(() => {});
-            await chrome.downloads.erase({id: created}).catch(() => {});
             return {code: 'save_as_prompt_suspected', download_id: created, waited_ms: elapsed};
         }
         if (elapsed >= timeout) {

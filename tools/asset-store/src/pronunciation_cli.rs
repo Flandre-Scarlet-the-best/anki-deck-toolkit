@@ -844,9 +844,11 @@ async fn run_brave(
     // Brave, вкладки пользователя и настройки не трогаются.
     let work = work.with_subscriber(guard.dispatch());
     tokio::pin!(work);
+    let graceful_interrupt = waits_for_brave_smoke_cleanup(action);
     let result = tokio::select! {
         result = &mut work => result,
-        _ = tokio::signal::ctrl_c() => {
+        _ = tokio::signal::ctrl_c(), if !graceful_interrupt => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана; соединение с расширением закрыто, браузер не изменён")),
+        _ = tokio::signal::ctrl_c(), if graceful_interrupt => {
             let _ = interrupt_tx.send(true);
             tokio::select! {
                 result = tokio::time::timeout(Duration::from_secs(20), &mut work) => match result {
@@ -858,6 +860,10 @@ async fn run_brave(
         }
     };
     finish_brave_run(result, guard.finish(), &path)
+}
+
+fn waits_for_brave_smoke_cleanup(action: &BraveAction) -> bool {
+    matches!(action, BraveAction::Smoke { .. })
 }
 
 fn finish_brave_run(
@@ -894,7 +900,7 @@ fn finish_brave_run(
 
 #[cfg(test)]
 mod tests {
-    use super::finish_brave_run;
+    use super::{BraveAction, finish_brave_run, waits_for_brave_smoke_cleanup};
     use crate::{AssetError, ErrorCode};
     use serde_json::json;
 
@@ -935,5 +941,34 @@ mod tests {
                 .unwrap()
                 .contains("disk full")
         );
+    }
+
+    #[test]
+    fn only_smoke_waits_for_its_download_cleanup_after_ctrl_c() {
+        let smoke = BraveAction::Smoke {
+            surface: "元気".into(),
+            reading: "げんき".into(),
+            wait_seconds: 45,
+            probe_downloads_api: false,
+            close_tab: false,
+            keep_download: false,
+        };
+        let setup = BraveAction::Setup {
+            install_dir: None,
+            port: None,
+            rotate_secret: false,
+        };
+        let doctor = BraveAction::Doctor {
+            wait_seconds: 45,
+            forvo: false,
+            reconnect: false,
+            reload: false,
+        };
+        let close = BraveAction::Close { wait_seconds: 45 };
+
+        assert!(waits_for_brave_smoke_cleanup(&smoke));
+        assert!(!waits_for_brave_smoke_cleanup(&setup));
+        assert!(!waits_for_brave_smoke_cleanup(&doctor));
+        assert!(!waits_for_brave_smoke_cleanup(&close));
     }
 }

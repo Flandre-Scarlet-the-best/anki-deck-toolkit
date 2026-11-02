@@ -193,6 +193,17 @@ test('неподтверждённый erase сохраняет владение
     assert.equal(h.items.length, 0);
 });
 
+test('cleanup удаляет запись interrupted и снимает владение только после подтверждения', async t => {
+    const h = harness(t);
+    h.add(1, h.tab.url, 'interrupted');
+    h.data.apiDownloads = [1];
+    const result = await h.cleanup(1);
+    assert.equal(result.removed_file, false);
+    assert.equal(result.erased, true);
+    assert.deepEqual(h.data.apiDownloads, []);
+    assert.equal(h.items.length, 0);
+});
+
 test('рестарт до связывания fail closed, после связывания сохраняет доказательство', async t => {
     for (const bound of [false, true]) {
         const h = harness(t); await h.begin(); h.request(); h.add(1);
