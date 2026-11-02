@@ -209,6 +209,7 @@ fn cached_reload_validates_new_blob_after_another_owner_changes_revision() {
         revision: 1,
         description: "old".into(),
         blob: Some(old),
+        ..PlainTextBatch::default_flags()
     };
     first.save(&state).unwrap();
     first.load::<PlainTextBatch>().unwrap();
