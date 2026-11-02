@@ -139,6 +139,8 @@ async function command(id, op, args) {
     const controller = new AbortController();
     operation = controller;
     try {
+        // Ошибка диагностики не должна мешать команде освободить свою операцию.
+        await cleanupRestoredGroups().catch(() => {});
         const result = await handler(args, controller.signal);
         send({type: 'res', id, ok: true, result});
     } catch (error) {
@@ -177,7 +179,7 @@ function delay(ms) {
 // --- Собственная вкладка --------------------------------------------------
 
 async function ownTab() {
-    const {own} = await chrome.storage.local.get('own');
+    const {own} = await chrome.storage.session.get('own');
     if (!own) return null;
     try {
         const tab = await chrome.tabs.get(own.tabId);
@@ -186,7 +188,7 @@ async function ownTab() {
     } catch {
         // Вкладка закрыта пользователем: состояние сбрасывается, чужие вкладки не усыновляются.
     }
-    await chrome.storage.local.remove('own');
+    await chrome.storage.session.remove('own');
     return null;
 }
 
@@ -202,7 +204,7 @@ async function requireTab() {
 // в той же группе, а настройки браузера не меняются.
 async function ensureTab() {
     const existing = await ownTab();
-    const {own} = await chrome.storage.local.get('own');
+    const {own} = await chrome.storage.session.get('own');
     if (existing && !own?.download_used) return {tab: existing, created: false, replaced: false};
     const window = existing ? {id: existing.windowId} : await chrome.windows.getLastFocused({windowTypes: ['normal']});
     const tab = await chrome.tabs.create({windowId: window.id, url: FORVO_ORIGIN + '/', active: false});
@@ -212,7 +214,7 @@ async function ensureTab() {
             : await chrome.tabs.group({tabIds: [tab.id], createProperties: {windowId: window.id}});
         await chrome.tabGroups.update(groupId, {title: GROUP_TITLE, color: 'blue', collapsed: true});
         await chrome.tabs.update(tab.id, {autoDiscardable: false});
-        await chrome.storage.local.set({own: {tabId: tab.id, groupId, windowId: window.id, download_used: false}});
+        await chrome.storage.session.set({own: {tabId: tab.id, groupId, windowId: window.id, download_used: false}});
         if (existing) await chrome.tabs.remove(existing.id).catch(() => {});
         return {tab: await chrome.tabs.get(tab.id), created: true, replaced: !!existing};
     } catch (error) {
@@ -221,9 +223,33 @@ async function ensureTab() {
     }
 }
 
+// ID прошлой сессии и внешнее сходство не доказывают владения. Поэтому
+// восстановленные группы только учитываются, а закрыть можно собственную
+// вкладку с идентичностью из storage.session через close. Повторная команда
+// повторяет диагностику: временный отказ API не фиксируется как завершение.
+async function cleanupRestoredGroups() {
+    const current = await ownTab();
+    let kept = 0;
+    try {
+        for (const group of await chrome.tabGroups.query({title: GROUP_TITLE})) {
+            if (group.id !== current?.groupId) kept += 1;
+        }
+        await chrome.storage.local.set({[CLEANUP_KEY]: {
+            groups_closed: 0, tabs_closed: 0, groups_kept: kept,
+            ownership_unproven: kept, status: kept ? 'ownership_unproven' : 'complete',
+        }});
+    } catch (error) {
+        await chrome.storage.local.set({[CLEANUP_KEY]: {
+            groups_closed: 0, tabs_closed: 0, groups_kept: kept,
+            status: 'error', reason: 'group_query_failed',
+        }});
+        throw error;
+    }
+}
+
 async function markTabUsed(tabId) {
-    const {own} = await chrome.storage.local.get('own');
-    if (own?.tabId === tabId) await chrome.storage.local.set({own: {...own, download_used: true}});
+    const {own} = await chrome.storage.session.get('own');
+    if (own?.tabId === tabId) await chrome.storage.session.set({own: {...own, download_used: true}});
 }
 
 async function tabSummary(tab) {
@@ -236,8 +262,8 @@ async function tabSummary(tab) {
 }
 
 chrome.tabs.onRemoved.addListener(async tabId => {
-    const {own} = await chrome.storage.local.get('own');
-    if (own?.tabId === tabId) await chrome.storage.local.remove('own');
+    const {own} = await chrome.storage.session.get('own');
+    if (own?.tabId === tabId) await chrome.storage.session.remove('own');
 });
 
 async function inject(tabId, func, args = []) {
@@ -282,6 +308,7 @@ function waitComplete(tabId, ms, signal) {
 
 const OP_KEY = 'operation';
 const API_KEY = 'apiDownloads';
+const CLEANUP_KEY = 'restoredCleanup';
 const DOWNLOAD_FILTER = {urls: [FORVO_ORIGIN + '/download/*']};
 const observers = new Map();
 
@@ -378,7 +405,7 @@ async function downloadBegin(args) {
     const id = recordId(args.record_id);
     if (await loadOp()) throw new Failure('operation_pending');
     const tab = await requireTab();
-    const {own} = await chrome.storage.local.get('own');
+    const {own} = await chrome.storage.session.get('own');
     if (own?.download_used) throw new Failure('own_tab_used');
     const page = new URL(tab.url);
     if (page.origin !== FORVO_ORIGIN || decodeURIComponent(page.pathname) !== decodeURIComponent(wordPath(surface))) throw new Failure('page_identity_mismatch');
@@ -598,7 +625,7 @@ async function downloadCleanup(args) {
 
 // Снимок без URL и заголовков: только структура вкладок и групп вне собственной.
 async function snapshot() {
-    const {own} = await chrome.storage.local.get('own');
+    const {own} = await chrome.storage.session.get('own');
     const tabs = await chrome.tabs.query({});
     const groups = await chrome.tabGroups.query({});
     return {
@@ -615,7 +642,8 @@ const OPERATIONS = {
         return {protocol: PROTOCOL, version: VERSION, extension_id: chrome.runtime.id, own_tab: await tabSummary(await ownTab()),
             listeners: {determining_filename: chrome.downloads.onDeterminingFilename.hasListeners(),
                 web_request: chrome.webRequest.onBeforeRequest.hasListeners(), active_observers: observers.size},
-            operation: await operationSummary()};
+            operation: await operationSummary(),
+            restored_cleanup: (await chrome.storage.local.get(CLEANUP_KEY))[CLEANUP_KEY] ?? null};
     },
     async tab_status() {
         return await tabSummary(await ownTab());
@@ -665,7 +693,7 @@ const OPERATIONS = {
     async close() {
         const tab = await ownTab();
         if (tab) await chrome.tabs.remove(tab.id);
-        await chrome.storage.local.remove('own');
+        await chrome.storage.session.remove('own');
         return {closed: !!tab};
     },
     async reload() {

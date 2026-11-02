@@ -69,6 +69,7 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
         extension: &ctx.extension_dir,
         fixture_port: ctx.fixture.port,
         prompt_for_download: name == "save_as_prompt",
+        restore_session: name == "browser_restart",
     })
     .await
     {
@@ -131,6 +132,7 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "own_tab_closed" => own_tab_closed(env).await,
         "interrupt" => interrupt(env).await,
         "save_as_prompt" => save_as_prompt(env).await,
+        "browser_restart" => browser_restart(env).await,
         _ => Err(format!("нет сценария {name}")),
     }
 }
@@ -1089,5 +1091,77 @@ async fn save_as_prompt(env: &mut Env<'_>) -> Result<()> {
         json!({"cleanup":cleanup["evidence"],"downloads":files_json(&env.downloads())}),
     );
     env.connect().await?;
+    env.residual_clean().await
+}
+
+/// Перезапуск браузера с восстановлением сессии: восстановленная группа адаптера
+/// без доказанного владения сохраняется, вкладка пользователя остаётся, новая
+/// собственная вкладка создаётся отдельно.
+async fn browser_restart(env: &mut Env<'_>) -> Result<()> {
+    env.connect().await?;
+    let opened = env.call("open", json!({})).await.map_err(err)?;
+    let user_url = word_url(fixture::WORD);
+    let _user = env.browser.user_tab(&user_url).await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    if let Some(mut conn) = env.conn.take() {
+        conn.bridge.disconnect().await;
+    }
+    let stopped = env
+        .browser
+        .relaunch(LaunchOptions {
+            executable: &env.ctx.chrome,
+            dir: &env.dir,
+            extension: &env.ctx.extension_dir,
+            fixture_port: env.ctx.fixture.port,
+            prompt_for_download: false,
+            restore_session: true,
+        })
+        .await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let restored = loop {
+        let pages = env.browser.page_urls().await?;
+        let own = pages.iter().filter(|u| *u == "https://forvo.com/").count();
+        if (own > 0 && pages.contains(&user_url)) || tokio::time::Instant::now() >= deadline {
+            break pages;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    env.out.check(
+        "браузер восстановил вкладку адаптера и вкладку пользователя",
+        opened["created"] == true
+            && restored.iter().any(|u| u == "https://forvo.com/")
+            && restored.contains(&user_url),
+        json!({"pages_after_restart":restored,"shutdown":stopped}),
+    );
+    env.connect().await?;
+    let ping = env.call("ping", json!({})).await.map_err(err)?;
+    let pages = env.browser.page_urls().await?;
+    let snapshot = env.call("snapshot", json!({})).await.map_err(err)?;
+    env.out.check(
+        "первая команда сохранила восстановленную группу без доказательства владения",
+        ping["restored_cleanup"] == json!({"groups_closed":0,"tabs_closed":0,"groups_kept":1,"ownership_unproven":1,"status":"ownership_unproven"})
+            && pages.iter().any(|u| u == "https://forvo.com/")
+            && pages.contains(&user_url)
+            && snapshot["groups"].as_array().is_some_and(|g| g.len() == 1),
+        json!({"restored_cleanup":ping["restored_cleanup"],"pages":pages,"foreign_groups":snapshot["groups"]}),
+    );
+    let preserved = snapshot;
+    let reopened = env.call("open", json!({})).await.map_err(err)?;
+    let snapshot = env.call("snapshot", json!({})).await.map_err(err)?;
+    env.out.check(
+        "новая собственная вкладка создана отдельно от восстановленной группы",
+        reopened["created"] == true
+            && reopened["group_title"] == GROUP_TITLE
+            && snapshot["groups"] == preserved["groups"]
+            && snapshot["tabs"] == preserved["tabs"],
+        json!({"open":reopened,"foreign_groups":snapshot["groups"]}),
+    );
+    let closed = env.call("close", json!({})).await.map_err(err)?;
+    let after = env.call("snapshot", json!({})).await.map_err(err)?;
+    env.out.check(
+        "close удаляет новую собственную вкладку, сохраняя восстановленную группу и вкладки пользователя",
+        closed["closed"] == true && after["groups"] == preserved["groups"] && after["tabs"] == preserved["tabs"],
+        json!({"close":closed,"after":after}),
+    );
     env.residual_clean().await
 }
