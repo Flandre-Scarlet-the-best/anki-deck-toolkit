@@ -388,6 +388,22 @@ impl Session {
     }
 }
 
+fn with_batch_resume_action(
+    mut error: AssetError,
+    id: &str,
+    binding: Option<&BrowserBinding>,
+) -> AssetError {
+    if provider_code(&error) == "browser_mismatch"
+        && let Some(binding) = binding
+    {
+        error.details["next_action"] = serde_json::json!(format!(
+            "{} batch-resume --batch-id {id}",
+            super::brave::targets::command_prefix(&binding.target)
+        ));
+    }
+    error
+}
+
 async fn launch(
     store: &AssetStore,
     id: &str,
@@ -423,10 +439,12 @@ async fn launch(
         // Подключение к расширению безопасно прервать: до первой команды в
         // браузере ничего не изменено.
         Backend::Brave(options) => tokio::select! {
-            result = BraveSession::connect(options) => result.map(|mut s| {
-                s.set_batch(id);
-                Session::Brave(Box::new(s))
-            }),
+            result = BraveSession::connect(options) => result
+                .map(|mut s| {
+                    s.set_batch(id);
+                    Session::Brave(Box::new(s))
+                })
+                .map_err(|error| with_batch_resume_action(error, id, options.binding.as_ref())),
             _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Подключение к браузеру прервано; продолжите через batch-resume цели")),
             result = cancellation(store, id) => Err(result.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён"))),
         },

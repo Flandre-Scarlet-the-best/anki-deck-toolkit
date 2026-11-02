@@ -342,6 +342,23 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
     }
 }
 
+fn repin_target(harness: &Harness, instance: &str) {
+    let current =
+        super::super::targets::load_target(&harness.options.state_dir, Some("brave")).unwrap();
+    let mut setup = super::super::targets::SetupOptions::new(harness.options.state_dir.clone());
+    setup.target = Some(current.target);
+    setup.browser = Some(current.browser);
+    setup.install_dir = Some(current.install_dir);
+    setup.port = Some(current.port);
+    setup.platform = Some(current.platform);
+    setup.repin = true;
+    super::super::targets::setup(&setup).unwrap();
+    let unpinned =
+        super::super::targets::load_target(&harness.options.state_dir, Some("brave")).unwrap();
+    super::super::targets::pin_peer(&harness.options.state_dir, &unpinned, ID, Some(instance))
+        .unwrap();
+}
+
 fn record(id: &str, votes: i64, body: Body) -> Record {
     Record {
         candidate: candidate(id, Some(votes), Some(Gender::Female), Some("Japan")),
@@ -960,6 +977,40 @@ async fn release_failure_keeps_bytes_and_batch_resume_recovers_without_download(
     assert_eq!(done.items[0].outcome.as_ref().unwrap().code, "imported");
     assert_eq!(lock(&h.world).begins.len(), 1);
     assert!(lock(&h.world).op.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repinned_browser_mismatch_resume_action_contains_batch_id() {
+    let h = harness(vec![(
+        "元気",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    lock(&h.world).instance = Some("aa".repeat(32));
+    lock(&h.world).fail_release = true;
+    let store = store(&h.root);
+    batch::start(
+        &store,
+        "repinned",
+        plan(&[("元気", "げんき")]),
+        Transport::BraveExtension,
+    )
+    .unwrap();
+    let paused = batch::resume(&store, "repinned", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap();
+    assert!(paused.paused.as_ref().unwrap().recovery_required);
+
+    let new_instance = "bb".repeat(32);
+    lock(&h.world).instance = Some(new_instance.clone());
+    repin_target(&h, &new_instance);
+    let error = batch::resume(&store, "repinned", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(provider_code(&error), "browser_mismatch");
+    assert_eq!(
+        error.details["next_action"],
+        "pronunciation-assets forvo brave batch-resume --batch-id repinned"
+    );
 }
 
 #[tokio::test]
