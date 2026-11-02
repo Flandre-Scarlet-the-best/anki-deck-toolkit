@@ -694,11 +694,20 @@ pub async fn resume(
         Ok::<_, AssetError>(())
     }
     .await;
-    let mut stopped = if let Some(session) = session {
+    let stopped = if let Some(session) = session {
         session.close().await
     } else {
         Ok(())
     };
+    finish_resume(&mut runtime, batch, result, stopped)
+}
+
+fn finish_resume(
+    runtime: &mut SafeBatchRuntime,
+    mut batch: ForvoBatch,
+    result: Result<(), AssetError>,
+    mut stopped: Result<(), AssetError>,
+) -> Result<ForvoBatch, AssetError> {
     if let Err(cleanup) = &mut stopped {
         cleanup.details["paused"] = serde_json::json!(batch.paused);
         if let Some(original) = &mut batch.paused {
@@ -711,12 +720,15 @@ pub async fn resume(
             )));
         }
         batch.revision += 1;
-        runtime.save(&batch)?;
+        if let Err(save) = runtime.save(&batch) {
+            cleanup.details["checkpoint_error"] = serde_json::json!({
+                "code": save.code.as_str(), "message": save.message, "details": save.details
+            });
+        }
     }
     match (result, stopped) {
         (Err(mut original), Err(cleanup)) => {
-            original.details["browser_cleanup"] =
-                serde_json::json!({"code":provider_code(&cleanup),"message":cleanup.message});
+            original.details["browser_cleanup"] = serde_json::json!({"code":provider_code(&cleanup),"message":cleanup.message,"details":cleanup.details});
             return Err(original);
         }
         (Err(original), _) => return Err(original),
@@ -729,6 +741,51 @@ pub async fn resume(
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+
+    #[test]
+    fn cleanup_checkpoint_failure_preserves_both_errors() {
+        let workspace =
+            crate::temp_workspace::TempWorkspace::create("brave-cleanup-error").unwrap();
+        let store = AssetStore::open_with_policy(
+            crate::StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        start(
+            &store,
+            "failure",
+            FetchPlan {
+                schema_version: 1,
+                items: vec![FetchItem {
+                    surface: "水".into(),
+                    reading: "みず".into(),
+                    replace_expected_sha256: None,
+                }],
+            },
+            Transport::BraveExtension,
+        )
+        .unwrap();
+        let mut runtime = SafeBatchRuntime::open(store.root(), "failure").unwrap();
+        let batch = load(&mut runtime).unwrap();
+        runtime.release_lock().unwrap();
+        let original = AssetError::new(ErrorCode::IoFailure, "исходная ошибка");
+        let cleanup = AssetError::with_details(
+            ErrorCode::InvalidTransition,
+            "ошибка очистки",
+            serde_json::json!({"code":"cleanup_incomplete"}),
+        );
+        let error = finish_resume(&mut runtime, batch, Err(original), Err(cleanup))
+            .err()
+            .unwrap();
+        assert_eq!(error.message, "исходная ошибка");
+        assert_eq!(
+            error.details["browser_cleanup"]["code"],
+            "cleanup_incomplete"
+        );
+        assert!(
+            error.details["browser_cleanup"]["details"]["checkpoint_error"]["message"].is_string()
+        );
+    }
 
     #[tokio::test]
     async fn grace_timeout_survives_checkpoint_and_new_runtime() {

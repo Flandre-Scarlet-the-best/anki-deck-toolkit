@@ -411,7 +411,10 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
     let small = cli.plan(
         &env.dir,
         "small",
-        &[(fixture::WORD_3, fixture::READING_3), ("元気", "げんき")],
+        &[
+            (fixture::WORD_3, fixture::READING_3),
+            (fixture::WORD, fixture::READING),
+        ],
     )?;
     let small_store = env.dir.join("store-max-items");
     let mut limited_cli = Cli::new(env).expect("cli");

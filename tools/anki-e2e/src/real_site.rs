@@ -777,13 +777,15 @@ pub fn production_status(output: &Value) -> Status {
         "download_conflict",
     ];
     let error = output["error"]["details"]["code"].as_str();
+    let paused = output["result"]["paused"]["code"].as_str();
     match output["outcome"].as_str() {
         Some("ok") if output["result"]["browser"]["recovery_required"] == true => Status::Fail,
         Some("ok") => Status::Pass,
         Some("paused") if output["result"]["paused"]["code"] == "interrupted" => {
             Status::Interrupted
         }
-        Some("paused") => Status::Blocked,
+        Some("paused") if paused.is_some_and(|c| BLOCKERS.contains(&c)) => Status::Blocked,
+        Some("paused") => Status::Fail,
         Some("cancelled") => Status::Interrupted,
         _ if output["error"]["code"] == "interrupted" => Status::Interrupted,
         _ if error.is_some_and(|c| BLOCKERS.contains(&c)) => Status::Blocked,
@@ -1023,6 +1025,8 @@ fn finish_cleanup(
             && v["result"]["recovery_required"] == false
         {
             Status::Pass
+        } else if v["error"]["details"]["code"] == "extension_not_connected" {
+            Status::Blocked
         } else {
             Status::Fail
         }
@@ -1333,6 +1337,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cleanup_distinguishes_disconnected_extension_from_unconfirmed_cleanup() {
+        for (value, expected) in [
+            (
+                json!({"outcome":"error","error":{"details":{"code":"extension_not_connected"}}}),
+                "BLOCKED",
+            ),
+            (
+                json!({"outcome":"error","error":{"details":{"code":"cleanup_incomplete"}}}),
+                "FAIL",
+            ),
+            (json!({"outcome":"ok","result":{}}), "FAIL"),
+        ] {
+            let mut commands = Vec::new();
+            finish_cleanup(&mut commands, |_| Ok(value));
+            assert_eq!(commands[0]["status"], expected);
+        }
+    }
+
+    #[test]
     fn markdown_omits_null_errors_but_keeps_real_errors() {
         let report = json!({"commands":[
             {"name":"doctor","status":"PASS","error":null},
@@ -1454,6 +1477,16 @@ mod tests {
     #[test]
     fn production_outcomes_map_to_statuses() {
         assert_eq!(production_status(&json!({"outcome":"ok"})), Status::Pass);
+        assert_eq!(
+            production_status(
+                &json!({"outcome":"paused","result":{"paused":{"code":"protocol_error"}}})
+            ),
+            Status::Fail
+        );
+        assert_eq!(
+            production_status(&json!({"outcome":"paused"})),
+            Status::Fail
+        );
         assert_eq!(
             production_status(
                 &json!({"outcome":"paused","result":{"paused":{"code":"challenge_required"}}})

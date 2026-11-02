@@ -245,9 +245,9 @@ pronunciation-assets forvo brave setup                 # каталог расш
 pronunciation-assets forvo brave doctor [--forvo] [--reconnect] [--reload]
 pronunciation-assets forvo brave smoke --surface 元気 --reading げんき [--close-tab] [--keep-download] [--probe-downloads-api]
 pronunciation-assets forvo brave close
-pronunciation-assets forvo brave fetch --surface 元気 --reading げんき [--replace-expected-sha256 <SHA>] [--close-tab]
-pronunciation-assets forvo brave batch-start --batch-id jp-audio --plan plan.json [--max-items N] [--close-tab]
-pronunciation-assets forvo brave batch-resume --batch-id jp-audio [--max-items N]
+pronunciation-assets forvo brave fetch --surface 元気 --reading げんき [--replace-expected-sha256 <SHA>] [--wait-seconds N] [--close-tab]
+pronunciation-assets forvo brave batch-start --batch-id jp-audio --plan plan.json [--max-items N] [--wait-seconds N] [--close-tab]
+pronunciation-assets forvo brave batch-resume --batch-id jp-audio [--max-items N] [--wait-seconds N] [--close-tab]
 pronunciation-assets forvo batch-status --batch-id jp-audio     # без браузера, любой транспорт
 pronunciation-assets forvo batch-cancel --batch-id jp-audio     # без браузера, любой транспорт
 ```
