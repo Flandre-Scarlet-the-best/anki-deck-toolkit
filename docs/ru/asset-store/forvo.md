@@ -160,7 +160,7 @@ lease сохраняет единственного исполнителя. `sta
 
 Транспорт пакета закреплён в его состоянии: `forvo batch-start` создаёт пакет
 `cdp_chromium`, а `forvo brave batch-start` — пакет `brave_extension` (обычный Brave,
-см. [адаптер Brave](forvo-brave.md#production-получение-и-пакеты)). Состояние
+см. [адаптер Brave](forvo-brave.md#получение-и-пакеты)). Состояние
 `schema_version=1` без поля `transport` остаётся читаемым и означает CDP. Resume другим
 транспортом отвергается до запуска браузера (`transport_mismatch`). `batch-status` и
 `batch-cancel` показывают `effective_transport`. Происхождение аудио (`forvo_web`,

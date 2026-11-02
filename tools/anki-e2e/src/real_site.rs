@@ -1206,7 +1206,7 @@ pub fn render_markdown(report: &Value) -> String {
             command["name"].as_str().unwrap_or("?"),
             command["status"].as_str().unwrap_or("?")
         ));
-        if let Some(error) = command.get("error") {
+        if let Some(error) = command.get("error").filter(|error| !error.is_null()) {
             out.push_str(&format!("\nОшибка: {error}\n"));
         }
         if let Some(evidence) = command.get("evidence") {
@@ -1331,6 +1331,17 @@ fn purge(stand: &Stand, yes: bool) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_omits_null_errors_but_keeps_real_errors() {
+        let report = json!({"commands":[
+            {"name":"doctor","status":"PASS","error":null},
+            {"name":"fetch","status":"FAIL","error":"сбой"}
+        ]});
+        let markdown = render_markdown(&report);
+        assert!(!markdown.contains("Ошибка: null"));
+        assert!(markdown.contains("Ошибка: \"сбой\""));
+    }
 
     #[test]
     fn final_cleanup_is_independent_and_preserves_original_failure() {
