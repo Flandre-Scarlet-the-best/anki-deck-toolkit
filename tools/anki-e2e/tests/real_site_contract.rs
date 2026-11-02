@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -10,6 +11,14 @@ const VOLUMES: [&str; 3] = [
     "anki-e2e-real-site-state",
     "anki-e2e-real-site-downloads",
 ];
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -24,10 +33,22 @@ impl Fixture {
         )
         .unwrap();
         fs::set_permissions(dir.join("docker"), fs::Permissions::from_mode(0o755)).unwrap();
-        // Путь к уже подготовленному профилю: тест не обращается в сеть.
+        // Подготовленный кэш seccomp: тест не обращается в сеть.
+        let policy = json!({
+            "names": ["clone", "unshare"],
+            "action": "SCMP_ACT_ALLOW",
+            "args": [{"index": 0, "value": 0x0E02_0000u64, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}],
+            "comment": "anki-e2e real-site: песочнице Brave нужны только user/pid/net namespaces"
+        });
+        let policy_hash = sha256_hex(policy.to_string().as_bytes());
+        let profile = b"{}";
+        let profile_hash = sha256_hex(profile);
+        let source_hash = "6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6";
         fs::write(
-            dir.join("work/real-site/seccomp-brave-6416b4777078.json"),
-            "{}",
+            dir.join(format!(
+                "work/real-site/seccomp-brave-{source_hash}-{policy_hash}-{profile_hash}.json"
+            )),
+            profile,
         )
         .unwrap();
         fs::write(dir.join("state"), serde_json::to_vec(state).unwrap()).unwrap();

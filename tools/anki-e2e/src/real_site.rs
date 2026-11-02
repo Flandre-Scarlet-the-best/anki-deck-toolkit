@@ -16,7 +16,7 @@ use crate::util::{
 };
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +97,56 @@ pub enum Action {
 /// Добавляет к профилю seccomp по умолчанию единственное правило: `clone` и
 /// `unshare` разрешены, только если не запрошены mount-, cgroup-, UTS- и
 /// IPC-namespaces. Остальные запреты профиля не меняются.
+fn brave_seccomp_rule() -> Value {
+    json!({
+        "names": ["clone", "unshare"],
+        "action": "SCMP_ACT_ALLOW",
+        "args": [{"index": 0, "value": FORBIDDEN_NAMESPACES, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}],
+        "comment": "anki-e2e real-site: песочнице Brave нужны только user/pid/net namespaces"
+    })
+}
+
+fn seccomp_policy_hash(rule: &Value) -> String {
+    sha256_hex(rule.to_string().as_bytes())
+}
+
+fn seccomp_cache_prefix(policy_hash: &str) -> String {
+    format!("seccomp-brave-{SECCOMP_SHA256}-{policy_hash}-")
+}
+
+fn seccomp_profile_cache_path(dir: &Path, policy_hash: &str, profile_hash: &str) -> PathBuf {
+    dir.join(format!(
+        "{}{profile_hash}.json",
+        seccomp_cache_prefix(policy_hash)
+    ))
+}
+
+fn find_cached_seccomp_profile(dir: &Path, policy_hash: &str) -> Option<PathBuf> {
+    let prefix = seccomp_cache_prefix(policy_hash);
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(profile_hash) = name
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if profile_hash.len() != 64 || !profile_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if sha256_hex(&bytes) == profile_hash && serde_json::from_slice::<Value>(&bytes).is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 pub fn brave_seccomp(default_profile: &Value) -> Result<Value> {
     let mut profile = default_profile.clone();
     if profile["defaultAction"] != "SCMP_ACT_ERRNO" {
@@ -105,12 +155,7 @@ pub fn brave_seccomp(default_profile: &Value) -> Result<Value> {
     profile["syscalls"]
         .as_array_mut()
         .ok_or("в профиле seccomp нет syscalls")?
-        .push(json!({
-            "names": ["clone", "unshare"],
-            "action": "SCMP_ACT_ALLOW",
-            "args": [{"index": 0, "value": FORBIDDEN_NAMESPACES, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}],
-            "comment": "anki-e2e real-site: песочнице Brave нужны только user/pid/net namespaces"
-        }));
+        .push(brave_seccomp_rule());
     Ok(profile)
 }
 
@@ -268,8 +313,8 @@ impl Stand {
     fn seccomp_profile(&self) -> Result<PathBuf> {
         let dir = self.work.join("real-site");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let path = dir.join(format!("seccomp-brave-{}.json", &SECCOMP_SHA256[..12]));
-        if path.exists() {
+        let policy_hash = seccomp_policy_hash(&brave_seccomp_rule());
+        if let Some(path) = find_cached_seccomp_profile(&dir, &policy_hash) {
             return Ok(path);
         }
         let client = reqwest::blocking::Client::builder()
@@ -291,7 +336,11 @@ impl Stand {
         }
         let default: Value =
             serde_json::from_slice(&bytes).map_err(|e| format!("профиль seccomp: {e}"))?;
-        write_json(&path, &brave_seccomp(&default)?)?;
+        let profile = brave_seccomp(&default)?;
+        let rendered = serde_json::to_vec_pretty(&profile).map_err(|e| e.to_string())?;
+        let profile_hash = sha256_hex(&rendered);
+        let path = seccomp_profile_cache_path(&dir, &policy_hash, &profile_hash);
+        write_atomic(&path, &rendered)?;
         Ok(path)
     }
 
@@ -929,6 +978,36 @@ mod tests {
         assert!(!profile.to_string().contains("setns"));
         let permissive = json!({"defaultAction":"SCMP_ACT_ALLOW","syscalls":[]});
         assert!(brave_seccomp(&permissive).is_err());
+    }
+
+    #[test]
+    fn seccomp_cache_tracks_policy_and_rejects_changed_profile_bytes() {
+        let mut random = [0; 8];
+        getrandom::fill(&mut random).unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("anki-e2e-seccomp-{:x}", u64::from_ne_bytes(random)));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let profile = br#"{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[]}"#;
+        let rule = brave_seccomp_rule();
+        let policy_hash = seccomp_policy_hash(&rule);
+        let profile_hash = sha256_hex(profile);
+        let path = seccomp_profile_cache_path(&dir, &policy_hash, &profile_hash);
+        std::fs::write(&path, profile).unwrap();
+        assert_eq!(
+            find_cached_seccomp_profile(&dir, &policy_hash),
+            Some(path.clone())
+        );
+
+        let mut changed_rule = rule;
+        changed_rule["args"][0]["value"] = json!(FORBIDDEN_NAMESPACES ^ 1);
+        let changed_policy_hash = seccomp_policy_hash(&changed_rule);
+        assert_ne!(policy_hash, changed_policy_hash);
+        assert!(find_cached_seccomp_profile(&dir, &changed_policy_hash).is_none());
+
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(find_cached_seccomp_profile(&dir, &policy_hash).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -370,3 +370,10 @@ fn successful_acquisition_requires_release_of_the_bound_operation() {
         .is_ok()
     );
 }
+
+#[test]
+fn save_as_message_only_mentions_the_dialog_when_it_remains_open() {
+    let message = failure_message("save_as_required");
+    assert!(message.contains("Если окно сохранения осталось открытым после отмены загрузки"));
+    assert!(message.contains("закройте его кнопкой «Отмена»"));
+}
