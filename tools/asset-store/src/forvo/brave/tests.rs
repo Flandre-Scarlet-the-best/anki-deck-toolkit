@@ -319,6 +319,43 @@ async fn paired_extension_executes_typed_commands() {
 }
 
 #[tokio::test]
+async fn download_release_retries_busy_until_the_extension_can_clean_up() {
+    let mut bridge = Bridge::bind(0, secret(), None).await.expect("bind");
+    let port = bridge.port();
+    let extension = tokio::spawn(async move {
+        let mut socket = paired_client(port, &secret(), ID).await.expect("pair");
+        for _ in 0..2 {
+            let command = next_json(&mut socket).await;
+            assert_eq!(command["op"], "download_release");
+            assert_eq!(command["args"]["action"], "remove");
+            send(
+                &mut socket,
+                json!({"type":"res","id":command["id"],"ok":false,"code":"busy"}),
+            )
+            .await;
+        }
+        let command = next_json(&mut socket).await;
+        assert_eq!(command["op"], "download_release");
+        send(
+            &mut socket,
+            json!({"type":"res","id":command["id"],"ok":true,"result":{"released":true,"bound":true,"erased":true}}),
+        )
+        .await;
+    });
+    bridge
+        .accept(Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("accept");
+
+    let released = super::download::release(&mut bridge, "operation", false)
+        .await
+        .expect("release after busy retries");
+    assert_eq!(released["released"], true);
+    assert_eq!(released["erased"], true);
+    extension.await.expect("extension task");
+}
+
+#[tokio::test]
 async fn wrong_secret_is_never_accepted() {
     let mut bridge = Bridge::bind(0, secret(), None).await.expect("bind");
     let port = bridge.port();

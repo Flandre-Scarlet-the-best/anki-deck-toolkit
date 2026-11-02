@@ -469,13 +469,23 @@ pub async fn acquire(
 /// или удаляет её файл и запись истории; `keep` оставляет всё на месте.
 /// Несвязанная операция ничего не затрагивает.
 pub async fn release(bridge: &mut Bridge, op_id: &str, keep: bool) -> Result<Value, AssetError> {
-    let value = bridge
-        .call(
-            "download_release",
-            json!({"op_id":op_id,"action":if keep {"keep"} else {"remove"}}),
-            Duration::from_secs(10),
-        )
-        .await?;
+    let mut busy_retries = 0;
+    let value = loop {
+        match bridge
+            .call(
+                "download_release",
+                json!({"op_id":op_id,"action":if keep {"keep"} else {"remove"}}),
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            Err(error) if provider_code(&error) == "busy" && busy_retries < 20 => {
+                busy_retries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            result => break result?,
+        }
+    };
     validate_release(&value, keep, false)?;
     tracing::info!(event = "brave_download_released", stage = "cleanup", operation_id = op_id,
         bound = ?value["bound"].as_bool(), removed_file = ?value["removed_file"].as_bool(),
