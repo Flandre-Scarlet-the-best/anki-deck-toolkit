@@ -335,21 +335,21 @@ fn aliases_of_another_target_dir_are_refused_before_writing() {
     std::os::unix::fs::symlink(&real, temp.path().join("link")).unwrap();
     std::os::unix::fs::symlink(temp.path().join("data"), temp.path().join("parent")).unwrap();
     std::fs::create_dir_all(temp.path().join("other")).unwrap();
-    let aliases = [
-        temp.path().join("link"),
-        temp.path().join("parent/brave"),
-        temp.path().join("other/../data/./brave"),
-        temp.path().join("data/brave/missing/.."),
-    ];
-    for alias in &aliases {
+    // В сообщениях — относительная метка: путь временного каталога содержит UID.
+    for alias in [
+        "link",
+        "parent/brave",
+        "other/../data/./brave",
+        "data/brave/missing/..",
+    ] {
         let error = setup(&SetupOptions {
             port: None,
-            ..options(&state_dir, BrowserKind::Chrome, alias)
+            ..options(&state_dir, BrowserKind::Chrome, &temp.path().join(alias))
         })
         .unwrap_err();
-        assert_eq!(provider_code(&error), "install_dir_conflict", "{alias:?}");
+        assert_eq!(provider_code(&error), "install_dir_conflict", "{alias}");
         assert_eq!(error.details["other_target"], "brave");
-        assert_eq!(snapshot(&state_dir, &real), before, "{alias:?}");
+        assert!(snapshot(&state_dir, &real) == before, "{alias}");
     }
     // Тот же критерий в проверке загруженного/записываемого состояния.
     let alias = AdapterState {
@@ -363,7 +363,7 @@ fn aliases_of_another_target_dir_are_refused_before_writing() {
     };
     let error = save_state(&state_dir, &alias).unwrap_err();
     assert_eq!(provider_code(&error), "install_dir_conflict");
-    assert_eq!(snapshot(&state_dir, &real), before);
+    assert!(snapshot(&state_dir, &real) == before);
     // Состояние, записанное в обход проверки, не загружается.
     let mut file = load_file(&state_dir).unwrap().unwrap();
     file.targets.insert("chrome".into(), alias);
@@ -400,11 +400,11 @@ fn alias_check_works_in_reverse_order_and_keeps_distinct_dirs() {
     })
     .unwrap_err();
     assert_eq!(provider_code(&error), "install_dir_conflict");
-    assert_eq!(snapshot(&state_dir, &real), before);
+    assert!(snapshot(&state_dir, &real) == before);
     // Сохранённый путь цели остаётся буквальным: ID расширения не меняется.
     let edge = load_target(&state_dir, Some("edge")).unwrap();
-    assert_eq!(edge.install_dir, link);
-    assert_eq!(edge.load_unpacked_path, link.display().to_string());
+    assert!(edge.install_dir == link);
+    assert!(edge.load_unpacked_path == link.display().to_string());
     // Повторный setup своей цели — без конфликта и без новой пары.
     let again = setup(&SetupOptions {
         port: Some(edge.port),
