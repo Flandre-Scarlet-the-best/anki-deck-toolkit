@@ -46,6 +46,10 @@ struct World {
     releases: Vec<Value>,
     op: Option<(String, String, String)>,
     page: Option<String>,
+    /// Экземпляр расширения в `ready` (у старых версий его нет).
+    instance: Option<String>,
+    version: String,
+    commands: Vec<String>,
 }
 
 type Shared = Arc<Mutex<World>>;
@@ -63,6 +67,7 @@ fn download_url(surface: &str, record: &str) -> Value {
 
 fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) -> Value {
     let mut w = lock(world);
+    w.commands.push(op.to_owned());
     match op {
         "ping" => {
             json!({"ok":true,"result":{"operation":w.op.as_ref().map(|(id,_,_)| json!({"op_id":id})),"listeners":{"determining_filename":false,"web_request":false}}})
@@ -175,6 +180,10 @@ fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) 
         "close" => {
             json!({"ok":true,"result":{"closed":true,"tab_closed":true,"own_tab_absent":true,"own_group_absent":true,"recovery_required":false}})
         }
+        "reload" => {
+            w.version = super::super::targets::bundled_version();
+            json!({"ok":true,"result":{"reloading":true}})
+        }
         other => panic!("неожиданная команда {other}"),
     }
 }
@@ -209,7 +218,7 @@ async fn next_json(socket: &mut Client) -> Option<Value> {
     }
 }
 
-async fn pair(port: u16) -> Option<Client> {
+async fn pair(port: u16, instance: Option<String>, version: &str) -> Option<Client> {
     let stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
     let mut request = format!("ws://127.0.0.1:{port}{}", super::super::WS_PATH)
         .into_client_request()
@@ -230,7 +239,7 @@ async fn pair(port: u16) -> Option<Client> {
     ));
     socket
         .send(Message::text(
-            json!({"type":"auth","v":1,"nonce":own,"extension_id":ID,"version":"0.1.0","mac":mac})
+            json!({"type":"auth","v":1,"nonce":own,"extension_id":ID,"version":version,"mac":mac})
                 .to_string(),
         ))
         .await
@@ -239,7 +248,9 @@ async fn pair(port: u16) -> Option<Client> {
         .await
         .filter(|v| v["type"] == "auth_ok")?;
     socket
-        .send(Message::text(json!({"type":"ready"}).to_string()))
+        .send(Message::text(
+            json!({"type":"ready","instance":instance}).to_string(),
+        ))
         .await
         .ok()?;
     Some(socket)
@@ -249,7 +260,11 @@ async fn pair(port: u16) -> Option<Client> {
 fn spawn_extension(port: u16, world: Shared, downloads: PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let Some(mut socket) = pair(port).await else {
+            let (instance, version) = {
+                let world = lock(&world);
+                (world.instance.clone(), world.version.clone())
+            };
+            let Some(mut socket) = pair(port, instance, &version).await else {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             };
@@ -262,6 +277,9 @@ fn spawn_extension(port: u16, world: Shared, downloads: PathBuf) -> tokio::task:
                 reply["type"] = json!("res");
                 reply["id"] = message["id"].clone();
                 if socket.send(Message::text(reply.to_string())).await.is_err() {
+                    break;
+                }
+                if op == "reload" {
                     break;
                 }
             }
@@ -298,18 +316,22 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
     super::super::save_state(
         &state_dir,
         &super::super::AdapterState {
-            schema_version: 1,
+            target: super::super::LEGACY_TARGET.into(),
+            browser: super::super::BrowserKind::Brave,
             port,
             secret: encode_lower_hex(SECRET),
             install_dir: root.join("extension"),
             load_unpacked_path: "unused".into(),
             platform: Platform::Linux,
             extension_id: Some(ID.into()),
+            instance_id: None,
+            executable: None,
         },
     )
     .unwrap();
     let world: Shared = Arc::new(Mutex::new(World {
         words: words.into_iter().map(|(w, r)| (w.to_owned(), r)).collect(),
+        version: "0.1.0".into(),
         ..World::default()
     }));
     let extension = spawn_extension(port, world.clone(), downloads.clone());
@@ -317,6 +339,8 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
         _workspace: workspace,
         options: BraveOptions {
             state_dir,
+            target: None,
+            binding: None,
             wait: Duration::from_secs(10),
             limits: Limits {
                 start: Duration::from_secs(2),
@@ -330,6 +354,57 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
         root,
         extension,
     }
+}
+
+fn repin_target(harness: &Harness, instance: &str) {
+    let current =
+        super::super::targets::load_target(&harness.options.state_dir, Some("brave")).unwrap();
+    let mut setup = super::super::targets::SetupOptions::new(harness.options.state_dir.clone());
+    setup.target = Some(current.target);
+    setup.browser = Some(current.browser);
+    setup.install_dir = Some(current.install_dir);
+    setup.port = Some(current.port);
+    setup.platform = Some(current.platform);
+    setup.repin = true;
+    super::super::targets::setup(&setup).unwrap();
+    let unpinned =
+        super::super::targets::load_target(&harness.options.state_dir, Some("brave")).unwrap();
+    super::super::targets::pin_peer(&harness.options.state_dir, &unpinned, ID, Some(instance))
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mismatched_batch_binding_is_checked_before_extension_commands_and_pin() {
+    let h = harness(vec![]);
+    let state = super::super::targets::load_target(&h.options.state_dir, Some("brave")).unwrap();
+    super::super::targets::write_extension_files(&state.install_dir, state.port, &state.secret)
+        .unwrap();
+    let connected_instance = "bb".repeat(32);
+    lock(&h.world).instance = Some(connected_instance);
+    let expected = BrowserBinding {
+        target: "brave".into(),
+        browser: super::super::BrowserKind::Brave,
+        extension_id: ID.into(),
+        instance_id: Some("aa".repeat(32)),
+    };
+    let options = BraveOptions {
+        binding: Some(expected),
+        ..h.options.clone()
+    };
+
+    let error = match BraveSession::connect(&options).await {
+        Ok(_) => panic!("чужой экземпляр продолжил пакет"),
+        Err(error) => error,
+    };
+
+    assert_eq!(provider_code(&error), "browser_mismatch");
+    assert!(lock(&h.world).commands.is_empty());
+    assert!(
+        super::super::targets::load_target(&h.options.state_dir, Some("brave"))
+            .unwrap()
+            .instance_id
+            .is_none()
+    );
 }
 
 fn record(id: &str, votes: i64, body: Body) -> Record {
@@ -418,6 +493,14 @@ async fn rejected_candidate_falls_back_and_changed_row_pauses() {
     let second = acquire(&mut session, &request).await.err().unwrap();
     assert_eq!(provider_code(&second), "candidate_changed");
     assert!(pauses_batch(&second));
+    // Одиночная операция: пакета нет, `batch-resume` не предлагается.
+    let action = second.details["next_action"].as_str().unwrap();
+    assert!(!action.contains("batch-resume"), "{action}");
+    assert!(
+        !second.message.contains("batch-resume"),
+        "{}",
+        second.message
+    );
     assert_eq!(second.details["attempts"][0]["code"], "invalid_mp3");
     assert_eq!(second.details["attempts"][1]["code"], "candidate_changed");
     assert_eq!(second.details["attempts"].as_array().unwrap().len(), 2);
@@ -472,13 +555,19 @@ async fn blockers_pause_without_trying_next_candidate() {
     let challenge = acquire(&mut session, &request).await.err().unwrap();
     assert_eq!(provider_code(&challenge), "challenge_required");
     assert!(pauses_batch(&challenge));
-    assert!(
-        challenge.details["next_action"]
-            .as_str()
-            .unwrap()
-            .contains("forvo brave batch-resume")
-    );
+    // Одиночная сессия без пакета: продолжать нечего, совет — повторить команду.
+    let action = challenge.details["next_action"].as_str().unwrap();
+    assert!(!action.contains("batch-resume"), "{action}");
+    assert!(action.contains("повторите команду"), "{action}");
     assert_eq!(lock(&h.world).begins, ["10"]);
+    // Сессия пакета ведёт к продолжению именно этого пакета своей цели.
+    session.set_batch("forvo-batch-1");
+    let challenge = acquire(&mut session, &request).await.err().unwrap();
+    let action = challenge.details["next_action"].as_str().unwrap();
+    assert!(
+        action.contains("forvo brave batch-resume --batch-id forvo-batch-1"),
+        "{action}"
+    );
     session.close().await.unwrap();
 }
 
@@ -632,6 +721,106 @@ async fn blocker_pauses_batch_and_resume_continues_after_recovery() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_is_bound_to_first_browser_session() {
+    let mp3 = synthetic_mp3();
+    let h = harness(vec![
+        ("元気", vec![record("11", 3, Body::Bytes(mp3.clone()))]),
+        ("水", vec![record("21", 3, Body::Bytes(mp3.clone()))]),
+    ]);
+    let mine = "aa".repeat(32);
+    lock(&h.world).instance = Some(mine.clone());
+    let store = store(&h.root);
+    batch::start(
+        &store,
+        "bound",
+        plan(&[("元気", "げんき"), ("水", "みず")]),
+        Transport::BraveExtension,
+    )
+    .unwrap();
+    let first = batch::resume(&store, "bound", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap();
+    assert_eq!(first.schema_version, 3);
+    let binding = first.browser.clone().expect("пакет закреплён за сессией");
+    assert_eq!(
+        (
+            binding.target.as_str(),
+            binding.extension_id.as_str(),
+            binding.instance_id.as_deref()
+        ),
+        ("brave", ID, Some(mine.as_str()))
+    );
+    // Другая цель — отказ до подключения к браузеру.
+    let other_target = batch::resume(
+        &store,
+        "bound",
+        Backend::Brave(&BraveOptions {
+            target: Some("chrome".into()),
+            ..h.options.clone()
+        }),
+        10,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(provider_code(&other_target), "browser_mismatch");
+    // Тот же каталог в другом профиле (другой экземпляр) не продолжает пакет:
+    // пакет приостанавливается, элемент не помечается неудачным.
+    lock(&h.world).instance = Some("bb".repeat(32));
+    let options = BraveOptions {
+        wait: Duration::from_secs(2),
+        ..h.options.clone()
+    };
+    let paused = batch::resume(&store, "bound", Backend::Brave(&options), 10)
+        .await
+        .unwrap();
+    assert_eq!(paused.paused.as_ref().unwrap().code, "instance_mismatch");
+    assert!(paused.items[1].outcome.is_none());
+    assert_eq!(lock(&h.world).begins, ["11"]);
+    lock(&h.world).instance = Some(mine);
+    let done = batch::resume(&store, "bound", Backend::Brave(&h.options), 10)
+        .await
+        .unwrap();
+    assert!(done.paused.is_none());
+    assert_eq!(done.browser, Some(binding));
+    assert_eq!(lock(&h.world).begins, ["11", "21"]);
+}
+
+#[test]
+fn unbound_pre_selection_batch_continues_only_with_brave_target() {
+    let workspace = TempWorkspace::create("forvo-v2-batch").unwrap();
+    let store = store(workspace.path());
+    let mut runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), "v2").unwrap();
+    let legacy = json!({"schema_version":2,"provider":"forvo_web","transport":"brave_extension","batch_id":"v2",
+        "revision":0,"cancelled":false,"paused":null,
+        "items":[{"request":Pronunciation::new("水","みず").unwrap(),"replace_expected_sha256":null,"acquisition":null,"outcome":null}]});
+    runtime
+        .save(&serde_json::from_value::<batch::ForvoBatch>(legacy).unwrap())
+        .unwrap();
+    drop(runtime);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let error = runtime
+        .block_on(batch::resume(
+            &store,
+            "v2",
+            Backend::Brave(&BraveOptions {
+                state_dir: workspace.path().join("no-adapter"),
+                target: Some("edge".into()),
+                binding: None,
+                wait: Duration::from_secs(1),
+                limits: Limits::default(),
+                close_tab: false,
+            }),
+            10,
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(provider_code(&error), "browser_mismatch");
+    assert_eq!(error.details["batch_target"], "brave");
+    assert!(!workspace.path().join("no-adapter").exists());
+}
+
 #[test]
 fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
     use crate::batch_runtime::SafeBatchRuntime;
@@ -655,6 +844,8 @@ fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
             "old",
             Backend::Brave(&BraveOptions {
                 state_dir: workspace.path().join("no-adapter"),
+                target: None,
+                binding: None,
                 wait: Duration::from_secs(1),
                 limits: Limits::default(),
                 close_tab: false,
@@ -684,6 +875,96 @@ fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
     assert!(v1_with.validate().is_ok());
     v1_with.transport = None;
     assert!(v1_with.validate().is_err());
+}
+
+#[test]
+fn vivaldi_download_not_started_points_to_automatic_downloads() {
+    let state = |browser: super::super::BrowserKind| super::super::AdapterState {
+        target: browser.id().to_owned(),
+        browser,
+        port: 47613,
+        secret: encode_lower_hex(SECRET),
+        install_dir: "unused".into(),
+        load_unpacked_path: "unused".into(),
+        platform: Platform::Linux,
+        extension_id: Some(ID.into()),
+        instance_id: None,
+        executable: None,
+    };
+    let vivaldi_state = state(super::super::BrowserKind::Vivaldi);
+    let resume = format!(
+        "{} batch-resume --batch-id b1",
+        vivaldi_state.command_prefix()
+    );
+    let vivaldi = browser_auth_error(
+        bridge_error("download_not_started", "x"),
+        &vivaldi_state,
+        Some(&resume),
+    );
+    assert_eq!(provider_code(&vivaldi), "download_not_started");
+    let action = vivaldi.details["next_action"].as_str().unwrap();
+    assert!(action.contains("vivaldi://settings/downloads"), "{action}");
+    assert!(
+        action.contains("Начинать загрузки автоматически"),
+        "{action}"
+    );
+    assert!(
+        action.contains("forvo browser --target vivaldi batch-resume"),
+        "{action}"
+    );
+    // У других браузеров та же причина не получает подсказку Vivaldi.
+    let chrome = browser_auth_error(
+        bridge_error("download_not_started", "x"),
+        &state(super::super::BrowserKind::Chrome),
+        None,
+    );
+    assert!(
+        !chrome.details["next_action"]
+            .to_string()
+            .contains("Начинать загрузки")
+    );
+}
+
+#[test]
+fn candidate_changed_points_to_the_actual_target_and_operation() {
+    for browser in [
+        super::super::BrowserKind::Chrome,
+        super::super::BrowserKind::Edge,
+        super::super::BrowserKind::Vivaldi,
+    ] {
+        let state = super::super::AdapterState {
+            target: browser.id().to_owned(),
+            browser,
+            port: 47613,
+            secret: encode_lower_hex(SECRET),
+            install_dir: "unused".into(),
+            load_unpacked_path: "unused".into(),
+            platform: Platform::Linux,
+            extension_id: Some(ID.into()),
+            instance_id: None,
+            executable: None,
+        };
+        let changed = || bridge_error("candidate_changed", "x");
+        let single = browser_auth_error(changed(), &state, None);
+        assert_eq!(provider_code(&single), "candidate_changed");
+        let text = single.details["next_action"].as_str().unwrap();
+        assert!(text.contains(browser.display()), "{text}");
+        assert!(
+            !text.contains("batch-resume") && !text.contains("forvo brave"),
+            "{text}"
+        );
+        let resume = format!("{} batch-resume --batch-id b1", state.command_prefix());
+        let batch = browser_auth_error(changed(), &state, Some(&resume));
+        let text = batch.details["next_action"].as_str().unwrap();
+        assert!(
+            text.contains(&format!(
+                "forvo browser --target {} batch-resume --batch-id b1",
+                browser.id()
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("forvo brave"), "{text}");
+    }
 }
 
 #[tokio::test]
@@ -744,6 +1025,40 @@ async fn release_failure_keeps_bytes_and_batch_resume_recovers_without_download(
     assert_eq!(done.items[0].outcome.as_ref().unwrap().code, "imported");
     assert_eq!(lock(&h.world).begins.len(), 1);
     assert!(lock(&h.world).op.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repinned_browser_mismatch_resume_action_contains_batch_id() {
+    let h = harness(vec![(
+        "元気",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    lock(&h.world).instance = Some("aa".repeat(32));
+    lock(&h.world).fail_release = true;
+    let store = store(&h.root);
+    batch::start(
+        &store,
+        "repinned",
+        plan(&[("元気", "げんき")]),
+        Transport::BraveExtension,
+    )
+    .unwrap();
+    let paused = batch::resume(&store, "repinned", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap();
+    assert!(paused.paused.as_ref().unwrap().recovery_required);
+
+    let new_instance = "bb".repeat(32);
+    lock(&h.world).instance = Some(new_instance.clone());
+    repin_target(&h, &new_instance);
+    let error = batch::resume(&store, "repinned", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(provider_code(&error), "browser_mismatch");
+    assert_eq!(
+        error.details["next_action"],
+        "pronunciation-assets forvo brave batch-resume --batch-id repinned"
+    );
 }
 
 #[tokio::test]

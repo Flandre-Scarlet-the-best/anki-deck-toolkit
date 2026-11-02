@@ -486,6 +486,8 @@ pub fn pauses_batch(error: &AssetError) -> bool {
             | "adapter_not_configured"
             | "pairing_invalid"
             | "state_corrupt"
+            | "install_dir_conflict"
+            | "install_dir_unverifiable"
             | "state_permissions"
             | "state_dir_unknown"
             | "bridge_port_busy"
@@ -501,6 +503,7 @@ pub fn pauses_batch(error: &AssetError) -> bool {
             | "url_not_allowed"
             | "injection_failed"
             | "tab_group_failed"
+            | "tab_cleanup_failed"
             | "own_tab_missing"
             | "own_tab_used"
             | "own_tab_closed"
@@ -514,9 +517,21 @@ pub fn pauses_batch(error: &AssetError) -> bool {
             | "download_canceled"
             | "download_interrupted"
             | "save_as_required"
+            | "save_as_suspected"
             | "file_missing"
             | "file_access_denied"
             | "path_mapping_failed"
+            // Выбор браузера и сопряжение цели: конфигурация, а не отсутствие записи.
+            | "browser_mismatch"
+            | "target_ambiguous"
+            | "target_unknown"
+            | "pairing_mismatch"
+            | "pairing_changed"
+            | "extension_id_mismatch"
+            | "instance_mismatch"
+            | "extension_reload_ineffective"
+            | "extension_files_missing"
+            | "install_dir_foreign"
     )
 }
 

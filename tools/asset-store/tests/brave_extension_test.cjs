@@ -12,7 +12,7 @@ const op_id = 'a'.repeat(32);
 const url = 'https://forvo.com/download/mp3/元気/ja/3661006';
 const args = {op_id, surface: '元気', record_id: '3661006'};
 const event = () => ({listeners: new Set(), addListener(fn) {this.listeners.add(fn);}, removeListener(fn) {this.listeners.delete(fn);}});
-function harness(t) {
+function harness(t, {advanceTimers = false} = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brave-extension-'));
     t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
     const clock = {now: Date.now()};
@@ -65,10 +65,14 @@ function harness(t) {
         const context = vm.createContext({chrome, forvoDom() {}, URL, Date: clockDate, TextEncoder, crypto: webcrypto,
             AbortController,
             fetch: async () => {pairingFetches += 1; return {json: async () => ({schema_version: 1, port: 47613, secret: pairingSecret})};},
-            WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: () => ++nextTimerId, clearTimeout() {},
+            WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: (fn, ms = 0) => {
+                const id = ++nextTimerId;
+                if (advanceTimers && typeof fn === 'function') {clock.now += ms; fn();}
+                return id;
+            }, clearTimeout() {},
             setInterval: () => ++nextTimerId, clearInterval() {}});
         vm.runInContext(source.replace(/^import .*;$/m, '').split('chrome.runtime.onStartup.addListener')[0] +
-            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, cleanupRestoredGroups, close: OPERATIONS.close, command, ownTab, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
+            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, cleanupRestoredGroups, close: OPERATIONS.close, open: OPERATIONS.open, navigationVisible, command, ownTab, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
         return context.api;
     }
     chrome.storage.session = {
@@ -82,6 +86,9 @@ function harness(t) {
         restoredCleanup: () => api.cleanupRestoredGroups(),
         command: (id, op, commandArgs = {}) => api.command(id, op, commandArgs),
         close: () => api.close(),
+        open: () => api.open(),
+        navigationVisible: id => api.navigationVisible(id),
+        now: () => clock.now,
         ownTab: () => api.ownTab(),
         restart() {api = worker();},
         advance(ms) {clock.now += ms;},
@@ -118,6 +125,38 @@ test('недавний чужой файл не связывается до по
     assert.equal(fs.readFileSync(foreign.filename, 'utf8'), 'bytes-1');
     assert.equal(fs.existsSync(own.filename), false);
     assert.deepEqual(h.items.map(i => i.id), [1]);
+});
+
+test('медленная первоначальная навигация не перезапускается по таймауту первого ожидания', async t => {
+    const h = harness(t, {advanceTimers: true});
+    const started = h.now();
+    const updates = [];
+    h.chrome.tabs.get = async id => h.now() - started >= 6_000
+        ? {id, status: 'complete', url: 'https://forvo.com/'}
+        : {id, status: 'loading', url: 'about:blank', pendingUrl: 'https://forvo.com/'};
+    h.chrome.tabs.update = async (id, value) => updates.push({id, value});
+
+    await h.navigationVisible(1);
+
+    assert.deepEqual(updates, []);
+});
+
+test('подтверждённо потерянная навигация запускается повторно один раз', async t => {
+    const h = harness(t, {advanceTimers: true});
+    const started = h.now();
+    const updates = [];
+    let restarted = false;
+    h.chrome.tabs.get = async id => {
+        if (restarted) return {id, status: 'complete', url: 'https://forvo.com/'};
+        if (h.now() - started >= 2_550) return {id, status: 'complete', url: '', pendingUrl: ''};
+        return {id, status: 'loading', url: 'about:blank', pendingUrl: 'https://forvo.com/'};
+    };
+    h.chrome.tabs.update = async (id, value) => {updates.push({id, value}); restarted = true;};
+
+    await h.navigationVisible(1);
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].value.url, 'https://forvo.com/');
 });
 
 test('поздний конфликт пересматривается, чужой файл не удаляется', async t => {
@@ -361,9 +400,13 @@ test('close отказывается от чужой вкладки и непо�
     await h.ownTab(); // предварительная диагностика не стирает утраченное доказательство
     await assert.rejects(h.close(), e => e.code === 'ownership_unproven');
     assert.deepEqual(removed, []);
+    // Без идентичности этой сессии одноимённая группа не доказана своей: она не
+    // закрывается и не блокирует close, а только учитывается.
     delete h.session.own;
     h.chrome.tabGroups.query = async () => [{id: 99, title: 'Anki Deck Toolkit'}];
-    await assert.rejects(h.close(), e => e.code === 'ownership_unproven');
+    const result = await h.close();
+    assert.equal(result.closed, false);
+    assert.equal(result.unproven_groups_kept, 1);
     assert.deepEqual(removed, []);
 });
 
@@ -377,4 +420,233 @@ test('close подтверждает отсутствие группы толь�
     assert.equal(result.own_group_absent, true);
     assert.equal(result.own_tab_absent, true);
     assert.deepEqual(tabs.map(t => t.id), [4]);
+});
+
+// Управляемая модель вкладок и групп профиля с отказами отдельных вызовов API.
+// Несколько harness могут делить одну модель: это две копии расширения (две цели)
+// в одном профиле со своими storage.session.
+function profile(h, failures = new Set()) {
+    let nextTab = 100;
+    let nextGroup = 200;
+    const tabs = [];
+    const groups = [];
+    const fail = name => {if (failures.has(name)) throw Error(name);};
+    const api = {
+        windows: {getLastFocused: async () => ({id: 7})},
+        tabs: {
+            onRemoved: h.chrome.tabs.onRemoved,
+            query: async (q = {}) => structuredClone(tabs.filter(t => (q.windowId === undefined || t.windowId === q.windowId)
+                && (q.active === undefined || t.active === q.active) && (q.groupId === undefined || t.groupId === q.groupId))),
+            get: async id => {
+                fail('get');
+                const tab = tabs.find(t => t.id === id);
+                if (!tab) throw Error('No tab with id');
+                return structuredClone(tab);
+            },
+            create: async ({windowId, url}) => {
+                const tab = {id: nextTab++, windowId, groupId: -1, url, status: 'complete', active: false, pinned: false, width: 800};
+                tabs.push(tab);
+                return structuredClone(tab);
+            },
+            group: async ({tabIds, groupId, createProperties}) => {
+                fail('group');
+                const id = groupId ?? nextGroup++;
+                if (!groups.some(g => g.id === id)) groups.push({id, title: '', windowId: createProperties?.windowId});
+                for (const tabId of tabIds) tabs.find(t => t.id === tabId).groupId = id;
+                return id;
+            },
+            update: async (id, props) => {
+                if ('autoDiscardable' in props) fail('update');
+                Object.assign(tabs.find(t => t.id === id), props);
+            },
+            remove: async id => {
+                if (failures.has(`remove:${id}`)) throw Error(`remove:${id}`);
+                fail('remove');
+                const index = tabs.findIndex(t => t.id === id);
+                if (index < 0) throw Error('No tab with id');
+                const [tab] = tabs.splice(index, 1);
+                const empty = groups.findIndex(g => g.id === tab.groupId && !tabs.some(t => t.groupId === g.id));
+                if (empty >= 0) groups.splice(empty, 1);
+            },
+        },
+        tabGroups: {
+            query: async (q = {}) => structuredClone(groups.filter(g => q.title === undefined || g.title === q.title)),
+            get: async id => structuredClone(groups.find(g => g.id === id)),
+            update: async (id, props) => {fail('groupUpdate'); Object.assign(groups.find(g => g.id === id), props);},
+        },
+    };
+    const attach = target => {
+        Object.assign(target.chrome, api);
+        const session = target.chrome.storage.session;
+        const set = session.set;
+        session.set = async value => {
+            if ('own' in value) fail('own_set');
+            else if ('leftoverTabs' in value) fail('leftover_set');
+            return set(value);
+        };
+        delete target.session.own;
+    };
+    attach(h);
+    return {tabs, groups, failures, attach};
+}
+
+const STAGES = ['get', 'group', 'groupUpdate', 'update', 'own_set'];
+
+for (const stage of STAGES) {
+    test(`отказ ${stage} после создания вкладки: откат подтверждён, ошибка информативна`, async t => {
+        const h = harness(t);
+        const p = profile(h, new Set([stage]));
+        await assert.rejects(h.open(), e => e.code === 'tab_group_failed' && e.message.includes(stage));
+        assert.deepEqual(p.tabs, []);
+        assert.deepEqual(p.groups, []);
+        assert.deepEqual(h.session.leftoverTabs, []);
+        assert.equal(h.session.own, undefined);
+    });
+
+    test(`двойной отказ ${stage} + remove: остаток сохранён и удаляется повтором`, async t => {
+        const h = harness(t);
+        const p = profile(h, new Set([stage, 'remove']));
+        // Вкладка другой цели того же профиля с тем же названием группы.
+        p.tabs.push({id: 50, windowId: 7, groupId: 60, url: 'https://forvo.com/', active: false});
+        p.groups.push({id: 60, title: 'Anki Deck Toolkit', windowId: 7});
+        await assert.rejects(h.open(), e => e.code === 'tab_cleanup_failed' && e.message.includes(stage));
+        const leftover = p.tabs.find(t => t.id !== 50);
+        assert.ok(leftover, 'вкладка, которую не удалось удалить, существует');
+        assert.deepEqual(h.session.leftoverTabs, [leftover.id]);
+        assert.equal(h.session.own, undefined);
+        // Остаток мешает открыть ещё одну вкладку: накопления нет.
+        p.failures.delete(stage);
+        await assert.rejects(h.open(), e => e.code === 'tab_cleanup_failed');
+        assert.equal(p.tabs.length, 2);
+        // Перезапуск service worker: доказательство живёт в storage.session.
+        p.failures.clear(); h.restart();
+        const opened = await h.open();
+        assert.equal(opened.created, true);
+        assert.deepEqual(p.tabs.map(t => t.id).sort(), [50, h.session.own.tabId].sort());
+        assert.deepEqual(h.session.leftoverTabs, []);
+        assert.ok(p.groups.some(g => g.id === 60), 'группа другой цели не тронута');
+    });
+}
+
+test('несохранённое доказательство: вкладка удаляется сразу, двойной отказ виден', async t => {
+    const h = harness(t);
+    const p = profile(h, new Set(['leftover_set']));
+    await assert.rejects(h.open(), e => e.code === 'tab_group_failed');
+    assert.deepEqual(p.tabs, []);
+    p.failures.add('remove');
+    await assert.rejects(h.open(), e => e.code === 'tab_cleanup_failed' && e.message.includes('leftover_not_recorded'));
+    assert.equal(p.tabs.length, 1);
+});
+
+test('отказ удаления прежней вкладки при замене не выдаётся за полную замену', async t => {
+    const h = harness(t);
+    const p = profile(h);
+    await h.open();
+    const first = h.session.own;
+    h.session.own = {...first, download_used: true};
+    p.failures.add('remove');
+    await assert.rejects(h.open(), e => e.code === 'tab_cleanup_failed' && e.message.includes('previous_tab_not_removed'));
+    // Новая вкладка — собственная в той же группе, прежняя — остаток для повтора.
+    assert.notEqual(h.session.own.tabId, first.tabId);
+    assert.equal(h.session.own.groupId, first.groupId);
+    assert.equal(h.session.own.download_used, false);
+    assert.deepEqual(h.session.leftoverTabs, [first.tabId]);
+    assert.equal(p.tabs.length, 2);
+    p.failures.clear();
+    const again = await h.open();
+    assert.equal(again.created, false);
+    assert.deepEqual(p.tabs.map(t => t.id), [h.session.own.tabId]);
+    assert.deepEqual(h.session.leftoverTabs, []);
+    // close повторяет очистку остатков и честно сообщает об их сохранении.
+    h.session.own = {...h.session.own, download_used: true};
+    await h.open();
+    assert.equal(p.tabs.length, 1);
+    h.session.leftoverTabs = [999, ...(h.session.leftoverTabs || [])];
+    p.tabs.push({id: 999, windowId: 7, groupId: -1, url: 'https://forvo.com/', active: false});
+    p.failures.add('remove');
+    await assert.rejects(h.close());
+    assert.deepEqual(h.session.leftoverTabs, [999]);
+    assert.ok(h.session.own, 'собственная вкладка не удалена — идентичность сохранена');
+    p.failures.clear();
+    const closed = await h.close();
+    assert.equal(closed.own_tab_absent, true);
+    assert.deepEqual(p.tabs, []);
+    assert.deepEqual(h.session.leftoverTabs, []);
+});
+
+test('close сообщает tab_cleanup_failed для остатка в собственной группе и сохраняет own', async t => {
+    const h = harness(t);
+    const failures = new Set();
+    const p = profile(h, failures);
+    await h.open();
+    const first = h.session.own;
+    h.session.own = {...first, download_used: true};
+    failures.add(`remove:${first.tabId}`);
+    await assert.rejects(h.open(), e => e.code === 'tab_cleanup_failed');
+    assert.equal(h.session.own.groupId, first.groupId);
+    assert.deepEqual(h.session.leftoverTabs, [first.tabId]);
+
+    await assert.rejects(
+        h.close(),
+        e => e.code === 'tab_cleanup_failed' && e.message.includes('leftover tabs: 1'),
+    );
+    assert.ok(h.session.own, 'собственное состояние сохраняется, пока группа содержит остаток');
+    assert.deepEqual(h.session.leftoverTabs, [first.tabId]);
+    assert.deepEqual(p.tabs.map(tab => tab.id), [first.tabId]);
+
+    failures.clear();
+    const closed = await h.close();
+    assert.equal(closed.own_tab_absent, true);
+    assert.equal(h.session.own, undefined);
+    assert.deepEqual(p.tabs, []);
+    assert.deepEqual(p.groups, []);
+});
+
+test('остаток, уведённый пользователем на другой сайт, не закрывается', async t => {
+    const h = harness(t);
+    const p = profile(h);
+    p.tabs.push({id: 40, windowId: 7, groupId: -1, url: 'https://example.org/', active: true, width: 800});
+    h.session.leftoverTabs = [40];
+    await h.open();
+    assert.ok(p.tabs.some(t => t.id === 40));
+    assert.deepEqual(h.session.leftoverTabs, []);
+});
+
+test('остаток в процессе ухода на другой сайт не закрывается, переход на forvo.com — закрывается', async t => {
+    const h = harness(t);
+    const p = profile(h);
+    // Навигация не завершена: url ещё Forvo, pendingUrl уже чужой сайт.
+    p.tabs.push({id: 41, windowId: 7, groupId: -1, url: 'https://forvo.com/', pendingUrl: 'https://example.org/', width: 800});
+    // Начальная about:blank собственной вкладки, переходящей на forvo.com.
+    p.tabs.push({id: 42, windowId: 7, groupId: -1, url: 'about:blank', pendingUrl: 'https://forvo.com/', width: 800});
+    h.session.leftoverTabs = [41, 42];
+    await h.close();
+    assert.deepEqual(p.tabs.map(t => t.id), [41]);
+    assert.deepEqual(h.session.leftoverTabs, []);
+});
+
+test('две цели в одном профиле: close каждой закрывает только своё', async t => {
+    const a = harness(t);
+    const b = harness(t);
+    const p = profile(a);
+    p.attach(b);
+    await a.open();
+    await b.open();
+    assert.equal(p.groups.length, 2);
+    assert.ok(p.groups.every(g => g.title === 'Anki Deck Toolkit'));
+    const bOwn = b.session.own;
+    const closedA = await a.close();
+    assert.equal(closedA.closed, true);
+    assert.equal(closedA.own_group_absent, true);
+    assert.equal(closedA.unproven_groups_kept, 1);
+    assert.deepEqual(p.tabs.map(t => t.id), [bOwn.tabId]);
+    assert.deepEqual(p.groups.map(g => g.id), [bOwn.groupId]);
+    // Повторный close A идемпотентен и по-прежнему не трогает B.
+    assert.equal((await a.close()).closed, false);
+    assert.equal(p.tabs.length, 1);
+    const closedB = await b.close();
+    assert.equal(closedB.closed, true);
+    assert.equal(closedB.unproven_groups_kept, 0);
+    assert.deepEqual(p.tabs, []);
+    assert.deepEqual(p.groups, []);
 });

@@ -15,6 +15,7 @@ use crate::forvo::evidence::{Acquisition, CandidateSource, acquire_from, import_
 use crate::forvo::{Candidate, provider_code};
 use crate::pronunciation::Pronunciation;
 use crate::{AssetError, AssetStore, ErrorCode};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -26,9 +27,40 @@ const RECONNECT_WAIT: Duration = Duration::from_secs(45);
 /// Предел освобождения собственной операции.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Конкретная авторизованная браузерная сессия, за которой закреплён пакет:
+/// цель адаптера, браузер, ID расширения и его экземпляр в профиле.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserBinding {
+    pub target: String,
+    pub browser: super::BrowserKind,
+    pub extension_id: String,
+    /// `null` — пакет привязан расширением до 0.3; дополняется при первом
+    /// подключении того же расширения новой версии.
+    pub instance_id: Option<String>,
+}
+
+impl BrowserBinding {
+    /// Совпадает ли сессия с привязкой. Пустой экземпляр привязки допускает
+    /// только то же расширение (ID) той же цели.
+    pub fn accepts(&self, actual: &BrowserBinding) -> bool {
+        self.target == actual.target
+            && self.browser == actual.browser
+            && self.extension_id == actual.extension_id
+            && self
+                .instance_id
+                .as_ref()
+                .is_none_or(|id| actual.instance_id.as_ref() == Some(id))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BraveOptions {
     pub state_dir: PathBuf,
+    /// Цель адаптера; `None` — цель по умолчанию (или единственная).
+    pub target: Option<String>,
+    /// Привязка пакета: подключение к другой сессии отклоняется до первой команды.
+    pub binding: Option<BrowserBinding>,
     /// Сколько ждать первого подключения расширения.
     pub wait: Duration,
     pub limits: Limits,
@@ -60,7 +92,7 @@ pub async fn download_candidate(
     if before.code != "ok" || !before.candidates.contains(candidate) {
         return Err(bridge_error(
             "candidate_changed",
-            "Строка кандидата изменилась после выбора; проверьте страницу и продолжите через forvo brave batch-resume",
+            "Строка кандидата изменилась после выбора; проверьте страницу слова и повторите команду",
         ));
     }
     download::acquire_bytes(
@@ -69,23 +101,51 @@ pub async fn download_candidate(
     .await
 }
 
-/// Ошибка входа/проверки сайта с действием для обычного Brave, а не для CDP-профиля.
-fn brave_auth_error(mut error: AssetError) -> AssetError {
-    let action = match provider_code(&error) {
+/// Ошибка входа/проверки сайта с действием для обычного браузера цели, а не для CDP-профиля.
+/// `resume` — команда продолжения, только если операция идёт в существующем пакете;
+/// одиночные `fetch`/`smoke` получают совет повторить команду.
+pub(crate) fn browser_auth_error(
+    mut error: AssetError,
+    state: &super::AdapterState,
+    resume: Option<&str>,
+) -> AssetError {
+    let browser = state.browser.display();
+    let retry = match resume {
+        Some(resume) => format!("продолжите пакет: {resume}"),
+        None => "повторите команду".to_owned(),
+    };
+    let code = provider_code(&error).to_owned();
+    let action = match code.as_str() {
         "challenge_required" => {
-            "Откройте forvo.com в Brave, пройдите проверку сайта вручную и повторите команду (пакет — forvo brave batch-resume)"
+            format!("Откройте forvo.com в {browser}, пройдите проверку сайта вручную и {retry}")
         }
         "login_required" | "session_expired" => {
-            "Войдите в Forvo в обычном Brave и повторите команду (пакет — forvo brave batch-resume)"
+            format!("Войдите в Forvo в обычном {browser} и {retry}")
         }
         "access_denied" | "rate_limited" => {
-            "Forvo ограничил доступ; проверьте страницу в Brave и продолжите позже"
+            format!("Forvo ограничил доступ; проверьте страницу в {browser} и продолжите позже")
         }
+        "save_as_required" | "save_as_suspected" => format!(
+            "Откройте {} в {browser}, выключите «Спрашивать, куда сохранять каждый файл» и {retry}",
+            state.browser.downloads_settings_uri()
+        ),
+        // Vivaldi по умолчанию спрашивает подтверждение каждой загрузки в своём интерфейсе;
+        // расширению этот запрос не виден, загрузка просто не начинается.
+        "download_not_started" if state.browser == super::BrowserKind::Vivaldi => format!(
+            "Откройте {} в {browser}, включите «Начинать загрузки автоматически», закройте окно подтверждения загрузки, если оно открыто, и {retry}",
+            state.browser.downloads_settings_uri()
+        ),
+        "candidate_changed" => format!(
+            "Строка выбранной записи изменилась после выбора; проверьте страницу слова в {browser} и {retry}"
+        ),
         _ => return error,
     };
-    error.message = action.into();
+    error.message = action.clone();
     error.details["provider"] = json!("forvo_brave");
     error.details["next_action"] = json!(action);
+    if code == "download_not_started" {
+        error.details["setting_required"] = json!(true);
+    }
     error
 }
 
@@ -104,6 +164,26 @@ fn interrupted_error() -> AssetError {
     )
 }
 
+fn binding_of(connection: &Connection) -> BrowserBinding {
+    BrowserBinding {
+        target: connection.state.target.clone(),
+        browser: connection.state.browser,
+        extension_id: connection.peer.extension_id.clone(),
+        instance_id: connection.peer.instance.clone(),
+    }
+}
+
+/// Пакет закреплён за другой браузерной сессией: продолжение невыбранным
+/// браузером, другим профилем или переустановленным расширением не допускается.
+pub fn browser_mismatch(expected: &BrowserBinding, actual: &BrowserBinding) -> AssetError {
+    AssetError::with_details(
+        ErrorCode::InvalidTransition,
+        "Пакет закреплён за другой браузерной сессией; продолжите его в исходном браузере и профиле",
+        json!({"provider":"forvo_brave","code":"browser_mismatch","batch_browser":expected,"connected_browser":actual,
+            "next_action":format!("{} batch-resume --batch-id <id>", super::targets::command_prefix(&expected.target))}),
+    )
+}
+
 /// Одно логическое сопряжение с расширением на всё выполнение.
 pub struct BraveSession {
     connection: Connection,
@@ -115,13 +195,21 @@ pub struct BraveSession {
     operations: Vec<Value>,
     recovered: Option<Value>,
     reconnects: u32,
+    /// Команда продолжения, если сессия обслуживает существующий пакет.
+    resume: Option<String>,
 }
 
 impl BraveSession {
     /// Подключает расширение и освобождает операцию, оставшуюся от прерванного
     /// запуска (только связанную собственную загрузку).
     pub async fn connect(options: &BraveOptions) -> Result<Self, AssetError> {
-        let mut connection = acceptance::connect(&options.state_dir, options.wait).await?;
+        let mut connection = acceptance::connect_with_binding(
+            &options.state_dir,
+            options.target.as_deref(),
+            options.wait,
+            options.binding.as_ref(),
+        )
+        .await?;
         let ping = connection
             .bridge
             .call("ping", json!({}), Duration::from_secs(5))
@@ -147,6 +235,7 @@ impl BraveSession {
             operations: Vec::new(),
             recovered,
             reconnects: 0,
+            resume: None,
         })
     }
 
@@ -155,9 +244,26 @@ impl BraveSession {
         self.interrupt = interrupt;
     }
 
+    /// Сессия обслуживает пакет: советы пользователю ведут к его продолжению.
+    pub fn set_batch(&mut self, batch_id: &str) {
+        self.resume = Some(format!(
+            "{} batch-resume --batch-id {batch_id}",
+            self.connection.state.command_prefix()
+        ));
+    }
+
+    fn guided(&self, error: AssetError) -> AssetError {
+        browser_auth_error(error, &self.connection.state, self.resume.as_deref())
+    }
+
+    pub fn binding(&self) -> BrowserBinding {
+        binding_of(&self.connection)
+    }
+
     /// Сводка без секретов и путей: расширение, операции загрузок, восстановление.
     pub fn summary(&self) -> Value {
-        json!({"transport":"brave_extension","extension_id":self.connection.peer.extension_id,
+        json!({"transport":"brave_extension","target":self.connection.state.target,"browser":self.connection.state.browser,
+            "update":self.connection.update,"extension_id":self.connection.peer.extension_id,
             "extension_version":self.connection.peer.version,"downloads":self.operations.len(),
             "recovery_required":self.recovery_required(),"operations":self.operations,"recovered_previous":self.recovered,"reconnects":self.reconnects})
     }
@@ -202,7 +308,7 @@ impl BraveSession {
                     return Ok(());
                 }
                 Err(e) if attempt == 0 && reconnectable(&e) => self.reconnect().await?,
-                Err(e) => return Err(brave_auth_error(e)),
+                Err(e) => return Err(self.guided(e)),
             }
         }
         unreachable!("ограниченные попытки")
@@ -263,6 +369,7 @@ impl BraveSession {
             &mut interrupt,
         )
         .await;
+        let outcome = outcome.map_err(|e| self.guided(e));
         // Освобождение — при любом исходе: собственная связанная загрузка
         // отменяется или удаляется; несвязанная операция ничего не трогает.
         let released = self.release(&op_id).await.and_then(|value| {
