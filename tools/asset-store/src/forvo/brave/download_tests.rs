@@ -47,7 +47,18 @@ fn facts(item: Option<ItemFacts>, elapsed_ms: u64) -> StatusFacts {
         tab_present: true,
         page_unchanged: true,
         elapsed_ms,
+        bound_elapsed_ms: 0,
     }
+}
+
+fn facts_with_bound_elapsed(
+    item: Option<ItemFacts>,
+    elapsed_ms: u64,
+    bound_elapsed_ms: u64,
+) -> StatusFacts {
+    let mut value = facts(item, elapsed_ms);
+    value.bound_elapsed_ms = bound_elapsed_ms;
+    value
 }
 
 fn classify_default(facts: &StatusFacts) -> Progress {
@@ -162,10 +173,6 @@ fn download_states_are_distinguished() {
         classify_default(&facts(Some(dialog.clone()), 1000)),
         Progress::Waiting("in_progress")
     );
-    assert_eq!(
-        classify_default(&facts(Some(dialog.clone()), 9000)),
-        Progress::Failed("save_as_required")
-    );
     let mut dismissed = dialog;
     dismissed.state = "interrupted".into();
     dismissed.error = Some("USER_CANCELED".into());
@@ -194,6 +201,28 @@ fn download_states_are_distinguished() {
     assert_eq!(
         classify_default(&facts(Some(dangerous), 100)),
         Progress::Failed("download_dangerous")
+    );
+}
+
+#[test]
+fn save_as_prompt_limit_starts_when_download_is_bound() {
+    let mut dialog = item("in_progress");
+    dialog.has_filename = false;
+    dialog.filename = None;
+
+    // Заголовки могли задержаться после клика: общий timer уже истёк,
+    // но связанная загрузка пока ждёт выбора имени меньше 8 секунд.
+    assert_eq!(
+        classify_default(&facts_with_bound_elapsed(
+            Some(dialog.clone()),
+            20_000,
+            7_999,
+        )),
+        Progress::Waiting("in_progress")
+    );
+    assert_eq!(
+        classify_default(&facts_with_bound_elapsed(Some(dialog), 20_000, 8_000,)),
+        Progress::Failed("save_as_required")
     );
 }
 

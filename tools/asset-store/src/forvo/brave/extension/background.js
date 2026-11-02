@@ -453,12 +453,14 @@ async function downloadStatus(args) {
     });
     if (!current) return {code: 'operation_unknown', op_id: opId};
     const [item] = current.bound === null ? [] : await chrome.downloads.search({id: current.bound});
+    const now = Date.now();
     return {code: 'status', op_id: opId, observer_alive: alive, own_requests: current.own_requests,
         foreign_requests: current.foreign_requests, matching_downloads: items.length, conflict: current.conflict,
         ownership_proven: !!item && ownsItem(item, current),
         observer_lost: current.observer_lost, bound_id: current.bound, bound_missing: current.bound !== null && !item,
         item: item ? sanitizeItem(item, current) : null, tab_present: tabPresent,
-        page_unchanged: tabPresent && tab.url === current.page_url, elapsed_ms: Date.now() - current.began_at};
+        page_unchanged: tabPresent && tab.url === current.page_url, elapsed_ms: now - current.began_at,
+        bound_elapsed_ms: current.bound_at ? now - current.bound_at : 0};
 }
 
 // Освобождение операции. Действия применяются только к загрузке, владение

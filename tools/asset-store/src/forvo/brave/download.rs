@@ -88,6 +88,9 @@ pub struct StatusFacts {
     pub page_unchanged: bool,
     #[serde(default)]
     pub elapsed_ms: u64,
+    /// Время с момента связывания конкретного DownloadItem.
+    #[serde(default)]
+    pub bound_elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +184,7 @@ pub fn classify(
         return Progress::Failed("download_vanished");
     }
     let elapsed = Duration::from_millis(facts.elapsed_ms);
+    let bound_elapsed = Duration::from_millis(facts.bound_elapsed_ms);
     let Some(item) = &facts.item else {
         if !facts.tab_present {
             return Progress::Failed("own_tab_closed");
@@ -223,7 +227,7 @@ pub fn classify(
             Progress::Failed("download_canceled")
         }
         "interrupted" => Progress::Failed("download_interrupted"),
-        "in_progress" if !item.has_filename && elapsed >= limits.prompt => {
+        "in_progress" if !item.has_filename && bound_elapsed >= limits.prompt => {
             Progress::Failed("save_as_required")
         }
         "in_progress" if elapsed >= limits.total => Progress::Failed("download_timeout"),

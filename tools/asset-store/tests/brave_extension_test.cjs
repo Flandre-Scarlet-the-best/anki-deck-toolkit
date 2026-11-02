@@ -15,6 +15,8 @@ const event = () => ({listeners: new Set(), addListener(fn) {this.listeners.add(
 function harness(t) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brave-extension-'));
     t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+    const clock = {now: Date.now()};
+    const clockDate = class extends Date { static now() { return clock.now; } };
     const data = {own: {tabId: 1, groupId: 2}};
     const tab = {id: 1, groupId: 2, url: 'https://forvo.com/word/%E5%85%83%E6%B0%97/'};
     const items = [];
@@ -50,7 +52,7 @@ function harness(t) {
     };
     function worker() {
         onRequest.listeners.clear();
-        const context = vm.createContext({chrome, forvoDom() {}, URL, TextEncoder, crypto: webcrypto, console: {info() {}}, setTimeout, clearTimeout});
+        const context = vm.createContext({chrome, forvoDom() {}, URL, Date: clockDate, TextEncoder, crypto: webcrypto, console: {info() {}}, setTimeout, clearTimeout});
         vm.runInContext(source.replace(/^import .*;$/m, '').split('const OPERATIONS =')[0] + '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease};', context);
         return context.api;
     }
@@ -58,6 +60,7 @@ function harness(t) {
     return {
         data, items, failures, calls, tab,
         restart() {api = worker();},
+        advance(ms) {clock.now += ms;},
         beforeSet(fn) {beforeSet = fn;},
         begin: () => api.downloadBegin(args),
         status: () => api.downloadStatus({op_id}),
@@ -93,6 +96,19 @@ test('поздний конфликт пересматривается, чужо
     assert.equal((await h.status()).conflict, true);
     await h.release();
     assert.equal(fs.readFileSync(foreign.filename, 'utf8'), 'bytes-2');
+});
+
+test('время ожидания имени файла отсчитывается от связывания', async t => {
+    const h = harness(t); await h.begin();
+    h.advance(15_000); h.request();
+    const item = h.add(1, h.tab.url, 'in_progress'); delete item.filename;
+    const bound = await h.status();
+    assert.equal(bound.elapsed_ms, 15_000);
+    assert.equal(bound.bound_elapsed_ms, 0);
+    h.advance(7_999);
+    assert.equal((await h.status()).bound_elapsed_ms, 7_999);
+    h.advance(1);
+    assert.equal((await h.status()).bound_elapsed_ms, 8_000);
 });
 
 for (const failure of ['cancel', 'removeFile', 'erase']) {
