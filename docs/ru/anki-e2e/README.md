@@ -239,6 +239,179 @@ x86_64 или aarch64, сеть до GitHub, AnkiWeb, Docker Hub и зеркал
 [странице производительности](performance.md); общие правила
 замеров — в [методике](../performance/README.md).
 
+## Браузерный набор Forvo-Brave
+
+`cargo run -p anki-e2e -- browser [--scenarios a,b] [--chrome <путь>] [--extension-loader flag|cdp-pipe] [--cli <путь>] [--work-dir <каталог>] [--keep-profiles]` —
+отдельный явный набор для адаптера [Forvo через обычный браузер](../asset-store/forvo-brave.md).
+Он не требует Docker, Anki Desktop, персонального Brave, профиля и аккаунта Forvo и не
+выходит во внешнюю сеть. Это минимальная изолированная граница внутри того же runner.
+Docker-жизненный цикл стенда привязан к образу Anki, и встраивание браузера в контейнер
+агента потребовало бы ломки его архитектуры. Поэтому набор переиспользует статусы и коды
+завершения (`report::Status`), прерывание через Ctrl+C, рабочий каталог
+`target/anki-e2e` и отчёты JSON/Markdown, а Docker-сценарии Anki не меняются.
+Образ Anki собирается с `--no-default-features` без этой feature.
+
+Каждый сценарий запускает собственный тестовый Chromium:
+- headless, временный профиль в каталоге прогона;
+- `--no-proxy-server`;
+- `--host-resolver-rules` направляет `forvo.com` и синтетический чужой сайт `user-files.test` на локальный HTTPS fixture, а остальные имена — в `NOTFOUND`;
+- самоподписанный сертификат допускается только в этом профиле.
+
+В браузер устанавливается то же production-расширение, что ставит `pronunciation-assets
+forvo browser setup`: manifest и ограничение `https://forvo.com` не расширяются. Bridge
+настоящий, проверки — Rust-контракты `asset-store`. CDP управляет только тестовым
+браузером: действиями «пользователя» в других вкладках и остановкой service worker.
+
+Браузер задаётся `--chrome` (или `CHROME_BIN`, `CHROMIUM_BIN`, `PATH`). Его разновидность
+определяется по `--version` так же, как у `forvo browser discover`. Подходят Chromium,
+Chrome for Testing, Google Chrome, Microsoft Edge, Vivaldi и Brave для Linux. Цель
+адаптера — `brave` для Chromium и Brave (сценарии `cli_*` вызывают прежний
+`forvo brave`), иначе имя браузера (`forvo browser --target <имя>`). Способ
+установки расширения во **временный** профиль:
+- `flag` — `--load-extension`: Chromium, Chrome for Testing, Edge, Vivaldi, Brave;
+- `cdp-pipe` — CDP `Extensions.loadUnpacked` через `--remote-debugging-pipe` и
+  `--enable-unsafe-extension-debugging`, как «Загрузить распакованное». Это значение по
+  умолчанию для Google Chrome, который с версии 137 игнорирует `--load-extension`.
+
+Это способ только для тестового профиля стенда. Пользовательским способом установки он не
+является. Профиль создаётся с включённым режимом разработчика. У каждого сценария свой
+профиль, а значит, свой экземпляр расширения, поэтому перед сценарием выполняется
+`setup --repin` цели. Нужны `ffmpeg`/`ffprobe` и `openssl`; без них итог — `BLOCKED`
+с причиной.
+
+Временный профиль получает `vivaldi.downloads.start_automatically` в паре с
+`prompt_for_download` (другие браузеры этот ключ не читают): Vivaldi по умолчанию
+подтверждает каждую загрузку в своём интерфейсе. Под Vivaldi вкладка, к которой
+подключился CDP-клиент стенда, не завершает навигацию. Поэтому сценарии, открывающие
+«вкладку пользователя» через CDP (`extension_bridge_tab`, `concurrent_downloads`,
+`browser_restart`, `cli_fetch`, `cli_batch_recovery`, `cli_foreign_downloads`), для
+Vivaldi получают `BLOCKED` с этой причиной. Вкладка пользователя открывается не дольше 30 с.
+
+| Сценарий | Что доказывает |
+|---|---|
+| `extension_bridge_tab` | HMAC-сопряжение настоящего расширения, контракт команд, неактивная вкладка в свёрнутой группе, вкладки пользователя не изменены |
+| `auth_and_candidates` | японские записи и кнопки, неверный `record_id`, вход, изменённый DOM, другой язык, phrases, чужая кнопка |
+| `full_download` | `smoke` целиком: клик → загрузка → владение → `complete` → байты → SHA/`probe_mp3` → очистка; `--keep-download` |
+| `concurrent_downloads` | параллельные загрузки пользователя (другая запись Forvo, другой сайт) неизменны; та же запись из другой вкладки → `download_conflict`, ничего не удалено |
+| `recent_user_download` | недавний чужой файл того же URL с другими байтами не усыновляется при удержании заголовков своей загрузки; читаются и удаляются только свои байты |
+| `download_failures` | `.crdownload` не принимается, таймаут, обрыв, не-MP3, неверный адрес, чужой download ID |
+| `service_worker_restart` | рестарт до связывания → `ownership_unproven`; после связывания операция доводится до конца |
+| `bridge_reconnect` | разрыв bridge не теряет связанную операцию |
+| `own_tab_closed` | закрытие собственной вкладки до начала загрузки |
+| `interrupt` | прерывание как Ctrl+C: `INTERRUPTED`, собственная загрузка отменена |
+| `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` (Edge: `save_as_suspected`; Vivaldi без автоматического начала загрузок: `download_not_started` с действием) |
+| `browser_restart` | перезапуск браузера с восстановлением сессии: восстановленная группа без доказанного владения и вкладка пользователя сохранены; новая собственная вкладка создаётся отдельно |
+| `cli_fetch` | настоящий `pronunciation-assets forvo brave fetch`: импорт оригинального MP3 в отдельное тестовое хранилище (SHA, не `Verified`), одна сетевая загрузка, файл удалён, копий в `evidence/` нет; повтор тех же байтов; без `ffprobe` — `technical_validation_failed` без импорта |
+| `cli_batch` | пакет из трёх разных слов: не-MP3 лучшей записи → следующий кандидат с попытками в `ForvoEvidence`, ровно одна загрузка на попытку, resume без загрузок, `--max-items`, CDP-resume пакета Brave и Brave-resume состояния v1 → `transport_mismatch` без браузера |
+| `cli_batch_recovery` | Ctrl+C во время загрузки (отмена собственной загрузки, `paused interrupted`, resume), `batch-status` и `batch-cancel` во время работы при параллельной загрузке пользователя, второй исполнитель того же пакета, SIGKILL во время загрузки и освобождение операции следующим запуском, resume после checkpoint и после импорта без загрузок |
+| `cli_foreign_downloads` | загрузка той же записи из чужой вкладки во время пакета → `paused download_conflict`, файлы пользователя целы; повторный запуск завершает пакет |
+| `adapter_doctor` | `doctor --forvo --reconnect --reload` цели: ID из каталога цели, закреплённый экземпляр, версия как у CLI, установка по исполняемому файлу, бренды браузера (`PASS`; у Vivaldi — `NOT_TESTED`), все нужные API от самого браузера, `download_settings` — `NOT_TESTED` |
+| `extension_update` | установлена старая версия → следующая команда обновляет файлы и штатно перезагружает расширение с тем же ID, экземпляром и секретом; при незавершённой связанной загрузке перезагрузка откладывается, операция освобождается восстановлением, обновление выполняет следующая команда |
+| `target_isolation` | вторая цель в том же `state.json`: свои каталог, порт, секрет и ID; оба расширения в одном профиле подключаются каждое к своей цели; `close` первой цели закрывает только её вкладку при одноимённой группе второй, затем закрывается вторая; тот же каталог в другом профиле → `instance_mismatch`; `setup --repin` закрепляет новый экземпляр с прежним секретом |
+
+Сценарии `cli_*` запускают собранный `pronunciation-assets` (`--cli`,
+`PRONUNCIATION_ASSETS_BIN` или файл рядом с `anki-e2e`; без него — `BLOCKED`):
+`cargo build -p asset-store --bin pronunciation-assets`. Fixture содержит минимально
+необходимые независимые слова `水` и `山` с собственными записями и байтами. Каждое
+тестовое хранилище создаётся в каталоге сценария.
+
+Отчёт `target/anki-e2e/browser-runs/<run_id>/report.{json,md}` содержит:
+- ревизию, версию браузера и флаги; если разновидность браузера не определена —
+  причину отказа;
+- SHA-256 синтетических MP3 fixture;
+- проверки каждого сценария с доказательствами и итоговое содержимое каталога загрузок.
+
+`PASS` получает только завершённый сценарий, в котором все проверки истинны. Итог — худший
+статус, код завершения — как у стенда. Профили и каталог сопряжения с тестовым секретом
+удаляются после прогона, если не задан `--keep-profiles`. Живой Forvo в основном браузере
+пользователя этим набором не заменяется.
+
+## Real-Site стенд Forvo-Brave
+
+`cargo run -p anki-e2e -- real-site <up|run|status|down|purge>` — ручной стенд для
+адаптера [Forvo через обычный Brave](../asset-store/forvo-brave.md) на **настоящем**
+`forvo.com`: без fixture, моков и подмены ответов. Он дополняет изолированный браузерный
+набор и не заменяет его. Вход в аккаунт и проверки сайта (Cloudflare) пользователь
+проходит вручную, поэтому стенд не запускается в CI и `cargo test`.
+
+```bash
+cargo run -p anki-e2e -- real-site up        # образ, контейнер, Brave; печатает адрес noVNC
+cargo run -p anki-e2e -- real-site run       # doctor --forvo, smoke 元気/げんき, fetch и пакет 元気+猫
+cargo run -p anki-e2e -- real-site down      # штатно закрыть Brave, удалить контейнер
+cargo run -p anki-e2e -- real-site purge --yes   # удалить тома, образы и cache mount сборки стенда
+```
+
+Устройство:
+- образ `anki-e2e/real-site`: закреплённый Ubuntu 24.04, Brave Stable для Linux из
+  [официального репозитория](https://brave.com/linux/), Xvfb, x11vnc и noVNC,
+  `pronunciation-assets`, собранный внутри Docker из снимка исходников (как образ запуска Anki);
+- Brave запускается без CDP и `--remote-debugging-port`. `up` сначала выполняет
+  `pronunciation-assets forvo brave setup`, затем запускает Brave с `--load-extension`
+  каталога адаптера (Brave для Linux этот флаг принимает, режим разработчика не нужен).
+  ID расширения тот же, что при ручной загрузке. bridge работает на `127.0.0.1`
+  в собственном network namespace контейнера;
+- управляемая политика **только этого образа** выключает менеджер паролей (в контейнере
+  нет связки ключей, Brave работает с `--password-store=basic`) и запрос места сохранения
+  (`PromptForDownloadLocation`). Пользовательский Brave не меняется;
+- noVNC (`--vnc-port`, по умолчанию 6080) и VNC для нативного клиента (`--rfb-port`,
+  по умолчанию 5900) публикуются только на `127.0.0.1` хоста. Пароль VNC случайный,
+  хранится в томе состояния (0600): `docker exec anki-e2e-real-site cat /home/tester/state/vnc.txt`.
+  Нативный клиент (например, TigerVNC Viewer) надёжнее браузерного noVNC передаёт буфер
+  обмена и раскладку. x11vnc запущен с `-skip_lockkeys`: регистр берётся из символа клиента,
+  и Caps Lock не применяется повторно;
+- прокси для Brave берётся из `docker info` (Docker Desktop), явно — `--proxy`,
+  отключается `--no-proxy`.
+
+Повторный `up` без параметров сохраняет работающую конфигурацию и, как `status`,
+показывает фактические порты Docker. Явные `--rebuild`, `--vnc-port`, `--rfb-port`,
+`--proxy` и `--no-proxy` на работающем стенде отклоняются: сначала выполните `down`,
+затем `up` с нужными параметрами. Профиль и остальные тома сохранятся.
+
+Изоляция контейнера: `--cap-drop ALL --cap-add SYS_CHROOT`, `no-new-privileges`, без
+`privileged` и без `seccomp=unconfined`. Процесс Brave работает от uid 1000 без действующих
+capabilities. `SYS_CHROOT` в bounding set нужен песочнице только внутри её user namespace:
+без него zygote падает на `chroot`. Стандартный профиль seccomp не даёт песочнице Chromium создать
+namespaces, а отключать песочницу (`--no-sandbox`) стенд не стал. Поэтому runner берёт профиль Docker
+по умолчанию ([moby/profiles](https://github.com/moby/profiles), закреплён коммитом и
+SHA-256) и добавляет одно правило: `clone` и `unshare` разрешены только без флагов
+mount-, cgroup-, UTS- и IPC-namespaces. Brave получает user-, PID- и network-namespaces,
+`setns` не разрешается. Профиль лежит в `target/anki-e2e/real-site/`.
+
+**Тома — чувствительные локальные данные.** `anki-e2e-real-site-profile` хранит профиль
+Brave с авторизацией Forvo, `anki-e2e-real-site-state` — сопряжение адаптера, журналы,
+evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузки. Ресурсы помечены
+собственной меткой `io.github.anki-deck-toolkit.e2e.real-site`. `clean` их не трогает.
+Перед использованием и удалением контейнера и томов проверяется значение метки `1`;
+конфликт имён с чужими ресурсами завершает команду без их изменения.
+`down` сохраняет тома, удаляет их только `purge --yes`. В образ, отчёты и Git они не попадают.
+`purge --yes` удаляет также BuildKit cache mount `anki-e2e-real-site-target` точным фильтром;
+общий слоевой кэш Docker не затрагивается.
+
+Отчёт `target/anki-e2e/real-site-runs/<run_id>/report.{json,md}` содержит:
+- версию Brave, образ и коммит исходников;
+- шаги `doctor`/`smoke` по их машинному контракту и подсказку для `BLOCKED`;
+- production-шаги после зелёного `smoke` (`--acceptance-only` их отключает):
+  - `fetch` в отдельное тестовое хранилище: SHA ресурса равен `downloaded_sha256`,
+    ресурс не `Verified`, вкладки пользователя не изменены, `verify` проходит;
+  - пакет из `--surface` и `--batch-surface`/`--batch-reading` (по умолчанию `猫`/`ねこ`): `batch-start
+    --max-items 1` обрабатывает одно слово, `batch-resume` завершает второе. Число
+    начатых загрузок в журнале запуска равно числу попыток второго слова;
+  - повторный `batch-resume` не меняет ревизию и не начинает загрузок.
+
+Машинные имена шагов пакета и завершающей очистки в отчёте: `batch_start`,
+`batch_resume`, `batch_resume_again` и `cleanup`.
+
+Тестовые хранилища лежат в volume состояния
+(`/home/tester/state/real-site-stores/<run_id>`). Они не попадают в Git и
+пользовательский `AssetStore`.
+
+`up` и `run` проверяют песочницу: каждый renderer должен жить в собственном user namespace.
+Иначе `up` завершается ошибкой, а `run` получает `FAIL`. `smoke` запускается только после
+зелёного `doctor`. Перед записью отчёт сверяется с секретом
+сопряжения: при совпадении отчёт не пишется (`ERROR`). Коды завершения — как у стенда.
+Внешние ограничения (`login_required`, `challenge_required`, 429) дают `BLOCKED` и не
+считаются дефектом адаптера.
+
 ## Границы
 
 Стенд проверяет **Linux** Anki и не доказывает Windows/WSL-интеграцию из

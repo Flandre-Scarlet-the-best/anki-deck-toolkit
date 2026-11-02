@@ -1,4 +1,4 @@
-//! Локальный CLI MP3 без сетевых провайдеров и распознавания речи.
+//! CLI японских MP3: локальный импорт, Forvo Web и явное подтверждение.
 use crate::pronunciation::{self as audio, Pronunciation, PronunciationDomainPolicy, batch};
 use crate::{
     AssetError, AssetStore, ErrorCode, HumanAttestationRequest, HumanDecision, StoreOptions,
@@ -35,6 +35,13 @@ enum Decision {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Forvo в собственном постоянном профиле Chromium; окно требуется для входа.
+    Forvo {
+        #[arg(long)]
+        profile: Option<PathBuf>,
+        #[command(subcommand)]
+        action: ForvoAction,
+    },
     Init,
     Inspect,
     Verify,
@@ -101,6 +108,286 @@ enum Action {
         #[arg(long)]
         batch_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ForvoAction {
+    /// Обычный Brave пользователя через собственное расширение и loopback bridge
+    /// (цель `brave`; прежний интерфейс, не зависит от цели по умолчанию).
+    Brave {
+        /// Приватный каталог сопряжения, журналов и свидетельств вне репозитория.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        action: BraveAction,
+    },
+    /// Обычный Chromium-браузер пользователя: Brave, Google Chrome, Microsoft
+    /// Edge или Vivaldi. Каждая настроенная цель — отдельное сопряжение.
+    Browser {
+        /// Приватный каталог сопряжения, журналов и свидетельств вне репозитория.
+        #[arg(long, global = true)]
+        state_dir: Option<PathBuf>,
+        /// Цель (по умолчанию — цель по умолчанию или единственная настроенная).
+        #[arg(long, global = true)]
+        target: Option<String>,
+        #[command(subcommand)]
+        action: BrowserAction,
+    },
+    /// Войдите вручную в открывшемся окне; пароль не передаётся CLI.
+    Login {
+        #[arg(long, default_value_t = 300, value_parser=clap::value_parser!(u64).range(1..=1800))]
+        timeout_seconds: u64,
+        #[arg(long)]
+        surface: Option<String>,
+    },
+    Check,
+    Candidates {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+    },
+    Fetch {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+        #[arg(long)]
+        replace_expected_sha256: Option<String>,
+    },
+    BatchStart {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+    },
+    BatchResume {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+    },
+    BatchStatus {
+        #[arg(long)]
+        batch_id: String,
+    },
+    BatchCancel {
+        #[arg(long)]
+        batch_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BraveAction {
+    /// Подготовить каталог расширения и секрет сопряжения; повтор обновляет код.
+    Setup {
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
+        #[arg(long, value_parser=clap::value_parser!(u16).range(1024..))]
+        port: Option<u16>,
+        #[arg(long)]
+        rotate_secret: bool,
+        /// Нестандартный путь к Brave (Windows-путь в WSL или Linux-путь).
+        #[arg(long)]
+        executable: Option<String>,
+        /// Снять закрепление экземпляра расширения (оно переустановлено).
+        #[arg(long)]
+        repin: bool,
+    },
+    #[command(flatten)]
+    Run(RunAction),
+}
+
+#[derive(Subcommand)]
+enum BrowserAction {
+    /// Подготовить расширение и сопряжение выбранного браузера; повтор обновляет код.
+    Setup {
+        #[arg(long, value_enum)]
+        browser: Option<crate::forvo::brave::BrowserKind>,
+        /// Нестандартный путь к браузеру (Windows-путь в WSL или Linux-путь).
+        #[arg(long)]
+        executable: Option<String>,
+        #[arg(long)]
+        install_dir: Option<PathBuf>,
+        #[arg(long, value_parser=clap::value_parser!(u16).range(1024..))]
+        port: Option<u16>,
+        #[arg(long)]
+        rotate_secret: bool,
+        /// Снять закрепление экземпляра расширения (оно переустановлено).
+        #[arg(long)]
+        repin: bool,
+        /// Сделать цель целью по умолчанию.
+        #[arg(long)]
+        make_default: bool,
+    },
+    /// Найти установленные поддерживаемые браузеры (без изменений).
+    Discover,
+    /// Показать настроенные цели без секретов.
+    Targets,
+    /// Сделать --target целью по умолчанию.
+    Select,
+    #[command(flatten)]
+    Run(RunAction),
+}
+
+#[derive(Subcommand)]
+enum RunAction {
+    /// Проверить соединение, версию, браузер, loopback и (по флагам) Forvo и восстановление.
+    Doctor {
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        forvo: bool,
+        #[arg(long)]
+        reconnect: bool,
+        #[arg(long)]
+        reload: bool,
+    },
+    /// Живая проверка одной записи: вкладка, вход, кандидаты, загрузка и MP3.
+    Smoke {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        probe_downloads_api: bool,
+        #[arg(long)]
+        close_tab: bool,
+        /// Оставить собственный скачанный MP3 в загрузках браузера (по умолчанию удаляется после копии в свидетельства).
+        #[arg(long)]
+        keep_download: bool,
+    },
+    /// Получить оригинальный MP3 одного слова через браузер цели и импортировать его
+    /// в AssetStore (уровень доверия прежний: техническая проверка ≠ Verified).
+    Fetch {
+        #[arg(long)]
+        surface: String,
+        #[arg(long)]
+        reading: String,
+        #[arg(long)]
+        replace_expected_sha256: Option<String>,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        /// Закрыть собственную вкладку адаптера по завершении.
+        #[arg(long)]
+        close_tab: bool,
+    },
+    /// Создать пакет расширения и начать его выполнение; выбранная цель
+    /// сохраняется до подключения, затем пакет закрепляется за сессией.
+    BatchStart {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        close_tab: bool,
+    },
+    /// Продолжить пакет расширения в его браузерной сессии; пакет CDP этой командой не продолжается.
+    BatchResume {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long, default_value_t = 128)]
+        max_items: usize,
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        close_tab: bool,
+    },
+    /// Закрыть собственную вкладку адаптера.
+    Close {
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+    },
+}
+
+/// Команда адаптера в общем виде: каталог состояния, цель и действие.
+enum AdapterCommand<'a> {
+    Setup(crate::forvo::brave::SetupOptions),
+    Discover,
+    Targets,
+    Select(String),
+    Run(&'a RunAction),
+}
+
+fn adapter_command(
+    action: &ForvoAction,
+) -> Result<Option<(PathBuf, Option<String>, AdapterCommand<'_>)>, AssetError> {
+    use crate::forvo::brave::{BrowserKind, LEGACY_TARGET, SetupOptions};
+    Ok(Some(match action {
+        ForvoAction::Brave { state_dir, action } => {
+            let dir = brave_state_dir(state_dir.as_deref())?;
+            let target = Some(LEGACY_TARGET.to_owned());
+            let command = match action {
+                BraveAction::Setup {
+                    install_dir,
+                    port,
+                    rotate_secret,
+                    executable,
+                    repin,
+                } => AdapterCommand::Setup(SetupOptions {
+                    target: target.clone(),
+                    browser: Some(BrowserKind::Brave),
+                    executable: executable.clone(),
+                    install_dir: install_dir.clone(),
+                    port: *port,
+                    rotate_secret: *rotate_secret,
+                    repin: *repin,
+                    ..SetupOptions::new(dir.clone())
+                }),
+                BraveAction::Run(run) => AdapterCommand::Run(run),
+            };
+            (dir, target, command)
+        }
+        ForvoAction::Browser {
+            state_dir,
+            target,
+            action,
+        } => {
+            let dir = brave_state_dir(state_dir.as_deref())?;
+            let command = match action {
+                BrowserAction::Setup {
+                    browser,
+                    executable,
+                    install_dir,
+                    port,
+                    rotate_secret,
+                    repin,
+                    make_default,
+                } => AdapterCommand::Setup(SetupOptions {
+                    target: target.clone(),
+                    browser: *browser,
+                    executable: executable.clone(),
+                    install_dir: install_dir.clone(),
+                    port: *port,
+                    rotate_secret: *rotate_secret,
+                    repin: *repin,
+                    make_default: *make_default,
+                    ..SetupOptions::new(dir.clone())
+                }),
+                BrowserAction::Discover => AdapterCommand::Discover,
+                BrowserAction::Targets => AdapterCommand::Targets,
+                BrowserAction::Select => {
+                    AdapterCommand::Select(target.clone().ok_or_else(|| {
+                        crate::forvo::brave::bridge_error(
+                            "target_required",
+                            "Укажите --target <имя> для select",
+                        )
+                    })?)
+                }
+                BrowserAction::Run(run) => AdapterCommand::Run(run),
+            };
+            (dir, target.clone(), command)
+        }
+        _ => return Ok(None),
+    }))
 }
 
 /// Все компоненты источника открываются с NOFOLLOW. Проверяется как
@@ -204,6 +491,48 @@ fn read_local(
     }
     Ok(bytes)
 }
+// Существующий предок разрешается до создания каталогов. Так учитываются
+// symlink-алиасы корня хранилища и отсутствующие конечные компоненты пути.
+fn resolved_location(path: &Path) -> Result<PathBuf, AssetError> {
+    let absolute = std::path::absolute(path).map_err(|e| AssetError::io("абсолютный путь", e))?;
+    if absolute
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(AssetError::new(
+            ErrorCode::PathTraversal,
+            "путь не может содержать ..",
+        ));
+    }
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let mut resolved = std::fs::canonicalize(ancestor)
+                    .map_err(|e| AssetError::io("разрешение существующего предка", e))?;
+                for name in missing.into_iter().rev() {
+                    resolved.push(name);
+                }
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(ancestor.file_name().ok_or_else(|| {
+                    AssetError::io(
+                        "предок пути",
+                        std::io::Error::other("нет существующего предка"),
+                    )
+                })?);
+                ancestor = ancestor.parent().expect("абсолютный путь имеет родителя");
+            }
+            Err(e) => return Err(AssetError::io("проверка предка пути", e)),
+        }
+    }
+}
+fn overlaps(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     let repository = std::fs::canonicalize(&cli.repository_root)
         .map_err(|e| AssetError::io("корень репозитория", e))?;
@@ -217,6 +546,35 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
         if parent.join("AGENTS.md").is_file() {
             protected.insert(parent.join("decks"));
         }
+    }
+    if let Action::Forvo { profile, action } = &cli.command {
+        let profile = std::path::absolute(
+            profile
+                .clone()
+                .unwrap_or_else(|| repository.join(".codex/local/forvo-profile")),
+        )
+        .map_err(|e| AssetError::io("путь профиля", e))?;
+        let resolved_profile = resolved_location(&profile)?;
+        let resolved_store = resolved_location(&root)?;
+        if overlaps(&resolved_profile, &resolved_store) {
+            return Err(AssetError::new(
+                ErrorCode::BoundaryViolation,
+                "профиль Forvo и аудиохранилище должны находиться в отдельных каталогах без вложенности",
+            ));
+        }
+        for path in &protected {
+            if overlaps(
+                &profile,
+                &std::path::absolute(path).map_err(|e| AssetError::io("защищённый путь", e))?,
+            ) || overlaps(&resolved_profile, &resolved_location(path)?)
+            {
+                return Err(AssetError::new(
+                    ErrorCode::BoundaryViolation,
+                    "профиль Forvo не может пересекаться с decks/**",
+                ));
+            }
+        }
+        return execute_forvo(&root, &profile, action, &protected, cli.output);
     }
     if let Action::Probe { file } = &cli.command {
         return Ok(
@@ -238,6 +596,7 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     };
     let read_audio = |path: &Path| read_local(path, &protected, audio::MAX_AUDIO_BYTES);
     let result = match &cli.command {
+        Action::Forvo { .. } => unreachable!("Forvo обработан до открытия хранилища"),
         Action::Init => {
             serde_json::json!({"store_id":store.store_id(),"initialized":store.initialized_on_open()})
         }
@@ -385,7 +744,20 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
 pub fn main() -> u8 {
     let cli = Cli::parse();
     let (value, code) = match execute(&cli) {
-        Ok(value) => (value, 0),
+        Ok(value) => {
+            let code = if value["outcome"] == "cancelled" {
+                130
+            } else if value["outcome"] == "paused" {
+                if value["result"]["paused"]["code"] == "interrupted" {
+                    130
+                } else {
+                    3
+                }
+            } else {
+                0
+            };
+            (value, code)
+        }
         Err(error) => (
             serde_json::json!({"schema_version":1,"outcome":"error","error":{"code":error.code.as_str(),"message":error.message,"details":error.details}}),
             error.exit_code(),
@@ -396,4 +768,534 @@ pub fn main() -> u8 {
         Output::Text => println!("{}", serde_json::to_string_pretty(&value).expect("JSON")),
     }
     code
+}
+
+fn execute_forvo(
+    root: &Path,
+    profile: &Path,
+    action: &ForvoAction,
+    protected: &BTreeSet<PathBuf>,
+    output: Output,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::forvo::{self, AuthState, ForvoSession};
+    let open_store = |initialize: bool| {
+        let options = protected
+            .iter()
+            .fold(StoreOptions::new(root), |o, p| o.protect_from(p));
+        if initialize {
+            AssetStore::open_with_policy(options, PronunciationDomainPolicy)
+        } else {
+            AssetStore::open_existing_with_policy(options, PronunciationDomainPolicy)
+        }
+    };
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| AssetError::io("runtime", e))?;
+    let result=runtime.block_on(async {
+        match action {
+            ForvoAction::Brave{..}|ForvoAction::Browser{..}=>{
+                let (state_dir,target,command)=adapter_command(action)?.expect("команда адаптера");
+                match command {
+                    AdapterCommand::Run(RunAction::BatchStart{batch_id,plan,max_items,wait_seconds,close_tab})=>{
+                        let mut options=brave_options(&state_dir,target,*wait_seconds,*close_tab);
+                        let plan=read_plan(plan,protected)?;
+                        let resolved_target=forvo::brave::targets::load_target(
+                            &state_dir,
+                            options.target.as_deref(),
+                        )?.target;
+                        options.target=Some(resolved_target.clone());
+                        let store=open_store(true)?;
+                        forvo::batch::start_with_browser_target(&store,batch_id,plan,resolved_target)?;
+                        run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output).await
+                    }
+                    AdapterCommand::Run(RunAction::BatchResume{batch_id,max_items,wait_seconds,close_tab})=>{
+                        let options=brave_options(&state_dir,target,*wait_seconds,*close_tab);
+                        run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output).await
+                    }
+                    command=>run_brave(&state_dir,target,command,output,&open_store).await,
+                }
+            }
+            ForvoAction::BatchStatus{batch_id}=>Ok(batch_json(forvo::batch::status(&open_store(false)?,batch_id)?)),
+            ForvoAction::BatchCancel{batch_id}=>Ok(batch_json(forvo::batch::cancel(&open_store(false)?,batch_id)?)),
+            ForvoAction::BatchStart{batch_id,plan,max_items}=>{
+                let plan=read_plan(plan,protected)?;
+                let store=open_store(true)?;
+                forvo::batch::start(&store,batch_id,plan,forvo::batch::Transport::CdpChromium)?;
+                run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Cdp{profile},*max_items,output).await
+            }
+            ForvoAction::BatchResume{batch_id,max_items}=>run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Cdp{profile},*max_items,output).await,
+            _=>{
+                // Проверяем входные пары до запуска браузера.
+                let request=match action {ForvoAction::Candidates{surface,reading}|ForvoAction::Fetch{surface,reading,..}=>Some(Pronunciation::new(surface,reading)?),_=>None};
+                let store=if matches!(action,ForvoAction::Fetch{..}) {Some(open_store(true)?)} else {None};
+                let mut session=if matches!(action,ForvoAction::Login{..}) { ForvoSession::launch_interactive(profile).await? } else { ForvoSession::launch(profile).await? };
+                let result=tokio::select! {
+                    result=async {
+                      let mut retried = false;
+                      loop {
+                        let attempt: Result<serde_json::Value, AssetError> = async { match action {
+                            ForvoAction::Login{timeout_seconds,surface}=>{
+                                eprintln!("Войдите вручную в открытом окне Forvo; пароль не передаётся CLI.");
+                                let surface=surface.as_deref().map(|s|Pronunciation::new(s,s).map(|r|r.surface)).transpose()?;
+                                let state=session.check_at(true,std::time::Duration::from_secs(*timeout_seconds),surface.as_deref()).await?;
+                                if state!=AuthState::Authenticated {return Err(forvo::auth_error(state));}
+                                Ok(serde_json::json!({"auth_state":state}))
+                            }
+                            ForvoAction::Check=>{
+                                let state=session.check(false,std::time::Duration::from_secs(12)).await?;
+                                if state!=AuthState::Authenticated {return Err(forvo::auth_error(state));}
+                                Ok(serde_json::json!({"auth_state":state}))
+                            }
+                            ForvoAction::Candidates{..}=>Ok(serde_json::json!({"ranking_policy":forvo::RANKING,"candidates":session.candidates(request.as_ref().expect("request")).await?})),
+                            ForvoAction::Fetch{replace_expected_sha256,..}=>{
+                                let request=request.as_ref().expect("request");
+                                let acquisition=forvo::acquire(&mut session,request).await?;
+                                let asset=forvo::import_acquisition(store.as_ref().expect("store"),request,&acquisition,replace_expected_sha256.clone())?;
+                                Ok(serde_json::json!({"asset":asset,"acquisition":acquisition.evidence}))
+                            }
+                            _=>unreachable!(),
+                        }}.await;
+                        match attempt {
+                            Err(error) if !retried && !matches!(action, ForvoAction::Login{..} | ForvoAction::Fetch{..}) && forvo::requires_interaction(&error) => {
+                                if !session.recover_interactively(request.as_ref().map(|r|r.surface.as_str())).await? { break Err(error); }
+                                retried = true;
+                            }
+                            other => break other,
+                        }
+                      }
+                    }=>result,
+                    _=tokio::signal::ctrl_c()=>Err(AssetError::new(ErrorCode::Interrupted,"Forvo прерван пользователем")),
+                };
+                let stopped = session.close().await;
+                match (result, stopped) {
+                    (Err(mut original), Err(cleanup)) => { original.details["browser_cleanup"] = serde_json::json!({"code":forvo::provider_code(&cleanup),"message":cleanup.message}); Err(original) },
+                    (Err(original), _) => Err(original),
+                    (_, Err(cleanup)) => Err(cleanup),
+                    (Ok(value), Ok(())) => Ok(value),
+                }
+            }
+        }
+    })?;
+    let paused = result.get("paused").is_some_and(|v| !v.is_null());
+    let cancelled = matches!(
+        action,
+        ForvoAction::BatchStart { .. }
+            | ForvoAction::BatchResume { .. }
+            | ForvoAction::Brave {
+                action: BraveAction::Run(
+                    RunAction::BatchStart { .. } | RunAction::BatchResume { .. }
+                ),
+                ..
+            }
+            | ForvoAction::Browser {
+                action: BrowserAction::Run(
+                    RunAction::BatchStart { .. } | RunAction::BatchResume { .. }
+                ),
+                ..
+            }
+    ) && result["cancelled"] == true;
+    Ok(
+        serde_json::json!({"schema_version":1,"outcome":if cancelled {"cancelled"} else if paused {"paused"} else {"ok"},"result":result}),
+    )
+}
+
+fn read_plan(
+    plan: &Path,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<crate::forvo::batch::FetchPlan, AssetError> {
+    serde_json::from_slice(&read_local(plan, protected, 1024 * 1024)?).map_err(|_| {
+        AssetError::new(
+            ErrorCode::InvalidIdentity,
+            "неверный строгий JSON-план Forvo",
+        )
+    })
+}
+
+fn brave_state_dir(state_dir: Option<&Path>) -> Result<PathBuf, AssetError> {
+    match state_dir {
+        Some(dir) => {
+            std::path::absolute(dir).map_err(|e| AssetError::io("каталог состояния Brave", e))
+        }
+        None => crate::forvo::brave::default_state_dir(),
+    }
+}
+
+fn brave_options(
+    state_dir: &Path,
+    target: Option<String>,
+    wait_seconds: u64,
+    close_tab: bool,
+) -> crate::forvo::brave::fetch::BraveOptions {
+    crate::forvo::brave::fetch::BraveOptions {
+        state_dir: state_dir.to_owned(),
+        target,
+        binding: None,
+        wait: std::time::Duration::from_secs(wait_seconds),
+        limits: crate::forvo::brave::download::Limits::default(),
+        close_tab,
+    }
+}
+
+/// Состояние пакета и его фактический транспорт (у состояния версии 1 — CDP).
+fn batch_json(batch: crate::forvo::batch::ForvoBatch) -> serde_json::Value {
+    let transport = batch.transport();
+    let mut value = serde_json::to_value(batch).expect("состояние Forvo сериализуется");
+    value["effective_transport"] = serde_json::json!(transport);
+    value
+}
+
+async fn run_forvo_batch_logged(
+    store: &AssetStore,
+    id: &str,
+    backend: crate::forvo::batch::Backend<'_>,
+    max_items: usize,
+    output: Output,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::batch_runtime::SafeBatchRuntime;
+    use crate::diagnostics::{OutputMode, RunLogGuard};
+    use tracing::instrument::WithSubscriber;
+
+    let log = SafeBatchRuntime::open(store.root(), id)?.create_run_log()?;
+    let path = log.path.display().to_string();
+    let guard = RunLogGuard::new(
+        log.file,
+        match output {
+            Output::Json => OutputMode::Json,
+            Output::Text => OutputMode::Human,
+        },
+    );
+    let result = async {
+        tracing::info!(
+            event = "run_started",
+            stage = "run",
+            code = "forvo_batch_started",
+            "Начата обработка пакета Forvo"
+        );
+        let result = crate::forvo::batch::resume(store, id, backend, max_items).await;
+        match &result {
+            Ok(batch) => tracing::info!(
+                event = "run_finished",
+                stage = "run",
+                paused = batch.paused.is_some(),
+                cancelled = batch.cancelled,
+                "Обработка пакета Forvo завершена"
+            ),
+            Err(error) => tracing::error!(
+                event = "run_stopped",
+                stage = "run",
+                code = error.code.as_str(),
+                "Обработка пакета Forvo остановлена"
+            ),
+        }
+        result
+    }
+    .with_subscriber(guard.dispatch())
+    .await;
+    if let Err(logging) = guard.finish() {
+        return Err(AssetError::with_details(
+            ErrorCode::IoFailure,
+            "Не удалось сохранить диагностический журнал Forvo",
+            serde_json::json!({"diagnostic_log":path,"logging_error":crate::diagnostics::safe_message(&logging),"original_error":result.as_ref().err().map(|e| serde_json::json!({"code":e.code.as_str(),"message":crate::diagnostics::safe_message(&e.message)}))}),
+        ));
+    }
+    let batch = result.map_err(|mut error| {
+        error.details["diagnostic_log"] = serde_json::json!(path);
+        error
+    })?;
+    let mut value = batch_json(batch);
+    value["diagnostic_log"] = serde_json::json!(path);
+    Ok(value)
+}
+
+async fn run_brave(
+    state_dir: &Path,
+    target: Option<String>,
+    action: AdapterCommand<'_>,
+    output: Output,
+    open_store: &dyn Fn(bool) -> Result<AssetStore, AssetError>,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::diagnostics::{OutputMode, RunLogGuard};
+    use crate::forvo::brave::{self, acceptance};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::time::Duration;
+    use tracing::instrument::WithSubscriber;
+
+    let state_dir = state_dir.to_owned();
+    let logs = state_dir.join("logs");
+    brave::private_dir(&logs)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = logs.join(format!("{stamp}-{}.ndjson", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| AssetError::io("журнал адаптера браузера", e))?;
+    let guard = RunLogGuard::new(
+        file,
+        match output {
+            Output::Json => OutputMode::Json,
+            Output::Text => OutputMode::Human,
+        },
+    );
+    let (interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
+    let graceful_interrupt = waits_for_brave_download_cleanup(&action);
+    let work = async {
+        match action {
+            AdapterCommand::Setup(options) => brave::setup(&options),
+            AdapterCommand::Discover => {
+                let wsl = brave::detect_platform() == brave::Platform::Wsl;
+                let found =
+                    brave::browsers::discover(&brave::browsers::DiscoveryRoots::system(wsl));
+                let configured = brave::targets::describe(&state_dir)?;
+                Ok(
+                    serde_json::json!({"installations":found,"configured":configured,
+                    "note":"разновидность подтверждена по исполняемому файлу; версия null — не установлена надёжно"}),
+                )
+            }
+            AdapterCommand::Targets => brave::targets::describe(&state_dir),
+            AdapterCommand::Select(name) => brave::targets::select(&state_dir, &name),
+            AdapterCommand::Run(RunAction::Doctor {
+                wait_seconds,
+                forvo,
+                reconnect,
+                reload,
+            }) => acceptance::report_error(
+                acceptance::doctor(&acceptance::DoctorOptions {
+                    state_dir: state_dir.clone(),
+                    target: target.clone(),
+                    wait: Duration::from_secs(*wait_seconds),
+                    forvo: *forvo,
+                    reconnect: *reconnect,
+                    reload: *reload,
+                })
+                .await?,
+            ),
+            AdapterCommand::Run(RunAction::Smoke {
+                surface,
+                reading,
+                wait_seconds,
+                probe_downloads_api,
+                close_tab,
+                keep_download,
+            }) => acceptance::report_error(
+                acceptance::smoke(acceptance::SmokeOptions {
+                    state_dir: state_dir.clone(),
+                    target: target.clone(),
+                    wait: Duration::from_secs(*wait_seconds),
+                    surface: surface.clone(),
+                    reading: reading.clone(),
+                    probe_downloads_api: *probe_downloads_api,
+                    close_tab: *close_tab,
+                    keep_download: *keep_download,
+                    limits: brave::download::Limits::default(),
+                    interrupt: Some(interrupt_rx.clone()),
+                })
+                .await?,
+            ),
+            AdapterCommand::Run(RunAction::Close { wait_seconds }) => {
+                acceptance::close(
+                    &state_dir,
+                    target.as_deref(),
+                    Duration::from_secs(*wait_seconds),
+                )
+                .await
+            }
+            AdapterCommand::Run(RunAction::Fetch {
+                surface,
+                reading,
+                replace_expected_sha256,
+                wait_seconds,
+                close_tab,
+            }) => {
+                // Пара проверяется до подключения к браузеру.
+                let request = Pronunciation::new(surface, reading)?;
+                let store = open_store(true)?;
+                brave::fetch::fetch(
+                    &store,
+                    &request,
+                    replace_expected_sha256.clone(),
+                    &brave_options(&state_dir, target.clone(), *wait_seconds, *close_tab),
+                    Some(interrupt_rx.clone()),
+                )
+                .await
+            }
+            AdapterCommand::Run(RunAction::BatchStart { .. } | RunAction::BatchResume { .. }) => {
+                unreachable!("пакет расширения исполняется общим forvo::batch")
+            }
+        }
+    };
+    // Ctrl+C: работа получает сигнал и освобождает собственную операцию загрузки;
+    // повторный Ctrl+C или истечение отсрочки закрывают только соединение bridge.
+    // Браузер, вкладки пользователя и настройки не трогаются.
+    let work = work.with_subscriber(guard.dispatch());
+    tokio::pin!(work);
+    let result = tokio::select! {
+        result = &mut work => result,
+        _ = tokio::signal::ctrl_c(), if !graceful_interrupt => Err(adapter_interrupted(false)),
+        _ = tokio::signal::ctrl_c(), if graceful_interrupt => {
+            let _ = interrupt_tx.send(true);
+            tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(20), &mut work) => match result {
+                    Ok(Err(error)) => Err(error),
+                    _ => Err(adapter_interrupted(false)),
+                },
+                _ = tokio::signal::ctrl_c() => Err(adapter_interrupted(true)),
+            }
+        }
+    };
+    finish_brave_run(result, guard.finish(), &path)
+}
+
+/// Прерывание команды адаптера: общая ветка `forvo browser` обслуживает любой
+/// поддерживаемый браузер, поэтому сообщение не называет Brave.
+fn adapter_interrupted(repeated: bool) -> AssetError {
+    AssetError::new(
+        ErrorCode::Interrupted,
+        if repeated {
+            "Команда адаптера браузера прервана повторно; соединение с расширением закрыто"
+        } else {
+            "Команда адаптера браузера прервана; соединение с расширением закрыто, браузер не изменён"
+        },
+    )
+}
+
+fn waits_for_brave_download_cleanup(action: &AdapterCommand<'_>) -> bool {
+    matches!(
+        action,
+        AdapterCommand::Run(RunAction::Smoke { .. } | RunAction::Fetch { .. })
+    )
+}
+
+fn finish_brave_run(
+    result: Result<serde_json::Value, AssetError>,
+    logged: Result<(), String>,
+    path: impl AsRef<Path>,
+) -> Result<serde_json::Value, AssetError> {
+    let path = path.as_ref().display().to_string();
+    match (result, logged) {
+        (Ok(mut value), Ok(())) => {
+            value["diagnostic_log"] = serde_json::json!(path);
+            Ok(value)
+        }
+        (Err(mut error), Ok(())) => {
+            error.details["diagnostic_log"] = serde_json::json!(path);
+            Err(error)
+        }
+        (Err(mut error), Err(logging)) => {
+            error.details["diagnostic_log"] = serde_json::json!(path);
+            error.details["logging_error"] =
+                serde_json::json!(crate::diagnostics::safe_message(&logging));
+            Err(error)
+        }
+        (Ok(_), Err(logging)) => Err(AssetError::with_details(
+            ErrorCode::IoFailure,
+            "Не удалось сохранить диагностический журнал адаптера браузера",
+            serde_json::json!({
+                "diagnostic_log":path,
+                "logging_error":crate::diagnostics::safe_message(&logging),
+            }),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AdapterCommand, RunAction, adapter_interrupted, finish_brave_run,
+        waits_for_brave_download_cleanup,
+    };
+    use crate::{AssetError, ErrorCode};
+    use serde_json::json;
+
+    #[test]
+    fn brave_operation_error_survives_diagnostic_log_failure() {
+        let result = Err(AssetError::with_details(
+            ErrorCode::Interrupted,
+            "операция прервана",
+            json!({"stage":"download"}),
+        ));
+        let error =
+            finish_brave_run(result, Err("disk full".into()), "/logs/run.ndjson").unwrap_err();
+        assert_eq!(error.code, ErrorCode::Interrupted);
+        assert_eq!(error.message, "операция прервана");
+        assert_eq!(error.details["stage"], "download");
+        assert_eq!(error.details["diagnostic_log"], "/logs/run.ndjson");
+        assert!(
+            error.details["logging_error"]
+                .as_str()
+                .unwrap()
+                .contains("disk full")
+        );
+    }
+
+    #[test]
+    fn brave_success_with_diagnostic_log_failure_reports_log_details() {
+        let error = finish_brave_run(
+            Ok(json!({"status":"ok"})),
+            Err("disk full".into()),
+            "/logs/run.ndjson",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::IoFailure);
+        assert!(!error.message.contains("Brave"), "{}", error.message);
+        assert_eq!(error.details["diagnostic_log"], "/logs/run.ndjson");
+        assert!(
+            error.details["logging_error"]
+                .as_str()
+                .unwrap()
+                .contains("disk full")
+        );
+    }
+
+    #[test]
+    fn adapter_interruption_does_not_name_a_specific_browser() {
+        for repeated in [false, true] {
+            let error = adapter_interrupted(repeated);
+            assert_eq!(error.code, ErrorCode::Interrupted);
+            assert!(!error.message.contains("Brave"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn download_actions_wait_for_cleanup_after_ctrl_c() {
+        let smoke = RunAction::Smoke {
+            surface: "元気".into(),
+            reading: "げんき".into(),
+            wait_seconds: 45,
+            probe_downloads_api: false,
+            close_tab: false,
+            keep_download: false,
+        };
+        let doctor = RunAction::Doctor {
+            wait_seconds: 45,
+            forvo: false,
+            reconnect: false,
+            reload: false,
+        };
+        let close = RunAction::Close { wait_seconds: 45 };
+        let fetch = RunAction::Fetch {
+            surface: "元気".into(),
+            reading: "げんき".into(),
+            replace_expected_sha256: None,
+            wait_seconds: 45,
+            close_tab: false,
+        };
+
+        assert!(waits_for_brave_download_cleanup(&AdapterCommand::Run(
+            &smoke
+        )));
+        assert!(waits_for_brave_download_cleanup(&AdapterCommand::Run(
+            &fetch
+        )));
+        assert!(!waits_for_brave_download_cleanup(&AdapterCommand::Run(
+            &doctor
+        )));
+        assert!(!waits_for_brave_download_cleanup(&AdapterCommand::Run(
+            &close
+        )));
+        assert!(!waits_for_brave_download_cleanup(&AdapterCommand::Discover));
+        assert!(!waits_for_brave_download_cleanup(&AdapterCommand::Targets));
+    }
 }

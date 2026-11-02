@@ -1,0 +1,602 @@
+use super::*;
+use crate::temp_workspace::TempWorkspace;
+use async_tungstenite::tungstenite::client::IntoClientRequest;
+use serde_json::{Value, json};
+
+const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+fn hex(text: &str) -> Vec<u8> {
+    decode_hex(text).expect("hex")
+}
+
+#[test]
+fn hmac_matches_rfc4231() {
+    assert_eq!(
+        encode_lower_hex(hmac_sha256(&[0x0b; 20], b"Hi There")),
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    assert_eq!(
+        encode_lower_hex(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    );
+    // Ключ длиннее блока хэшируется (тест 6).
+    assert_eq!(
+        encode_lower_hex(hmac_sha256(
+            &[0xaa; 131],
+            b"Test Using Larger Than Block-Size Key - Hash Key First"
+        )),
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+}
+
+#[test]
+fn extension_origin_is_strict() {
+    assert_eq!(
+        origin_extension_id(&format!("chrome-extension://{ID}")),
+        Some(ID)
+    );
+    for bad in [
+        "https://forvo.com".to_owned(),
+        format!("chrome-extension://{}", ID.to_uppercase()),
+        format!("chrome-extension://{ID}/"),
+        "chrome-extension://short".to_owned(),
+        format!("moz-extension://{ID}"),
+    ] {
+        assert_eq!(origin_extension_id(&bad), None, "{bad}");
+    }
+    assert!(decode_hex("ABCD").is_none());
+    assert!(decode_hex("abc").is_none());
+}
+
+#[test]
+fn page_module_reuses_single_dom_contract() {
+    let module = page_module();
+    assert!(module.contains("export const forvoDom = "));
+    assert!(module.contains("export const forvoAuth = () => "));
+    assert!(module.contains(include_str!("../dom.js").trim_end()));
+    assert!(module.contains(include_str!("../auth.js").trim_end()));
+    assert!(include_str!("../dom.js").contains("action === 'activate'"));
+}
+
+#[test]
+fn extension_manifest_is_minimal() {
+    let manifest: Value = serde_json::from_str(MANIFEST).expect("manifest");
+    assert_eq!(manifest["manifest_version"], 3);
+    assert_eq!(
+        manifest["host_permissions"],
+        json!(["https://forvo.com/*", "http://127.0.0.1/*"])
+    );
+    let permissions = manifest["permissions"].as_array().expect("permissions");
+    // Нет tabs/debugger/cookies и блокирующих сетевых API: webRequest только
+    // наблюдает tabId запроса выбранной записи и ничего не изменяет.
+    for forbidden in [
+        "tabs",
+        "debugger",
+        "cookies",
+        "webRequestBlocking",
+        "declarativeNetRequest",
+        "declarativeNetRequestWithHostAccess",
+        "<all_urls>",
+        "nativeMessaging",
+    ] {
+        assert!(!permissions.iter().any(|p| p == forbidden), "{forbidden}");
+    }
+    assert!(permissions.iter().any(|p| p == "webRequest"));
+    // Глобального перехватчика имён загрузок и отмены чужих загрузок нет.
+    assert!(!BACKGROUND.contains("onDeterminingFilename.addListener"));
+    assert!(!BACKGROUND.contains("'blocking'"));
+    assert!(!BACKGROUND.contains("eval("));
+    assert!(!BACKGROUND.contains("new Function"));
+    assert!(BACKGROUND.contains(GROUP_TITLE));
+    assert!(BACKGROUND.contains(WS_PATH));
+}
+
+#[test]
+fn setup_writes_private_pairing_and_keeps_secret() {
+    let temp = TempWorkspace::create("brave-setup").expect("temp");
+    // Фиксированный порт мог совпасть с эфемерным портом параллельного теста.
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|l| l.local_addr())
+        .expect("port")
+        .port();
+    let options = SetupOptions {
+        browser: Some(BrowserKind::Brave),
+        install_dir: Some(temp.path().join("extension")),
+        port: Some(port),
+        platform: Some(Platform::Linux),
+        discovery: Some(browsers::DiscoveryRoots::default()),
+        ..SetupOptions::new(temp.path().join("state"))
+    };
+    let first = setup(&options).expect("setup");
+    assert_eq!(first["pairing"], "created");
+    let state = load_state(&options.state_dir).expect("state");
+    assert_eq!(
+        std::fs::metadata(options.state_dir.join("state.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let pairing: Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("extension/pairing.json")).unwrap())
+            .unwrap();
+    assert_eq!(pairing["port"], port);
+    assert_eq!(pairing["secret"], state.secret);
+    for name in ["manifest.json", "background.js", "forvo_page.js"] {
+        assert!(temp.path().join("extension").join(name).is_file());
+    }
+    // Секрет не попадает в машинный вывод setup.
+    assert!(!first.to_string().contains(&state.secret));
+    let again = setup(&options).expect("setup");
+    assert_eq!(again["pairing"], "kept");
+    assert_eq!(load_state(&options.state_dir).unwrap().secret, state.secret);
+    let rotated = setup(&SetupOptions {
+        rotate_secret: true,
+        ..options
+    })
+    .expect("setup");
+    assert_eq!(rotated["pairing"], "created");
+    assert_ne!(
+        load_state(&temp.path().join("state")).unwrap().secret,
+        state.secret
+    );
+}
+
+#[test]
+fn state_with_open_permissions_is_rejected() {
+    let temp = TempWorkspace::create("brave-state").expect("temp");
+    let state = AdapterState {
+        target: LEGACY_TARGET.into(),
+        browser: BrowserKind::Brave,
+        port: 48001,
+        secret: "00".repeat(32),
+        install_dir: temp.path().join("x"),
+        load_unpacked_path: "x".into(),
+        platform: Platform::Linux,
+        extension_id: None,
+        instance_id: None,
+        executable: None,
+    };
+    save_state(temp.path(), &state).expect("save");
+    assert_eq!(load_state(temp.path()).expect("load"), state);
+    std::fs::set_permissions(
+        temp.path().join("state.json"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::forvo::provider_code(&load_state(temp.path()).unwrap_err()),
+        "state_permissions"
+    );
+}
+
+#[test]
+fn browser_paths_map_per_platform() {
+    assert_eq!(
+        browser_path_to_local(Platform::Linux, "/home/u/Downloads/a.mp3").unwrap(),
+        PathBuf::from("/home/u/Downloads/a.mp3")
+    );
+    assert!(browser_path_to_local(Platform::Linux, "C:\\a.mp3").is_err());
+    assert!(browser_path_to_local(Platform::Wsl, "relative.mp3").is_err());
+    assert!(browser_path_to_local(Platform::Wsl, "C:relative.mp3").is_err());
+    // Linux-браузер внутри WSL сообщает обычный абсолютный путь.
+    assert_eq!(
+        browser_path_to_local(Platform::Wsl, "/tmp/a.mp3").unwrap(),
+        PathBuf::from("/tmp/a.mp3")
+    );
+}
+
+// --- Синтетическое расширение -------------------------------------------
+
+type Client = async_tungstenite::WebSocketStream<TokioAdapter<TcpStream>>;
+
+async fn client(port: u16, origin: &str) -> Result<Client, async_tungstenite::tungstenite::Error> {
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let mut request = format!("ws://127.0.0.1:{port}{WS_PATH}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", origin.parse().unwrap());
+    async_tungstenite::tokio::client_async(request, stream)
+        .await
+        .map(|(s, _)| s)
+}
+
+async fn next_json(socket: &mut Client) -> Value {
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
+            Some(Ok(Message::Close(_)) | Err(_)) | None => return json!({"type":"closed"}),
+            Some(Ok(_)) => continue,
+        }
+    }
+}
+
+async fn send(socket: &mut Client, value: Value) {
+    socket
+        .send(Message::text(value.to_string()))
+        .await
+        .expect("send");
+}
+
+/// Повторяет протокол background.js: hello → auth → auth_ok (проверка) → ready.
+async fn paired_client(port: u16, secret: &[u8], id: &str) -> Result<Client, &'static str> {
+    paired_client_ready(port, secret, id, json!({"type":"ready","version":"0.1.0"})).await
+}
+
+async fn paired_client_ready(
+    port: u16,
+    secret: &[u8],
+    id: &str,
+    ready: Value,
+) -> Result<Client, &'static str> {
+    let mut socket = client(port, &format!("chrome-extension://{id}"))
+        .await
+        .map_err(|_| "upgrade")?;
+    let hello = next_json(&mut socket).await;
+    let bridge_nonce = hello["nonce"].as_str().ok_or("hello")?.to_owned();
+    let own = "11".repeat(32);
+    let mac = encode_lower_hex(hmac_sha256(
+        secret,
+        mac_text("extension", &bridge_nonce, &own, id).as_bytes(),
+    ));
+    send(
+        &mut socket,
+        json!({"type":"auth","v":1,"nonce":own,"extension_id":id,"version":"0.1.0","mac":mac}),
+    )
+    .await;
+    let ok = next_json(&mut socket).await;
+    if ok["type"] != "auth_ok" {
+        return Err("rejected");
+    }
+    let expected = hmac_sha256(
+        secret,
+        mac_text("bridge", &own, &bridge_nonce, id).as_bytes(),
+    );
+    if hex(ok["mac"].as_str().unwrap()) != expected {
+        return Err("bridge_not_paired");
+    }
+    send(&mut socket, ready).await;
+    Ok(socket)
+}
+
+fn secret() -> Vec<u8> {
+    vec![7; 32]
+}
+
+#[tokio::test]
+async fn paired_extension_executes_typed_commands() {
+    let mut bridge = Bridge::bind(0, secret(), None).await.expect("bind");
+    let port = bridge.port();
+    let extension = tokio::spawn(async move {
+        let mut socket = paired_client(port, &secret(), ID).await.expect("pair");
+        let first = next_json(&mut socket).await;
+        assert_eq!(first["op"], "ping");
+        // Опоздавший ответ и keepalive не подменяют ответ текущей команды.
+        send(&mut socket, json!({"type":"res","id":first["id"].as_u64().unwrap() + 100,"ok":true,"result":"stale"})).await;
+        send(&mut socket, json!({"type":"keepalive"})).await;
+        send(
+            &mut socket,
+            json!({"type":"res","id":first["id"],"ok":true,"result":{"pong":true}}),
+        )
+        .await;
+        let second = next_json(&mut socket).await;
+        send(
+            &mut socket,
+            json!({"type":"res","id":second["id"],"ok":false,"code":"own_tab_missing"}),
+        )
+        .await;
+        let third = next_json(&mut socket).await;
+        send(
+            &mut socket,
+            json!({"type":"res","id":third["id"],"ok":false,"code":"Bad Code"}),
+        )
+        .await;
+        // Четвёртая команда остаётся без ответа: bridge должен завершить её по таймауту.
+        let _ = next_json(&mut socket).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let peer = bridge
+        .accept(Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("accept");
+    assert_eq!(
+        peer,
+        Peer {
+            extension_id: ID.into(),
+            version: "0.1.0".into(),
+            instance: None,
+            browser: Value::Null,
+        }
+    );
+    assert_eq!(
+        bridge
+            .call("ping", json!({}), Duration::from_secs(5))
+            .await
+            .unwrap(),
+        json!({"pong":true})
+    );
+    let error = bridge
+        .call("auth", json!({}), Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert_eq!(crate::forvo::provider_code(&error), "own_tab_missing");
+    let error = bridge
+        .call("auth", json!({}), Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert_eq!(crate::forvo::provider_code(&error), "protocol_error");
+    let error = bridge
+        .call("ping", json!({}), Duration::from_millis(300))
+        .await
+        .unwrap_err();
+    assert_eq!(crate::forvo::provider_code(&error), "extension_timeout");
+    extension.abort();
+}
+
+#[tokio::test]
+async fn download_release_retries_busy_until_the_extension_can_clean_up() {
+    let mut bridge = Bridge::bind(0, secret(), None).await.expect("bind");
+    let port = bridge.port();
+    let extension = tokio::spawn(async move {
+        let mut socket = paired_client(port, &secret(), ID).await.expect("pair");
+        for _ in 0..2 {
+            let command = next_json(&mut socket).await;
+            assert_eq!(command["op"], "download_release");
+            assert_eq!(command["args"]["action"], "remove");
+            send(
+                &mut socket,
+                json!({"type":"res","id":command["id"],"ok":false,"code":"busy"}),
+            )
+            .await;
+        }
+        let command = next_json(&mut socket).await;
+        assert_eq!(command["op"], "download_release");
+        send(
+            &mut socket,
+            json!({"type":"res","id":command["id"],"ok":true,"result":{"released":true,"bound":true,"erased":true}}),
+        )
+        .await;
+    });
+    bridge
+        .accept(Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("accept");
+
+    let released = super::download::release(&mut bridge, "operation", false)
+        .await
+        .expect("release after busy retries");
+    assert_eq!(released["released"], true);
+    assert_eq!(released["erased"], true);
+    extension.await.expect("extension task");
+}
+
+#[tokio::test]
+async fn wrong_secret_is_never_accepted() {
+    let mut bridge = Bridge::bind(0, secret(), None).await.expect("bind");
+    let port = bridge.port();
+    let extension = tokio::spawn(async move { paired_client(port, &[9; 32], ID).await.err() });
+    let error = bridge
+        .accept(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    // Причина отказа превращается в точное действие, секрет в вывод не попадает.
+    assert_eq!(crate::forvo::provider_code(&error), "pairing_mismatch");
+    assert!(error.details["rejections"]["pairing_mismatch"].as_u64() >= Some(1));
+    assert!(extension.await.unwrap().is_some());
+    assert!(!bridge.connected());
+}
+
+#[tokio::test]
+async fn foreign_origin_and_unpinned_extension_are_refused_before_upgrade() {
+    let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let mut bridge = Bridge::bind(0, secret(), Some(ID.into()))
+        .await
+        .expect("bind");
+    let port = bridge.port();
+    let attempts = tokio::spawn(async move {
+        let web = client(port, "https://forvo.com").await.is_err();
+        let unpinned = client(port, &format!("chrome-extension://{other}"))
+            .await
+            .is_err();
+        (web, unpinned)
+    });
+    assert!(
+        bridge
+            .accept(Instant::now() + Duration::from_secs(2))
+            .await
+            .is_err()
+    );
+    assert_eq!(attempts.await.unwrap(), (true, true));
+}
+
+#[tokio::test]
+async fn bridge_listens_only_on_loopback() {
+    let bridge = Bridge::bind(0, secret(), None).await.expect("bind");
+    let address = bridge.listener.local_addr().unwrap();
+    assert!(address.ip().is_loopback());
+    assert_eq!(address.ip(), std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
+}
+
+#[test]
+fn observed_url_requires_clean_forvo_download_contract() {
+    use super::acceptance::observed_url;
+    let clean = json!({"origin":"https://forvo.com","path":"/download/mp3/%E5%85%83%E6%B0%97/ja/3661006","has_query":false,"has_fragment":false,"has_credentials":false});
+    let url = observed_url(&clean).expect("url");
+    assert!(crate::forvo::download::matches_download(
+        &url, "元気", "3661006"
+    ));
+    assert!(!crate::forvo::download::matches_download(
+        &url, "元気", "5036880"
+    ));
+    let mut query = clean.clone();
+    query["has_query"] = json!(true);
+    assert!(observed_url(&query).is_none());
+}
+
+#[test]
+fn fib_trie_yields_unique_local_host_addresses() {
+    use super::acceptance::fib_trie_local;
+    let table = "Main:\n  +-- 0.0.0.0/0 3 0 5\n     |-- 0.0.0.0\n        /0 universe UNICAST\n     +-- 127.0.0.0/8 2 0 2\n        |-- 127.0.0.1\n           /32 host LOCAL\n     |-- 172.17.0.2\n        /32 host LOCAL\n     |-- 172.17.255.255\n        /32 link BROADCAST\nLocal:\n     |-- 172.17.0.2\n        /32 host LOCAL\n";
+    assert_eq!(
+        fib_trie_local(table),
+        vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(172, 17, 0, 2)]
+    );
+    assert!(fib_trie_local("").is_empty());
+}
+
+#[test]
+fn failed_or_unparseable_ip_output_allows_fib_trie_fallback() {
+    use super::acceptance::parse_ip_output;
+    let valid = br#"[{"addr_info":[{"local":"127.0.0.1"},{"local":"172.17.0.2"}]}]"#;
+    assert_eq!(
+        parse_ip_output(true, valid),
+        Some(vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(172, 17, 0, 2)])
+    );
+    assert_eq!(parse_ip_output(false, valid), None);
+    assert_eq!(parse_ip_output(true, b"not json"), None);
+}
+
+#[test]
+fn reused_own_tab_may_be_activated_by_user() {
+    use super::acceptance::own_tab_grouped;
+    let tab = |created: bool, active: bool| json!({"group_title":GROUP_TITLE,"created":created,"active":active});
+    assert!(own_tab_grouped(&tab(true, false)));
+    assert!(own_tab_grouped(&tab(false, true)));
+    assert!(!own_tab_grouped(&tab(true, true)));
+    let mut foreign = tab(false, false);
+    foreign["group_title"] = json!("Другая группа");
+    assert!(!own_tab_grouped(&foreign));
+}
+
+fn ready_with(instance: &str) -> Value {
+    json!({"type":"ready","version":"0.3.0","instance":instance,
+        "browser":{"brands":[{"brand":"Google Chrome","version":"156"},{"brand":"Chromium","version":"156"}],
+            "chromium_version":"156.0.1.2","platform":"Linux","manifest_version":3,"secret":"must-not-pass",
+            "capabilities":{"service_worker":true,"downloads":true,"downloads_search":true,"web_request_observe":true,
+                "tabs":true,"tab_groups":true,"scripting":true,"storage_local":true,"storage_session":true,"alarms":true,
+                "websocket_hmac":true,"extra":true}}})
+}
+
+#[tokio::test]
+async fn pinned_instance_rejects_same_extension_from_other_profile() {
+    let mine = "aa".repeat(32);
+    let other = "bb".repeat(32);
+    let mut bridge = Bridge::bind_with(
+        0,
+        secret(),
+        Trust {
+            pinned: Some(ID.into()),
+            expected: vec![],
+            instance: Some(mine.clone()),
+        },
+    )
+    .await
+    .expect("bind");
+    let port = bridge.port();
+    // Тот же каталог в другом профиле: тот же ID и секрет, но другой экземпляр.
+    let foreign = tokio::spawn(async move {
+        let first = paired_client_ready(port, &secret(), ID, ready_with(&other)).await;
+        let legacy = paired_client(port, &secret(), ID).await;
+        (first.is_ok(), legacy.is_ok())
+    });
+    let error = bridge
+        .accept(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    foreign.await.unwrap();
+    assert_eq!(crate::forvo::provider_code(&error), "instance_mismatch");
+    assert_eq!(error.details["rejections"]["instance_mismatch"], 1);
+    assert_eq!(error.details["rejections"]["instance_missing"], 1);
+    let good = mine.clone();
+    let client = tokio::spawn(async move {
+        paired_client_ready(port, &secret(), ID, ready_with(&good))
+            .await
+            .map(|_| ())
+    });
+    let peer = bridge
+        .accept(Instant::now() + Duration::from_secs(2))
+        .await
+        .expect("свой экземпляр");
+    assert_eq!(peer.instance.as_deref(), Some(mine.as_str()));
+    // Из сведений о браузере остаются только известные поля.
+    assert_eq!(peer.browser["chromium_version"], "156.0.1.2");
+    assert!(peer.browser.get("secret").is_none());
+    assert!(peer.browser["capabilities"].get("extra").is_none());
+    assert_eq!(peer.browser["capabilities"]["tab_groups"], true);
+    let _ = client.await;
+}
+
+#[tokio::test]
+async fn unpinned_bridge_accepts_only_ids_of_target_directory() {
+    let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let mut bridge = Bridge::bind_with(
+        0,
+        secret(),
+        Trust {
+            pinned: None,
+            expected: vec![ID.into()],
+            instance: None,
+        },
+    )
+    .await
+    .expect("bind");
+    let port = bridge.port();
+    let attempt = tokio::spawn(async move { paired_client(port, &secret(), other).await.is_err() });
+    let error = bridge
+        .accept(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap_err();
+    assert!(attempt.await.unwrap());
+    assert_eq!(crate::forvo::provider_code(&error), "extension_id_mismatch");
+    let ok = tokio::spawn(async move { paired_client(port, &secret(), ID).await.map(|_| ()) });
+    assert_eq!(
+        bridge
+            .accept(Instant::now() + Duration::from_secs(2))
+            .await
+            .expect("свой каталог")
+            .extension_id,
+        ID
+    );
+    let _ = ok.await;
+}
+
+#[test]
+fn browser_identity_and_capabilities_are_not_assumed() {
+    use super::acceptance::{Status, capabilities_check, identity_check};
+    let facts = |brands: &[&str], tab_groups: bool, chromium: &str| {
+        sanitize_browser_facts(
+            &json!({"brands":brands.iter().map(|b| json!({"brand":b,"version":"1"})).collect::<Vec<_>>(),
+            "chromium_version":chromium,"manifest_version":3,
+            "capabilities":REQUIRED_CAPABILITIES.iter().map(|k| ((*k).to_owned(), json!(*k != "tab_groups" || tab_groups))).collect::<serde_json::Map<_,_>>()}),
+        )
+    };
+    let chrome = facts(&["Chromium", "Google Chrome"], true, "156.0.1.1");
+    assert_eq!(identity_check(BrowserKind::Chrome, &chrome).0, Status::Pass);
+    assert_eq!(identity_check(BrowserKind::Edge, &chrome).0, Status::Fail);
+    // Vivaldi представляется брендом Google Chrome: не подтверждено, но не FAIL.
+    assert_eq!(
+        identity_check(BrowserKind::Vivaldi, &chrome).0,
+        Status::NotTested
+    );
+    let edge = facts(&["Microsoft Edge", "Chromium"], true, "155.0.1.1");
+    assert_eq!(identity_check(BrowserKind::Edge, &edge).0, Status::Pass);
+    assert_eq!(identity_check(BrowserKind::Vivaldi, &edge).0, Status::Fail);
+    assert_eq!(identity_check(BrowserKind::Brave, &edge).0, Status::Fail);
+    assert_eq!(
+        identity_check(BrowserKind::Brave, &Value::Null).0,
+        Status::NotTested
+    );
+    assert_eq!(capabilities_check(&chrome).0, Status::Pass);
+    let (status, evidence) = capabilities_check(&facts(&["Chromium"], false, "156.0.1.1"));
+    assert_eq!(status, Status::Blocked);
+    assert_eq!(evidence["missing"], json!(["tab_groups"]));
+    let (status, evidence) = capabilities_check(&facts(&["Chromium"], true, "110.0.1.1"));
+    assert_eq!(status, Status::Blocked);
+    assert_eq!(evidence["code"], "browser_version_unsupported");
+    assert_eq!(capabilities_check(&Value::Null).0, Status::NotTested);
+}

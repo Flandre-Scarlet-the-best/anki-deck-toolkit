@@ -104,6 +104,9 @@ jobs:
       - name: Включить аннотации rustc и rustfmt
         run: echo "::add-matcher::.github/rust-problem-matcher.json"
 
+      - name: Проверить владение загрузками и отказы очистки MV3
+        run: node --test tools/asset-store/tests/brave_extension_test.cjs
+
       - name: Проверить форматирование
         run: cargo fmt --all --check
 

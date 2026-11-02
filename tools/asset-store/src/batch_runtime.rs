@@ -168,6 +168,36 @@ enum ExistingState {
     Identical { file: File, identity: FileIdentity },
 }
 
+/// Lease единственного исполнителя пакета.
+#[derive(Debug)]
+pub(crate) struct ExecutionLease {
+    directory: File,
+}
+
+/// `flock` принадлежит открытому файловому описанию, а не дескриптору. Копия,
+/// унаследованная через `fork` до `exec`, удерживала бы его после закрытия
+/// нашего дескриптора, поэтому блокировка снимается явно.
+impl Drop for ExecutionLease {
+    fn drop(&mut self) {
+        if let Err(error) = flock(&self.directory, FlockOperation::Unlock) {
+            tracing::warn!(
+                operation = "batch_runtime_lock",
+                stage = "execution_lease",
+                code = "execution_lease_unlock_failed",
+                error = %error,
+                "Не удалось явно снять lease исполнителя; он снимется при закрытии дескриптора"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+impl ExecutionLease {
+    pub(crate) fn duplicate_descriptor_for_test(&self) -> File {
+        self.directory.try_clone().unwrap()
+    }
+}
+
 /// Изолированный каталог производных артефактов. Все имена — одиночные
 /// компоненты, чтение ограничено и не следует символическим ссылкам.
 pub(crate) struct ArtifactDirectory {
@@ -192,6 +222,19 @@ impl ArtifactDirectory {
 }
 
 impl SafeBatchRuntime {
+    /// Короткая блокировка состояния может сниматься на время внешней работы.
+    /// Этот отдельный lease сохраняет единственного исполнителя и не мешает status/cancel.
+    pub(crate) fn execution_lease(&self) -> Result<ExecutionLease, AssetError> {
+        self.require_lock()?;
+        let directory = ensure_directory(&self.directory, "execution")?;
+        flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
+            AssetError::new(
+                ErrorCode::InvalidTransition,
+                "пакет уже исполняется другим процессом",
+            )
+        })?;
+        Ok(ExecutionLease { directory })
+    }
     pub(crate) fn artifact_directory(&self, name: &str) -> Result<ArtifactDirectory, AssetError> {
         self.require_lock()?;
         validate_leaf_name(name)?;

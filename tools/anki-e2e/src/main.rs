@@ -5,9 +5,12 @@
 //! `cargo test`, CI и сборку стенд не встроен.
 
 mod agent;
+#[cfg(feature = "browser")]
+mod browser;
 mod cli;
 mod docker;
 mod host;
+mod real_site;
 mod release;
 mod report;
 mod source;
@@ -49,6 +52,13 @@ fn main() -> ExitCode {
         flag.store(true, Ordering::SeqCst);
     }) {
         eprintln!("Обработчик прерывания не установлен: {e}");
+    }
+    #[cfg(feature = "browser")]
+    if let Command::Browser(args) = &cli.command {
+        return ExitCode::from(browser::run(args, interrupted));
+    }
+    if let Command::RealSite(args) = &cli.command {
+        return ExitCode::from(real_site::run(args, interrupted));
     }
     let Some((suite, scenarios, args)) = cli.command.suite() else {
         return ExitCode::from(3);

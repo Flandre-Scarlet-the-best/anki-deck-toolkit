@@ -1366,7 +1366,20 @@ impl AssetStore {
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         let source = open_source_file(&request.source_path)?;
-        self.ingest_source(request, source, Some(provenance))
+        self.ingest_source(request, source, Some(provenance), false)
+    }
+
+    /// Явное обновление происхождения/метаданных даже при прежнем SHA. Требует
+    /// точного CAS при изменении существующей записи и заново создаёт Pending,
+    /// поэтому прежнее одобрение не переносится на новую редакцию свидетельств.
+    pub fn ingest_with_metadata_cas(
+        &self,
+        request: IngestRequest,
+        provenance: Provenance,
+    ) -> Result<IngestOutcome, AssetError> {
+        self.policy.validate_identity(&request.identity)?;
+        let source = open_source_file(&request.source_path)?;
+        self.ingest_source(request, source, Some(provenance), true)
     }
 
     /// Импортирует уже открытый и проверенный дескриптор исходного файла через `CLI`.
@@ -1375,7 +1388,7 @@ impl AssetStore {
         request: IngestRequest,
         source: File,
     ) -> Result<IngestOutcome, AssetError> {
-        self.ingest_source(request, source, None)
+        self.ingest_source(request, source, None, false)
     }
 
     fn ingest_source(
@@ -1383,6 +1396,7 @@ impl AssetStore {
         request: IngestRequest,
         source: File,
         provenance: Option<Provenance>,
+        refresh_metadata: bool,
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         if let Some(expected) = &request.expected_source_sha256 {
@@ -1433,7 +1447,12 @@ impl AssetStore {
         )?;
 
         if let Some(existing) = &existing {
-            if existing.sha256 == staged.sha256 {
+            let metadata_changed = refresh_metadata
+                && (existing.domain_metadata != request.domain_metadata
+                    || provenance
+                        .as_ref()
+                        .is_some_and(|p| p != &existing.provenance));
+            if existing.sha256 == staged.sha256 && !metadata_changed {
                 drop(staged);
                 lock.unlock()?;
                 return Ok(IngestOutcome {

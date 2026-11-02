@@ -282,6 +282,8 @@ pub enum Operation {
     IngestContention { writers: u32 },
     /// Открытие пакета и загрузка состояния с полной сверкой всех blob.
     BatchReopen,
+    /// Повторное чтение состояния после снятия и повторного захвата блокировки.
+    BatchResumeReload,
     /// Загрузка и сохранение состояния, с изменением или без.
     BatchCheckpoint { modified: bool },
 }
@@ -316,6 +318,7 @@ impl Operation {
                 };
             }
             "batch-reopen" => Self::BatchReopen,
+            "batch-resume-reload" => Self::BatchResumeReload,
             "batch-checkpoint" => {
                 let modified = match change {
                     Some("unchanged") => false,
@@ -1162,6 +1165,32 @@ pub fn run(spec_path: &Path, workdir: &Path, operation: Operation) -> Result<Sum
                 u64::from(spec.batch_blobs) * u64::from(spec.blob_bytes),
             )
         }
+        Operation::BatchResumeReload => {
+            let mut runtime = SafeBatchRuntime::open(&root, BATCH_ID)?;
+            let state = load_batch(&mut runtime)?;
+            if state.entries.len() != spec.batch_entries as usize {
+                return Err(BenchError::failed(
+                    "число записей пакета отличается от эталона",
+                ));
+            }
+            for _ in 0..spec.batch_entries {
+                runtime.release_lock()?;
+                runtime.reacquire_lock()?;
+                let state = runtime
+                    .reload_cached::<BenchBatchState>()?
+                    .ok_or_else(|| BenchError::failed("пакетное состояние отсутствует"))?;
+                if state.entries.len() != spec.batch_entries as usize {
+                    return Err(BenchError::failed(
+                        "число записей пакета отличается от эталона",
+                    ));
+                }
+            }
+            (
+                "batch-resume-reload",
+                spec.batch_entries as u64,
+                u64::from(spec.batch_blobs) * u64::from(spec.blob_bytes),
+            )
+        }
         Operation::BatchCheckpoint { modified } => {
             let mut runtime = SafeBatchRuntime::open(&root, BATCH_ID)?;
             let mut state = load_batch(&mut runtime)?;
@@ -1471,10 +1500,34 @@ mod tests {
             Operation::parse("ingest-contention", Some(4), None).unwrap(),
             Operation::IngestContention { writers: 4 }
         );
+        assert_eq!(
+            Operation::parse("batch-resume-reload", None, None).unwrap(),
+            Operation::BatchResumeReload
+        );
         assert!(Operation::parse("ingest-contention", None, None).is_err());
         assert!(Operation::parse("ingest", Some(2), None).is_err());
         assert!(Operation::parse("batch-checkpoint", None, Some("maybe")).is_err());
         assert!(Operation::parse("read-batch", None, Some("modified")).is_err());
         assert!(Operation::parse("unknown", None, None).is_err());
+    }
+
+    #[test]
+    fn batch_resume_reload_reuses_verified_blob_cache() {
+        use crate::batch_runtime::REFERENCED_BLOB_READS;
+        use crate::temp_workspace::TempWorkspace;
+
+        let workspace = TempWorkspace::create("asset-store-bench-resume-reload").unwrap();
+        let spec_path = workspace.path().join("workload.toml");
+        let workdir = workspace.path().join("workload");
+        let spec = spec();
+        fs::write(&spec_path, toml::to_string(&spec).unwrap()).unwrap();
+        setup(&spec_path, &workdir).unwrap();
+
+        REFERENCED_BLOB_READS.with(|reads| reads.set(0));
+        run(&spec_path, &workdir, Operation::BatchResumeReload).unwrap();
+
+        let expected_reads = spec.batch_blobs as usize;
+        REFERENCED_BLOB_READS.with(|reads| assert_eq!(reads.get(), expected_reads));
+        verify(&spec_path, &workdir, Operation::BatchResumeReload).unwrap();
     }
 }
