@@ -200,6 +200,12 @@ pub async fn open_word(bridge: &mut Bridge, surface: &str) -> Result<Value, Asse
     if state != AuthState::Authenticated {
         return Err(auth_error(state));
     }
+    if observation.status == 404 {
+        return Err(bridge_error(
+            "word_not_found",
+            "Forvo вернул 404 для точной страницы слова",
+        ));
+    }
     Ok(
         json!({"tab":opened,"load":navigation["load"],"path":navigation["path"],"status":observation.status}),
     )
@@ -539,7 +545,8 @@ pub struct SmokeOptions {
     pub interrupt: Option<watch::Receiver<bool>>,
 }
 
-fn structure(snapshot: &Value) -> Value {
+/// Структура вкладок и групп вне собственной: без URL и заголовков.
+pub(crate) fn structure(snapshot: &Value) -> Value {
     json!({"tabs":snapshot["tabs"],"groups":snapshot["groups"]})
 }
 
@@ -753,25 +760,9 @@ pub async fn download_selected(
     options: &mut SmokeOptions,
     report: &mut Report,
 ) -> Result<(), AssetError> {
-    let before = bridge
-        .call(
-            "dom",
-            json!({"surface":request.surface,"action":"inspect"}),
-            Duration::from_secs(15),
-        )
-        .await
-        .inspect_err(|e| report.fail("site_download", e))?;
-    let before: DomResult = serde_json::from_value(before)
-        .map_err(|_| bridge_error("dom_changed", "Неизвестная структура кандидатов Forvo"))?;
-    if before.code != "ok" || !before.candidates.contains(selected) {
-        let e = bridge_error(
-            "candidate_changed",
-            "Строка кандидата изменилась; повторите выбор",
-        );
-        report.fail("site_download", &e);
-        return Err(e);
-    }
-    let acquired = download::acquire(
+    // Та же узкая операция, что у production-получения; smoke лишь добавляет
+    // отчёт и копию-свидетельство.
+    let acquired = super::fetch::download_candidate(
         bridge,
         platform,
         request,
@@ -781,6 +772,7 @@ pub async fn download_selected(
         &mut options.interrupt,
     )
     .await
+    .and_then(|downloaded| download::probed(op_id, downloaded))
     .inspect_err(|e| report.fail("site_download", e))?;
     let item = &acquired.item;
     report.push("site_download", Status::Pass, json!({"operation_id":op_id,"download_id":item.id,"file_name":item.file_name,
@@ -919,14 +911,34 @@ fn downloads_api_file_status(
     }
 }
 
+/// Проверенное закрытие собственной вкладки; ошибка требует восстановления.
+pub(super) async fn close_owned(bridge: &mut Bridge) -> Result<Value, AssetError> {
+    let result = async {
+        let ping = bridge
+            .call("ping", json!({}), Duration::from_secs(5))
+            .await?;
+        if let Some(recovery) = recover_previous(bridge, &ping).await {
+            recovery?;
+        }
+        let value = bridge.call("close", json!({}), Duration::from_secs(10)).await?;
+        if value["own_tab_absent"] != true || value["own_group_absent"] != true
+            || value["recovery_required"] != false {
+            return Err(bridge_error("cleanup_incomplete", "Расширение не подтвердило отсутствие собственной вкладки и группы; обновите адаптер и повторите close"));
+        }
+        Ok(value)
+    }
+    .await;
+    result.map_err(|mut e: AssetError| {
+        e.details["recovery_required"] = json!(true);
+        e
+    })
+}
+
 pub async fn close(state_dir: &Path, wait: Duration) -> Result<Value, AssetError> {
     let mut connection = connect(state_dir, wait).await?;
-    let value = connection
-        .bridge
-        .call("close", json!({}), Duration::from_secs(10))
-        .await?;
+    let result = close_owned(&mut connection.bridge).await;
     connection.bridge.disconnect().await;
-    Ok(value)
+    result
 }
 
 pub fn report_error(report: Report) -> Result<Value, AssetError> {

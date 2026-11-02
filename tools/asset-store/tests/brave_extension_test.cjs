@@ -40,7 +40,8 @@ function harness(t) {
             set: async value => {await beforeSet(value); Object.assign(data, structuredClone(value));},
             remove: async key => {if (failures.has('storage_remove')) throw Error(); delete data[key];},
         }},
-        tabs: {onRemoved: event(), get: async () => tab, remove: async () => {}},
+        tabs: {onRemoved: event(), get: async () => tab, query: async () => [tab], remove: async () => {}},
+        tabGroups: {query: async () => []},
         webRequest: {onBeforeRequest: onRequest},
         scripting: {executeScript: async ({args}) => {
             if (args.length === 1) tab.url = args[0];
@@ -312,12 +313,12 @@ test('ошибка запроса групп видна и не препятст
     assert.equal(h.data.restoredCleanup.status, 'complete');
 });
 
-test('ошибка диагностики не блокирует закрытие собственной вкладки', async t => {
+test('ошибка диагностики допускает попытку закрытия, но не подтверждение очистки', async t => {
     const h = harness(t);
     h.chrome.tabGroups = {query: async () => {throw Error('unavailable');}};
     await h.command(1, 'close');
     assert.equal(h.data.restoredCleanup.status, 'error');
-    assert.equal(h.session.own, undefined);
+    assert.equal(h.session.own.tabId, 1); // подтверждение отсутствия группы не получено
 });
 
 test('отказ close сохраняет доказанную собственную вкладку для повтора', async t => {
@@ -350,4 +351,30 @@ test('перезапуск worker сохраняет сессионное вла
     assert.equal(h.data.restoredCleanup.groups_kept, 1);
     assert.equal(h.data.restoredCleanup.groups_closed, 0);
     assert.equal(h.session.own.tabId, 1);
+});
+
+test('close отказывается от чужой вкладки и неподтверждённых групп', async t => {
+    const h = harness(t);
+    const removed = [];
+    h.chrome.tabs.remove = async id => removed.push(id);
+    h.chrome.tabs.query = async () => [{id: 1, groupId: 99, url: 'https://example.org/'}];
+    await h.ownTab(); // предварительная диагностика не стирает утраченное доказательство
+    await assert.rejects(h.close(), e => e.code === 'ownership_unproven');
+    assert.deepEqual(removed, []);
+    delete h.session.own;
+    h.chrome.tabGroups.query = async () => [{id: 99, title: 'Anki Deck Toolkit'}];
+    await assert.rejects(h.close(), e => e.code === 'ownership_unproven');
+    assert.deepEqual(removed, []);
+});
+
+test('close подтверждает отсутствие группы только после удаления собственной вкладки', async t => {
+    const h = harness(t);
+    const tabs = [{id: 1, groupId: 2, url: 'https://forvo.com/'}, {id: 4, groupId: 5, url: 'https://example.org/'}];
+    h.chrome.tabs.query = async () => tabs;
+    h.chrome.tabs.remove = async id => tabs.splice(tabs.findIndex(t => t.id === id), 1);
+    h.chrome.tabGroups.query = async () => tabs.map(t => ({id: t.groupId}));
+    const result = await h.close();
+    assert.equal(result.own_group_absent, true);
+    assert.equal(result.own_tab_absent, true);
+    assert.deepEqual(tabs.map(t => t.id), [4]);
 });

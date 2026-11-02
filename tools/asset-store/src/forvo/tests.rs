@@ -39,7 +39,7 @@ fn source(responses: Vec<Result<Vec<u8>, AssetError>>) -> FakeSource {
         candidate_error: None,
     }
 }
-fn synthetic_mp3() -> Vec<u8> {
+pub(crate) fn synthetic_mp3() -> Vec<u8> {
     let workspace = crate::temp_workspace::TempWorkspace::create("forvo-synthetic-mp3").unwrap();
     let path = workspace.path().join("fixture.mp3");
     let status = std::process::Command::new("ffmpeg")
@@ -167,6 +167,7 @@ async fn cancellation_reloads_revision_without_rehashing_unchanged_blobs() {
             schema_version: 1,
             items,
         },
+        batch::Transport::CdpChromium,
     )
     .unwrap();
     let mut runtime = SafeBatchRuntime::open(store.root(), "poll").unwrap();
@@ -239,6 +240,7 @@ fn resume_reload_after_acquisition_reuses_verified_blob_cache() {
                 replace_expected_sha256: None,
             }],
         },
+        batch::Transport::CdpChromium,
     )
     .unwrap();
 
@@ -295,6 +297,7 @@ async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
                 },
             ],
         },
+        batch::Transport::CdpChromium,
     )
     .unwrap();
     let mut runtime = SafeBatchRuntime::open(store.root(), "terminal").unwrap();
@@ -316,7 +319,9 @@ async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
     let result = batch::resume(
         &store,
         "terminal",
-        &workspace.path().join("never-created"),
+        batch::Backend::Cdp {
+            profile: &workspace.path().join("never-created"),
+        },
         10,
     )
     .await
@@ -350,7 +355,29 @@ fn execution_lease_survives_releasing_state_lock_and_rejects_another_runner() {
     assert!(second.execution_lease().is_ok());
 }
 
-fn candidate(
+/// Дочерний процесс, созданный `fork` в другом потоке, до `exec` держит копию
+/// дескриптора lease с тем же открытым файловым описанием. Завершение
+/// исполнителя обязано снять блокировку, не дожидаясь закрытия такой копии.
+#[test]
+fn execution_lease_release_does_not_wait_for_inherited_descriptor_copy() {
+    let workspace =
+        crate::temp_workspace::TempWorkspace::create("forvo-execution-lease-copy").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), "copy").unwrap();
+    let lease = runtime.execution_lease().unwrap();
+    let inherited = lease.duplicate_descriptor_for_test();
+    drop(lease);
+    drop(runtime);
+    let next = crate::batch_runtime::SafeBatchRuntime::open(store.root(), "copy").unwrap();
+    assert!(next.execution_lease().is_ok());
+    drop(inherited);
+}
+
+pub(crate) fn candidate(
     id: &str,
     votes: Option<i64>,
     gender: Option<Gender>,
@@ -757,6 +784,8 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
         "candidate_changed",
         "candidate_disappeared",
         "download_timeout",
+        "download_canceled",
+        "download_interrupted",
         "technical_validation_failed",
     ] {
         let workspace =
@@ -777,6 +806,7 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
                     replace_expected_sha256: None,
                 }],
             },
+            batch::Transport::CdpChromium,
         )
         .unwrap();
         let mut source = source(vec![Err(error(
@@ -814,7 +844,9 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
         let resumed = batch::resume(
             &store,
             "recovery",
-            &workspace.path().join("unused-profile"),
+            batch::Backend::Cdp {
+                profile: &workspace.path().join("unused-profile"),
+            },
             1,
         )
         .await

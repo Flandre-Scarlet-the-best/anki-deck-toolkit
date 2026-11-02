@@ -1,4 +1,5 @@
 //! Forvo-пакет сохраняет полученные байты до импорта, используя единственный SafeBatchRuntime.
+use super::brave::fetch::{self as brave_fetch, BraveOptions, BraveSession};
 use super::{
     Acquisition, ForvoEvidence, ForvoSession, acquire, import_acquisition, pauses_batch,
     provider_code,
@@ -11,6 +12,46 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
+
+/// Браузерный транспорт, которым пакет получает записи. Это не происхождение
+/// аудио: оно для обоих транспортов одно — `provider=forvo_web` и единый
+/// `ForvoEvidence`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    /// Собственный постоянный профиль Chromium через CDP (`forvo batch-*`).
+    CdpChromium,
+    /// Обычный Brave пользователя через MV3-расширение (`forvo brave batch-*`).
+    BraveExtension,
+}
+impl Transport {
+    pub fn resume_command(self) -> &'static str {
+        match self {
+            Self::CdpChromium => "pronunciation-assets forvo batch-resume",
+            Self::BraveExtension => "pronunciation-assets forvo brave batch-resume",
+        }
+    }
+}
+
+/// Источник для `resume`. Транспорт пакета закреплён в состоянии, и resume
+/// другим транспортом отвергается до запуска браузера.
+pub enum Backend<'a> {
+    Cdp { profile: &'a Path },
+    Brave(&'a BraveOptions),
+}
+impl Backend<'_> {
+    pub fn transport(&self) -> Transport {
+        match self {
+            Self::Cdp { .. } => Transport::CdpChromium,
+            Self::Brave(_) => Transport::BraveExtension,
+        }
+    }
+}
+
+/// Сколько исполнитель Brave ждёт штатного освобождения собственной загрузки
+/// после Ctrl+C или `batch-cancel`, прежде чем оставить её на восстановление.
+const BRAVE_INTERRUPT_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +71,8 @@ pub struct FetchItem {
 pub struct Failure {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovery_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<CandidateReport>,
 }
@@ -63,6 +106,7 @@ impl From<AssetError> for Failure {
                 })
                 .unwrap_or_else(|| provider_code(&e))
                 .into(),
+            recovery_required: e.details["recovery_required"] == true,
             message: e.message,
             report,
         }
@@ -85,8 +129,12 @@ pub struct Item {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForvoBatch {
+    /// 1 — пакет без поля `transport` (до Brave): всегда CDP, состояние не
+    /// переписывается в новую версию. 2 — транспорт закреплён явно.
     pub schema_version: u32,
     pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<Transport>,
     pub batch_id: String,
     pub revision: u64,
     pub cancelled: bool,
@@ -103,6 +151,12 @@ fn valid_sha(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+impl ForvoBatch {
+    /// Фактический транспорт: у состояния версии 1 — CDP.
+    pub fn transport(&self) -> Transport {
+        self.transport.unwrap_or(Transport::CdpChromium)
+    }
 }
 impl RuntimeBatchState for ForvoBatch {
     fn batch_id(&self) -> &str {
@@ -121,7 +175,11 @@ impl RuntimeBatchState for ForvoBatch {
             .collect()
     }
     fn validate(&self) -> Result<(), AssetError> {
-        if self.schema_version != 1
+        let transport_ok = matches!(
+            (self.schema_version, self.transport),
+            (1, None) | (2, Some(_))
+        );
+        if !transport_ok
             || self.provider != "forvo_web"
             || self.items.is_empty()
             || self.items.len() > MAX_BATCH_ITEMS
@@ -158,7 +216,12 @@ impl RuntimeBatchState for ForvoBatch {
         Ok(())
     }
 }
-pub fn start(store: &AssetStore, id: &str, plan: FetchPlan) -> Result<ForvoBatch, AssetError> {
+pub fn start(
+    store: &AssetStore,
+    id: &str,
+    plan: FetchPlan,
+    transport: Transport,
+) -> Result<ForvoBatch, AssetError> {
     if plan.schema_version != 1 || plan.items.is_empty() || plan.items.len() > MAX_BATCH_ITEMS {
         return Err(invalid());
     }
@@ -175,8 +238,9 @@ pub fn start(store: &AssetStore, id: &str, plan: FetchPlan) -> Result<ForvoBatch
         })
         .collect::<Result<Vec<_>, AssetError>>()?;
     let batch = ForvoBatch {
-        schema_version: 1,
+        schema_version: 2,
         provider: "forvo_web".into(),
+        transport: Some(transport),
         batch_id: id.into(),
         revision: 0,
         cancelled: false,
@@ -188,7 +252,7 @@ pub fn start(store: &AssetStore, id: &str, plan: FetchPlan) -> Result<ForvoBatch
     if runtime.load::<ForvoBatch>()?.is_some() {
         return Err(AssetError::new(
             ErrorCode::IdentityConflict,
-            "пакет существует; используйте forvo batch-resume",
+            "пакет существует; используйте batch-resume его транспорта",
         ));
     }
     runtime.save(&batch)?;
@@ -249,6 +313,149 @@ fn retryable_import(error: &AssetError) -> bool {
         })
 }
 
+fn transport_mismatch(id: &str, batch: Transport, requested: Transport) -> AssetError {
+    AssetError::with_details(
+        ErrorCode::InvalidTransition,
+        "Пакет закреплён за другим браузерным транспортом; продолжите его командой исходного транспорта",
+        serde_json::json!({"provider":"forvo_web","code":"transport_mismatch","batch_id":id,
+            "batch_transport":batch,"requested_transport":requested,
+            "next_action":format!("{} --batch-id {id}", batch.resume_command())}),
+    )
+}
+
+/// Сессия выбранного транспорта; открывается лениво, только если элементу нужны байты.
+enum Session {
+    Cdp(Box<ForvoSession>),
+    Brave(Box<BraveSession>),
+}
+
+impl Session {
+    async fn close(self) -> Result<(), AssetError> {
+        match self {
+            Self::Cdp(session) => (*session).close().await,
+            Self::Brave(session) => session.close().await.map(|_| ()),
+        }
+    }
+}
+
+async fn launch(
+    store: &AssetStore,
+    id: &str,
+    backend: &Backend<'_>,
+) -> Result<Session, AssetError> {
+    match backend {
+        Backend::Cdp { profile } => {
+            enum LaunchResult {
+                Finished(Box<Result<ForvoSession, AssetError>>),
+                Interrupted(AssetError),
+            }
+            let mut launching = Box::pin(ForvoSession::launch(profile));
+            match tokio::select! {
+                result = &mut launching => LaunchResult::Finished(Box::new(result)),
+                _ = tokio::signal::ctrl_c() => LaunchResult::Interrupted(AssetError::new(ErrorCode::Interrupted, "Запуск Forvo прерван; продолжите через batch-resume")),
+                result = cancellation(store, id) => LaunchResult::Interrupted(result.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён"))),
+            } {
+                LaunchResult::Finished(result) => (*result).map(|s| Session::Cdp(Box::new(s))),
+                LaunchResult::Interrupted(mut interrupted) => {
+                    let cleanup = match launching.await {
+                        Ok(s) => s.close().await,
+                        Err(e) if provider_code(&e) == "browser_cleanup_failed" => Err(e),
+                        Err(_) => Ok(()),
+                    };
+                    if let Err(e) = cleanup {
+                        interrupted.details["browser_cleanup"] =
+                            serde_json::json!({"code":provider_code(&e),"message":e.message});
+                    }
+                    Err(interrupted)
+                }
+            }
+        }
+        // Подключение к расширению безопасно прервать: до первой команды в
+        // браузере ничего не изменено.
+        Backend::Brave(options) => tokio::select! {
+            result = BraveSession::connect(options) => result.map(|s| Session::Brave(Box::new(s))),
+            _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Подключение к Brave прервано; продолжите через forvo brave batch-resume")),
+            result = cancellation(store, id) => Err(result.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён"))),
+        },
+    }
+}
+
+/// Получение одного элемента с наблюдением Ctrl+C и `batch-cancel`.
+///
+/// CDP сохраняет прежнее поведение: future получения сбрасывается, а браузер
+/// закрывается вместе с сессией. Brave не бросает операцию посреди загрузки:
+/// сигнал передаётся сессии, которая отменяет и стирает только собственную
+/// связанную загрузку; если она не успела за [`BRAVE_INTERRUPT_GRACE`],
+/// незавершённая операция освобождается при следующем подключении.
+/// Второе значение — сигнал остановки, пришедший во время получения.
+async fn acquire_item(
+    session: &mut Session,
+    store: &AssetStore,
+    id: &str,
+    request: &Pronunciation,
+) -> (Result<Acquisition, AssetError>, Option<AssetError>) {
+    match session {
+        Session::Cdp(session) => (
+            tokio::select! {
+                r = acquire(session, request) => r,
+                _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume")),
+                r = cancellation(store, id) => { if let Err(e) = r { Err(e) } else { Err(AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён")) } },
+            },
+            None,
+        ),
+        Session::Brave(session) => {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            session.set_interrupt(Some(rx));
+            let work = brave_fetch::acquire(session, request);
+            tokio::pin!(work);
+            let stop = tokio::select! {
+                r = &mut work => return (r, None),
+                _ = tokio::signal::ctrl_c() => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через forvo brave batch-resume",
+                    serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
+                r = cancellation(store, id) => match r {
+                    Err(e) => e,
+                    Ok(()) => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет отменён",
+                        serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
+                },
+            };
+            tracing::warn!(
+                event = "brave_batch_stop_requested",
+                stage = "acquire",
+                code = provider_code(&stop),
+                "Получена остановка; собственная операция загрузки освобождается"
+            );
+            let _ = tx.send(true);
+            finish_interrupted(&mut work, stop, BRAVE_INTERRUPT_GRACE).await
+        }
+    }
+}
+
+async fn finish_interrupted(
+    work: impl std::future::Future<Output = Result<Acquisition, AssetError>>,
+    stop: AssetError,
+    grace: Duration,
+) -> (Result<Acquisition, AssetError>, Option<AssetError>) {
+    match tokio::time::timeout(grace, work).await {
+        Ok(result) => (result, Some(stop)),
+        Err(_) => {
+            let mut stop = stop;
+            stop.details["recovery_required"] = serde_json::json!(true);
+            stop.message = format!(
+                "{}; собственная загрузка не освобождена вовремя и будет освобождена при следующем подключении",
+                stop.message
+            );
+            (
+                Err(AssetError::with_details(
+                    stop.code,
+                    stop.message.clone(),
+                    stop.details.clone(),
+                )),
+                Some(stop),
+            )
+        }
+    }
+}
+
 /// Единая граница фиксации результата получения; до Ready импорт невозможен.
 pub(super) enum AcquisitionProgress {
     Ready,
@@ -296,67 +503,127 @@ pub(super) fn checkpoint_acquisition(
 pub async fn resume(
     store: &AssetStore,
     id: &str,
-    profile: &Path,
+    backend: Backend<'_>,
     max_items: usize,
 ) -> Result<ForvoBatch, AssetError> {
     let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
     let _lease = runtime.execution_lease()?;
     let mut batch = load(&mut runtime)?;
+    if batch.transport() != backend.transport() {
+        return Err(transport_mismatch(
+            id,
+            batch.transport(),
+            backend.transport(),
+        ));
+    }
     if batch.cancelled {
         return Err(AssetError::new(
             ErrorCode::InvalidTransition,
             "пакет отменён",
         ));
     }
-    if batch.paused.is_some() && batch.items.iter().all(|item| item.outcome.is_some()) {
+    if batch.paused.as_ref().is_some_and(|p| !p.recovery_required)
+        && batch.items.iter().all(|item| item.outcome.is_some())
+    {
         batch.paused = None;
         batch.revision += 1;
         runtime.save(&batch)?;
     }
-    let mut session = None;
-    let result=async {
-        let mut done=0;
-        while let Some(index)=batch.items.iter().position(|i|i.outcome.is_none()) {
-            if done>=max_items||batch.cancelled{break;}
-            let timer = BrowserItemTimer::new(BrowserItemContext::without_generation("forvo_web", &batch.items[index].request.surface, 1));
-            if batch.items[index].acquisition.is_none(){
+    let mut session: Option<Session> = None;
+    let result = async {
+        // Сохранённые байты не требуют скачивания, но отложенное освобождение
+        // всё равно требует сопряжения до импорта.
+        if batch.paused.as_ref().is_some_and(|p| p.recovery_required) {
+            runtime.release_lock()?;
+            let connected = launch(store, id, &backend).await.map(|s| {
+                session = Some(s);
+            });
+            runtime.reacquire_lock()?;
+            batch = reload_after_acquisition(&mut runtime)?;
+            connected?;
+            batch.paused = None;
+            batch.revision += 1;
+            runtime.save(&batch)?;
+        }
+        let mut done = 0;
+        while let Some(index) = batch.items.iter().position(|i| i.outcome.is_none()) {
+            if done >= max_items || batch.cancelled {
+                break;
+            }
+            let timer = BrowserItemTimer::new(BrowserItemContext::without_generation(
+                "forvo_web",
+                &batch.items[index].request.surface,
+                1,
+            ));
+            if batch.items[index].acquisition.is_none() {
                 let stage = timer.stage("acquire");
                 runtime.release_lock()?;
-                let launched=if session.is_none() {
-                    enum LaunchResult { Finished(Box<Result<ForvoSession,AssetError>>), Interrupted(AssetError) }
-                    let mut launching=Box::pin(ForvoSession::launch(profile));
-                    match tokio::select! {
-                        result=&mut launching => LaunchResult::Finished(Box::new(result)),
-                        _=tokio::signal::ctrl_c()=>LaunchResult::Interrupted(AssetError::new(ErrorCode::Interrupted,"Запуск Forvo прерван; продолжите через batch-resume")),
-                        result=cancellation(store,id)=>LaunchResult::Interrupted(result.err().unwrap_or_else(||AssetError::new(ErrorCode::Interrupted,"Forvo-пакет отменён"))),
-                    } {
-                        LaunchResult::Finished(result)=>match *result {Ok(s)=>{session=Some(s);Ok(())},Err(e)=>Err(e)},
-                        LaunchResult::Interrupted(mut interrupted)=>{
-                            let cleanup=match launching.await {Ok(s)=>s.close().await,Err(e) if provider_code(&e)=="browser_cleanup_failed"=>Err(e),Err(_)=>Ok(())};
-                            if let Err(e)=cleanup {interrupted.details["browser_cleanup"]=serde_json::json!({"code":provider_code(&e),"message":e.message});}
-                            Err(interrupted)
-                        }
-                    }
-                } else {Ok(())};
-                let acquisition=match launched {
-                    Err(e)=>Err(e),
-                    Ok(())=>tokio::select! {
-                    r=acquire(session.as_mut().expect("session"),&batch.items[index].request)=>r,
-                    _=tokio::signal::ctrl_c()=>Err(AssetError::new(ErrorCode::Interrupted,"Forvo-пакет прерван; продолжите через batch-resume")),
-                    r=cancellation(store,id)=>{r?;Err(AssetError::new(ErrorCode::Interrupted,"Forvo-пакет отменён"))},
+                let launched = if session.is_none() {
+                    launch(store, id, &backend).await.map(|s| {
+                        session = Some(s);
+                    })
+                } else {
+                    Ok(())
+                };
+                let (mut acquisition, mut stop) = match launched {
+                    Err(e) => (Err(e), None),
+                    Ok(()) => {
+                        acquire_item(
+                            session.as_mut().expect("session"),
+                            store,
+                            id,
+                            &batch.items[index].request,
+                        )
+                        .await
                     }
                 };
-                match &acquisition { Ok(_) => stage.finish_success(), Err(e) => stage.finish_failure(provider_code(e), pauses_batch(e), None) }
+                if session.as_ref().is_some_and(|s| matches!(s, Session::Brave(s) if s.recovery_required())) {
+                    if let Err(e) = &mut acquisition {
+                        e.details["recovery_required"] = serde_json::json!(true);
+                    }
+                    if let Some(e) = &mut stop {
+                        e.details["recovery_required"] = serde_json::json!(true);
+                    } else if acquisition.is_ok() {
+                        stop = Some(AssetError::with_details(
+                            ErrorCode::Interrupted,
+                            "Проверенные байты сохранены; требуется освобождение собственной загрузки при следующем сопряжении",
+                            serde_json::json!({"code":"cleanup_incomplete","recovery_required":true}),
+                        ));
+                    }
+                }
+                match &acquisition {
+                    Ok(_) => stage.finish_success(),
+                    Err(e) => stage.finish_failure(provider_code(e), pauses_batch(e), None),
+                }
                 runtime.reacquire_lock()?;
-                batch=reload_after_acquisition(&mut runtime)?;
-                if let Err(e)=&acquisition && !e.details["browser_cleanup"].is_null() {
-                    return Err(AssetError::with_details(e.code, e.message.clone(), e.details.clone()));
+                batch = reload_after_acquisition(&mut runtime)?;
+                if let Err(e) = &acquisition
+                    && !e.details["browser_cleanup"].is_null()
+                {
+                    return Err(AssetError::with_details(
+                        e.code,
+                        e.message.clone(),
+                        e.details.clone(),
+                    ));
                 }
                 if batch.cancelled {
                     break;
                 }
-                let failure_code = acquisition.as_ref().err().map(|e| provider_code(e).to_owned());
-                match checkpoint_acquisition(&mut runtime, &mut batch, index, acquisition)? {
+                // Остановка во время получения: проверенные байты всё равно
+                // фиксируются, затем пакет приостанавливается сигналом остановки.
+                let (acquisition, stop) = match (acquisition, stop) {
+                    (Err(_), Some(stop)) => (Err(stop), None),
+                    (acquisition, stop) => (acquisition, stop),
+                };
+                let mut failure_code =
+                    acquisition.as_ref().err().map(|e| provider_code(e).to_owned());
+                let mut progress =
+                    checkpoint_acquisition(&mut runtime, &mut batch, index, acquisition)?;
+                if let (AcquisitionProgress::Ready, Some(stop)) = (&progress, stop) {
+                    failure_code = Some(provider_code(&stop).to_owned());
+                    progress = checkpoint_acquisition(&mut runtime, &mut batch, index, Err(stop))?;
+                }
+                match progress {
                     AcquisitionProgress::Ready => (),
                     AcquisitionProgress::Paused => {
                         timer.finish_failure(failure_code.as_deref().expect("ошибка получения"), true, None);
@@ -369,37 +636,103 @@ pub async fn resume(
                     }
                 }
             }
-            let item=&batch.items[index];
+            let item = &batch.items[index];
             let stage = timer.stage("import_mp3");
-            let saved=item.acquisition.as_ref().expect("checkpoint");
-            let result=runtime.read_blob(&saved.blob).and_then(|bytes|import_acquisition(store,&item.request,&Acquisition{bytes,evidence:saved.evidence.clone()},item.replace_expected_sha256.clone()));
-            if let Err(e) = &result && retryable_import(e) {
-                let failure=Failure::from(AssetError::with_details(e.code, e.message.clone(), e.details.clone()));
+            let saved = item.acquisition.as_ref().expect("checkpoint");
+            let result = runtime.read_blob(&saved.blob).and_then(|bytes| {
+                import_acquisition(
+                    store,
+                    &item.request,
+                    &Acquisition {
+                        bytes,
+                        evidence: saved.evidence.clone(),
+                    },
+                    item.replace_expected_sha256.clone(),
+                )
+            });
+            if let Err(e) = &result
+                && retryable_import(e)
+            {
+                let failure = Failure::from(AssetError::with_details(
+                    e.code,
+                    e.message.clone(),
+                    e.details.clone(),
+                ));
                 stage.finish_failure(&failure.code, true, None);
                 timer.finish_failure(&failure.code, true, None);
-                tracing::warn!(event="forvo_batch_paused", stage="import_mp3", code=failure.code, "Импорт сохранённого MP3 приостановлен");
-                batch.paused=Some(failure);
-                batch.revision+=1;runtime.save(&batch)?;break;
+                tracing::warn!(
+                    event = "forvo_batch_paused",
+                    stage = "import_mp3",
+                    code = failure.code,
+                    "Импорт сохранённого MP3 приостановлен"
+                );
+                batch.paused = Some(failure);
+                batch.revision += 1;
+                runtime.save(&batch)?;
+                break;
             }
-            match &result { Ok(_) => stage.finish_success(), Err(e) => stage.finish_failure(provider_code(e), false, None) }
-            match &result { Ok(_) => timer.finish_success(), Err(e) => timer.finish_failure(provider_code(e), false, None) }
-            batch.items[index].outcome=Some(match result {
-                Ok(_)=>Failure{code:"imported".into(),message:"Оригинальный MP3 сохранён; техническая проверка не даёт фонетического доверия".into(),report:None},
-                Err(e)=>e.into(),
+            match &result {
+                Ok(_) => stage.finish_success(),
+                Err(e) => stage.finish_failure(provider_code(e), false, None),
+            }
+            match &result {
+                Ok(_) => timer.finish_success(),
+                Err(e) => timer.finish_failure(provider_code(e), false, None),
+            }
+            batch.items[index].outcome = Some(match result {
+                Ok(_) => Failure {
+                    code: "imported".into(),
+                    message: "Оригинальный MP3 сохранён; техническая проверка не даёт фонетического доверия".into(),
+                    report: None,
+                    recovery_required: false,
+                },
+                Err(e) => e.into(),
             });
-            batch.paused=None;batch.revision+=1;runtime.save(&batch)?;done+=1;
+            batch.paused = None;
+            batch.revision += 1;
+            runtime.save(&batch)?;
+            done += 1;
         }
-        Ok::<_,AssetError>(())
-    }.await;
+        Ok::<_, AssetError>(())
+    }
+    .await;
     let stopped = if let Some(session) = session {
         session.close().await
     } else {
         Ok(())
     };
+    finish_resume(&mut runtime, batch, result, stopped)
+}
+
+fn finish_resume(
+    runtime: &mut SafeBatchRuntime,
+    mut batch: ForvoBatch,
+    result: Result<(), AssetError>,
+    mut stopped: Result<(), AssetError>,
+) -> Result<ForvoBatch, AssetError> {
+    if let Err(cleanup) = &mut stopped {
+        cleanup.details["paused"] = serde_json::json!(batch.paused);
+        if let Some(original) = &mut batch.paused {
+            original.recovery_required = true;
+        } else {
+            let mut failure = Failure::from(AssetError::with_details(
+                cleanup.code,
+                cleanup.message.clone(),
+                cleanup.details.clone(),
+            ));
+            failure.recovery_required = true;
+            batch.paused = Some(failure);
+        }
+        batch.revision += 1;
+        if let Err(save) = runtime.save(&batch) {
+            cleanup.details["checkpoint_error"] = serde_json::json!({
+                "code": save.code.as_str(), "message": save.message, "details": save.details
+            });
+        }
+    }
     match (result, stopped) {
         (Err(mut original), Err(cleanup)) => {
-            original.details["browser_cleanup"] =
-                serde_json::json!({"code":provider_code(&cleanup),"message":cleanup.message});
+            original.details["browser_cleanup"] = serde_json::json!({"code":provider_code(&cleanup),"message":cleanup.message,"details":cleanup.details});
             return Err(original);
         }
         (Err(original), _) => return Err(original),
@@ -407,4 +740,119 @@ pub async fn resume(
         _ => (),
     }
     Ok(batch)
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_checkpoint_failure_preserves_both_errors() {
+        let workspace =
+            crate::temp_workspace::TempWorkspace::create("brave-cleanup-error").unwrap();
+        let store = AssetStore::open_with_policy(
+            crate::StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        start(
+            &store,
+            "failure",
+            FetchPlan {
+                schema_version: 1,
+                items: vec![FetchItem {
+                    surface: "水".into(),
+                    reading: "みず".into(),
+                    replace_expected_sha256: None,
+                }],
+            },
+            Transport::BraveExtension,
+        )
+        .unwrap();
+        let mut runtime = SafeBatchRuntime::open(store.root(), "failure").unwrap();
+        let batch = load(&mut runtime).unwrap();
+        runtime.release_lock().unwrap();
+        let original = AssetError::new(ErrorCode::IoFailure, "исходная ошибка");
+        let cleanup = AssetError::with_details(
+            ErrorCode::InvalidTransition,
+            "ошибка очистки",
+            serde_json::json!({"code":"cleanup_incomplete"}),
+        );
+        let error = finish_resume(&mut runtime, batch, Err(original), Err(cleanup))
+            .err()
+            .unwrap();
+        assert_eq!(error.message, "исходная ошибка");
+        assert_eq!(
+            error.details["browser_cleanup"]["code"],
+            "cleanup_incomplete"
+        );
+        assert!(
+            error.details["browser_cleanup"]["details"]["checkpoint_error"]["message"].is_string()
+        );
+        runtime.reacquire_lock().unwrap();
+        let batch = load(&mut runtime).unwrap();
+        let cleanup = AssetError::with_details(
+            ErrorCode::InvalidTransition,
+            "ошибка очистки CDP",
+            serde_json::json!({"code":"browser_cleanup_failed"}),
+        );
+        assert!(finish_resume(&mut runtime, batch, Ok(()), Err(cleanup)).is_err());
+        drop(runtime);
+        let saved = status(&store, "failure").unwrap();
+        assert_eq!(
+            saved.paused.as_ref().unwrap().code,
+            "browser_cleanup_failed"
+        );
+        assert!(saved.paused.unwrap().recovery_required);
+    }
+
+    #[tokio::test]
+    async fn grace_timeout_survives_checkpoint_and_new_runtime() {
+        let workspace = crate::temp_workspace::TempWorkspace::create("brave-grace").unwrap();
+        let store = AssetStore::open_with_policy(
+            crate::StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        start(
+            &store,
+            "timeout",
+            FetchPlan {
+                schema_version: 1,
+                items: vec![FetchItem {
+                    surface: "水".into(),
+                    reading: "みず".into(),
+                    replace_expected_sha256: None,
+                }],
+            },
+            Transport::BraveExtension,
+        )
+        .unwrap();
+        let (result, stop) = finish_interrupted(
+            std::future::pending(),
+            AssetError::new(ErrorCode::Interrupted, "остановка"),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(
+            result.as_ref().err().unwrap().details["recovery_required"],
+            true
+        );
+        assert!(Failure::from(stop.unwrap()).recovery_required);
+        let mut runtime = SafeBatchRuntime::open(store.root(), "timeout").unwrap();
+        let mut batch = load(&mut runtime).unwrap();
+        checkpoint_acquisition(&mut runtime, &mut batch, 0, result).unwrap();
+        drop(runtime);
+        assert!(
+            status(&store, "timeout")
+                .unwrap()
+                .paused
+                .unwrap()
+                .recovery_required
+        );
+        let old: Failure =
+            serde_json::from_value(serde_json::json!({"code":"interrupted","message":"остановка"}))
+                .unwrap();
+        assert!(!old.recovery_required);
+    }
 }
