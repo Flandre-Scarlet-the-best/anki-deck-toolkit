@@ -437,3 +437,54 @@ pub fn download_files(dir: &Path) -> Vec<(String, u64, String)> {
     files.sort();
     files
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_match_extension_loader_contract() {
+        let executable = Path::new("/usr/bin/chromium");
+        let dir = Path::new("/tmp/anki-e2e");
+        let profile = Path::new("/tmp/anki-e2e/profile");
+        let extensions = vec![
+            PathBuf::from("/extensions/first"),
+            PathBuf::from("/extensions/second"),
+        ];
+        let make_options = |loader| LaunchOptions {
+            executable,
+            dir,
+            extensions: &extensions,
+            loader,
+            fixture_port: 9443,
+            prompt_for_download: false,
+            restore_session: false,
+        };
+
+        let flag_loader = flags(&make_options(Loader::Flag), profile);
+        assert!(
+            flag_loader
+                .iter()
+                .any(|flag| { flag == "--load-extension=/extensions/first,/extensions/second" })
+        );
+        assert!(flag_loader.iter().any(|flag| {
+            flag == "--disable-extensions-except=/extensions/first,/extensions/second"
+        }));
+
+        let cdp_loader = flags(&make_options(Loader::CdpPipe), profile);
+        assert!(
+            cdp_loader
+                .iter()
+                .any(|flag| flag == "--remote-debugging-pipe")
+        );
+        assert!(
+            cdp_loader
+                .iter()
+                .any(|flag| flag == "--enable-unsafe-extension-debugging")
+        );
+        assert!(!cdp_loader.iter().any(|flag| {
+            flag.starts_with("--load-extension=")
+                || flag.starts_with("--disable-extensions-except=")
+        }));
+    }
+}

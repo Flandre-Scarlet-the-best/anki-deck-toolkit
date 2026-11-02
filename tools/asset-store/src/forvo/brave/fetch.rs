@@ -203,16 +203,13 @@ impl BraveSession {
     /// Подключает расширение и освобождает операцию, оставшуюся от прерванного
     /// запуска (только связанную собственную загрузку).
     pub async fn connect(options: &BraveOptions) -> Result<Self, AssetError> {
-        let mut connection =
-            acceptance::connect(&options.state_dir, options.target.as_deref(), options.wait)
-                .await?;
-        let actual = binding_of(&connection);
-        if let Some(expected) = &options.binding
-            && !expected.accepts(&actual)
-        {
-            connection.bridge.disconnect().await;
-            return Err(browser_mismatch(expected, &actual));
-        }
+        let mut connection = acceptance::connect_with_binding(
+            &options.state_dir,
+            options.target.as_deref(),
+            options.wait,
+            options.binding.as_ref(),
+        )
+        .await?;
         let ping = connection
             .bridge
             .call("ping", json!({}), Duration::from_secs(5))

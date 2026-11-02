@@ -48,6 +48,8 @@ struct World {
     page: Option<String>,
     /// Экземпляр расширения в `ready` (у старых версий его нет).
     instance: Option<String>,
+    version: String,
+    commands: Vec<String>,
 }
 
 type Shared = Arc<Mutex<World>>;
@@ -65,6 +67,7 @@ fn download_url(surface: &str, record: &str) -> Value {
 
 fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) -> Value {
     let mut w = lock(world);
+    w.commands.push(op.to_owned());
     match op {
         "ping" => {
             json!({"ok":true,"result":{"operation":w.op.as_ref().map(|(id,_,_)| json!({"op_id":id})),"listeners":{"determining_filename":false,"web_request":false}}})
@@ -177,6 +180,10 @@ fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) 
         "close" => {
             json!({"ok":true,"result":{"closed":true,"tab_closed":true,"own_tab_absent":true,"own_group_absent":true,"recovery_required":false}})
         }
+        "reload" => {
+            w.version = super::super::targets::bundled_version();
+            json!({"ok":true,"result":{"reloading":true}})
+        }
         other => panic!("неожиданная команда {other}"),
     }
 }
@@ -211,7 +218,7 @@ async fn next_json(socket: &mut Client) -> Option<Value> {
     }
 }
 
-async fn pair(port: u16, instance: Option<String>) -> Option<Client> {
+async fn pair(port: u16, instance: Option<String>, version: &str) -> Option<Client> {
     let stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
     let mut request = format!("ws://127.0.0.1:{port}{}", super::super::WS_PATH)
         .into_client_request()
@@ -232,7 +239,7 @@ async fn pair(port: u16, instance: Option<String>) -> Option<Client> {
     ));
     socket
         .send(Message::text(
-            json!({"type":"auth","v":1,"nonce":own,"extension_id":ID,"version":"0.1.0","mac":mac})
+            json!({"type":"auth","v":1,"nonce":own,"extension_id":ID,"version":version,"mac":mac})
                 .to_string(),
         ))
         .await
@@ -253,8 +260,11 @@ async fn pair(port: u16, instance: Option<String>) -> Option<Client> {
 fn spawn_extension(port: u16, world: Shared, downloads: PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let instance = lock(&world).instance.clone();
-            let Some(mut socket) = pair(port, instance).await else {
+            let (instance, version) = {
+                let world = lock(&world);
+                (world.instance.clone(), world.version.clone())
+            };
+            let Some(mut socket) = pair(port, instance, &version).await else {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             };
@@ -267,6 +277,9 @@ fn spawn_extension(port: u16, world: Shared, downloads: PathBuf) -> tokio::task:
                 reply["type"] = json!("res");
                 reply["id"] = message["id"].clone();
                 if socket.send(Message::text(reply.to_string())).await.is_err() {
+                    break;
+                }
+                if op == "reload" {
                     break;
                 }
             }
@@ -318,6 +331,7 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
     .unwrap();
     let world: Shared = Arc::new(Mutex::new(World {
         words: words.into_iter().map(|(w, r)| (w.to_owned(), r)).collect(),
+        version: "0.1.0".into(),
         ..World::default()
     }));
     let extension = spawn_extension(port, world.clone(), downloads.clone());
@@ -357,6 +371,40 @@ fn repin_target(harness: &Harness, instance: &str) {
         super::super::targets::load_target(&harness.options.state_dir, Some("brave")).unwrap();
     super::super::targets::pin_peer(&harness.options.state_dir, &unpinned, ID, Some(instance))
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mismatched_batch_binding_is_checked_before_extension_commands_and_pin() {
+    let h = harness(vec![]);
+    let state = super::super::targets::load_target(&h.options.state_dir, Some("brave")).unwrap();
+    super::super::targets::write_extension_files(&state.install_dir, state.port, &state.secret)
+        .unwrap();
+    let connected_instance = "bb".repeat(32);
+    lock(&h.world).instance = Some(connected_instance);
+    let expected = BrowserBinding {
+        target: "brave".into(),
+        browser: super::super::BrowserKind::Brave,
+        extension_id: ID.into(),
+        instance_id: Some("aa".repeat(32)),
+    };
+    let options = BraveOptions {
+        binding: Some(expected),
+        ..h.options.clone()
+    };
+
+    let error = match BraveSession::connect(&options).await {
+        Ok(_) => panic!("чужой экземпляр продолжил пакет"),
+        Err(error) => error,
+    };
+
+    assert_eq!(provider_code(&error), "browser_mismatch");
+    assert!(lock(&h.world).commands.is_empty());
+    assert!(
+        super::super::targets::load_target(&h.options.state_dir, Some("brave"))
+            .unwrap()
+            .instance_id
+            .is_none()
+    );
 }
 
 fn record(id: &str, votes: i64, body: Body) -> Record {

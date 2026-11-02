@@ -402,6 +402,7 @@ async fn execute(
         }
     }
     let identified = brave::browsers::identify(&chrome.display().to_string(), false);
+    let identify_error = identified.as_ref().err().map(|error| error.message.clone());
     let kind = identified
         .as_ref()
         .map(|i| i.browser)
@@ -417,7 +418,8 @@ async fn execute(
         other => other.id().to_owned(),
     };
     report["browser"] = json!({"executable": chrome, "version": chrome_version(&chrome), "kind": kind,
-        "identified": identified.as_ref().ok(), "extension_loader": loader, "target": target,
+        "identified": identified.as_ref().ok(), "identify_error": identify_error,
+        "extension_loader": loader, "target": target,
         "headless": true, "profile": "временный, в каталоге прогона"});
     let fixture_dir = dir.join("fixture");
     let prepared = (|| {

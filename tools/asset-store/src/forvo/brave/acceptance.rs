@@ -139,15 +139,27 @@ fn connect_action(state: &AdapterState) -> String {
     action
 }
 
-/// Подключает расширение выбранной цели. Пока порт bridge занят этим
-/// процессом, другая команда этой цели не работает, поэтому здесь же
-/// обновляются файлы установленного расширения и, если версия отличается,
-/// расширение штатно перезагружается командой `reload` — но только когда у
-/// него нет незавершённой операции загрузки.
+/// Подключает расширение выбранной цели без проверки пакетной привязки.
 pub async fn connect(
     state_dir: &Path,
     target: Option<&str>,
     wait: Duration,
+) -> Result<Connection, AssetError> {
+    connect_with_binding(state_dir, target, wait, None).await
+}
+
+/// Подключает расширение выбранной цели и, если задана пакетная привязка,
+/// сверяет её до pin и команд. Пока порт bridge занят этим
+/// процессом, другая команда этой цели не работает, поэтому здесь же
+/// обновляются файлы установленного расширения и, если версия отличается,
+/// расширение штатно перезагружается командой `reload` — но только когда у
+/// него нет незавершённой операции загрузки. Ожидаемая привязка пакета
+/// сверяется сразу после handshake, до pin и команд.
+pub(super) async fn connect_with_binding(
+    state_dir: &Path,
+    target: Option<&str>,
+    wait: Duration,
+    expected_binding: Option<&super::fetch::BrowserBinding>,
 ) -> Result<Connection, AssetError> {
     let state = load_target(state_dir, target)?;
     let mut bridge = Bridge::bind_with(
@@ -173,6 +185,18 @@ pub async fn connect(
         .accept(Instant::now() + wait)
         .await
         .map_err(|e| with_action(e, &state))?;
+    if let Some(expected) = expected_binding {
+        let actual = super::fetch::BrowserBinding {
+            target: state.target.clone(),
+            browser: state.browser,
+            extension_id: peer.extension_id.clone(),
+            instance_id: peer.instance.clone(),
+        };
+        if !expected.accepts(&actual) {
+            bridge.disconnect().await;
+            return Err(super::fetch::browser_mismatch(expected, &actual));
+        }
+    }
     let mut state = pin(state_dir, &state, &mut bridge, &peer)?;
     let bundled = bundled_version();
     let mut update = json!({"files_changed":files,"extension_version":peer.version,"bundled_version":bundled,"reload":"not_needed"});

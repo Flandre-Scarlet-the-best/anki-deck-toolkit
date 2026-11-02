@@ -290,6 +290,51 @@ fn pinning_refuses_concurrent_pairing_change() {
 }
 
 #[test]
+fn custom_executable_survives_secret_rotation_and_install_dir_change() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for rotate_secret in [true, false] {
+        let temp = TempWorkspace::create("targets-custom-executable").unwrap();
+        let state_dir = temp.path().join("state");
+        let executable = temp.path().join("custom/chrome");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' 'Google Chrome 156.0.1.2'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let original_dir = temp.path().join("extension");
+        let mut initial = options(&state_dir, BrowserKind::Chrome, &original_dir);
+        let port = free_port();
+        initial.port = Some(port);
+        initial.executable = Some(executable.display().to_string());
+        setup(&initial).unwrap();
+
+        let changed_dir = if rotate_secret {
+            original_dir
+        } else {
+            temp.path().join("extension-moved")
+        };
+        let mut repeated = options(&state_dir, BrowserKind::Chrome, &changed_dir);
+        repeated.port = Some(port);
+        repeated.rotate_secret = rotate_secret;
+        setup(&repeated).unwrap();
+
+        assert_eq!(
+            load_target(&state_dir, Some("chrome"))
+                .unwrap()
+                .executable
+                .as_deref(),
+            Some(executable.to_str().unwrap())
+        );
+    }
+}
+
+#[test]
 fn windows_install_dir_is_not_a_relative_linux_path() {
     let temp = TempWorkspace::create("targets-windows-dir").unwrap();
     let windows = Path::new(r"C:\Users\Example\AppData\Local\Temp\forvo-chrome-adapter");

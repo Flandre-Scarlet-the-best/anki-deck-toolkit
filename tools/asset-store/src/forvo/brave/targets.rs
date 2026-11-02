@@ -865,7 +865,15 @@ pub fn setup(options: &SetupOptions) -> Result<Value, AssetError> {
                 .collect();
             let remembered = previous.as_ref().and_then(|p| p.executable.clone());
             match (remembered, candidates.as_slice()) {
-                (Some(path), _) => candidates.iter().find(|i| i.executable == path).cloned(),
+                (Some(path), _) => candidates
+                    .iter()
+                    .find(|i| i.executable == path)
+                    .cloned()
+                    .or_else(|| {
+                        browsers::identify(&path, wsl)
+                            .ok()
+                            .filter(|installation| installation.browser == kind)
+                    }),
                 (None, [one]) => Some(one.clone()),
                 (None, []) => None,
                 (None, many) => {
@@ -977,7 +985,12 @@ pub fn setup(options: &SetupOptions) -> Result<Value, AssetError> {
         executable: installation
             .as_ref()
             .map(|i| i.executable.clone())
-            .or_else(|| keep.and_then(|p| p.executable.clone())),
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .filter(|p| p.platform == platform)
+                    .and_then(|p| p.executable.clone())
+            }),
     };
     let unchanged_state = previous.as_ref() == Some(&state) && legacy.is_none();
     file.targets.insert(name.clone(), state.clone());

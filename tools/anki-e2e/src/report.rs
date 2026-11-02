@@ -309,6 +309,13 @@ pub fn render_browser_markdown(report: &Value) -> String {
         s(&report["browser"]["version"]),
         s(&report["browser"]["executable"])
     );
+    if let Some(error) = report["browser"]["identify_error"].as_str() {
+        let _ = writeln!(
+            out,
+            "- Ошибка определения браузера: {}",
+            markdown_cell(error)
+        );
+    }
     let _ = writeln!(out, "- Fixture: {}", s(&report["fixture"]["origin"]));
     let _ = writeln!(
         out,
@@ -383,11 +390,14 @@ mod tests {
     fn browser_markdown_lists_every_scenario_and_failed_check() {
         let report = json!({
             "status":"FAIL","run_id":"r","source":{"commit":"c","dirty":false},
+            "browser":{"version":"156.0","executable":"/usr/bin/chromium",
+                "identify_error":"browser_unrecognized: не удалось определить браузер"},
             "scenarios":[{"name":"full_download","status":"FAIL","duration_s":1.0,"reason":"проверка не выполнена",
                 "checks":[{"what":"байты совпадают","ok":false},{"what":"очистка","ok":true}]}]
         });
         let text = render_browser_markdown(&report);
         assert!(text.contains("Итог: **FAIL**"));
+        assert!(text.contains("- Ошибка определения браузера: browser_unrecognized:"));
         assert!(text.contains("| `full_download` | **FAIL** |"));
         assert!(text.contains("- ✘ байты совпадают"));
         assert!(text.contains("- ✔ очистка"));
