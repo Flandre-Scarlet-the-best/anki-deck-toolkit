@@ -123,6 +123,19 @@ impl ArtifactDirectory {
 }
 
 impl SafeBatchRuntime {
+    /// Короткая блокировка состояния может сниматься на время внешней работы.
+    /// Этот отдельный lease сохраняет единственного исполнителя и не мешает status/cancel.
+    pub(crate) fn execution_lease(&self) -> Result<File, AssetError> {
+        self.require_lock()?;
+        let directory = ensure_directory(&self.directory, "execution")?;
+        flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
+            AssetError::new(
+                ErrorCode::InvalidTransition,
+                "пакет уже исполняется другим процессом",
+            )
+        })?;
+        Ok(directory)
+    }
     pub(crate) fn artifact_directory(&self, name: &str) -> Result<ArtifactDirectory, AssetError> {
         self.require_lock()?;
         validate_leaf_name(name)?;

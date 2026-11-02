@@ -31,6 +31,8 @@ use url::Url;
 use crate::browser_process::{BrowserLaunchSpec, OwnedBrowserProcess, ProcessLaunchFailure};
 use crate::temp_workspace::TempWorkspace;
 
+mod persistent;
+
 const MAX_TRACKED_REQUESTS: usize = 256;
 const MAX_NETWORK_OUTCOMES: usize = 256;
 /// События ответа из кэша разделены долями миллисекунды, поэтому такой объём памяти
@@ -172,6 +174,8 @@ struct BrowserProfile {
     workspace_path: PathBuf,
     workspace: Option<TempWorkspace>,
     closed: bool,
+    persistent: Option<persistent::PersistentProfile>,
+    persistent_visible: bool,
 }
 
 /// Ошибка запуска сохраняет доказанность очистки до владельца восстановления.
@@ -286,6 +290,8 @@ impl BrowserProfile {
                                 workspace_path: parent,
                                 workspace: None,
                                 closed: false,
+                                persistent: None,
+                                persistent_visible: false,
                             });
                         }
                         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -325,10 +331,16 @@ impl BrowserProfile {
 
     fn cleanup(&self) -> io::Result<()> {
         TempWorkspace::ensure_no_live_process_references(&self.workspace_path)?;
-        let profile = remove_browser_directory(&self.path);
+        let profile = if self.persistent.is_some() {
+            Ok(())
+        } else {
+            remove_browser_directory(&self.path)
+        };
         let temp = remove_browser_directory(&self.temp_path);
         profile.and(temp)?;
-        ensure_directory_removed(&self.path)?;
+        if self.persistent.is_none() {
+            ensure_directory_removed(&self.path)?;
+        }
         ensure_directory_removed(&self.temp_path)
     }
 }
@@ -415,6 +427,8 @@ fn build_launch_spec(
         user_data_dir: profile.path.clone(),
         tmpdir: temp_directory.to_owned(),
         launch_timeout: config.launch_timeout,
+        persistent_visible: profile.persistent_visible,
+        persistent_profile: profile.persistent.is_some(),
     })
 }
 
@@ -776,6 +790,10 @@ impl BrowserResources {
         drop(self.browser.take());
         drop(self.process.take());
         let started = Instant::now();
+        let persistent = self
+            .profile
+            .as_ref()
+            .is_some_and(|p| p.persistent.is_some());
         let cleanup = match self.profile.take() {
             Some(profile) => profile.close_after_browser_stop().await.map_err(|error| {
                 format!(
@@ -788,16 +806,25 @@ impl BrowserResources {
         tracing::info!(
             event = "browser_lifecycle",
             stage = "browser_profile_temp_cleanup",
-            code = if cleanup.is_ok() {
+            code = if cleanup.is_ok() && persistent {
+                "browser_profile_preserved_temp_removed"
+            } else if cleanup.is_ok() {
                 "browser_profile_temp_removed"
             } else {
                 "browser_profile_cleanup_failed"
             },
             browser_session = self.diagnostic_session_id,
-            outcome = if cleanup.is_ok() { "removed" } else { "failed" },
+            outcome = if cleanup.is_ok() && persistent {
+                "preserved"
+            } else if cleanup.is_ok() {
+                "removed"
+            } else {
+                "failed"
+            },
+            persistent_profile_preserved = persistent,
             owned_resources_removed = cleanup.is_ok(),
             stage_duration_ms = duration_millis(started.elapsed()),
-            "Завершена проверка удаления профиля и временного каталога"
+            "Завершена проверка профиля и очистки временного каталога"
         );
         tracing::info!(
             event = "browser_lifecycle",
@@ -810,6 +837,7 @@ impl BrowserResources {
             },
             process_stopped = stopped.process_stopped,
             profile_temp_removed = cleanup.is_ok(),
+            persistent_profile_preserved = persistent,
             "Проверены постусловия принадлежащих процессов и каталогов"
         );
         let result = combine_browser_close_results(
@@ -890,6 +918,69 @@ impl BrowserSession {
         config.validate().map_err(BrowserLaunchError::Setup)?;
         let profile = BrowserProfile::in_workspace(workspace)?;
         Self::launch_with_profile(config, profile).await
+    }
+
+    /// Видимый профиль Forvo сохраняется после закрытия; временные ресурсы по-прежнему удаляются.
+    pub async fn launch_persistent(
+        config: BrowserRuntimeConfig,
+        path: &Path,
+    ) -> Result<Self, BrowserLaunchError> {
+        Self::launch_persistent_mode(config, path, true).await
+    }
+
+    /// Фоновый сеанс использует тот же постоянный профиль без incognito и GUI.
+    pub async fn launch_persistent_background(
+        config: BrowserRuntimeConfig,
+        path: &Path,
+    ) -> Result<Self, BrowserLaunchError> {
+        Self::launch_persistent_mode(config, path, false).await
+    }
+
+    async fn launch_persistent_mode(
+        config: BrowserRuntimeConfig,
+        path: &Path,
+        visible: bool,
+    ) -> Result<Self, BrowserLaunchError> {
+        config.validate().map_err(BrowserLaunchError::Setup)?;
+        if visible
+            && std::env::var_os("DISPLAY").is_none_or(|v| v.is_empty())
+            && std::env::var_os("WAYLAND_DISPLAY").is_none_or(|v| v.is_empty())
+        {
+            return Err(BrowserLaunchError::Setup(
+                "gui_unavailable: включите Linux/WSLg дисплей".into(),
+            ));
+        }
+        let persistent = persistent::PersistentProfile::open(path)?;
+        let mut profile = BrowserProfile::standalone()?;
+        fs::remove_dir(&profile.path)?;
+        persistent.register_workspace(&profile.workspace_path)?;
+        profile.path = persistent.path.clone();
+        profile.persistent = Some(persistent);
+        profile.persistent_visible = visible;
+        Self::launch_with_profile(config, profile).await
+    }
+
+    /// Staging живёт в том же дереве, что и TMPDIR Chromium, и удаляется его владельцем.
+    pub(crate) fn download_staging(&self) -> io::Result<PathBuf> {
+        let profile = self
+            .resources
+            .as_ref()
+            .and_then(|r| r.profile.as_ref())
+            .ok_or_else(|| io::Error::other("ресурсы браузера недоступны"))?;
+        let path = profile.workspace_path.join("forvo-download");
+        fs::create_dir(&path)?;
+        set_private_directory(&path)?;
+        Ok(path)
+    }
+
+    /// Browser-level CDP для корреляции загрузок в принадлежащем сеансе.
+    pub fn browser(&self) -> &Browser {
+        self.resources
+            .as_ref()
+            .expect("открытый сеанс")
+            .browser
+            .as_ref()
+            .expect("браузер")
     }
 
     async fn launch_with_profile(
@@ -974,6 +1065,23 @@ impl BrowserSession {
                 .new_page("about:blank")
                 .await
                 .map_err(|error| format!("создание страницы браузера: {error}"))?;
+            if resources
+                .profile
+                .as_ref()
+                .is_some_and(|profile| profile.persistent.is_some())
+            {
+                for old in browser
+                    .pages()
+                    .await
+                    .map_err(|_| "browser_owned_tabs_unavailable".to_owned())?
+                {
+                    if old.target_id() != page.target_id() {
+                        old.close()
+                            .await
+                            .map_err(|_| "browser_owned_tab_close_failed".to_owned())?;
+                    }
+                }
+            }
             page.execute(EnableParams::default())
                 .await
                 .map_err(|error| format!("CDP Page.enable: {error}"))?;
@@ -2071,6 +2179,46 @@ mod tests {
         assert!(!root.exists());
         assert!(!profile_path.exists());
         assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn staging_survives_failed_close_and_drop_while_a_process_uses_the_workspace() {
+        for explicit_close in [true, false] {
+            let profile = BrowserProfile::standalone().unwrap();
+            let root = profile.workspace_path.clone();
+            let staging = root.join("forvo-download");
+            fs::create_dir(&staging).unwrap();
+            let file = staging.join("unfinished-guid");
+            fs::write(&file, b"partial").unwrap();
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "exec 3< \"$1\"; read line", "forvo-test"])
+                .arg(&file)
+                .arg(format!("--user-data-dir={}", root.display()))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            assert!(child.try_wait().unwrap().is_none());
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !Path::new(&format!("/proc/{}/fd/3", child.id())).exists()
+                || !TempWorkspace::has_live_process_references(&root).unwrap()
+            {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if explicit_close {
+                assert!(profile.close().is_err());
+            } else {
+                drop(profile);
+            }
+            assert_eq!(fs::read(&file).unwrap(), b"partial");
+            child.kill().unwrap();
+            child.wait().unwrap();
+            TempWorkspace::ensure_no_live_process_references(&root).unwrap();
+            // Владелец теста ещё жив; штатный orphan GC ждёт его завершения.
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

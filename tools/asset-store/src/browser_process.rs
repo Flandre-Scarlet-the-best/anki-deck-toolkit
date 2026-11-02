@@ -75,6 +75,8 @@ pub(crate) struct BrowserLaunchSpec {
     pub user_data_dir: PathBuf,
     pub tmpdir: String,
     pub launch_timeout: Duration,
+    pub persistent_visible: bool,
+    pub persistent_profile: bool,
 }
 
 impl BrowserLaunchSpec {
@@ -84,11 +86,16 @@ impl BrowserLaunchSpec {
             "--remote-debugging-port=0".to_owned(),
             "--disable-extensions".to_owned(),
             format!("--user-data-dir={}", self.user_data_dir.display()),
-            "--headless".to_owned(),
-            "--hide-scrollbars".to_owned(),
-            "--mute-audio".to_owned(),
-            "--incognito".to_owned(),
         ]);
+        if !self.persistent_visible {
+            arguments
+                .extend(["--headless", "--hide-scrollbars", "--mute-audio"].map(str::to_owned));
+            if !self.persistent_profile {
+                arguments.push("--incognito".into());
+            }
+        } else {
+            arguments.push("--disable-save-password-bubble".into());
+        }
         arguments
     }
 }

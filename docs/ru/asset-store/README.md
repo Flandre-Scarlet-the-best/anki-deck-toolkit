@@ -11,8 +11,8 @@
 изображения в колоды.
 
 Самостоятельный домен `pronunciation_audio` и CLI `pronunciation-assets` импортируют локальные
-MP3 японских произношений, сохраняют техническую проверку и требуют явного подтверждения
-человеком. Полный контракт, команды и ограничения — [японские MP3](pronunciation.md). Корпус
+MP3 японских произношений, получают их через [Forvo Web](forvo.md), сохраняют
+техническую проверку и требуют явного подтверждения человеком. Полный контракт, команды и ограничения — [японские MP3](pronunciation.md). Корпус
 `.asset-store/pronunciation-audio/` независим от изображений; интеграция в колоды ещё не
 включена.
 
@@ -2381,7 +2381,7 @@ SHA, generation, ревизии элемента, отпечатку запро�
 интервала), `clean` (удаление каталога; с `--keep-template` — только рабочей
 копии). Операции: `verify-integrity`, `read-batch`, `read-single`, `ingest`,
 `ingest-contention --writers N`, `batch-reopen`,
-`batch-checkpoint --change unchanged|modified`. Коды: `0` — успех, `1` —
+`batch-resume-reload`, `batch-checkpoint --change unchanged|modified`. Коды: `0` — успех, `1` —
 отказ операции или постусловия, `2` — неверное использование.
 
 Нагрузка задаётся спецификацией `benchmarks/workloads/asset-store/*.toml`:

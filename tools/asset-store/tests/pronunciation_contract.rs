@@ -73,6 +73,206 @@ fn import(store: &AssetStore, request: &Pronunciation) -> AssetRecord {
     import_bytes(store, request, audio(), "pronunciation_ja_こいつ.mp3", None).unwrap()
 }
 
+fn web_acquisition(bytes: &[u8], request: &Pronunciation) -> asset_store::forvo::Acquisition {
+    use asset_store::forvo::*;
+    Acquisition {
+        bytes: bytes.to_vec(),
+        evidence: ForvoEvidence {
+            schema_version: 1,
+            page_url: word_url(&request.surface),
+            downloaded_sha256: sha256_hex(bytes),
+            selected_record_id: "101".into(),
+            ranking_policy: RANKING.into(),
+            candidates: vec![Candidate {
+                record_id: "101".into(),
+                username: Some("fixture-speaker".into()),
+                votes: Some(-1),
+                gender: Some(Gender::Female),
+                country: Some("Japan".into()),
+                download_available: true,
+            }],
+            attempts: vec![Attempt {
+                record_id: "101".into(),
+                code: "downloaded".into(),
+            }],
+        },
+    }
+}
+
+#[test]
+fn forvo_provenance_uses_the_existing_uncertain_and_trusted_boundary() {
+    use asset_store::forvo::*;
+    let workspace = TempWorkspace::create("forvo-store-contract").unwrap();
+    let store = store(&workspace.path().join("audio"));
+    let request = request();
+    let acquisition = web_acquisition(audio(), &request);
+    let record = import_acquisition(&store, &request, &acquisition, None).unwrap();
+    assert_eq!(record.provenance.source_kind, "forvo_web");
+    assert_eq!(record.consumer_filename, "こいつ.mp3");
+    assert_eq!(record.lifecycle, LifecycleState::Quarantined);
+    assert_eq!(
+        record.validation.as_ref().unwrap().status,
+        SemanticStatus::Uncertain
+    );
+    assert_eq!(
+        record.domain_metadata.as_ref().unwrap()["forvo"]["downloaded_sha256"],
+        sha256_hex(audio())
+    );
+    assert!(read_trusted(store.root(), std::slice::from_ref(&request)).is_err());
+    attest(&store, &request, &record.sha256, HumanDecision::Approve).unwrap();
+    assert!(read_trusted(store.root(), std::slice::from_ref(&request)).is_ok());
+    let other = web_acquisition(other_audio(), &request);
+    assert_eq!(
+        import_acquisition(&store, &request, &other, None)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdentityConflict
+    );
+    assert_eq!(
+        import_acquisition(&store, &request, &other, Some("0".repeat(64)))
+            .unwrap_err()
+            .code,
+        ErrorCode::IdentityConflict
+    );
+    assert!(read_trusted(store.root(), std::slice::from_ref(&request)).is_ok());
+    let changed = import_acquisition(&store, &request, &other, Some(record.sha256)).unwrap();
+    assert_eq!(changed.lifecycle, LifecycleState::Quarantined);
+    assert!(read_trusted(store.root(), &[request]).is_err());
+    store.verify_integrity().unwrap();
+}
+
+#[test]
+fn same_sha_local_source_requires_metadata_cas_to_become_forvo_and_revokes_trust() {
+    use asset_store::forvo::*;
+    let workspace = TempWorkspace::create("forvo-metadata-cas").unwrap();
+    let store = store(&workspace.path().join("audio"));
+    let request = request();
+    let local = import(&store, &request);
+    attest(&store, &request, &local.sha256, HumanDecision::Approve).unwrap();
+    let acquisition = web_acquisition(audio(), &request);
+    assert_eq!(
+        import_acquisition(&store, &request, &acquisition, None)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdentityConflict
+    );
+    assert_eq!(
+        read_trusted(store.root(), std::slice::from_ref(&request)).unwrap()[0]
+            .record
+            .provenance
+            .source_kind,
+        "local_import"
+    );
+    let web = import_acquisition(&store, &request, &acquisition, Some(local.sha256)).unwrap();
+    assert_eq!(web.provenance.source_kind, "forvo_web");
+    assert!(web.human_attestation.is_none());
+    assert_eq!(web.lifecycle, LifecycleState::Quarantined);
+    let mut bad = web.clone();
+    bad.domain_metadata.as_mut().unwrap()["forvo"]["page_url"] =
+        serde_json::json!("https://forvo.com/?token=secret");
+    assert!(
+        PronunciationDomainPolicy
+            .validate_record_evidence(&bad)
+            .is_err()
+    );
+    bad = web;
+    bad.domain_metadata.as_mut().unwrap()["unexpected"] = serde_json::json!(true);
+    assert!(
+        PronunciationDomainPolicy
+            .validate_record_evidence(&bad)
+            .is_err()
+    );
+    store.verify_integrity().unwrap();
+}
+
+#[test]
+fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
+    use asset_store::batch_runtime::SafeBatchRuntime;
+    use asset_store::forvo::{self, batch as web_batch};
+    let workspace = TempWorkspace::create("forvo-batch-resume").unwrap();
+    let store = store(&workspace.path().join("audio"));
+    let request = request();
+    let plan = web_batch::FetchPlan {
+        schema_version: 1,
+        items: vec![web_batch::FetchItem {
+            surface: request.surface.clone(),
+            reading: request.reading.clone(),
+            replace_expected_sha256: None,
+        }],
+    };
+    web_batch::start(&store, "web-resume", plan).unwrap();
+    let acquisition = web_acquisition(audio(), &request);
+    {
+        let mut runtime = SafeBatchRuntime::open(store.root(), "web-resume").unwrap();
+        let mut batch: web_batch::ForvoBatch = runtime.load().unwrap().unwrap();
+        let blob = runtime.persist_blob(audio(), "mp3").unwrap();
+        batch.items[0].acquisition = Some(web_batch::StoredAcquisition {
+            blob,
+            evidence: acquisition.evidence.clone(),
+        });
+        batch.revision += 1;
+        runtime.save(&batch).unwrap();
+    }
+    // Смерть после импорта до outcome: возобновление повторяет ровно те же байты.
+    forvo::import_acquisition(&store, &request, &acquisition, None).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let batch = runtime
+        .block_on(web_batch::resume(
+            &store,
+            "web-resume",
+            Path::new("/does-not-exist/no-browser-profile"),
+            1,
+        ))
+        .unwrap();
+    assert_eq!(batch.items[0].outcome.as_ref().unwrap().code, "imported");
+    // Восстановление прежнего состояния: завершённый пакет не должен оставаться paused.
+    {
+        let mut runtime = SafeBatchRuntime::open(store.root(), "web-resume").unwrap();
+        let mut batch: web_batch::ForvoBatch = runtime.load().unwrap().unwrap();
+        batch.paused = Some(web_batch::Failure {
+            code: "dom_changed".into(),
+            message: "прежний блокер".into(),
+            report: None,
+        });
+        batch.revision += 1;
+        runtime.save(&batch).unwrap();
+    }
+    let batch = runtime
+        .block_on(web_batch::resume(
+            &store,
+            "web-resume",
+            Path::new("/does-not-exist/no-browser-profile"),
+            1,
+        ))
+        .unwrap();
+    assert!(batch.paused.is_none());
+    let revision = batch.revision;
+    assert_eq!(
+        runtime
+            .block_on(web_batch::resume(
+                &store,
+                "web-resume",
+                Path::new("/does-not-exist/no-browser-profile"),
+                1
+            ))
+            .unwrap()
+            .revision,
+        revision
+    );
+    assert!(web_batch::cancel(&store, "web-resume").unwrap().cancelled);
+    assert!(
+        runtime
+            .block_on(web_batch::resume(
+                &store,
+                "web-resume",
+                Path::new("/does-not-exist/no-browser-profile"),
+                1
+            ))
+            .is_err()
+    );
+    store.verify_integrity().unwrap();
+}
+
 #[test]
 fn japanese_identity_nfc_only_and_safe_filename() {
     let decomposed = Pronunciation::new("か\u{3099}", "か\u{3099}").unwrap();
@@ -690,6 +890,236 @@ fn json(output: &Output) -> serde_json::Value {
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
 }
 #[test]
+fn forvo_login_without_gui_reports_a_blocker_before_creating_profile_or_store() {
+    let workspace = TempWorkspace::create("forvo-no-gui").unwrap();
+    let profile = workspace.path().join("profile");
+    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+        .arg("--repository-root")
+        .arg(workspace.path())
+        .arg("forvo")
+        .arg("--profile")
+        .arg(&profile)
+        .arg("login")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(json(&output)["error"]["details"]["code"], "gui_unavailable");
+    assert!(!profile.exists());
+    assert!(!workspace.path().join(".asset-store").exists());
+}
+
+#[test]
+fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
+    use asset_store::batch_runtime::SafeBatchRuntime;
+    use asset_store::forvo::batch as web;
+    let workspace = TempWorkspace::create("forvo-checkpoint-resume").unwrap();
+    let store = store(&workspace.path().join("store"));
+    let request = request();
+    let acquisition = web_acquisition(audio(), &request);
+    web::start(
+        &store,
+        "checkpoint",
+        web::FetchPlan {
+            schema_version: 1,
+            items: vec![web::FetchItem {
+                surface: request.surface.clone(),
+                reading: request.reading.clone(),
+                replace_expected_sha256: None,
+            }],
+        },
+    )
+    .unwrap();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "checkpoint").unwrap();
+    let mut batch: web::ForvoBatch = runtime.load().unwrap().unwrap();
+    let blob = runtime.persist_blob(&acquisition.bytes, "mp3").unwrap();
+    let sha = blob.sha256.clone();
+    batch.items[0].acquisition = Some(web::StoredAcquisition {
+        blob,
+        evidence: acquisition.evidence,
+    });
+    batch.revision += 1;
+    runtime.save(&batch).unwrap();
+    drop(runtime);
+    let tools = workspace.path().join("tools");
+    fs::create_dir(&tools).unwrap();
+    let run = |path: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+            .arg("--repository-root")
+            .arg(workspace.path())
+            .arg("--store")
+            .arg(store.root())
+            .args(["forvo", "batch-resume", "--batch-id", "checkpoint"])
+            .env("PATH", path)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .output()
+            .unwrap()
+    };
+    let blocked = run(&tools);
+    assert_eq!(
+        blocked.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&blocked.stdout)
+    );
+    let value = json(&blocked);
+    assert_eq!(value["outcome"], "paused");
+    assert_eq!(value["result"]["paused"]["code"], "audio_tool_missing");
+    assert!(value["result"]["items"][0]["outcome"].is_null());
+    assert_eq!(
+        value["result"]["items"][0]["acquisition"]["blob"]["sha256"],
+        sha
+    );
+    let first_log = value["result"]["diagnostic_log"].as_str().unwrap();
+    let lines = fs::read_to_string(first_log).unwrap();
+    assert!(
+        lines
+            .lines()
+            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+    );
+    assert!(lines.contains("browser_acquisition_stage"));
+    assert!(lines.contains("import_mp3"));
+    assert!(lines.contains("audio_tool_missing"));
+    assert!(!lines.contains("fixture-speaker"));
+    let original_path = std::env::var_os("PATH").expect("для теста нужен PATH с FFmpeg и prlimit");
+    let restored = run(Path::new(&original_path));
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stdout)
+    );
+    let value = json(&restored);
+    assert_eq!(value["result"]["items"][0]["outcome"]["code"], "imported");
+    assert_eq!(
+        value["result"]["items"][0]["acquisition"]["blob"]["sha256"],
+        sha
+    );
+    assert!(!workspace.path().join(".codex/local/forvo-profile").exists());
+    assert_ne!(value["result"]["diagnostic_log"], first_log);
+    let asset = store
+        .verify_integrity()
+        .unwrap()
+        .into_iter()
+        .find(|a| a.identity == request.identity())
+        .unwrap();
+    assert_eq!(asset.sha256, sha);
+    assert_eq!(asset.validation.unwrap().status, SemanticStatus::Uncertain);
+}
+#[test]
+fn forvo_cli_strict_plan_status_and_cancel_do_not_require_browser() {
+    let workspace = TempWorkspace::create("forvo-plan-cli").unwrap();
+    let plan = workspace.path().join("plan.json");
+    fs::write(
+        &plan,
+        r#"{"schema_version":1,"items":[{"surface":"元気","reading":"げんき"}]}"#,
+    )
+    .unwrap();
+    let output = cli(
+        &workspace,
+        &[
+            "forvo",
+            "batch-start",
+            "--batch-id",
+            "offline-web",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--max-items",
+            "0",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        cli(
+            &workspace,
+            &["forvo", "batch-status", "--batch-id", "offline-web"]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(
+        json(&cli(
+            &workspace,
+            &["forvo", "batch-cancel", "--batch-id", "offline-web"]
+        ))["result"]["cancelled"],
+        true
+    );
+    let stopped = cli(
+        &workspace,
+        &["forvo", "batch-resume", "--batch-id", "offline-web"],
+    );
+    assert!(!stopped.status.success());
+    let stopped_json = json(&stopped);
+    let log = stopped_json["error"]["details"]["diagnostic_log"]
+        .as_str()
+        .unwrap();
+    let log = fs::read_to_string(log).unwrap();
+    assert!(
+        log.lines()
+            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+    );
+    assert!(log.contains("run_stopped"));
+    fs::write(&plan,r#"{"schema_version":1,"schema_version":1,"items":[{"surface":"元気","reading":"げんき"}]}"#).unwrap();
+    let duplicate = cli(
+        &workspace,
+        &[
+            "forvo",
+            "batch-start",
+            "--batch-id",
+            "duplicate",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--max-items",
+            "0",
+        ],
+    );
+    assert!(!duplicate.status.success(), "{:?}", json(&duplicate));
+    assert_eq!(json(&duplicate)["error"]["code"], "invalid_identity");
+    let duplicate_status = cli(
+        &workspace,
+        &["forvo", "batch-status", "--batch-id", "duplicate"],
+    );
+    assert!(
+        !duplicate_status.status.success(),
+        "пакет с повторяющимся ключом не должен создаваться: {:?}",
+        json(&duplicate_status)
+    );
+    fs::write(&plan,r#"{"schema_version":1,"items":[{"surface":"元気","reading":"げんき","password":"forbidden"}]}"#).unwrap();
+    let unknown_field = cli(
+        &workspace,
+        &[
+            "forvo",
+            "batch-start",
+            "--batch-id",
+            "unknown-field",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--max-items",
+            "0",
+        ],
+    );
+    assert!(
+        !unknown_field.status.success(),
+        "{:?}",
+        json(&unknown_field)
+    );
+    assert_eq!(json(&unknown_field)["error"]["code"], "invalid_identity");
+    let unknown_field_status = cli(
+        &workspace,
+        &["forvo", "batch-status", "--batch-id", "unknown-field"],
+    );
+    assert!(
+        !unknown_field_status.status.success(),
+        "пакет с неизвестным полем не должен создаваться: {:?}",
+        json(&unknown_field_status)
+    );
+}
+#[test]
 fn cli_real_local_import_attest_read_and_resume() {
     let ws = TempWorkspace::create("audio-cli").unwrap();
     let path = ws.path().join("pronunciation_ja_こいつ.mp3");
@@ -1247,4 +1677,118 @@ fn cli_read_uses_the_streaming_store_boundary() {
     assert!(read.contains("Vec<crate::AssetRecord>"));
     assert!(!read.contains("read_trusted("));
     assert!(!read.contains("VerifiedAssetBytes"));
+}
+
+#[test]
+fn forvo_cli_rejects_profile_store_overlap_before_any_writes() {
+    fn tree(path: &Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                entries.push((path.clone(), None));
+                entries.extend(tree(&path));
+            } else if kind.is_symlink() {
+                entries.push((
+                    path.clone(),
+                    Some(
+                        fs::read_link(path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    ),
+                ));
+            } else {
+                entries.push((path.clone(), Some(fs::read(path).unwrap())));
+            }
+        }
+        entries.sort();
+        entries
+    }
+    for existing in [false, true] {
+        let ws = TempWorkspace::create("forvo-path-overlap").unwrap();
+        let external = TempWorkspace::create("forvo-path-external").unwrap();
+        let corpus = external.path().join("corpus");
+        if existing {
+            let store = store(&corpus);
+            drop(store);
+        }
+        let alias = external.path().join("alias");
+        std::os::unix::fs::symlink(external.path(), &alias).unwrap();
+        let protected = ws.path().join("decks");
+        fs::create_dir(&protected).unwrap();
+        let decks_alias = external.path().join("protected-alias");
+        std::os::unix::fs::symlink(&protected, &decks_alias).unwrap();
+        let cases = [
+            (Some(corpus.clone()), corpus.join("profile")),
+            (Some(corpus.join("audio")), corpus.clone()),
+            (Some(corpus.clone()), corpus.clone()),
+            (Some(alias.join("corpus")), corpus.join("profile")),
+            (Some(alias.join("corpus/audio")), corpus.clone()),
+            (Some(corpus.clone()), alias.join("corpus/profile")),
+            (
+                None,
+                ws.path().join(".asset-store/pronunciation-audio/profile"),
+            ),
+            (None, ws.path().join(".asset-store")),
+            (Some(corpus.clone()), protected.join("profile")),
+            (Some(corpus.clone()), decks_alias.join("profile")),
+        ];
+        for (root, profile) in cases {
+            let before = (tree(ws.path()), tree(external.path()));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"));
+            command.arg("--repository-root").arg(ws.path());
+            if let Some(root) = root {
+                command.arg("--store").arg(root);
+            }
+            let output = command
+                .args(["forvo", "--profile"])
+                .arg(&profile)
+                .arg("login")
+                .env_remove("DISPLAY")
+                .env_remove("WAYLAND_DISPLAY")
+                .output()
+                .unwrap();
+            assert_eq!(
+                json(&output)["error"]["code"],
+                "boundary_violation",
+                "{}: {:?}",
+                profile.display(),
+                json(&output)
+            );
+            assert!(!output.status.success());
+            assert_eq!((tree(ws.path()), tree(external.path())), before);
+        }
+    }
+}
+
+#[test]
+fn forvo_cli_accepts_separate_external_private_profile_and_preserves_it() {
+    let ws = TempWorkspace::create("forvo-profile-repository").unwrap();
+    let external = TempWorkspace::create("forvo-profile-external").unwrap();
+    // Имя decks вне защищённого дерева репозитория допустимо.
+    let profile = external.path().join("decks/profile");
+    fs::create_dir_all(&profile).unwrap();
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        profile.join(".forvo-owner"),
+        "anki-asset-store/forvo-browser-profile/v1\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+        .arg("--repository-root")
+        .arg(ws.path())
+        .args(["forvo", "--profile"])
+        .arg(&profile)
+        .arg("login")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output()
+        .unwrap();
+    assert_eq!(json(&output)["error"]["details"]["code"], "gui_unavailable");
+    assert_eq!(fs::read_dir(&profile).unwrap().count(), 1);
+    assert!(!ws.path().join(".asset-store").exists());
 }

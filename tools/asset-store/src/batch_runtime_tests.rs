@@ -152,6 +152,42 @@ fn unlocking_invalidates_stale_save_and_reload_preserves_verified_blob_cache() {
 }
 
 #[test]
+fn cached_reload_validates_new_blob_after_another_owner_changes_revision() {
+    let temporary = TemporaryDirectory::new();
+    let mut first = SafeBatchRuntime::open(temporary.path(), "new-blob").unwrap();
+    let old = first.persist_blob(b"old", "bin").unwrap();
+    let state = PlainTextBatch {
+        schema_version: 1,
+        batch_id: "new-blob".into(),
+        revision: 1,
+        description: "old".into(),
+        blob: Some(old),
+    };
+    first.save(&state).unwrap();
+    first.load::<PlainTextBatch>().unwrap();
+    first.release_lock().unwrap();
+    let new_blob = {
+        let mut second = SafeBatchRuntime::open(temporary.path(), "new-blob").unwrap();
+        let mut next = second.load::<PlainTextBatch>().unwrap().unwrap();
+        let blob = second.persist_blob(b"new", "bin").unwrap();
+        next.blob = Some(blob.clone());
+        next.revision += 1;
+        second.save(&next).unwrap();
+        blob
+    };
+    let file = temporary
+        .path()
+        .join(".runtime/batches/new-blob")
+        .join(&new_blob.storage_path);
+    fs::write(&file, b"changed").unwrap();
+    first.reacquire_lock().unwrap();
+    assert_eq!(
+        first.reload_cached::<PlainTextBatch>().unwrap_err().code,
+        ErrorCode::IntegrityMismatch
+    );
+}
+
+#[test]
 fn relocked_empty_runtime_also_requires_a_new_load() {
     let temporary = TemporaryDirectory::new();
     let mut runtime = SafeBatchRuntime::open(temporary.path(), "empty-state").unwrap();
