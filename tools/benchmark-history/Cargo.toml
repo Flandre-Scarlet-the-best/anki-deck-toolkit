@@ -39,4 +39,4 @@ unsafe_code = "forbid"
 all = { level = "warn", priority = -1 }
 
 [dev-dependencies]
-comrak = { version = "0.59", default-features = false }
+comrak = { version = "=0.59.0", default-features = false }
