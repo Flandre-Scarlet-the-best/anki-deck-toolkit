@@ -12,7 +12,7 @@ const op_id = 'a'.repeat(32);
 const url = 'https://forvo.com/download/mp3/元気/ja/3661006';
 const args = {op_id, surface: '元気', record_id: '3661006'};
 const event = () => ({listeners: new Set(), addListener(fn) {this.listeners.add(fn);}, removeListener(fn) {this.listeners.delete(fn);}});
-function harness(t) {
+function harness(t, {advanceTimers = false} = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brave-extension-'));
     t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
     const clock = {now: Date.now()};
@@ -65,10 +65,14 @@ function harness(t) {
         const context = vm.createContext({chrome, forvoDom() {}, URL, Date: clockDate, TextEncoder, crypto: webcrypto,
             AbortController,
             fetch: async () => {pairingFetches += 1; return {json: async () => ({schema_version: 1, port: 47613, secret: pairingSecret})};},
-            WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: () => ++nextTimerId, clearTimeout() {},
+            WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: (fn, ms = 0) => {
+                const id = ++nextTimerId;
+                if (advanceTimers && typeof fn === 'function') {clock.now += ms; fn();}
+                return id;
+            }, clearTimeout() {},
             setInterval: () => ++nextTimerId, clearInterval() {}});
         vm.runInContext(source.replace(/^import .*;$/m, '').split('chrome.runtime.onStartup.addListener')[0] +
-            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, cleanupRestoredGroups, close: OPERATIONS.close, open: OPERATIONS.open, command, ownTab, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
+            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, cleanupRestoredGroups, close: OPERATIONS.close, open: OPERATIONS.open, navigationVisible, command, ownTab, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
         return context.api;
     }
     chrome.storage.session = {
@@ -83,6 +87,8 @@ function harness(t) {
         command: (id, op, commandArgs = {}) => api.command(id, op, commandArgs),
         close: () => api.close(),
         open: () => api.open(),
+        navigationVisible: id => api.navigationVisible(id),
+        now: () => clock.now,
         ownTab: () => api.ownTab(),
         restart() {api = worker();},
         advance(ms) {clock.now += ms;},
@@ -119,6 +125,38 @@ test('недавний чужой файл не связывается до по
     assert.equal(fs.readFileSync(foreign.filename, 'utf8'), 'bytes-1');
     assert.equal(fs.existsSync(own.filename), false);
     assert.deepEqual(h.items.map(i => i.id), [1]);
+});
+
+test('медленная первоначальная навигация не перезапускается по таймауту первого ожидания', async t => {
+    const h = harness(t, {advanceTimers: true});
+    const started = h.now();
+    const updates = [];
+    h.chrome.tabs.get = async id => h.now() - started >= 6_000
+        ? {id, status: 'complete', url: 'https://forvo.com/'}
+        : {id, status: 'loading', url: 'about:blank', pendingUrl: 'https://forvo.com/'};
+    h.chrome.tabs.update = async (id, value) => updates.push({id, value});
+
+    await h.navigationVisible(1);
+
+    assert.deepEqual(updates, []);
+});
+
+test('подтверждённо потерянная навигация запускается повторно один раз', async t => {
+    const h = harness(t, {advanceTimers: true});
+    const started = h.now();
+    const updates = [];
+    let restarted = false;
+    h.chrome.tabs.get = async id => {
+        if (restarted) return {id, status: 'complete', url: 'https://forvo.com/'};
+        if (h.now() - started >= 2_550) return {id, status: 'complete', url: '', pendingUrl: ''};
+        return {id, status: 'loading', url: 'about:blank', pendingUrl: 'https://forvo.com/'};
+    };
+    h.chrome.tabs.update = async (id, value) => {updates.push({id, value}); restarted = true;};
+
+    await h.navigationVisible(1);
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].value.url, 'https://forvo.com/');
 });
 
 test('поздний конфликт пересматривается, чужой файл не удаляется', async t => {
@@ -422,6 +460,7 @@ function profile(h, failures = new Set()) {
                 Object.assign(tabs.find(t => t.id === id), props);
             },
             remove: async id => {
+                if (failures.has(`remove:${id}`)) throw Error(`remove:${id}`);
                 fail('remove');
                 const index = tabs.findIndex(t => t.id === id);
                 if (index < 0) throw Error('No tab with id');
@@ -533,6 +572,34 @@ test('отказ удаления прежней вкладки при заме�
     assert.equal(closed.own_tab_absent, true);
     assert.deepEqual(p.tabs, []);
     assert.deepEqual(h.session.leftoverTabs, []);
+});
+
+test('close сообщает tab_cleanup_failed для остатка в собственной группе и сохраняет own', async t => {
+    const h = harness(t);
+    const failures = new Set();
+    const p = profile(h, failures);
+    await h.open();
+    const first = h.session.own;
+    h.session.own = {...first, download_used: true};
+    failures.add(`remove:${first.tabId}`);
+    await assert.rejects(h.open(), e => e.code === 'tab_cleanup_failed');
+    assert.equal(h.session.own.groupId, first.groupId);
+    assert.deepEqual(h.session.leftoverTabs, [first.tabId]);
+
+    await assert.rejects(
+        h.close(),
+        e => e.code === 'tab_cleanup_failed' && e.message.includes('leftover tabs: 1'),
+    );
+    assert.ok(h.session.own, 'собственное состояние сохраняется, пока группа содержит остаток');
+    assert.deepEqual(h.session.leftoverTabs, [first.tabId]);
+    assert.deepEqual(p.tabs.map(tab => tab.id), [first.tabId]);
+
+    failures.clear();
+    const closed = await h.close();
+    assert.equal(closed.own_tab_absent, true);
+    assert.equal(h.session.own, undefined);
+    assert.deepEqual(p.tabs, []);
+    assert.deepEqual(p.groups, []);
 });
 
 test('остаток, уведённый пользователем на другой сайт, не закрывается', async t => {

@@ -399,13 +399,17 @@ async function windowLaidOut(windowId) {
 // вторую. Поэтому вкладка возвращается только после того, как на forvo.com
 // зафиксирован её url; потерянная навигация собственной вкладки повторяется один раз.
 async function navigationVisible(tabId) {
+    let lost = false;
     for (const attempt of [0, 1]) {
-        if (attempt) await chrome.tabs.update(tabId, {url: FORVO_ORIGIN + '/'});
+        if (attempt && lost) await chrome.tabs.update(tabId, {url: FORVO_ORIGIN + '/'});
         const deadline = Date.now() + NAVIGATION_VISIBLE_MS;
         while (Date.now() < deadline) {
             const tab = await chrome.tabs.get(tabId);
             if (committedForvo(tab)) return;
-            if (tab.status === 'complete' && !tab.url && !tab.pendingUrl && Date.now() > deadline - NAVIGATION_VISIBLE_MS / 2) break;
+            if (tab.status === 'complete' && !tab.url && !tab.pendingUrl && Date.now() > deadline - NAVIGATION_VISIBLE_MS / 2) {
+                lost = true;
+                break;
+            }
             await new Promise(resolve => setTimeout(resolve, 50));
         }
     }
@@ -902,9 +906,9 @@ const OPERATIONS = {
         // доказаны своими: они не закрываются и не мешают закрытию своей цели,
         // а только учитываются.
         const groups = await chrome.tabGroups.query({});
+        if (stuck.length) throw new Failure('tab_cleanup_failed', `leftover tabs: ${stuck.length}`);
         if (own && groups.some(g => g.id === own.groupId)) throw new Failure('ownership_unproven');
         await chrome.storage.session.remove('own');
-        if (stuck.length) throw new Failure('tab_cleanup_failed', `leftover tabs: ${stuck.length}`);
         const unproven = groups.filter(g => g.title === GROUP_TITLE).length;
         return {closed: !!tab, tab_closed: !!tab, own_tab_absent: true, own_group_absent: true, recovery_required: false,
             unproven_groups_kept: unproven};

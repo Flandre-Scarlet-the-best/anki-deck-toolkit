@@ -230,10 +230,16 @@ pub async fn extension_update(env: &mut Env<'_>) -> Result<()> {
 }
 
 pub async fn target_isolation(env: &mut Env<'_>) -> Result<()> {
-    let second_dir = env.dir.join("second-extension");
+    let second_dir = env
+        .ctx
+        .extension_dir
+        .parent()
+        .expect("каталог расширения")
+        .join("second-extension");
     let second = brave::setup(&SetupOptions {
         target: Some("second".into()),
         browser: Some(env.ctx.kind),
+        executable: env.ctx.setup.executable.clone(),
         install_dir: Some(second_dir.clone()),
         port: None,
         platform: Some(Platform::Linux),

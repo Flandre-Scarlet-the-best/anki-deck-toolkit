@@ -1,9 +1,9 @@
 # Forvo через обычный браузер: адаптер-расширение
 
-`pronunciation-assets forvo browser` и прежний `forvo brave` работают с Forvo через
-обычный авторизованный браузер пользователя — Brave, Google Chrome, Microsoft Edge или
-Vivaldi — без отдельного профиля, `--remote-debugging-port`, Browser MCP и экспорта
-cookies. Отдельный профиль Cloudflare отклонял (`403`, `cf-mitigated: challenge`);
+`pronunciation-assets forvo browser` работает с Brave, Google Chrome, Microsoft Edge и
+Vivaldi; прежний `forvo brave` закреплён только за целью `brave`. Обе команды обращаются
+к Forvo через обычный авторизованный браузер пользователя — без отдельного профиля,
+`--remote-debugging-port`, Browser MCP и экспорта cookies. Отдельный профиль Cloudflare отклонял (`403`, `cf-mitigated: challenge`);
 основной профиль пользователя проходит. Через браузер работают одиночное получение с
 импортом в `AssetStore` (`fetch`) и пакеты (`batch-start|batch-resume`) поверх того же
 `forvo::batch`/`SafeBatchRuntime`, что у [CDP-провайдера](forvo.md). `doctor` и `smoke`
@@ -17,8 +17,8 @@ cookies. Отдельный профиль Cloudflare отклонял (`403`, `
 
 **Цель** — одно независимое сопряжение с одной установкой браузера: свой каталог
 распакованного расширения (а значит, свой ID), свой секрет, свой порт bridge и свой
-закреплённый экземпляр расширения. Все цели лежат в одном приватном `state.json`
-каталога состояния (`schema_version=2`). Имя цели по умолчанию — имя браузера
+закреплённый экземпляр расширения. Все цели лежат в одном приватном файле `state.json`
+в каталоге состояния (`schema_version=2`). Имя цели по умолчанию — имя браузера
 (`brave`, `chrome`, `edge`, `vivaldi`); для второго профиля того же браузера
 настройте отдельную цель (`--target chrome-work`).
 
@@ -133,8 +133,8 @@ pronunciation-assets forvo browser --target chrome doctor      # подключ�
 
 ## Сопряжение и безопасность
 
-`setup` создаёт для цели 32-байтный секрет и записывает его в `pairing.json` каталога
-расширения и в приватный `state.json` (0600) каталога состояния
+`setup` создаёт для цели 32-байтный секрет и записывает его в файл `pairing.json` в
+каталоге расширения и в приватный файл `state.json` (0600) в каталоге состояния
 (`$XDG_CONFIG_HOME/anki-deck-toolkit/forvo-brave/`, `--state-dir`; имя каталога
 историческое). Единственный акт доверия — установка расширения из каталога цели. Bridge:
 
@@ -149,7 +149,7 @@ pronunciation-assets forvo browser --target chrome doctor      # подключ�
   исполняет команды bridge, не знающего секрета, а bridge отвергает клиента без секрета
   (`pairing_mismatch`);
 - закрепляет **экземпляр** расширения. Расширение версии 0.3+ хранит случайный ID в
-  собственном `chrome.storage.local` профиля и сообщает его в `ready` после взаимной
+  `chrome.storage.local` своего профиля и сообщает его в `ready` после взаимной
   проверки. Тот же каталог, загруженный во второй профиль, даёт тот же ID расширения и
   секрет, но другой экземпляр, и отвергается (`instance_mismatch`). Экземпляр
   закрепляется при первом подключении версии 0.3+. Ограничение: если расширение одного
@@ -394,7 +394,7 @@ Resume другим транспортом отвергается до запу�
 
 ## Диагностика
 
-Все этапы пишутся в журнал NDJSON общего `RunLogGuard` (`logs/` каталога состояния)
+Все этапы пишутся в журнал NDJSON общего `RunLogGuard` (подкаталог `logs/` каталога состояния)
 с одним `operation_id`: `brave_download_activated`, `brave_download_state`,
 `brave_download_complete`, `brave_download_validated`, `brave_download_failed`,
 `brave_download_reconnect`, `brave_download_released`, `brave_operation_recovery`.
@@ -432,8 +432,8 @@ pronunciation-assets forvo batch-cancel --batch-id jp-audio     # без бра�
 сопряжения (у `forvo brave` — до подкоманды). План пакета — тот же строгий JSON, что у CDP. Результат
 `fetch` содержит `asset`, `acquisition` (`ForvoEvidence`) и `browser`. В `browser`
 записаны цель, браузер, ID и версия расширения, выполненное обновление, операции загрузок с освобождением, восстановленная
-операция прошлого запуска и `user_tabs_untouched`. Журнал `fetch` лежит в `logs/`
-каталога состояния, журнал пакета — в runtime пакета (`result.diagnostic_log`).
+операция прошлого запуска и `user_tabs_untouched`. Журнал `fetch` лежит в подкаталоге
+`logs/` каталога состояния, журнал пакета — в runtime пакета (`result.diagnostic_log`).
 Коды завершения общие: 0 — успех, 3 — пауза из-за блокера или отказ,
 130 — Ctrl+C или `cancelled`.
 
@@ -445,7 +445,7 @@ pronunciation-assets forvo batch-cancel --batch-id jp-audio     # без бра�
 
 `doctor` и `smoke` возвращают шаги `PASS`/`FAIL`/`BLOCKED`/`NOT_TESTED`/`INTERRUPTED`
 с доказательствами. Внешний блокер (Challenge, вход, 429) даёт `BLOCKED` без повторов.
-Журнал NDJSON общего `RunLogGuard` лежит в `logs/` каталога состояния,
+Журнал NDJSON общего `RunLogGuard` лежит в подкаталоге `logs/` каталога состояния,
 проверенный MP3 `smoke` — в `evidence/` (0600). `doctor`/`smoke` хранилище ресурсов и
 колоды не меняют.
 

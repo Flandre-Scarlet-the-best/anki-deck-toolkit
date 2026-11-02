@@ -338,6 +338,29 @@ fn finish(dir: &Path, report: &mut Value, status: Status, started: f64) -> u8 {
     .exit_code()
 }
 
+fn cleanup_browser_artifacts(dir: &Path, adapter_dir: &Path, keep_profiles: bool) -> Value {
+    let mut cleanup = json!({"fixture_stopped": true});
+    if !keep_profiles {
+        // Каталог сопряжения содержит тестовый секрет; профили — состояние Chromium.
+        cleanup["adapter_removed"] = json!(std::fs::remove_dir_all(adapter_dir).is_ok());
+        let mut removed = 0;
+        for entry in std::fs::read_dir(dir.join("scenarios"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if std::fs::remove_dir_all(entry.path().join("profile")).is_ok() {
+                removed += 1;
+            }
+        }
+        if std::fs::remove_dir_all(dir.join("other-profile")).is_ok() {
+            removed += 1;
+        }
+        cleanup["profiles_removed"] = json!(removed);
+    }
+    cleanup
+}
+
 async fn execute(
     args: &BrowserArgs,
     repo: &Path,
@@ -544,35 +567,46 @@ async fn execute(
     }
     watcher.abort();
     fixture.shutdown();
-    let mut cleanup = json!({"fixture_stopped": true});
-    if !args.keep_profiles {
-        // Каталог сопряжения содержит тестовый секрет прогона; профили — состояние Chromium.
-        cleanup["adapter_removed"] = json!(std::fs::remove_dir_all(&adapter_dir).is_ok());
-        let mut removed = 0;
-        for entry in std::fs::read_dir(dir.join("scenarios"))
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            if std::fs::remove_dir_all(entry.path().join("profile")).is_ok() {
-                removed += 1;
-            }
-        }
-        cleanup["profiles_removed"] = json!(removed);
-    }
     report["scenarios"] = json!(results);
-    report["cleanup"] = cleanup;
+    report["cleanup"] = cleanup_browser_artifacts(dir, &adapter_dir, args.keep_profiles);
     report::overall(statuses)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserArgs, deduplicate_scenarios, execute, find_cli};
+    use super::{BrowserArgs, cleanup_browser_artifacts, deduplicate_scenarios, execute, find_cli};
     use crate::report::Status;
     use std::{
-        path::Path,
+        path::{Path, PathBuf},
         sync::{Arc, atomic::AtomicBool},
     };
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn create() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "anki-e2e-browser-cleanup-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn relative_explicit_cli_resolves_to_the_checked_executable() {
@@ -652,5 +686,38 @@ mod tests {
                 "recent_user_download".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn cleanup_removes_adapter_and_every_owned_profile_unless_kept() {
+        let workspace = TempDirectory::create();
+        let dir = workspace.path().join("run");
+        let adapter_dir = dir.join("adapter");
+        for path in [
+            adapter_dir.join("extension"),
+            adapter_dir.join("second-extension"),
+            dir.join("scenarios/full_download/profile"),
+            dir.join("scenarios/target_isolation/profile"),
+            dir.join("other-profile"),
+        ] {
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("owned-file"), "test").unwrap();
+        }
+
+        let cleanup = cleanup_browser_artifacts(&dir, &adapter_dir, false);
+
+        assert_eq!(cleanup["adapter_removed"], true);
+        assert_eq!(cleanup["profiles_removed"], 3);
+        assert!(!adapter_dir.exists());
+        assert!(!dir.join("scenarios/full_download/profile").exists());
+        assert!(!dir.join("scenarios/target_isolation/profile").exists());
+        assert!(!dir.join("other-profile").exists());
+
+        std::fs::create_dir_all(adapter_dir.join("second-extension")).unwrap();
+        std::fs::create_dir_all(dir.join("other-profile")).unwrap();
+        let kept = cleanup_browser_artifacts(&dir, &adapter_dir, true);
+        assert!(kept.get("adapter_removed").is_none());
+        assert!(adapter_dir.join("second-extension").exists());
+        assert!(dir.join("other-profile").exists());
     }
 }
