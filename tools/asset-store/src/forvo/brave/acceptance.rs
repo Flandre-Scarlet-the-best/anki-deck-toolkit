@@ -675,11 +675,14 @@ async fn run_flow(
     )
     .await
     {
-        Ok(Ok(value)) => report.push(
-            "download_cleanup",
-            Status::Pass,
-            json!({"operation_id":op_id,"keep_download":keep,"release":value}),
-        ),
+        Ok(Ok(value)) => match download::validate_release(&value, keep, outcome.is_ok()) {
+            Ok(()) => report.push(
+                "download_cleanup",
+                Status::Pass,
+                json!({"operation_id":op_id,"keep_download":keep,"release":value}),
+            ),
+            Err(e) => report.fail("download_cleanup", &e),
+        },
         Ok(Err(e)) => report.fail("download_cleanup", &e),
         Err(_) => report.fail(
             "download_cleanup",

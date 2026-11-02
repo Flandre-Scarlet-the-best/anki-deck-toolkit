@@ -124,6 +124,7 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "auth_and_candidates" => auth_and_candidates(env).await,
         "full_download" => full_download(env).await,
         "concurrent_downloads" => concurrent_downloads(env).await,
+        "recent_user_download" => recent_user_download(env).await,
         "download_failures" => download_failures(env).await,
         "service_worker_restart" => service_worker_restart(env).await,
         "bridge_reconnect" => bridge_reconnect(env).await,
@@ -497,6 +498,67 @@ async fn full_download(env: &mut Env<'_>) -> Result<()> {
         json!({"downloads":files_json(&env.downloads()),"site_download":step(&kept, "site_download"),"cleanup":step(&kept, "download_cleanup")}),
     );
     Ok(())
+}
+
+/// Завершённый чужой файл того же URL виден, пока свои заголовки удерживаются.
+async fn recent_user_download(env: &mut Env<'_>) -> Result<()> {
+    env.connect().await?;
+    env.select(fixture::WORD, fixture::RECORD_A).await?;
+    let user = env.browser.user_tab(&word_url(fixture::WORD)).await?;
+    env.ctx.fixture.set(fixture::RECORD_A, Behavior::Garbage);
+    TestBrowser::click(&user, &format!("a[data-p4=\"{}\"]", fixture::RECORD_A)).await?;
+    let name = "pronunciation_ja_3661006.mp3";
+    let before = settle(&env.downloads(), &[name], Duration::from_secs(15)).await;
+    let foreign_sha = sha_of(&before, name).ok_or("чужой файл не завершился")?;
+    let count = env.ctx.fixture.requests_for(fixture::RECORD_A);
+    let (gate, rx) = Gate::new();
+    env.ctx
+        .fixture
+        .set(fixture::RECORD_A, Behavior::HoldHeaders(rx));
+    let op = download::new_operation_id().map_err(err)?;
+    env.begin(&op, fixture::WORD, fixture::RECORD_A).await?;
+    if !env
+        .ctx
+        .fixture
+        .wait_request(fixture::RECORD_A, count + 1, Duration::from_secs(10))
+        .await
+    {
+        return Err("собственный запрос не пришёл".into());
+    }
+    let waiting = env
+        .poll(&op, Duration::from_secs(10), |s| s.own_requests > 0)
+        .await?;
+    env.out.check(
+        "чужая завершённая загрузка не усыновлена при задержке своей",
+        waiting.own_requests == 1 && waiting.bound_id.is_none() && waiting.item.is_none(),
+        json!({"status":waiting}),
+    );
+    gate.open();
+    let complete = env
+        .poll(&op, Duration::from_secs(15), |s| {
+            s.item.as_ref().is_some_and(|i| i.state == "complete")
+        })
+        .await?;
+    let decision = download::classify(
+        &complete,
+        &request(fixture::WORD),
+        fixture::RECORD_A,
+        &Limits::default(),
+    );
+    let own_sha = match decision {
+        Progress::Complete(item) => download::verify_file(Platform::Linux, &item)
+            .ok()
+            .map(|(_, bytes)| sha256_hex(&bytes)),
+        _ => None,
+    };
+    let release = env.release(&op).await;
+    let after = download_files(&env.downloads());
+    env.out.check("прочитаны свои байты, удалён только свой файл; чужой SHA и файл сохранены",
+        own_sha == Some(env.sha_a()) && foreign_sha != env.sha_a()
+            && release["removed_file"] == true && after.len() == 1
+            && sha_of(&after, name) == Some(foreign_sha.clone()),
+        json!({"release":release,"foreign_sha":foreign_sha,"own_sha":own_sha,"after":files_json(&env.downloads())}));
+    env.residual_clean().await
 }
 
 async fn concurrent_downloads(env: &mut Env<'_>) -> Result<()> {

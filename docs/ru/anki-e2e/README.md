@@ -271,6 +271,7 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 | `auth_and_candidates` | японские записи и кнопки, неверный `record_id`, вход, изменённый DOM, другой язык, phrases, чужая кнопка |
 | `full_download` | `smoke` целиком: клик → загрузка → владение → `complete` → байты → SHA/`probe_mp3` → очистка; `--keep-download` |
 | `concurrent_downloads` | параллельные загрузки пользователя (другая запись Forvo, другой сайт) неизменны; та же запись из другой вкладки → `download_conflict`, ничего не удалено |
+| `recent_user_download` | недавний чужой файл того же URL с другими байтами не усыновляется при удержании заголовков своей загрузки; читаются и удаляются только свои байты |
 | `download_failures` | `.crdownload` не принимается, таймаут, обрыв, не-MP3, неверный адрес, чужой download ID |
 | `service_worker_restart` | рестарт до связывания → `ownership_unproven`; после связывания операция доводится до конца |
 | `bridge_reconnect` | разрыв bridge не теряет связанную операцию |

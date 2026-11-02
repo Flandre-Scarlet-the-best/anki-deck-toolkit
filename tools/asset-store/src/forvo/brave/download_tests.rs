@@ -41,6 +41,7 @@ fn facts(item: Option<ItemFacts>, elapsed_ms: u64) -> StatusFacts {
         conflict: false,
         observer_lost: false,
         bound_id: item.as_ref().map(|i| i.id),
+        ownership_proven: item.is_some(),
         bound_missing: false,
         item,
         tab_present: true,
@@ -280,4 +281,63 @@ fn operation_ids_are_unique_lower_hex() {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     );
     assert_ne!(a, b);
+}
+
+#[test]
+fn missing_proof_and_origin_only_referrer_never_allow_reading() {
+    let mut value = facts(Some(item("complete")), 100);
+    value.ownership_proven = false;
+    assert_eq!(
+        classify_default(&value),
+        Progress::Failed("ownership_unproven")
+    );
+    value.ownership_proven = true;
+    value.item.as_mut().unwrap().referrer_is_own_page = false;
+    assert_eq!(
+        classify_default(&value),
+        Progress::Failed("download_mismatch")
+    );
+}
+
+#[test]
+fn cleanup_delivery_is_not_cleanup_success() {
+    for value in [
+        json!({"released":false,"reason":"cleanup_failed","bound":true}),
+        json!({"released":true,"bound":true,"erased":false}),
+        json!({}),
+    ] {
+        assert!(validate_release(&value, false, false).is_err());
+    }
+    for (value, keep) in [
+        (
+            json!({"released":false,"reason":"operation_unknown"}),
+            false,
+        ),
+        (json!({"released":true,"bound":false}), false),
+        (json!({"released":true,"bound":true,"erased":false}), true),
+        (json!({"released":true,"bound":true,"erased":true}), false),
+    ] {
+        assert!(validate_release(&value, keep, false).is_ok());
+    }
+}
+
+#[test]
+fn successful_acquisition_requires_release_of_the_bound_operation() {
+    assert!(
+        validate_release(
+            &json!({"released":false,"reason":"operation_unknown"}),
+            false,
+            true
+        )
+        .is_err()
+    );
+    assert!(validate_release(&json!({"released":true,"bound":false}), false, true).is_err());
+    assert!(
+        validate_release(
+            &json!({"released":true,"bound":true,"erased":true}),
+            false,
+            true
+        )
+        .is_ok()
+    );
 }

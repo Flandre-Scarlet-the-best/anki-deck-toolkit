@@ -227,7 +227,7 @@ mod tests {
         ])
         .unwrap();
         let Command::Browser(args) = &cli.command else {
-            panic!("expected browser command");
+            panic!("ожидалась команда browser");
         };
         assert_eq!(args.scenarios, ["full_download", "save_as_prompt"]);
         assert!(!args.keep_profiles);

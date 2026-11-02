@@ -26,6 +26,7 @@ pub const SCENARIOS: &[&str] = &[
     "auth_and_candidates",
     "full_download",
     "concurrent_downloads",
+    "recent_user_download",
     "download_failures",
     "service_worker_restart",
     "bridge_reconnect",

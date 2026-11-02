@@ -2,7 +2,8 @@
 //!
 //! Расширение нажимает обычную кнопку записи в собственной вкладке и сообщает
 //! факты: запросы ожидаемого адреса из своей и чужих вкладок, совпавшие
-//! загрузки и связанный `DownloadItem`. Решение о ходе операции принимает
+//! загрузки и связанный `DownloadItem` с точным referrer уникальной страницы.
+//! Решение о ходе операции принимает
 //! [`classify`] — чистая функция над этими фактами; файл читается только после
 //! `complete` и проверки размеров. Ничего, кроме связанной собственной загрузки,
 //! расширение не отменяет и не удаляет.
@@ -76,6 +77,8 @@ pub struct StatusFacts {
     #[serde(default)]
     pub bound_id: Option<i64>,
     #[serde(default)]
+    pub ownership_proven: bool,
+    #[serde(default)]
     pub bound_missing: bool,
     #[serde(default)]
     pub item: Option<ItemFacts>,
@@ -122,7 +125,7 @@ pub fn failure_message(code: &str) -> &'static str {
             "Параллельная загрузка той же записи делает владение неоднозначным; операция остановлена, чужие загрузки не тронуты"
         }
         "ownership_unproven" => {
-            "Принадлежность загрузки не доказана (например, после рестарта service worker); файл не импортирован и не удалён"
+            "Принадлежность загрузки не доказана (рестарт до связывания или referrer без маркера операции); файл не импортирован и не удалён"
         }
         "download_vanished" => "Связанная загрузка исчезла из истории браузера",
         "download_mismatch" => "Загрузка не связана однозначно с выбранной записью",
@@ -195,11 +198,15 @@ pub fn classify(
             "waiting_download"
         });
     };
+    if !facts.ownership_proven {
+        return Progress::Failed("ownership_unproven");
+    }
     let address_ok = observed_url(&item.url)
         .is_some_and(|url| matches_download(&url, &request.surface, record_id));
     if !address_ok
         || item.by_extension
-        || !(item.referrer_is_own_page || item.referrer_origin_is_forvo)
+        || !item.referrer_is_own_page
+        || facts.bound_id != Some(item.id)
     {
         return Progress::Failed("download_mismatch");
     }
@@ -465,10 +472,32 @@ pub async fn release(bridge: &mut Bridge, op_id: &str, keep: bool) -> Result<Val
             Duration::from_secs(10),
         )
         .await?;
+    validate_release(&value, keep, false)?;
     tracing::info!(event = "brave_download_released", stage = "cleanup", operation_id = op_id,
         bound = ?value["bound"].as_bool(), removed_file = ?value["removed_file"].as_bool(),
         canceled = ?value["canceled"].as_bool(), erased = ?value["erased"].as_bool(), "Операция загрузки освобождена");
     Ok(value)
+}
+
+/// Успешная доставка JSON ещё не подтверждает освобождение операции.
+pub(crate) fn validate_release(
+    value: &Value,
+    keep: bool,
+    expected_bound: bool,
+) -> Result<(), AssetError> {
+    let unknown = value["released"] == false && value["reason"] == "operation_unknown";
+    let released =
+        value["released"] == true && (keep || value["bound"] == false || value["erased"] == true);
+    if (unknown || released) && (!expected_bound || (released && value["bound"] == true)) {
+        Ok(())
+    } else {
+        let mut error = bridge_error(
+            "download_cleanup_failed",
+            "Очистка загрузки не подтверждена; проверьте состояние операции перед повтором",
+        );
+        error.details["release"] = value.clone();
+        Err(error)
+    }
 }
 
 #[cfg(test)]

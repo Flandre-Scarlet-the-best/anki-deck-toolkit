@@ -269,13 +269,12 @@ function waitComplete(tabId, ms, signal) {
 // Один штатный download: обычная кнопка выбранной записи в собственной вкладке.
 // Расширение не регистрирует onDeterminingFilename и не отменяет, не
 // переименовывает и не удаляет загрузки, владение которыми не доказано.
-// У DownloadItem нет tabId, поэтому владение доказывает связка:
-//  1) запрос ожидаемого адреса выбранной записи пришёл из собственной вкладки
-//     (webRequest.onBeforeRequest без блокировки сообщает tabId);
-//  2) в окне операции ровно одна загрузка с этим адресом и ни одного такого же
-//     запроса из других вкладок;
-//  3) связывание выполняется, пока наблюдатель операции жив. После рестарта
-//     service worker несвязанная операция загрузку не усыновляет (fail closed).
+// У DownloadItem нет tabId. Перед кликом собственная страница получает
+// уникальный query-маркер через history.replaceState (без сетевого запроса).
+// Только точный referrer этой страницы доказывает источник DownloadItem.
+// Если политика referrer убрала маркер, загрузка остаётся несвязанной.
+// webRequest служит дополнительным детектором конкуренции, а время — не
+// доказательством владения. После рестарта несвязанная операция fail closed.
 // Состояние операции хранится в chrome.storage.local: рестарт service worker и
 // переподключение bridge его не теряют, а таймеры service worker не считаются
 // гарантией — ход операции опрашивает Rust.
@@ -283,7 +282,6 @@ function waitComplete(tabId, ms, signal) {
 const OP_KEY = 'operation';
 const API_KEY = 'apiDownloads';
 const DOWNLOAD_FILTER = {urls: [FORVO_ORIGIN + '/download/*']};
-const START_MARGIN_MS = 1000;
 const observers = new Map();
 
 function describeUrl(raw) {
@@ -328,7 +326,7 @@ function mutateOp(opId, change) {
     const run = opQueue.then(async () => {
         const op = await loadOp();
         if (!op || op.op_id !== opId) return null;
-        if (change(op) !== false) await chrome.storage.local.set({[OP_KEY]: op});
+        if (await change(op) !== false) await chrome.storage.local.set({[OP_KEY]: op});
         return op;
     });
     opQueue = run.catch(() => {});
@@ -383,13 +381,15 @@ async function downloadBegin(args) {
     if (own?.download_used) throw new Failure('own_tab_used');
     const page = new URL(tab.url);
     if (page.origin !== FORVO_ORIGIN || decodeURIComponent(page.pathname) !== decodeURIComponent(wordPath(surface))) throw new Failure('page_identity_mismatch');
-    // Уже идущая загрузка того же адреса сделала бы владение неразличимым: кнопка не нажимается.
+    // При уже идущей загрузке той же записи консервативно отказываем до клика.
     const active = await chrome.downloads.search({state: 'in_progress'});
     if (active.some(item => expectedDownload(item.url, surface, id))) {
         trace(opId, 'conflict_before_click');
         return {code: 'download_conflict', phase: 'before_click'};
     }
-    const op = {op_id: opId, surface, record_id: id, tab_id: tab.id, page_url: tab.url, began_at: Date.now(), own_requests: 0,
+    page.searchParams.set('anki_forvo_operation', randomHex());
+    page.hash = '';
+    const op = {ownership_version: 2, op_id: opId, surface, record_id: id, tab_id: tab.id, page_url: page.href, began_at: Date.now(), own_requests: 0,
         foreign_requests: 0, first_request_at: null, bound: null, conflict: false, observer_lost: false};
     await chrome.storage.local.set({[OP_KEY]: op});
     await markTabUsed(tab.id);
@@ -397,6 +397,7 @@ async function downloadBegin(args) {
     trace(opId, 'begin', {tab_id: tab.id});
     let activated;
     try {
+        await inject(tab.id, url => { history.replaceState(history.state, '', url); }, [op.page_url]);
         activated = await inject(tab.id, forvoDom, [surface, 'activate', id]);
     } catch (error) {
         await dropOp(opId);
@@ -412,8 +413,10 @@ async function downloadBegin(args) {
 
 async function dropOp(opId) {
     unobserve(opId);
-    const op = await loadOp();
-    if (op?.op_id === opId) await chrome.storage.local.remove(OP_KEY);
+    await mutateOp(opId, async () => {
+        await chrome.storage.local.remove(OP_KEY);
+        return false;
+    });
 }
 
 async function downloadStatus(args) {
@@ -423,24 +426,25 @@ async function downloadStatus(args) {
     const alive = observers.has(opId);
     const tab = await ownTab();
     const tabPresent = !!tab && tab.id === op.tab_id;
-    const items = (await chrome.downloads.search({startedAfter: new Date(op.began_at - START_MARGIN_MS).toISOString()}))
+    const items = (await chrome.downloads.search({}))
         .filter(item => expectedDownload(item.url, op.surface, op.record_id));
     const current = await mutateOp(opId, state => {
-        if (state.bound !== null) return false;
-        if (state.foreign_requests > 0 || items.length > 1) {
+        if (state.foreign_requests > 0 || state.own_requests > 1 || items.filter(item => ownsItem(item, state)).length > 1) {
             if (state.conflict) return false;
             state.conflict = true;
             trace(opId, 'conflict', {matching_downloads: items.length});
             return;
         }
+        if (state.bound !== null) return false;
         if (!alive) {
             if (state.observer_lost) return false;
             state.observer_lost = true;
             trace(opId, 'observer_lost');
             return;
         }
-        if (state.own_requests > 0 && items.length === 1 && !state.conflict && !state.observer_lost) {
-            state.bound = items[0].id;
+        const owned = items.filter(item => ownsItem(item, state));
+        if (state.own_requests === 1 && owned.length === 1 && !state.conflict && !state.observer_lost) {
+            state.bound = owned[0].id;
             state.bound_at = Date.now();
             trace(opId, 'bound', {download_id: state.bound});
             return;
@@ -451,6 +455,7 @@ async function downloadStatus(args) {
     const [item] = current.bound === null ? [] : await chrome.downloads.search({id: current.bound});
     return {code: 'status', op_id: opId, observer_alive: alive, own_requests: current.own_requests,
         foreign_requests: current.foreign_requests, matching_downloads: items.length, conflict: current.conflict,
+        ownership_proven: !!item && ownsItem(item, current),
         observer_lost: current.observer_lost, bound_id: current.bound, bound_missing: current.bound !== null && !item,
         item: item ? sanitizeItem(item, current) : null, tab_present: tabPresent,
         page_unchanged: tabPresent && tab.url === current.page_url, elapsed_ms: Date.now() - current.began_at};
@@ -458,31 +463,71 @@ async function downloadStatus(args) {
 
 // Освобождение операции. Действия применяются только к загрузке, владение
 // которой доказано связыванием; несвязанная операция ничего не трогает.
+function ownsItem(item, op) {
+    return op.ownership_version === 2 && !item.byExtensionId &&
+        item.referrer === op.page_url && expectedDownload(item.url, op.surface, op.record_id);
+}
+
 async function downloadRelease(args) {
     const opId = operationId(args.op_id);
     const action = args.action;
     if (action !== 'remove' && action !== 'keep') throw new Failure('invalid_arguments');
     unobserve(opId);
-    const op = await loadOp();
-    if (!op || op.op_id !== opId) return {released: false, reason: 'operation_unknown'};
-    const result = {released: true, bound: op.bound !== null, canceled: false, removed_file: false, erased: false};
-    if (op.bound !== null && action === 'remove') {
-        const [item] = await chrome.downloads.search({id: op.bound});
-        if (item && expectedDownload(item.url, op.surface, op.record_id)) {
-            if (item.state === 'in_progress') {
-                await chrome.downloads.cancel(item.id).catch(() => {});
-                result.canceled = true;
-            }
-            if (item.state === 'complete' && item.exists) {
-                await chrome.downloads.removeFile(item.id).then(() => {
+    let result = {released: false, reason: 'operation_unknown'};
+    await mutateOp(opId, async op => {
+        result = {released: false, bound: op.bound !== null, canceled: false, removed_file: false, erased: false};
+        let step = 'search';
+        try {
+            if (op.bound !== null && action === 'remove') {
+                let [item] = await chrome.downloads.search({id: op.bound});
+                if (!item && op.cleanup_file_done) {
+                    step = 'storage';
+                    await chrome.storage.local.remove(OP_KEY);
+                    result.released = true;
+                    result.erased = true;
+                    return false;
+                }
+                if (!item || !ownsItem(item, op)) {
+                    result.reason = 'ownership_unproven';
+                    return false;
+                }
+                if (item.state === 'in_progress') {
+                    step = 'cancel';
+                    await chrome.downloads.cancel(item.id);
+                    result.canceled = true;
+                    [item] = await chrome.downloads.search({id: op.bound});
+                    if (!item || !ownsItem(item, op) || item.state === 'in_progress') {
+                        result.reason = 'cancel_unconfirmed';
+                        return false;
+                    }
+                }
+                if (item.state === 'complete' && item.exists && !op.removed_file) {
+                    step = 'removeFile';
+                    await chrome.downloads.removeFile(item.id);
                     result.removed_file = true;
-                }).catch(() => {});
+                    // Сохраняем подтверждение до erase: его отказ/рестарт допускает повтор.
+                    op.removed_file = true;
+                    await chrome.storage.local.set({[OP_KEY]: op});
+                }
+                op.cleanup_file_done = true;
+                step = 'storage';
+                await chrome.storage.local.set({[OP_KEY]: op});
+                step = 'erase';
+                const erased = await chrome.downloads.erase({id: item.id});
+                if (!erased.includes(item.id)) {
+                    result.reason = 'erase_unconfirmed';
+                    return false;
+                }
+                result.erased = true;
             }
-            await chrome.downloads.erase({id: item.id});
-            result.erased = true;
+            step = 'storage';
+            await chrome.storage.local.remove(OP_KEY);
+            result.released = true;
+        } catch {
+            result.reason = `${step}_failed`;
         }
-    }
-    await chrome.storage.local.remove(OP_KEY);
+        return false;
+    });
     trace(opId, 'released', {action, ...result});
     return result;
 }
@@ -500,7 +545,7 @@ async function downloadsApi(args, signal) {
     const op = await loadOp();
     if (!op || op.op_id !== opId || op.bound === null) throw new Failure('download_not_owned');
     const [source] = await chrome.downloads.search({id: op.bound});
-    if (!source || source.state !== 'complete' || !expectedDownload(source.url, op.surface, op.record_id)) throw new Failure('download_not_owned');
+    if (!source || source.state !== 'complete' || !ownsItem(source, op)) throw new Failure('download_not_owned');
     const stem = text(args.filename_stem, 80);
     if (!/^[a-z0-9-]+$/.test(stem)) throw new Failure('invalid_arguments');
     const promptMs = duration(args.prompt_ms, 1000, 60000);
