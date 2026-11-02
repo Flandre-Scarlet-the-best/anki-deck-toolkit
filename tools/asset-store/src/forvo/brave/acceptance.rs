@@ -306,18 +306,26 @@ fn local_ipv4() -> Result<(Vec<std::net::Ipv4Addr>, &'static str), &'static str>
     if let Ok(output) = std::process::Command::new("ip")
         .args(["-j", "-4", "addr", "show"])
         .output()
+        && let Some(addresses) = parse_ip_output(output.status.success(), &output.stdout)
     {
-        let interfaces = serde_json::from_slice::<Vec<Value>>(&output.stdout)
-            .map_err(|_| "ip_output_unknown")?;
-        let addresses = interfaces
-            .iter()
-            .flat_map(|i| i["addr_info"].as_array().cloned().unwrap_or_default())
-            .filter_map(|a| a["local"].as_str().and_then(|s| s.parse().ok()))
-            .collect();
         return Ok((addresses, "ip"));
     }
     let table = std::fs::read_to_string("/proc/net/fib_trie").map_err(|_| "ip_unavailable")?;
     Ok((fib_trie_local(&table), "fib_trie"))
+}
+
+pub(crate) fn parse_ip_output(success: bool, stdout: &[u8]) -> Option<Vec<std::net::Ipv4Addr>> {
+    if !success {
+        return None;
+    }
+    let interfaces = serde_json::from_slice::<Vec<Value>>(stdout).ok()?;
+    Some(
+        interfaces
+            .iter()
+            .flat_map(|i| i["addr_info"].as_array().cloned().unwrap_or_default())
+            .filter_map(|a| a["local"].as_str().and_then(|s| s.parse().ok()))
+            .collect(),
+    )
 }
 
 /// Адреса с пометкой `/32 host LOCAL` в `/proc/net/fib_trie`.

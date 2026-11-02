@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """Модель Docker CLI: состояние и журнал операций изолированы каждым тестом."""
 import json
 import os

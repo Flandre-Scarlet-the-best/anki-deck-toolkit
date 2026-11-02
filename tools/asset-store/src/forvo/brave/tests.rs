@@ -431,6 +431,18 @@ fn fib_trie_yields_unique_local_host_addresses() {
 }
 
 #[test]
+fn failed_or_unparseable_ip_output_allows_fib_trie_fallback() {
+    use super::acceptance::parse_ip_output;
+    let valid = br#"[{"addr_info":[{"local":"127.0.0.1"},{"local":"172.17.0.2"}]}]"#;
+    assert_eq!(
+        parse_ip_output(true, valid),
+        Some(vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(172, 17, 0, 2)])
+    );
+    assert_eq!(parse_ip_output(false, valid), None);
+    assert_eq!(parse_ip_output(true, b"not json"), None);
+}
+
+#[test]
 fn reused_own_tab_may_be_activated_by_user() {
     use super::acceptance::own_tab_grouped;
     let tab = |created: bool, active: bool| json!({"group_title":GROUP_TITLE,"created":created,"active":active});

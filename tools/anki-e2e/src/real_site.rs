@@ -734,7 +734,9 @@ fn hint(status: Status, steps: &[Value]) -> Option<&'static str> {
     if status == Status::Pass {
         None
     } else if blocked("extension_connected") || blocked("transport") {
-        Some("расширение не подключено: загрузите его через noVNC (см. anki-e2e real-site up)")
+        Some(
+            "расширение не подключено: проверьте запуск Brave через `anki-e2e real-site status` и повторите `run`; расширение загружается автоматически. Журнал: `docker exec anki-e2e-real-site cat /home/tester/state/brave.log`",
+        )
     } else if blocked("forvo_auth") || blocked("forvo_page_auth") {
         Some("нужен вход в Forvo или ручное прохождение проверки сайта через noVNC")
     } else {
@@ -1082,6 +1084,17 @@ mod tests {
         let failed = json!({"outcome":"error","error":{"details":{"code":"acceptance_failed"}}});
         assert_eq!(command_status(&failed), Status::Fail);
         assert_eq!(command_status(&json!({"outcome":"error"})), Status::Error);
+    }
+
+    #[test]
+    fn extension_hint_matches_automatic_load_path() {
+        let steps = json!([{"name":"extension_connected","status":"BLOCKED"}]);
+        assert_eq!(
+            hint(Status::Blocked, steps.as_array().unwrap()),
+            Some(
+                "расширение не подключено: проверьте запуск Brave через `anki-e2e real-site status` и повторите `run`; расширение загружается автоматически. Журнал: `docker exec anki-e2e-real-site cat /home/tester/state/brave.log`"
+            )
+        );
     }
 
     #[test]
