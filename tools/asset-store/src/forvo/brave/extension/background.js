@@ -96,6 +96,7 @@ async function connect() {
     };
     current.onclose = () => {
         if (current !== socket) return;
+        pairing = null;
         teardown();
         scheduleRetry();
     };

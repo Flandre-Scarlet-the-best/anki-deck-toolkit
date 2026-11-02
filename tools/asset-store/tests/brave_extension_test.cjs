@@ -17,6 +17,14 @@ function harness(t) {
     t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
     const clock = {now: Date.now()};
     const clockDate = class extends Date { static now() { return clock.now; } };
+    let pairingSecret = 'a'.repeat(64);
+    let pairingFetches = 0;
+    let nextTimerId = 0;
+    class WebSocketStub {
+        static OPEN = 1;
+        constructor(url) { this.url = url; this.readyState = 0; }
+        send() {}
+    }
     const data = {own: {tabId: 1, groupId: 2}};
     const tab = {id: 1, groupId: 2, url: 'https://forvo.com/word/%E5%85%83%E6%B0%97/'};
     const items = [];
@@ -25,7 +33,7 @@ function harness(t) {
     const onRequest = event();
     let beforeSet = async () => {};
     const chrome = {
-        runtime: {getManifest: () => ({version: 'test'})},
+        runtime: {id: 'test-extension', getURL: path => `chrome-extension://test/${path}`, getManifest: () => ({version: 'test'})},
         storage: {local: {
             get: async key => ({[key]: structuredClone(data[key])}),
             set: async value => {await beforeSet(value); Object.assign(data, structuredClone(value));},
@@ -52,8 +60,12 @@ function harness(t) {
     };
     function worker() {
         onRequest.listeners.clear();
-        const context = vm.createContext({chrome, forvoDom() {}, URL, Date: clockDate, TextEncoder, crypto: webcrypto, console: {info() {}}, setTimeout, clearTimeout});
-        vm.runInContext(source.replace(/^import .*;$/m, '').split('const OPERATIONS =')[0] + '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease};', context);
+        const context = vm.createContext({chrome, forvoDom() {}, URL, Date: clockDate, TextEncoder, crypto: webcrypto,
+            fetch: async () => {pairingFetches += 1; return {json: async () => ({schema_version: 1, port: 47613, secret: pairingSecret})};},
+            WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: () => ++nextTimerId, clearTimeout() {},
+            setInterval: () => ++nextTimerId, clearInterval() {}});
+        vm.runInContext(source.replace(/^import .*;$/m, '').split('const OPERATIONS =')[0] +
+            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
         return context.api;
     }
     let api = worker();
@@ -61,6 +73,12 @@ function harness(t) {
         data, items, failures, calls, tab,
         restart() {api = worker();},
         advance(ms) {clock.now += ms;},
+        connect: () => api.connect(),
+        closeSocket: () => api.closeCurrent(),
+        setPhase: value => api.setPhase(value),
+        hasPairing: () => api.hasPairing(),
+        pairingFetches: () => pairingFetches,
+        rotatePairing() {pairingSecret = 'b'.repeat(64);},
         beforeSet(fn) {beforeSet = fn;},
         begin: () => api.downloadBegin(args),
         status: () => api.downloadStatus({op_id}),
@@ -109,6 +127,17 @@ test('время ожидания имени файла отсчитываетс
     assert.equal((await h.status()).bound_elapsed_ms, 7_999);
     h.advance(1);
     assert.equal((await h.status()).bound_elapsed_ms, 8_000);
+});
+
+test('после закрытия WebSocket pairing перечитывается даже после ready', async t => {
+    const h = harness(t);
+    await h.connect();
+    assert.equal(h.pairingFetches(), 1);
+    assert.equal(h.hasPairing(), true);
+    h.rotatePairing(); h.setPhase('ready'); h.closeSocket();
+    assert.equal(h.hasPairing(), false);
+    await h.connect();
+    assert.equal(h.pairingFetches(), 2);
 });
 
 for (const failure of ['cancel', 'removeFile', 'erase']) {

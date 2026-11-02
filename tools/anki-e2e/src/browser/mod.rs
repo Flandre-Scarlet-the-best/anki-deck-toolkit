@@ -16,6 +16,7 @@ use crate::util;
 use asset_store::forvo::brave;
 use clap::Args;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -176,6 +177,14 @@ fn revision(repo: &Path) -> Value {
     json!({"commit":git(&["rev-parse","HEAD"]),"dirty":git(&["status","--porcelain"]).map(|s| !s.is_empty())})
 }
 
+fn deduplicate_scenarios(selected: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::with_capacity(selected.len());
+    selected
+        .into_iter()
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
+}
+
 pub fn run(args: &BrowserArgs, interrupted: Arc<AtomicBool>) -> u8 {
     let cwd = std::env::current_dir().unwrap_or_default();
     let repo = match crate::source::repository_root(&cwd) {
@@ -185,11 +194,11 @@ pub fn run(args: &BrowserArgs, interrupted: Arc<AtomicBool>) -> u8 {
             return Status::Error.exit_code();
         }
     };
-    let selected: Vec<String> = if args.scenarios.is_empty() {
+    let selected = deduplicate_scenarios(if args.scenarios.is_empty() {
         SCENARIOS.iter().map(|s| (*s).to_owned()).collect()
     } else {
         args.scenarios.clone()
-    };
+    });
     if let Some(unknown) = selected.iter().find(|s| !SCENARIOS.contains(&s.as_str())) {
         eprintln!(
             "Неизвестный сценарий {unknown}; доступны: {}",
@@ -428,4 +437,27 @@ async fn execute(
     report["scenarios"] = json!(results);
     report["cleanup"] = cleanup;
     report::overall(statuses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deduplicate_scenarios;
+
+    #[test]
+    fn duplicate_scenarios_keep_the_first_occurrence_and_order() {
+        assert_eq!(
+            deduplicate_scenarios(vec![
+                "full_download".into(),
+                "concurrent_downloads".into(),
+                "full_download".into(),
+                "recent_user_download".into(),
+                "concurrent_downloads".into(),
+            ]),
+            vec![
+                "full_download".to_owned(),
+                "concurrent_downloads".to_owned(),
+                "recent_user_download".to_owned(),
+            ]
+        );
+    }
 }
