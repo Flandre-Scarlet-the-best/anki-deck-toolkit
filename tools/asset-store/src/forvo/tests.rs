@@ -784,6 +784,8 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
         "candidate_changed",
         "candidate_disappeared",
         "download_timeout",
+        "download_canceled",
+        "download_interrupted",
         "technical_validation_failed",
     ] {
         let workspace =

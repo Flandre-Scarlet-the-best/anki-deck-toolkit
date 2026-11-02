@@ -41,6 +41,7 @@ struct World {
     challenge: bool,
     fail_close: bool,
     fail_release: bool,
+    unknown_release: bool,
     begins: Vec<String>,
     releases: Vec<Value>,
     op: Option<(String, String, String)>,
@@ -152,6 +153,9 @@ fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) 
         "download_release" => {
             if w.fail_release {
                 return json!({"ok":false,"code":"download_cleanup_failed"});
+            }
+            if w.unknown_release {
+                return json!({"ok":true,"result":{"released":false,"reason":"operation_unknown"}});
             }
             let current = w.op.take();
             let mut result = json!({"released":current.is_some(),"bound":current.is_some(),"canceled":false,"removed_file":false,"erased":false});
@@ -495,6 +499,23 @@ async fn interrupt_releases_in_progress_own_download() {
     assert_eq!(w.releases.len(), 1);
     assert_eq!(w.releases[0]["canceled"], true);
     assert!(w.op.is_none());
+}
+
+#[tokio::test]
+async fn unknown_release_after_download_requires_recovery() {
+    let h = harness(vec![(
+        "元気",
+        vec![record("10", 2, Body::Bytes(synthetic_mp3()))],
+    )]);
+    lock(&h.world).unknown_release = true;
+    let mut session = BraveSession::connect(&h.options).await.unwrap();
+    let request = Pronunciation::new("元気", "げんき").unwrap();
+    assert!(acquire(&mut session, &request).await.is_ok());
+    assert!(session.recovery_required());
+    assert_eq!(
+        session.summary()["operations"][0]["release"]["error"],
+        "download_cleanup_failed"
+    );
 }
 
 fn plan(words: &[(&str, &str)]) -> FetchPlan {

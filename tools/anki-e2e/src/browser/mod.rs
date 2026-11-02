@@ -163,13 +163,15 @@ fn certificate(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
 }
 
 fn find_cli(explicit: Option<&Path>) -> Option<PathBuf> {
-    let executable = |p: &Path| {
+    let executable = |p: &Path| -> Option<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
-        p.metadata()
+        let path = std::path::absolute(p).ok()?;
+        path.metadata()
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .then_some(path)
     };
     if let Some(path) = explicit {
-        return executable(path).then(|| path.to_owned());
+        return executable(path);
     }
     std::env::var_os("PRONUNCIATION_ASSETS_BIN")
         .map(PathBuf::from)
@@ -179,7 +181,7 @@ fn find_cli(explicit: Option<&Path>) -> Option<PathBuf> {
                 .ok()
                 .and_then(|e| e.parent().map(|d| d.join("pronunciation-assets"))),
         )
-        .find(|p| executable(p))
+        .find_map(|p| executable(&p))
 }
 
 fn chrome_version(path: &Path) -> Option<String> {
@@ -516,12 +518,44 @@ async fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserArgs, deduplicate_scenarios, execute};
+    use super::{BrowserArgs, deduplicate_scenarios, execute, find_cli};
     use crate::report::Status;
     use std::{
         path::Path,
         sync::{Arc, atomic::AtomicBool},
     };
+
+    #[test]
+    fn relative_explicit_cli_resolves_to_the_checked_executable() {
+        let executable = std::env::current_exe().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let (depth, suffix) = cwd
+            .ancestors()
+            .enumerate()
+            .find_map(|(depth, parent)| {
+                executable
+                    .strip_prefix(parent)
+                    .ok()
+                    .map(|suffix| (depth, suffix))
+            })
+            .unwrap();
+        let mut relative = std::path::PathBuf::new();
+        for _ in 0..depth {
+            relative.push("..");
+        }
+        relative.push(suffix);
+        let resolved = find_cli(Some(&relative)).unwrap();
+        assert_eq!(std::fs::canonicalize(&resolved).unwrap(), executable);
+        assert!(
+            std::process::Command::new(resolved)
+                .env("PATH", "")
+                .arg("--help")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
 
     #[tokio::test]
     async fn invalid_explicit_cli_is_reported_before_browser_setup() {

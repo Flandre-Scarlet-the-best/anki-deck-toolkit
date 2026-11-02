@@ -511,6 +511,8 @@ pub fn pauses_batch(error: &AssetError) -> bool {
             | "download_dangerous"
             | "download_vanished"
             | "download_not_started"
+            | "download_canceled"
+            | "download_interrupted"
             | "save_as_required"
             | "file_missing"
             | "file_access_denied"

@@ -265,7 +265,12 @@ impl BraveSession {
         .await;
         // Освобождение — при любом исходе: собственная связанная загрузка
         // отменяется или удаляется; несвязанная операция ничего не трогает.
-        let released = self.release(&op_id).await;
+        let released = self.release(&op_id).await.and_then(|value| {
+            if outcome.is_ok() {
+                download::validate_release(&value, false, true)?;
+            }
+            Ok(value)
+        });
         let mut entry = json!({"operation_id":op_id,"record_id":candidate.record_id,"code":match &outcome {
             Ok(_) => "downloaded".to_owned(), Err(e) => provider_code(e).to_owned() }});
         if let Ok(d) = &outcome {
