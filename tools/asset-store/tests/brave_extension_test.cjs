@@ -37,7 +37,13 @@ function harness(t) {
         }},
         downloads: {
             search: async query => structuredClone(items.filter(i => (query.id === undefined || i.id === query.id) && (!query.state || i.state === query.state))),
-            cancel: async id => {calls.push(['cancel', id]); if (failures.has('cancel')) throw Error(); items.find(i => i.id === id).state = 'interrupted';},
+            cancel: async id => {
+                calls.push(['cancel', id]);
+                if (failures.has('cancel')) throw Error();
+                const item = items.find(i => i.id === id);
+                item.state = failures.has('cancel_complete') ? 'complete' : 'interrupted';
+                item.error = item.state === 'interrupted' ? 'USER_CANCELED' : null;
+            },
             removeFile: async id => {calls.push(['removeFile', id]); if (failures.has('removeFile')) throw Error(); fs.unlinkSync(items.find(i => i.id === id).filename);},
             erase: async ({id}) => {calls.push(['erase', id]); if (failures.has('erase')) throw Error(); const index = items.findIndex(i => i.id === id); return index < 0 ? [] : [items.splice(index, 1)[0].id];},
         },
@@ -178,4 +184,15 @@ test('новая вторая загрузка из своей страницы 
     assert.equal((await h.status()).bound_id, 1);
     h.add(2);
     assert.equal((await h.status()).conflict, true);
+});
+
+test('завершение между search и cancel не выдаётся за отмену', async t => {
+    const h = harness(t); await h.begin(); h.request();
+    const item = h.add(1, h.tab.url, 'in_progress'); await h.status();
+    h.failures.add('cancel_complete');
+    const result = await h.release();
+    assert.equal(result.canceled, false);
+    assert.equal(result.removed_file, true);
+    assert.equal(result.released, true);
+    assert.equal(fs.existsSync(item.filename), false);
 });

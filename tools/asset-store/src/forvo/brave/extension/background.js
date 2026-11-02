@@ -494,8 +494,8 @@ async function downloadRelease(args) {
                 if (item.state === 'in_progress') {
                     step = 'cancel';
                     await chrome.downloads.cancel(item.id);
-                    result.canceled = true;
                     [item] = await chrome.downloads.search({id: op.bound});
+                    result.canceled = item?.state === 'interrupted' && item.error === 'USER_CANCELED';
                     if (!item || !ownsItem(item, op) || item.state === 'in_progress') {
                         result.reason = 'cancel_unconfirmed';
                         return false;
