@@ -71,6 +71,8 @@ pub struct FetchItem {
 pub struct Failure {
     pub code: String,
     pub message: String,
+    #[serde(default)]
+    pub recovery_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<CandidateReport>,
 }
@@ -104,6 +106,7 @@ impl From<AssetError> for Failure {
                 })
                 .unwrap_or_else(|| provider_code(&e))
                 .into(),
+            recovery_required: e.details["recovery_required"] == true,
             message: e.message,
             report,
         }
@@ -422,24 +425,33 @@ async fn acquire_item(
                 "Получена остановка; собственная операция загрузки освобождается"
             );
             let _ = tx.send(true);
-            match tokio::time::timeout(BRAVE_INTERRUPT_GRACE, &mut work).await {
-                Ok(result) => (result, Some(stop)),
-                Err(_) => {
-                    let mut stop = stop;
-                    stop.details["recovery_required"] = serde_json::json!(true);
-                    stop.message = format!(
-                        "{}; собственная загрузка не освобождена вовремя и будет освобождена при следующем подключении",
-                        stop.message
-                    );
-                    (
-                        Err(AssetError::new(
-                            ErrorCode::Interrupted,
-                            stop.message.clone(),
-                        )),
-                        Some(stop),
-                    )
-                }
-            }
+            finish_interrupted(&mut work, stop, BRAVE_INTERRUPT_GRACE).await
+        }
+    }
+}
+
+async fn finish_interrupted(
+    work: impl std::future::Future<Output = Result<Acquisition, AssetError>>,
+    stop: AssetError,
+    grace: Duration,
+) -> (Result<Acquisition, AssetError>, Option<AssetError>) {
+    match tokio::time::timeout(grace, work).await {
+        Ok(result) => (result, Some(stop)),
+        Err(_) => {
+            let mut stop = stop;
+            stop.details["recovery_required"] = serde_json::json!(true);
+            stop.message = format!(
+                "{}; собственная загрузка не освобождена вовремя и будет освобождена при следующем подключении",
+                stop.message
+            );
+            (
+                Err(AssetError::with_details(
+                    stop.code,
+                    stop.message.clone(),
+                    stop.details.clone(),
+                )),
+                Some(stop),
+            )
         }
     }
 }
@@ -510,13 +522,27 @@ pub async fn resume(
             "пакет отменён",
         ));
     }
-    if batch.paused.is_some() && batch.items.iter().all(|item| item.outcome.is_some()) {
+    if batch.paused.as_ref().is_some_and(|p| !p.recovery_required)
+        && batch.items.iter().all(|item| item.outcome.is_some())
+    {
         batch.paused = None;
         batch.revision += 1;
         runtime.save(&batch)?;
     }
     let mut session: Option<Session> = None;
     let result = async {
+        // Сохранённые байты не требуют скачивания, но отложенное освобождение
+        // всё равно требует сопряжения до импорта.
+        if batch.paused.as_ref().is_some_and(|p| p.recovery_required) {
+            runtime.release_lock()?;
+            let connected = launch(store, id, &backend).await;
+            runtime.reacquire_lock()?;
+            batch = reload_after_acquisition(&mut runtime)?;
+            session = Some(connected?);
+            batch.paused = None;
+            batch.revision += 1;
+            runtime.save(&batch)?;
+        }
         let mut done = 0;
         while let Some(index) = batch.items.iter().position(|i| i.outcome.is_none()) {
             if done >= max_items || batch.cancelled {
@@ -537,7 +563,7 @@ pub async fn resume(
                 } else {
                     Ok(())
                 };
-                let (acquisition, stop) = match launched {
+                let (mut acquisition, mut stop) = match launched {
                     Err(e) => (Err(e), None),
                     Ok(()) => {
                         acquire_item(
@@ -549,6 +575,20 @@ pub async fn resume(
                         .await
                     }
                 };
+                if session.as_ref().is_some_and(|s| matches!(s, Session::Brave(s) if s.recovery_required())) {
+                    if let Err(e) = &mut acquisition {
+                        e.details["recovery_required"] = serde_json::json!(true);
+                    }
+                    if let Some(e) = &mut stop {
+                        e.details["recovery_required"] = serde_json::json!(true);
+                    } else if acquisition.is_ok() {
+                        stop = Some(AssetError::with_details(
+                            ErrorCode::Interrupted,
+                            "Проверенные байты сохранены; требуется освобождение собственной загрузки при следующем сопряжении",
+                            serde_json::json!({"code":"cleanup_incomplete","recovery_required":true}),
+                        ));
+                    }
+                }
                 match &acquisition {
                     Ok(_) => stage.finish_success(),
                     Err(e) => stage.finish_failure(provider_code(e), pauses_batch(e), None),
@@ -642,6 +682,7 @@ pub async fn resume(
                     code: "imported".into(),
                     message: "Оригинальный MP3 сохранён; техническая проверка не даёт фонетического доверия".into(),
                     report: None,
+                    recovery_required: false,
                 },
                 Err(e) => e.into(),
             });
@@ -653,11 +694,25 @@ pub async fn resume(
         Ok::<_, AssetError>(())
     }
     .await;
-    let stopped = if let Some(session) = session {
+    let mut stopped = if let Some(session) = session {
         session.close().await
     } else {
         Ok(())
     };
+    if let Err(cleanup) = &mut stopped {
+        cleanup.details["paused"] = serde_json::json!(batch.paused);
+        if let Some(original) = &mut batch.paused {
+            original.recovery_required = true;
+        } else {
+            batch.paused = Some(Failure::from(AssetError::with_details(
+                cleanup.code,
+                cleanup.message.clone(),
+                cleanup.details.clone(),
+            )));
+        }
+        batch.revision += 1;
+        runtime.save(&batch)?;
+    }
     match (result, stopped) {
         (Err(mut original), Err(cleanup)) => {
             original.details["browser_cleanup"] =
@@ -669,4 +724,59 @@ pub async fn resume(
         _ => (),
     }
     Ok(batch)
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn grace_timeout_survives_checkpoint_and_new_runtime() {
+        let workspace = crate::temp_workspace::TempWorkspace::create("brave-grace").unwrap();
+        let store = AssetStore::open_with_policy(
+            crate::StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        start(
+            &store,
+            "timeout",
+            FetchPlan {
+                schema_version: 1,
+                items: vec![FetchItem {
+                    surface: "水".into(),
+                    reading: "みず".into(),
+                    replace_expected_sha256: None,
+                }],
+            },
+            Transport::BraveExtension,
+        )
+        .unwrap();
+        let (result, stop) = finish_interrupted(
+            std::future::pending(),
+            AssetError::new(ErrorCode::Interrupted, "остановка"),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(
+            result.as_ref().err().unwrap().details["recovery_required"],
+            true
+        );
+        assert!(Failure::from(stop.unwrap()).recovery_required);
+        let mut runtime = SafeBatchRuntime::open(store.root(), "timeout").unwrap();
+        let mut batch = load(&mut runtime).unwrap();
+        checkpoint_acquisition(&mut runtime, &mut batch, 0, result).unwrap();
+        drop(runtime);
+        assert!(
+            status(&store, "timeout")
+                .unwrap()
+                .paused
+                .unwrap()
+                .recovery_required
+        );
+        let old: Failure =
+            serde_json::from_value(serde_json::json!({"code":"interrupted","message":"остановка"}))
+                .unwrap();
+        assert!(!old.recovery_required);
+    }
 }

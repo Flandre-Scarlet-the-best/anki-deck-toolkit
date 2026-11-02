@@ -240,6 +240,7 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
         batch.paused = Some(web_batch::Failure {
             code: "dom_changed".into(),
             message: "прежний блокер".into(),
+            recovery_required: false,
             report: None,
         });
         batch.revision += 1;

@@ -911,14 +911,34 @@ fn downloads_api_file_status(
     }
 }
 
+/// Проверенное закрытие собственной вкладки; ошибка требует восстановления.
+pub(super) async fn close_owned(bridge: &mut Bridge) -> Result<Value, AssetError> {
+    let result = async {
+        let ping = bridge
+            .call("ping", json!({}), Duration::from_secs(5))
+            .await?;
+        if let Some(recovery) = recover_previous(bridge, &ping).await {
+            recovery?;
+        }
+        let value = bridge.call("close", json!({}), Duration::from_secs(10)).await?;
+        if value["own_tab_absent"] != true || value["own_group_absent"] != true
+            || value["recovery_required"] != false {
+            return Err(bridge_error("cleanup_incomplete", "Расширение не подтвердило отсутствие собственной вкладки и группы; обновите адаптер и повторите close"));
+        }
+        Ok(value)
+    }
+    .await;
+    result.map_err(|mut e: AssetError| {
+        e.details["recovery_required"] = json!(true);
+        e
+    })
+}
+
 pub async fn close(state_dir: &Path, wait: Duration) -> Result<Value, AssetError> {
     let mut connection = connect(state_dir, wait).await?;
-    let value = connection
-        .bridge
-        .call("close", json!({}), Duration::from_secs(10))
-        .await?;
+    let result = close_owned(&mut connection.bridge).await;
     connection.bridge.disconnect().await;
-    Ok(value)
+    result
 }
 
 pub fn report_error(report: Report) -> Result<Value, AssetError> {

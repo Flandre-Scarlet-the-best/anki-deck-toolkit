@@ -778,6 +778,7 @@ pub fn production_status(output: &Value) -> Status {
     ];
     let error = output["error"]["details"]["code"].as_str();
     match output["outcome"].as_str() {
+        Some("ok") if output["result"]["browser"]["recovery_required"] == true => Status::Fail,
         Some("ok") => Status::Pass,
         Some("paused") if output["result"]["paused"]["code"] == "interrupted" => {
             Status::Interrupted
@@ -839,7 +840,10 @@ fn production(
         if status == Status::Pass || !extra.is_empty() {
             steps.extend(extra);
         }
-        commands.push(json!({"name": name, "status": status.as_str(), "steps": steps}));
+        commands.push(
+            json!({"name": name, "status": status.as_str(), "steps": steps,
+            "error":output.as_ref().map(|o| o["error"].clone()).unwrap_or_else(|e| json!(e))}),
+        );
         status
     };
     let (surface, reading) = words[0];
@@ -1005,6 +1009,32 @@ fn production(
     commands
 }
 
+fn finish_cleanup(
+    commands: &mut Vec<Value>,
+    execute: impl FnOnce(&AtomicBool) -> std::result::Result<Value, String>,
+) {
+    // Финальная попытка выполняется и при установленном сигнале остановки.
+    // close восстанавливает связанную загрузку и подтверждает отсутствие вкладки/группы.
+    let cleanup = execute(&AtomicBool::new(false));
+    let cleanup_status = cleanup.as_ref().map_or(Status::Error, |v| {
+        if v["outcome"] == "ok"
+            && v["result"]["own_tab_absent"] == true
+            && v["result"]["own_group_absent"] == true
+            && v["result"]["recovery_required"] == false
+        {
+            Status::Pass
+        } else {
+            Status::Fail
+        }
+    });
+    let mut cleanup_entry = command_entry("cleanup", &cleanup, cleanup_status);
+    cleanup_entry["evidence"] = match cleanup {
+        Ok(v) => v,
+        Err(e) => json!({"error":e}),
+    };
+    commands.push(cleanup_entry);
+}
+
 fn acceptance(
     stand: &Stand,
     words: [(&String, &String); 2],
@@ -1061,6 +1091,9 @@ fn acceptance(
             ));
         }
     }
+    finish_cleanup(&mut commands, |signal| {
+        exec_cli(stand, &["forvo", "brave", "close"], signal)
+    });
     let mut overall = crate::report::overall(
         commands
             .iter()
@@ -1145,7 +1178,7 @@ fn acceptance(
 fn command_entry(name: &str, output: &std::result::Result<Value, String>, status: Status) -> Value {
     match output {
         Ok(value) => json!({"name": name, "status": status.as_str(),
-            "code": value["error"]["code"], "steps": steps(value)}),
+            "code": value["error"]["code"], "error":value["error"], "steps": steps(value)}),
         Err(e) => json!({"name": name, "status": status.as_str(), "error": e, "steps": []}),
     }
 }
@@ -1169,16 +1202,31 @@ pub fn render_markdown(report: &Value) -> String {
     }
     for command in report["commands"].as_array().into_iter().flatten() {
         out.push_str(&format!(
-            "\n## {} — {}\n\n| Шаг | Статус |\n|---|---|\n",
+            "\n## {} — {}\n",
             command["name"].as_str().unwrap_or("?"),
             command["status"].as_str().unwrap_or("?")
         ));
+        if let Some(error) = command.get("error") {
+            out.push_str(&format!("\nОшибка: {error}\n"));
+        }
+        if let Some(evidence) = command.get("evidence") {
+            out.push_str(&format!("\n```json\n{evidence}\n```\n"));
+        }
+        out.push_str("\n| Шаг | Статус |\n|---|---|\n");
         for step in command["steps"].as_array().into_iter().flatten() {
             out.push_str(&format!(
                 "| `{}` | {} |\n",
                 step["name"].as_str().unwrap_or("?"),
                 step["status"].as_str().unwrap_or("?")
             ));
+        }
+        for step in command["steps"].as_array().into_iter().flatten() {
+            if let Some(evidence) = step.get("evidence") {
+                out.push_str(&format!(
+                    "\n`{}`:\n```json\n{evidence}\n```\n",
+                    step["name"].as_str().unwrap_or("?")
+                ));
+            }
         }
     }
     out
@@ -1283,6 +1331,40 @@ fn purge(stand: &Stand, yes: bool) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_cleanup_is_independent_and_preserves_original_failure() {
+        for prior in [
+            Status::Pass,
+            Status::Fail,
+            Status::Interrupted,
+            Status::Blocked,
+        ] {
+            let original = json!({"name":"fetch","status":prior.as_str(),"error":"исходный сбой"});
+            for evidence in [
+                Ok(
+                    json!({"outcome":"ok","result":{"own_tab_absent":true,"own_group_absent":true,"recovery_required":false}}),
+                ),
+                Ok(json!({"outcome":"ok","result":{"closed":true}})),
+                Err("close timeout".to_owned()),
+            ] {
+                let expect_pass = evidence
+                    .as_ref()
+                    .is_ok_and(|v| v["result"]["own_group_absent"] == true);
+                let mut commands = vec![original.clone()];
+                finish_cleanup(&mut commands, |signal| {
+                    assert!(!signal.load(Ordering::SeqCst));
+                    evidence
+                });
+                assert_eq!(commands[0], original);
+                assert_eq!(commands[1]["status"] == "PASS", expect_pass);
+                let report = json!({"commands":commands});
+                let markdown = render_markdown(&report);
+                assert!(markdown.contains("исходный сбой"));
+                assert!(markdown.contains("cleanup"));
+            }
+        }
+    }
 
     #[test]
     fn seccomp_adds_only_masked_namespace_rule() {

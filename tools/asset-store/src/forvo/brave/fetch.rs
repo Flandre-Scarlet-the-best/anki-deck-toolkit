@@ -1,7 +1,7 @@
-//! Production-получение японских MP3 через обычный Brave.
+//! Получение японских MP3 через обычный Brave.
 //!
 //! [`BraveSession`] — источник кандидатов для общего порядка попыток
-//! `acquire_from`: рейтинг, переход к следующему кандидату, provenance
+//! `acquire_from`: рейтинг, переход к следующему кандидату, сведения о происхождении
 //! (`ForvoEvidence`) и проверка MP3 те же, что у CDP-провайдера. Сессия держит
 //! одно логическое сопряжение с расширением на всё выполнение (одиночный fetch
 //! или пакет) и при необходимости переподключается; каждая загрузка — одна
@@ -37,7 +37,7 @@ pub struct BraveOptions {
 }
 
 /// Свежая проверка строки выбранного кандидата и одна штатная загрузка до
-/// проверенных байтов файла. Общая узкая операция production-получения и
+/// проверенных байтов файла. Общая узкая операция получения и
 /// диагностического `smoke`; операцию не освобождает.
 pub async fn download_candidate(
     bridge: &mut Bridge,
@@ -159,7 +159,13 @@ impl BraveSession {
     pub fn summary(&self) -> Value {
         json!({"transport":"brave_extension","extension_id":self.connection.peer.extension_id,
             "extension_version":self.connection.peer.version,"downloads":self.operations.len(),
-            "operations":self.operations,"recovered_previous":self.recovered,"reconnects":self.reconnects})
+            "recovery_required":self.recovery_required(),"operations":self.operations,"recovered_previous":self.recovered,"reconnects":self.reconnects})
+    }
+
+    pub fn recovery_required(&self) -> bool {
+        self.operations
+            .iter()
+            .any(|op| !op["release"]["error"].is_null())
     }
 
     pub async fn snapshot(&mut self) -> Result<Value, AssetError> {
@@ -295,20 +301,13 @@ impl BraveSession {
     /// Закрывает только соединение bridge и, по контракту `close_tab`,
     /// собственную вкладку адаптера. Brave и вкладки пользователя не трогаются.
     pub async fn close(mut self) -> Result<Value, AssetError> {
-        let mut result = json!({"tab_closed":false});
-        if self.close_tab {
-            match self
-                .connection
-                .bridge
-                .call("close", json!({}), Duration::from_secs(10))
-                .await
-            {
-                Ok(value) => result["tab_closed"] = value["closed"].clone(),
-                Err(e) => result["tab_close_error"] = json!(provider_code(&e)),
-            }
-        }
+        let result = if self.close_tab {
+            acceptance::close_owned(&mut self.connection.bridge).await
+        } else {
+            Ok(json!({"tab_closed":false,"recovery_required":self.recovery_required()}))
+        };
         self.connection.bridge.disconnect().await;
-        Ok(result)
+        result
     }
 }
 
@@ -342,7 +341,7 @@ pub async fn acquire(
     acquire_from(session, request).await
 }
 
-/// Одиночный production fetch: одно сопряжение, кандидаты, загрузка выбранного
+/// Одиночный fetch: одно сопряжение, кандидаты, загрузка выбранного
 /// оригинального MP3 и импорт через `import_acquisition` с прежним уровнем доверия.
 pub async fn fetch(
     store: &AssetStore,
@@ -363,7 +362,14 @@ pub async fn fetch(
         (Ok(b), Ok(a)) => json!(b == a),
         _ => Value::Null,
     };
-    browser["close"] = closed.unwrap_or(Value::Null);
+    browser["close"] = match &closed {
+        Ok(value) => value.clone(),
+        Err(e) => json!({"error":provider_code(e),"recovery_required":true}),
+    };
+    browser["recovery_required"] = json!(match &closed {
+        Ok(v) if options.close_tab => v["recovery_required"] == true,
+        _ => browser["recovery_required"] == true || closed.is_err(),
+    });
     let acquisition = acquired.map_err(|mut e| {
         e.details["browser"] = browser.clone();
         e
@@ -373,6 +379,12 @@ pub async fn fetch(
             e.details["browser"] = browser.clone();
             e
         })?;
+    if let Err(mut e) = closed {
+        e.details["browser"] = browser;
+        e.details["asset"] = json!(asset);
+        e.details["acquisition"] = json!(acquisition.evidence);
+        return Err(e);
+    }
     tracing::info!(event = "brave_fetch_imported", stage = "import", sha256 = %acquisition.evidence.downloaded_sha256,
         record_id = %acquisition.evidence.selected_record_id, "Оригинальный MP3 импортирован");
     Ok(

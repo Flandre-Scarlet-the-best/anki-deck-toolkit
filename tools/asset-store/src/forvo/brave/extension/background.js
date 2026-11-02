@@ -186,9 +186,10 @@ async function ownTab() {
         // Владение доказывает сохранённый tab ID в текущей сессии браузера и наша группа.
         if (tab.groupId === own.groupId && new URL(tab.url || tab.pendingUrl || 'about:blank').origin === FORVO_ORIGIN) return tab;
     } catch {
-        // Вкладка закрыта пользователем: состояние сбрасывается, чужие вкладки не усыновляются.
+        // Ошибка API не доказывает отсутствие вкладки.
     }
-    await chrome.storage.session.remove('own');
+    // Сохраняем идентичность для close: потеря признаков владения должна
+    // давать диагностируемый отказ, а не ложное подтверждение очистки.
     return null;
 }
 
@@ -691,10 +692,19 @@ const OPERATIONS = {
         return await snapshot();
     },
     async close() {
-        const tab = await ownTab();
+        const {own} = await chrome.storage.session.get('own');
+        // Идентичность текущей сессии обязательна; название группы не даёт права удаления.
+        const tab = own ? (await chrome.tabs.query({})).find(t => t.id === own.tabId) : null;
+        if (tab && (tab.groupId !== own.groupId || new URL(tab.url || tab.pendingUrl || 'about:blank').origin !== FORVO_ORIGIN)) {
+            throw new Failure('ownership_unproven');
+        }
         if (tab) await chrome.tabs.remove(tab.id);
+        const groups = await chrome.tabGroups.query({});
+        if (groups.some(g => g.id === own?.groupId || g.title === GROUP_TITLE)) {
+            throw new Failure('ownership_unproven');
+        }
         await chrome.storage.session.remove('own');
-        return {closed: !!tab};
+        return {closed: !!tab, tab_closed: !!tab, own_tab_absent: true, own_group_absent: true, recovery_required: false};
     },
     async reload() {
         setTimeout(() => chrome.runtime.reload(), 100);

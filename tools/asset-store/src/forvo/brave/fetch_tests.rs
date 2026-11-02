@@ -39,6 +39,8 @@ struct World {
     /// Строки, которые увидит повторная проверка перед загрузкой (`inspect`).
     inspect_override: BTreeMap<String, Vec<Candidate>>,
     challenge: bool,
+    fail_close: bool,
+    fail_release: bool,
     begins: Vec<String>,
     releases: Vec<Value>,
     op: Option<(String, String, String)>,
@@ -62,7 +64,7 @@ fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) 
     let mut w = lock(world);
     match op {
         "ping" => {
-            json!({"ok":true,"result":{"operation":null,"listeners":{"determining_filename":false,"web_request":false}}})
+            json!({"ok":true,"result":{"operation":w.op.as_ref().map(|(id,_,_)| json!({"op_id":id})),"listeners":{"determining_filename":false,"web_request":false}}})
         }
         "snapshot" => json!({"ok":true,"result":{"tabs":[{"id":1}],"groups":[]}}),
         "open" => {
@@ -148,6 +150,9 @@ fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) 
                     "start_time":null,"end_time":null}}})
         }
         "download_release" => {
+            if w.fail_release {
+                return json!({"ok":false,"code":"download_cleanup_failed"});
+            }
             let current = w.op.take();
             let mut result = json!({"released":current.is_some(),"bound":current.is_some(),"canceled":false,"removed_file":false,"erased":false});
             if current.is_none() {
@@ -162,7 +167,10 @@ fn respond(world: &Shared, downloads: &std::path::Path, op: &str, args: &Value) 
             w.releases.push(result.clone());
             json!({"ok":true,"result":result})
         }
-        "close" => json!({"ok":true,"result":{"closed":true}}),
+        "close" if w.fail_close => json!({"ok":false,"code":"ownership_unproven"}),
+        "close" => {
+            json!({"ok":true,"result":{"closed":true,"tab_closed":true,"own_tab_absent":true,"own_group_absent":true,"recovery_required":false}})
+        }
         other => panic!("неожиданная команда {other}"),
     }
 }
@@ -655,4 +663,122 @@ fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
     assert!(v1_with.validate().is_ok());
     v1_with.transport = None;
     assert!(v1_with.validate().is_err());
+}
+
+#[tokio::test]
+async fn explicit_close_error_keeps_imported_asset_and_successful_close_is_reported() {
+    let mut h = harness(vec![(
+        "元気",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    h.options.close_tab = true;
+    lock(&h.world).fail_close = true;
+    let store = store(&h.root);
+    let request = Pronunciation::new("元気", "げんき").unwrap();
+    let error = fetch(&store, &request, None, &h.options, None)
+        .await
+        .unwrap_err();
+    assert_eq!(provider_code(&error), "ownership_unproven");
+    assert_eq!(error.details["recovery_required"], true);
+    assert!(!error.details["asset"].is_null());
+    assert_eq!(store.verify_integrity().unwrap().len(), 1);
+    lock(&h.world).fail_close = false;
+    let session = BraveSession::connect(&h.options).await.unwrap();
+    assert_eq!(session.close().await.unwrap()["own_group_absent"], true);
+    assert_eq!(lock(&h.world).begins.len(), 1);
+}
+
+#[tokio::test]
+async fn release_failure_keeps_bytes_and_batch_resume_recovers_without_download() {
+    let h = harness(vec![(
+        "元気",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    lock(&h.world).fail_release = true;
+    let store = store(&h.root);
+    batch::start(
+        &store,
+        "recovery",
+        plan(&[("元気", "げんき")]),
+        Transport::BraveExtension,
+    )
+    .unwrap();
+    let paused = batch::resume(&store, "recovery", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap();
+    assert!(paused.paused.unwrap().recovery_required);
+    assert!(paused.items[0].acquisition.is_some());
+    assert!(
+        batch::status(&store, "recovery")
+            .unwrap()
+            .paused
+            .unwrap()
+            .recovery_required
+    );
+    lock(&h.world).fail_release = false;
+    let done = batch::resume(&store, "recovery", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap();
+    assert!(done.paused.is_none());
+    assert_eq!(done.items[0].outcome.as_ref().unwrap().code, "imported");
+    assert_eq!(lock(&h.world).begins.len(), 1);
+    assert!(lock(&h.world).op.is_none());
+}
+
+#[tokio::test]
+async fn single_release_failure_reports_recovery_without_discarding_import() {
+    let h = harness(vec![(
+        "元気",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    lock(&h.world).fail_release = true;
+    let store = store(&h.root);
+    let result = fetch(
+        &store,
+        &Pronunciation::new("元気", "げんき").unwrap(),
+        None,
+        &h.options,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["browser"]["recovery_required"], true);
+    assert_eq!(store.verify_integrity().unwrap().len(), 1);
+    lock(&h.world).fail_release = false;
+    let session = BraveSession::connect(&h.options).await.unwrap();
+    assert_eq!(session.summary()["recovery_required"], false);
+    session.close().await.unwrap();
+    assert_eq!(lock(&h.world).begins.len(), 1);
+}
+
+#[tokio::test]
+async fn batch_explicit_close_failure_does_not_undo_import_or_hide_failure() {
+    let mut h = harness(vec![(
+        "元気",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    h.options.close_tab = true;
+    lock(&h.world).fail_close = true;
+    let store = store(&h.root);
+    batch::start(
+        &store,
+        "close",
+        plan(&[("元気", "げんき")]),
+        Transport::BraveExtension,
+    )
+    .unwrap();
+    let error = batch::resume(&store, "close", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(provider_code(&error), "ownership_unproven");
+    assert_eq!(error.details["recovery_required"], true);
+    let saved = batch::status(&store, "close").unwrap();
+    assert_eq!(saved.items[0].outcome.as_ref().unwrap().code, "imported");
+    assert!(saved.paused.unwrap().recovery_required);
+    lock(&h.world).fail_close = false;
+    let done = batch::resume(&store, "close", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap();
+    assert!(done.paused.is_none());
+    assert_eq!(lock(&h.world).begins.len(), 1);
 }
