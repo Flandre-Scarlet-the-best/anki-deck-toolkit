@@ -857,17 +857,83 @@ async fn run_brave(
             }
         }
     };
-    let logged = guard.finish();
-    let mut value = result.map_err(|mut error| {
-        error.details["diagnostic_log"] = serde_json::json!(path);
-        error
-    })?;
-    if logged.is_err() {
-        return Err(AssetError::new(
+    finish_brave_run(result, guard.finish(), &path)
+}
+
+fn finish_brave_run(
+    result: Result<serde_json::Value, AssetError>,
+    logged: Result<(), String>,
+    path: impl AsRef<Path>,
+) -> Result<serde_json::Value, AssetError> {
+    let path = path.as_ref().display().to_string();
+    match (result, logged) {
+        (Ok(mut value), Ok(())) => {
+            value["diagnostic_log"] = serde_json::json!(path);
+            Ok(value)
+        }
+        (Err(mut error), Ok(())) => {
+            error.details["diagnostic_log"] = serde_json::json!(path);
+            Err(error)
+        }
+        (Err(mut error), Err(logging)) => {
+            error.details["diagnostic_log"] = serde_json::json!(path);
+            error.details["logging_error"] =
+                serde_json::json!(crate::diagnostics::safe_message(&logging));
+            Err(error)
+        }
+        (Ok(_), Err(logging)) => Err(AssetError::with_details(
             ErrorCode::IoFailure,
             "Не удалось сохранить диагностический журнал адаптера Brave",
-        ));
+            serde_json::json!({
+                "diagnostic_log":path,
+                "logging_error":crate::diagnostics::safe_message(&logging),
+            }),
+        )),
     }
-    value["diagnostic_log"] = serde_json::json!(path);
-    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finish_brave_run;
+    use crate::{AssetError, ErrorCode};
+    use serde_json::json;
+
+    #[test]
+    fn brave_operation_error_survives_diagnostic_log_failure() {
+        let result = Err(AssetError::with_details(
+            ErrorCode::Interrupted,
+            "операция прервана",
+            json!({"stage":"download"}),
+        ));
+        let error =
+            finish_brave_run(result, Err("disk full".into()), "/logs/run.ndjson").unwrap_err();
+        assert_eq!(error.code, ErrorCode::Interrupted);
+        assert_eq!(error.message, "операция прервана");
+        assert_eq!(error.details["stage"], "download");
+        assert_eq!(error.details["diagnostic_log"], "/logs/run.ndjson");
+        assert!(
+            error.details["logging_error"]
+                .as_str()
+                .unwrap()
+                .contains("disk full")
+        );
+    }
+
+    #[test]
+    fn brave_success_with_diagnostic_log_failure_reports_log_details() {
+        let error = finish_brave_run(
+            Ok(json!({"status":"ok"})),
+            Err("disk full".into()),
+            "/logs/run.ndjson",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::IoFailure);
+        assert_eq!(error.details["diagnostic_log"], "/logs/run.ndjson");
+        assert!(
+            error.details["logging_error"]
+                .as_str()
+                .unwrap()
+                .contains("disk full")
+        );
+    }
 }

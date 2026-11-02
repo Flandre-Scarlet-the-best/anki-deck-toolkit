@@ -54,8 +54,8 @@ function harness(t) {
                 item.state = failures.has('cancel_complete') ? 'complete' : 'interrupted';
                 item.error = item.state === 'interrupted' ? 'USER_CANCELED' : null;
             },
-            removeFile: async id => {calls.push(['removeFile', id]); if (failures.has('removeFile')) throw Error(); fs.unlinkSync(items.find(i => i.id === id).filename);},
-            erase: async ({id}) => {calls.push(['erase', id]); if (failures.has('erase')) throw Error(); const index = items.findIndex(i => i.id === id); return index < 0 ? [] : [items.splice(index, 1)[0].id];},
+            removeFile: async id => {calls.push(['removeFile', id]); if (failures.has('removeFile')) throw Error(); const item = items.find(i => i.id === id); fs.unlinkSync(item.filename); item.exists = false;},
+            erase: async ({id}) => {calls.push(['erase', id]); if (failures.has('erase')) throw Error(); if (failures.has('erase_empty')) return []; const index = items.findIndex(i => i.id === id); return index < 0 ? [] : [items.splice(index, 1)[0].id];},
         },
     };
     function worker() {
@@ -65,7 +65,7 @@ function harness(t) {
             WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: () => ++nextTimerId, clearTimeout() {},
             setInterval: () => ++nextTimerId, clearInterval() {}});
         vm.runInContext(source.replace(/^import .*;$/m, '').split('const OPERATIONS =')[0] +
-            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
+            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
         return context.api;
     }
     let api = worker();
@@ -83,6 +83,7 @@ function harness(t) {
         begin: () => api.downloadBegin(args),
         status: () => api.downloadStatus({op_id}),
         release: (action = 'remove') => api.downloadRelease({op_id, action}),
+        cleanup: id => api.downloadCleanup({download_id: id}),
         request(tabId = 1) {for (const fn of onRequest.listeners) fn({url, tabId, timeStamp: Date.now()});},
         add(id, referrer = tab.url, state = 'complete') {
             const filename = path.join(dir, `${id}.mp3`);
@@ -169,6 +170,27 @@ test('keep, неизвестная и несвязанная операции с
     assert.equal((await h.release('keep')).released, true);
     assert.equal(fs.existsSync(own.filename), true);
     assert.deepEqual(h.calls, []);
+});
+
+test('неподтверждённый erase сохраняет владение файлом для повтора cleanup', async t => {
+    const h = harness(t);
+    const item = h.add(1);
+    h.data.apiDownloads = [1];
+    h.failures.add('erase_empty');
+    const first = await h.cleanup(1);
+    assert.equal(first.removed_file, true);
+    assert.equal(first.erased, false);
+    assert.equal(first.reason, 'erase_unconfirmed');
+    assert.deepEqual(h.data.apiDownloads, [1]);
+    assert.equal(fs.existsSync(item.filename), false);
+    assert.ok(h.items.some(i => i.id === 1));
+
+    h.failures.clear();
+    const retry = await h.cleanup(1);
+    assert.equal(retry.removed_file, false);
+    assert.equal(retry.erased, true);
+    assert.deepEqual(h.data.apiDownloads, []);
+    assert.equal(h.items.length, 0);
 });
 
 test('рестарт до связывания fail closed, после связывания сохраняет доказательство', async t => {

@@ -591,7 +591,8 @@ async function downloadCleanup(args) {
         await chrome.downloads.removeFile(args.download_id);
         removed = true;
     }
-    await chrome.downloads.erase({id: args.download_id});
+    const erased = await chrome.downloads.erase({id: args.download_id});
+    if (!erased.includes(args.download_id)) return {removed_file: removed, erased: false, reason: 'erase_unconfirmed'};
     await chrome.storage.local.set({[API_KEY]: owned.filter(id => id !== args.download_id)});
     return {removed_file: removed, erased: true};
 }

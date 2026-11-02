@@ -798,9 +798,16 @@ async fn downloads_api_probe(
             match checked {
                 Ok((path, length, file_sha, probe)) => {
                     let same = file_sha == sha;
-                    report.push("downloads_api_file", if same { Status::Pass } else { Status::Fail }, json!({"download_id":id,
+                    let file_removed = !path.exists();
+                    let status = downloads_api_file_status(same, &cleanup, file_removed);
+                    let cleanup_evidence = match &cleanup {
+                        Ok(value) => value.clone(),
+                        Err(error) => json!({"error":{"code":error.code.as_str(),"message":error.message}}),
+                    };
+                    report.push("downloads_api_file", status, json!({"download_id":id,
                         "file_name":path.file_name().map(|n| n.to_string_lossy().into_owned()),
-                        "byte_length":length,"sha256":file_sha,"matches_site_download":same,"probe_codec":probe.codec,"cleanup":cleanup.as_ref().ok(),"file_removed":!path.exists()}));
+                        "byte_length":length,"sha256":file_sha,"matches_site_download":same,"probe_codec":probe.codec,"cleanup":cleanup_evidence,
+                        "cleanup_confirmed":cleanup.as_ref().is_ok_and(|value| value["removed_file"] == true && value["erased"] == true),"file_removed":file_removed}));
                 }
                 Err(e) => report.fail("downloads_api_file", &e),
             }
@@ -808,6 +815,21 @@ async fn downloads_api_probe(
         Some("save_as_prompt_suspected") => report.push("downloads_api_file", Status::Blocked, json!({"code":"save_as_prompt_suspected","api":"chrome.downloads.download({saveAs:false})",
             "observed":value,"meaning":"настройка «Спрашивать, куда сохранять» открывает выбор пути; загрузка отменена и удалена из истории"})),
         _ => report.push("downloads_api_file", Status::Fail, value),
+    }
+}
+
+fn downloads_api_file_status(
+    matches_site_download: bool,
+    cleanup: &Result<Value, AssetError>,
+    file_removed: bool,
+) -> Status {
+    let cleanup_confirmed = cleanup
+        .as_ref()
+        .is_ok_and(|value| value["removed_file"] == true && value["erased"] == true);
+    if matches_site_download && cleanup_confirmed && file_removed {
+        Status::Pass
+    } else {
+        Status::Fail
     }
 }
 
@@ -843,5 +865,39 @@ pub fn report_error(report: Report) -> Result<Value, AssetError> {
             },
             json!({"provider":"forvo_brave","code":if blocked {"acceptance_blocked"} else {"acceptance_failed"},"report":value}),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Status, downloads_api_file_status};
+    use crate::{AssetError, ErrorCode};
+    use serde_json::{Value, json};
+
+    #[test]
+    fn downloads_api_file_requires_matching_bytes_and_confirmed_cleanup() {
+        let cleanup: Result<Value, AssetError> = Ok(json!({"removed_file":true,"erased":true}));
+        assert_eq!(
+            downloads_api_file_status(true, &cleanup, true),
+            Status::Pass
+        );
+        assert_eq!(
+            downloads_api_file_status(false, &cleanup, true),
+            Status::Fail
+        );
+        assert_eq!(
+            downloads_api_file_status(true, &cleanup, false),
+            Status::Fail
+        );
+
+        let partial: Result<Value, AssetError> = Ok(json!({"removed_file":true,"erased":false}));
+        assert_eq!(
+            downloads_api_file_status(true, &partial, true),
+            Status::Fail
+        );
+
+        let error: Result<Value, AssetError> =
+            Err(AssetError::new(ErrorCode::IoFailure, "cleanup failed"));
+        assert_eq!(downloads_api_file_status(true, &error, true), Status::Fail);
     }
 }
