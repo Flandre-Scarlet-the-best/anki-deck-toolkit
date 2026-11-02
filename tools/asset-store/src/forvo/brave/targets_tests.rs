@@ -341,6 +341,7 @@ fn aliases_of_another_target_dir_are_refused_before_writing() {
         "parent/brave",
         "other/../data/./brave",
         "data/brave/missing/..",
+        "missing/../data/brave",
     ] {
         let error = setup(&SetupOptions {
             port: None,
@@ -351,6 +352,7 @@ fn aliases_of_another_target_dir_are_refused_before_writing() {
         assert_eq!(error.details["other_target"], "brave");
         assert!(snapshot(&state_dir, &real) == before, "{alias}");
     }
+    assert!(!temp.path().join("missing").exists());
     // Тот же критерий в проверке загруженного/записываемого состояния.
     let alias = AdapterState {
         target: "chrome".into(),

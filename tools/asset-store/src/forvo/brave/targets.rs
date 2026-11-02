@@ -274,18 +274,31 @@ impl DirIdentity {
             .strip_prefix(base)
             .map_err(|_| unverifiable("prefix"))?;
         let mut tail = Vec::new();
+        let mut normalized_tail = PathBuf::new();
+        let mut parent_component = false;
         for part in rest.components() {
             match part {
                 // Неоднозначность lossy-имён даёт лишь осторожный отказ.
                 std::path::Component::Normal(name) => {
-                    tail.push(name.to_string_lossy().into_owned())
+                    tail.push(name.to_string_lossy().into_owned());
+                    normalized_tail.push(name);
                 }
                 std::path::Component::CurDir => {}
                 std::path::Component::ParentDir => {
                     tail.pop().ok_or_else(|| unverifiable("parent"))?;
+                    if !normalized_tail.pop() {
+                        return Err(unverifiable("parent"));
+                    }
+                    parent_component = true;
                 }
                 _ => return Err(unverifiable("component")),
             }
+        }
+        // Если `..` следует за отсутствующим каталогом, сначала вычислили
+        // слишком короткий якорь. Повторное разрешение уже нормализованного
+        // пути находит физический каталог до любых записей в него.
+        if parent_component {
+            return Self::of(&base.join(normalized_tail), platform);
         }
         Ok(Self {
             device: meta.dev(),
