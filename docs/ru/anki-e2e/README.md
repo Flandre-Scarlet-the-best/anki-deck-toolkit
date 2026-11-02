@@ -344,7 +344,7 @@ mount-, cgroup-, UTS- и IPC-namespaces. Brave получает user-, PID- и n
 **Тома — чувствительные локальные данные.** `anki-e2e-real-site-profile` хранит профиль
 Brave с авторизацией Forvo, `anki-e2e-real-site-state` — сопряжение адаптера, журналы,
 evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузки. Ресурсы помечены
-собственной меткой `io.github.anki-deck-toolkit.e2e.real-site`. `clean` их не трогает,
+собственной меткой `io.github.anki-deck-toolkit.e2e.real-site`. `clean` их не трогает.
 Перед использованием и удалением контейнера и томов проверяется значение метки `1`;
 конфликт имён с чужими ресурсами завершает команду без их изменения.
 `down` сохраняет тома, удаляет их только `purge --yes`. В образ, отчёты и Git они не попадают.

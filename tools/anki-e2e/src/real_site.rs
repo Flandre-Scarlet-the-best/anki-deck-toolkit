@@ -622,10 +622,12 @@ fn exec_cli(
     std::thread::spawn(move || {
         let _ = sender.send(child.wait_with_output());
     });
+    let mut signal_sent = false;
     loop {
-        if interrupted.load(Ordering::SeqCst) {
+        if !signal_sent && interrupted.load(Ordering::SeqCst) {
             // Ctrl+C терминала не доходит до процесса в контейнере: доставляем SIGINT сами.
             let _ = stand.exec(&["pkill", "-INT", "-f", "^pronunciation-assets "]);
+            signal_sent = true;
         }
         match receiver.recv_timeout(Duration::from_millis(200)) {
             Ok(output) => {

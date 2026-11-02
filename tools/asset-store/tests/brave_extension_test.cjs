@@ -40,7 +40,7 @@ function harness(t) {
             set: async value => {await beforeSet(value); Object.assign(data, structuredClone(value));},
             remove: async key => {if (failures.has('storage_remove')) throw Error(); delete data[key];},
         }},
-        tabs: {onRemoved: event(), get: async () => tab},
+        tabs: {onRemoved: event(), get: async () => tab, remove: async () => {}},
         webRequest: {onBeforeRequest: onRequest},
         scripting: {executeScript: async ({args}) => {
             if (args.length === 1) tab.url = args[0];
@@ -62,11 +62,12 @@ function harness(t) {
     function worker() {
         onRequest.listeners.clear();
         const context = vm.createContext({chrome, forvoDom() {}, URL, Date: clockDate, TextEncoder, crypto: webcrypto,
+            AbortController,
             fetch: async () => {pairingFetches += 1; return {json: async () => ({schema_version: 1, port: 47613, secret: pairingSecret})};},
             WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: () => ++nextTimerId, clearTimeout() {},
             setInterval: () => ++nextTimerId, clearInterval() {}});
         vm.runInContext(source.replace(/^import .*;$/m, '').split('chrome.runtime.onStartup.addListener')[0] +
-            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, cleanupRestoredGroups, close: OPERATIONS.close, ownTab, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
+            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, cleanupRestoredGroups, close: OPERATIONS.close, command, ownTab, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
         return context.api;
     }
     chrome.storage.session = {
@@ -78,6 +79,7 @@ function harness(t) {
     return {
         data, session, items, failures, calls, tab, chrome,
         restoredCleanup: () => api.cleanupRestoredGroups(),
+        command: (id, op, commandArgs = {}) => api.command(id, op, commandArgs),
         close: () => api.close(),
         ownTab: () => api.ownTab(),
         restart() {api = worker();},
@@ -308,6 +310,14 @@ test('ошибка запроса групп видна и не препятст
     h.chrome.tabGroups.query = async () => [];
     await h.restoredCleanup();
     assert.equal(h.data.restoredCleanup.status, 'complete');
+});
+
+test('ошибка диагностики не блокирует закрытие собственной вкладки', async t => {
+    const h = harness(t);
+    h.chrome.tabGroups = {query: async () => {throw Error('unavailable');}};
+    await h.command(1, 'close');
+    assert.equal(h.data.restoredCleanup.status, 'error');
+    assert.equal(h.session.own, undefined);
 });
 
 test('отказ close сохраняет доказанную собственную вкладку для повтора', async t => {

@@ -19,6 +19,10 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+fn tab_status_after_extension_reload_is_expected(before: &Value, after: &Value) -> bool {
+    before["exists"] == false || after["exists"] == false || before["tab_id"] == after["tab_id"]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Status {
@@ -500,8 +504,8 @@ pub async fn doctor(options: &DoctorOptions) -> Result<Report, AssetError> {
         .await;
         match result {
             Ok(after) => {
-                let same = before["exists"] == false || before["tab_id"] == after["tab_id"];
-                report.push("service_worker_restart", if same { Status::Pass } else { Status::Fail },
+                let expected = tab_status_after_extension_reload_is_expected(&before, &after);
+                report.push("service_worker_restart", if expected { Status::Pass } else { Status::Fail },
                     json!({"reconnect_ms":duration_ms(started.elapsed()),"own_tab_before":before["tab_id"],"own_tab_after":after["tab_id"]}));
             }
             Err(e) => report.fail("service_worker_restart", &e),
@@ -944,9 +948,30 @@ pub fn report_error(report: Report) -> Result<Value, AssetError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Status, downloads_api_file_status};
+    use super::{Status, downloads_api_file_status, tab_status_after_extension_reload_is_expected};
     use crate::{AssetError, ErrorCode};
     use serde_json::{Value, json};
+
+    #[test]
+    fn extension_reload_allows_session_tab_identity_to_reset() {
+        let before = json!({"exists":true,"tab_id":1});
+        assert!(tab_status_after_extension_reload_is_expected(
+            &before,
+            &json!({"exists":false})
+        ));
+        assert!(tab_status_after_extension_reload_is_expected(
+            &before,
+            &json!({"exists":true,"tab_id":1})
+        ));
+        assert!(!tab_status_after_extension_reload_is_expected(
+            &before,
+            &json!({"exists":true,"tab_id":2})
+        ));
+        assert!(tab_status_after_extension_reload_is_expected(
+            &json!({"exists":false}),
+            &json!({"exists":true,"tab_id":2})
+        ));
+    }
 
     #[test]
     fn downloads_api_file_requires_matching_bytes_and_confirmed_cleanup() {

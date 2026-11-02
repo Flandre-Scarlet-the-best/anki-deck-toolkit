@@ -139,7 +139,8 @@ async function command(id, op, args) {
     const controller = new AbortController();
     operation = controller;
     try {
-        await cleanupRestoredGroups();
+        // Ошибка диагностики не должна мешать команде освободить свою операцию.
+        await cleanupRestoredGroups().catch(() => {});
         const result = await handler(args, controller.signal);
         send({type: 'res', id, ok: true, result});
     } catch (error) {
