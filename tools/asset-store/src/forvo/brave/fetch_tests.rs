@@ -428,6 +428,14 @@ async fn rejected_candidate_falls_back_and_changed_row_pauses() {
     let second = acquire(&mut session, &request).await.err().unwrap();
     assert_eq!(provider_code(&second), "candidate_changed");
     assert!(pauses_batch(&second));
+    // Одиночная операция: пакета нет, `batch-resume` не предлагается.
+    let action = second.details["next_action"].as_str().unwrap();
+    assert!(!action.contains("batch-resume"), "{action}");
+    assert!(
+        !second.message.contains("batch-resume"),
+        "{}",
+        second.message
+    );
     assert_eq!(second.details["attempts"][0]["code"], "invalid_mp3");
     assert_eq!(second.details["attempts"][1]["code"], "candidate_changed");
     assert_eq!(second.details["attempts"].as_array().unwrap().len(), 2);
@@ -482,13 +490,19 @@ async fn blockers_pause_without_trying_next_candidate() {
     let challenge = acquire(&mut session, &request).await.err().unwrap();
     assert_eq!(provider_code(&challenge), "challenge_required");
     assert!(pauses_batch(&challenge));
-    assert!(
-        challenge.details["next_action"]
-            .as_str()
-            .unwrap()
-            .contains("forvo brave batch-resume")
-    );
+    // Одиночная сессия без пакета: продолжать нечего, совет — повторить команду.
+    let action = challenge.details["next_action"].as_str().unwrap();
+    assert!(!action.contains("batch-resume"), "{action}");
+    assert!(action.contains("повторите команду"), "{action}");
     assert_eq!(lock(&h.world).begins, ["10"]);
+    // Сессия пакета ведёт к продолжению именно этого пакета своей цели.
+    session.set_batch("forvo-batch-1");
+    let challenge = acquire(&mut session, &request).await.err().unwrap();
+    let action = challenge.details["next_action"].as_str().unwrap();
+    assert!(
+        action.contains("forvo brave batch-resume --batch-id forvo-batch-1"),
+        "{action}"
+    );
     session.close().await.unwrap();
 }
 
@@ -812,9 +826,15 @@ fn vivaldi_download_not_started_points_to_automatic_downloads() {
         instance_id: None,
         executable: None,
     };
+    let vivaldi_state = state(super::super::BrowserKind::Vivaldi);
+    let resume = format!(
+        "{} batch-resume --batch-id b1",
+        vivaldi_state.command_prefix()
+    );
     let vivaldi = browser_auth_error(
         bridge_error("download_not_started", "x"),
-        &state(super::super::BrowserKind::Vivaldi),
+        &vivaldi_state,
+        Some(&resume),
     );
     assert_eq!(provider_code(&vivaldi), "download_not_started");
     let action = vivaldi.details["next_action"].as_str().unwrap();
@@ -831,12 +851,55 @@ fn vivaldi_download_not_started_points_to_automatic_downloads() {
     let chrome = browser_auth_error(
         bridge_error("download_not_started", "x"),
         &state(super::super::BrowserKind::Chrome),
+        None,
     );
     assert!(
         !chrome.details["next_action"]
             .to_string()
             .contains("Начинать загрузки")
     );
+}
+
+#[test]
+fn candidate_changed_points_to_the_actual_target_and_operation() {
+    for browser in [
+        super::super::BrowserKind::Chrome,
+        super::super::BrowserKind::Edge,
+        super::super::BrowserKind::Vivaldi,
+    ] {
+        let state = super::super::AdapterState {
+            target: browser.id().to_owned(),
+            browser,
+            port: 47613,
+            secret: encode_lower_hex(SECRET),
+            install_dir: "unused".into(),
+            load_unpacked_path: "unused".into(),
+            platform: Platform::Linux,
+            extension_id: Some(ID.into()),
+            instance_id: None,
+            executable: None,
+        };
+        let changed = || bridge_error("candidate_changed", "x");
+        let single = browser_auth_error(changed(), &state, None);
+        assert_eq!(provider_code(&single), "candidate_changed");
+        let text = single.details["next_action"].as_str().unwrap();
+        assert!(text.contains(browser.display()), "{text}");
+        assert!(
+            !text.contains("batch-resume") && !text.contains("forvo brave"),
+            "{text}"
+        );
+        let resume = format!("{} batch-resume --batch-id b1", state.command_prefix());
+        let batch = browser_auth_error(changed(), &state, Some(&resume));
+        let text = batch.details["next_action"].as_str().unwrap();
+        assert!(
+            text.contains(&format!(
+                "forvo browser --target {} batch-resume --batch-id b1",
+                browser.id()
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("forvo brave"), "{text}");
+    }
 }
 
 #[tokio::test]

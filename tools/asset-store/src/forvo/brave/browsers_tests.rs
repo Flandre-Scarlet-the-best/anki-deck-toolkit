@@ -354,3 +354,94 @@ fn kinds_have_exact_user_pages() {
         assert_eq!(BrowserKind::parse(kind.id()), Some(kind));
     }
 }
+
+/// Исполняемая фикстура `--version`.
+fn version_script(temp: &TempWorkspace, name: &str, body: &str) -> std::path::PathBuf {
+    let path = temp.path().join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Тот же запуск, что у `version_output_within`, но с повтором только при
+/// ETXTBSY до создания процесса: параллельный тест мог унаследовать дескриптор
+/// записи недавно созданной фикстуры. Время меряется от успешного запуска.
+fn timed_version(path: &std::path::Path, timeout: Duration) -> (Option<String>, Duration) {
+    let retry_until = std::time::Instant::now() + Duration::from_secs(1);
+    let child = loop {
+        match version_command(path).spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(rustix::io::Errno::TXTBSY.raw_os_error())
+                    && std::time::Instant::now() < retry_until =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => break result.unwrap(),
+        }
+    };
+    let started = std::time::Instant::now();
+    let output = read_version(child, started + timeout);
+    (output, started.elapsed())
+}
+
+#[test]
+fn version_output_reads_normal_line() {
+    let temp = TempWorkspace::create("browser-version-normal").unwrap();
+    let path = version_script(&temp, "brave", "echo 'Brave Browser 156.1.98.63'");
+    let (output, _) = timed_version(&path, Duration::from_secs(5));
+    assert_eq!(output.as_deref(), Some("Brave Browser 156.1.98.63\n"));
+}
+
+#[test]
+fn version_output_ignores_descendant_holding_stdout() {
+    let temp = TempWorkspace::create("browser-version-descendant").unwrap();
+    let marker = temp.path().join("descendant.pid");
+    // Обёртка печатает версию и выходит, а потомок держит унаследованный stdout.
+    let path = version_script(
+        &temp,
+        "wrapper",
+        &format!(
+            "echo 'Google Chrome 140.0.7339.80'\nsleep 300 &\necho $! > '{}'",
+            marker.display()
+        ),
+    );
+    let (output, elapsed) = timed_version(&path, Duration::from_secs(3));
+    assert_eq!(output.as_deref(), Some("Google Chrome 140.0.7339.80\n"));
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    // Потомок из собственной группы процесса не переживает проверку.
+    let pid: i32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let pid = rustix::process::Pid::from_raw(pid).unwrap();
+    let gone = (0..200).any(|_| {
+        let alive = rustix::process::test_kill_process(pid).is_ok()
+            && !std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero()))
+                .is_ok_and(|stat| stat.contains(") Z "));
+        if alive {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !alive
+    });
+    assert!(gone, "потомок --version остался жить");
+}
+
+#[test]
+fn version_output_bounds_hanging_process_and_large_output() {
+    let temp = TempWorkspace::create("browser-version-bounded").unwrap();
+    let hanging = version_script(&temp, "hanging", "exec sleep 300");
+    let (output, elapsed) = timed_version(&hanging, Duration::from_millis(500));
+    assert_eq!(output, None);
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+
+    // Бесконечный вывод не блокирует pipe и не накапливается в памяти.
+    let flood = version_script(&temp, "flood", "exec yes 'Brave Browser 156.1.98.63'");
+    let (output, elapsed) = timed_version(&flood, Duration::from_secs(5));
+    assert_eq!(output, None);
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+
+    let garbage = version_script(&temp, "garbage", "printf '\\377\\376'");
+    let (output, _) = timed_version(&garbage, Duration::from_secs(5));
+    assert_eq!(output, None);
+}

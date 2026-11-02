@@ -303,3 +303,139 @@ fn windows_install_dir_is_not_a_relative_linux_path() {
     assert!(windows_drive_path(r"C:\x") && windows_drive_path("d:/x"));
     assert!(!windows_drive_path("/mnt/c/x") && !windows_drive_path("C:"));
 }
+
+/// Снимок всего, что принадлежит цели: файлы расширения и state.json.
+fn snapshot(state_dir: &Path, dir: &Path) -> Vec<Vec<u8>> {
+    [
+        "pairing.json",
+        "manifest.json",
+        "background.js",
+        "forvo_page.js",
+    ]
+    .iter()
+    .map(|name| std::fs::read(dir.join(name)).unwrap())
+    .chain([std::fs::read(state_dir.join("state.json")).unwrap()])
+    .collect()
+}
+
+// Новые цели берут порт из штатного диапазона `setup`, а не эфемерный:
+// эфемерные порты заняты bridge параллельных тестов.
+#[test]
+fn aliases_of_another_target_dir_are_refused_before_writing() {
+    let temp = TempWorkspace::create("targets-alias").unwrap();
+    let state_dir = temp.path().join("state");
+    let real = temp.path().join("data/brave");
+    setup(&SetupOptions {
+        port: None,
+        ..options(&state_dir, BrowserKind::Brave, &real)
+    })
+    .unwrap();
+    let brave = load_target(&state_dir, Some("brave")).unwrap();
+    let before = snapshot(&state_dir, &real);
+    std::os::unix::fs::symlink(&real, temp.path().join("link")).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("data"), temp.path().join("parent")).unwrap();
+    std::fs::create_dir_all(temp.path().join("other")).unwrap();
+    let aliases = [
+        temp.path().join("link"),
+        temp.path().join("parent/brave"),
+        temp.path().join("other/../data/./brave"),
+        temp.path().join("data/brave/missing/.."),
+    ];
+    for alias in &aliases {
+        let error = setup(&SetupOptions {
+            port: None,
+            ..options(&state_dir, BrowserKind::Chrome, alias)
+        })
+        .unwrap_err();
+        assert_eq!(provider_code(&error), "install_dir_conflict", "{alias:?}");
+        assert_eq!(error.details["other_target"], "brave");
+        assert_eq!(snapshot(&state_dir, &real), before, "{alias:?}");
+    }
+    // Тот же критерий в проверке загруженного/записываемого состояния.
+    let alias = AdapterState {
+        target: "chrome".into(),
+        browser: BrowserKind::Chrome,
+        port: brave.port + 1,
+        secret: "cd".repeat(32),
+        install_dir: temp.path().join("parent/brave"),
+        load_unpacked_path: temp.path().join("parent/brave").display().to_string(),
+        ..brave.clone()
+    };
+    let error = save_state(&state_dir, &alias).unwrap_err();
+    assert_eq!(provider_code(&error), "install_dir_conflict");
+    assert_eq!(snapshot(&state_dir, &real), before);
+    // Состояние, записанное в обход проверки, не загружается.
+    let mut file = load_file(&state_dir).unwrap().unwrap();
+    file.targets.insert("chrome".into(), alias);
+    write_atomic(
+        &state_dir.join("state.json"),
+        &serde_json::to_vec_pretty(&file).unwrap(),
+        0o600,
+    )
+    .unwrap();
+    assert_eq!(
+        provider_code(&load_target(&state_dir, Some("brave")).unwrap_err()),
+        "install_dir_conflict"
+    );
+}
+
+#[test]
+fn alias_check_works_in_reverse_order_and_keeps_distinct_dirs() {
+    let temp = TempWorkspace::create("targets-alias-reverse").unwrap();
+    let state_dir = temp.path().join("state");
+    let real = temp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // Сначала цель через ссылку, затем через настоящий путь.
+    setup(&SetupOptions {
+        port: None,
+        ..options(&state_dir, BrowserKind::Edge, &link)
+    })
+    .unwrap();
+    let before = snapshot(&state_dir, &real);
+    let error = setup(&SetupOptions {
+        port: None,
+        ..options(&state_dir, BrowserKind::Vivaldi, &real)
+    })
+    .unwrap_err();
+    assert_eq!(provider_code(&error), "install_dir_conflict");
+    assert_eq!(snapshot(&state_dir, &real), before);
+    // Сохранённый путь цели остаётся буквальным: ID расширения не меняется.
+    let edge = load_target(&state_dir, Some("edge")).unwrap();
+    assert_eq!(edge.install_dir, link);
+    assert_eq!(edge.load_unpacked_path, link.display().to_string());
+    // Повторный setup своей цели — без конфликта и без новой пары.
+    let again = setup(&SetupOptions {
+        port: Some(edge.port),
+        install_dir: None,
+        ..options(&state_dir, BrowserKind::Edge, &link)
+    })
+    .unwrap();
+    assert_eq!(again["pairing"], "kept");
+    // Соседние, похожие и вложенные каталоги — разные цели.
+    for (kind, dir) in [
+        (BrowserKind::Vivaldi, temp.path().join("real-2")),
+        (BrowserKind::Chrome, temp.path().join("Real")),
+        (BrowserKind::Brave, real.join("nested")),
+    ] {
+        setup(&SetupOptions {
+            port: None,
+            ..options(&state_dir, kind, &dir)
+        })
+        .unwrap();
+    }
+    assert_eq!(load_file(&state_dir).unwrap().unwrap().targets.len(), 4);
+}
+
+#[test]
+fn wsl_dir_identity_ignores_case_only_where_windows_does() {
+    let temp = TempWorkspace::create("targets-identity-case").unwrap();
+    let a = temp.path().join("AppData/forvo-chrome-adapter");
+    let b = temp.path().join("appdata/Forvo-Chrome-Adapter");
+    let wsl = |p: &Path| DirIdentity::of(p, Platform::Wsl).unwrap();
+    let linux = |p: &Path| DirIdentity::of(p, Platform::Linux).unwrap();
+    assert_eq!(wsl(&a), wsl(&b));
+    assert_eq!(wsl(&a), linux(&b));
+    assert_ne!(linux(&a), linux(&b));
+}

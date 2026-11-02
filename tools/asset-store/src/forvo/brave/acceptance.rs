@@ -1111,7 +1111,7 @@ pub async fn download_selected(
     )
     .await
     .and_then(|downloaded| download::probed(op_id, downloaded))
-    .map_err(|e| super::fetch::browser_auth_error(e, state))
+    .map_err(|e| super::fetch::browser_auth_error(e, state, None))
     .inspect_err(|e| report.fail("site_download", e))?;
     let item = &acquired.item;
     report.push("site_download", Status::Pass, json!({"operation_id":op_id,"download_id":item.id,"file_name":item.file_name,

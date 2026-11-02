@@ -297,6 +297,49 @@ pub async fn target_isolation(env: &mut Env<'_>) -> Result<()> {
         json!({"first":a.peer.extension_id,"second":b.peer.extension_id,
             "loaded_by_browser":env.browser.loaded_extensions}),
     );
+    // Обе цели держат в одном профиле свои вкладку и группу с одинаковым
+    // названием. close первой закрывает только своё и не блокируется чужой
+    // одноимённой группой; затем закрывается и вторая.
+    let open_a = a
+        .bridge
+        .call("open", json!({}), Duration::from_secs(15))
+        .await
+        .map_err(err)?;
+    let open_b = b
+        .bridge
+        .call("open", json!({}), Duration::from_secs(15))
+        .await
+        .map_err(err)?;
+    let closed_a = a
+        .bridge
+        .call("close", json!({}), Duration::from_secs(10))
+        .await;
+    let b_after = b
+        .bridge
+        .call("tab_status", json!({}), Duration::from_secs(5))
+        .await
+        .map_err(err)?;
+    let closed_b = b
+        .bridge
+        .call("close", json!({}), Duration::from_secs(10))
+        .await;
+    let closed_a = closed_a.map_err(err)?;
+    let closed_b = closed_b.map_err(err)?;
+    env.out.check(
+        "одноимённые группы двух целей: close первой закрыл только её вкладку, вторая цель сохранила свою и закрылась сама",
+        open_a["group_title"] == open_b["group_title"]
+            && open_a["group_id"] != open_b["group_id"]
+            && closed_a["tab_closed"] == true
+            && closed_a["own_group_absent"] == true
+            && closed_a["unproven_groups_kept"] == 1
+            && b_after["exists"] == true
+            && b_after["tab_id"] == open_b["tab_id"]
+            && b_after["group_id"] == open_b["group_id"]
+            && closed_b["tab_closed"] == true
+            && closed_b["unproven_groups_kept"] == 0,
+        json!({"open":[open_a["group_id"],open_b["group_id"]],"group_title":open_a["group_title"],
+            "close_first":closed_a,"second_after":b_after,"close_second":closed_b}),
+    );
     a.bridge.disconnect().await;
     b.bridge.disconnect().await;
     drop((a, b));

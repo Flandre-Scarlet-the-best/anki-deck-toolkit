@@ -423,7 +423,10 @@ async fn launch(
         // Подключение к расширению безопасно прервать: до первой команды в
         // браузере ничего не изменено.
         Backend::Brave(options) => tokio::select! {
-            result = BraveSession::connect(options) => result.map(|s| Session::Brave(Box::new(s))),
+            result = BraveSession::connect(options) => result.map(|mut s| {
+                s.set_batch(id);
+                Session::Brave(Box::new(s))
+            }),
             _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Подключение к браузеру прервано; продолжите через batch-resume цели")),
             result = cancellation(store, id) => Err(result.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён"))),
         },

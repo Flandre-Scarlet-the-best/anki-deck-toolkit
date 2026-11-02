@@ -1026,7 +1026,7 @@ async fn run_brave(
         .create_new(true)
         .mode(0o600)
         .open(&path)
-        .map_err(|e| AssetError::io("журнал адаптера Brave", e))?;
+        .map_err(|e| AssetError::io("журнал адаптера браузера", e))?;
     let guard = RunLogGuard::new(
         file,
         match output {
@@ -1123,24 +1123,37 @@ async fn run_brave(
     };
     // Ctrl+C: работа получает сигнал и освобождает собственную операцию загрузки;
     // повторный Ctrl+C или истечение отсрочки закрывают только соединение bridge.
-    // Brave, вкладки пользователя и настройки не трогаются.
+    // Браузер, вкладки пользователя и настройки не трогаются.
     let work = work.with_subscriber(guard.dispatch());
     tokio::pin!(work);
     let result = tokio::select! {
         result = &mut work => result,
-        _ = tokio::signal::ctrl_c(), if !graceful_interrupt => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана; соединение с расширением закрыто, браузер не изменён")),
+        _ = tokio::signal::ctrl_c(), if !graceful_interrupt => Err(adapter_interrupted(false)),
         _ = tokio::signal::ctrl_c(), if graceful_interrupt => {
             let _ = interrupt_tx.send(true);
             tokio::select! {
                 result = tokio::time::timeout(Duration::from_secs(20), &mut work) => match result {
                     Ok(Err(error)) => Err(error),
-                    _ => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана; соединение с расширением закрыто, браузер не изменён")),
+                    _ => Err(adapter_interrupted(false)),
                 },
-                _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Проверка Brave прервана повторно; соединение с расширением закрыто")),
+                _ = tokio::signal::ctrl_c() => Err(adapter_interrupted(true)),
             }
         }
     };
     finish_brave_run(result, guard.finish(), &path)
+}
+
+/// Прерывание команды адаптера: общая ветка `forvo browser` обслуживает любой
+/// поддерживаемый браузер, поэтому сообщение не называет Brave.
+fn adapter_interrupted(repeated: bool) -> AssetError {
+    AssetError::new(
+        ErrorCode::Interrupted,
+        if repeated {
+            "Команда адаптера браузера прервана повторно; соединение с расширением закрыто"
+        } else {
+            "Команда адаптера браузера прервана; соединение с расширением закрыто, браузер не изменён"
+        },
+    )
 }
 
 fn waits_for_brave_download_cleanup(action: &AdapterCommand<'_>) -> bool {
@@ -1173,7 +1186,7 @@ fn finish_brave_run(
         }
         (Ok(_), Err(logging)) => Err(AssetError::with_details(
             ErrorCode::IoFailure,
-            "Не удалось сохранить диагностический журнал адаптера Brave",
+            "Не удалось сохранить диагностический журнал адаптера браузера",
             serde_json::json!({
                 "diagnostic_log":path,
                 "logging_error":crate::diagnostics::safe_message(&logging),
@@ -1184,7 +1197,10 @@ fn finish_brave_run(
 
 #[cfg(test)]
 mod tests {
-    use super::{AdapterCommand, RunAction, finish_brave_run, waits_for_brave_download_cleanup};
+    use super::{
+        AdapterCommand, RunAction, adapter_interrupted, finish_brave_run,
+        waits_for_brave_download_cleanup,
+    };
     use crate::{AssetError, ErrorCode};
     use serde_json::json;
 
@@ -1218,6 +1234,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::IoFailure);
+        assert!(!error.message.contains("Brave"), "{}", error.message);
         assert_eq!(error.details["diagnostic_log"], "/logs/run.ndjson");
         assert!(
             error.details["logging_error"]
@@ -1225,6 +1242,15 @@ mod tests {
                 .unwrap()
                 .contains("disk full")
         );
+    }
+
+    #[test]
+    fn adapter_interruption_does_not_name_a_specific_browser() {
+        for repeated in [false, true] {
+            let error = adapter_interrupted(repeated);
+            assert_eq!(error.code, ErrorCode::Interrupted);
+            assert!(!error.message.contains("Brave"), "{}", error.message);
+        }
     }
 
     #[test]

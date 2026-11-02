@@ -247,11 +247,79 @@ async function requireTab() {
     return tab;
 }
 
+// Вкладки, созданные адаптером в этой сессии браузера, но не ставшие собственной
+// (сбой между созданием и записью own) или заменённые без подтверждённого удаления.
+// Tab ID уникален в пределах сессии браузера, а storage.session сбрасывается вместе
+// с ней и переживает перезапуск service worker, поэтому запись доказывает владение.
+// Удаляются только такие вкладки; если пользователь увёл вкладку с forvo.com, она
+// считается его и забывается без закрытия.
+const LEFTOVER_KEY = 'leftoverTabs';
+async function leftovers() {
+    const {[LEFTOVER_KEY]: list = []} = await chrome.storage.session.get(LEFTOVER_KEY);
+    return list;
+}
+async function rememberLeftover(tabId) {
+    const list = await leftovers();
+    if (!list.includes(tabId)) await chrome.storage.session.set({[LEFTOVER_KEY]: [...list, tabId]});
+}
+async function forgetLeftover(tabId) {
+    const list = await leftovers();
+    if (list.includes(tabId)) await chrome.storage.session.set({[LEFTOVER_KEY]: list.filter(id => id !== tabId)});
+}
+function leftoverAdopted(tab) {
+    const raw = tab.url || tab.pendingUrl || '';
+    if (raw === '' || raw === 'about:blank') return false;
+    try {
+        return new URL(raw).origin !== FORVO_ORIGIN;
+    } catch {
+        return true;
+    }
+}
+// Отказ remove по уже закрытой вкладке — не остаток: отсутствие подтверждает
+// полный список вкладок, а не текст ошибки.
+async function removeTab(tabId) {
+    try {
+        await chrome.tabs.remove(tabId);
+    } catch (error) {
+        const tabs = await chrome.tabs.query({}).catch(() => null);
+        if (!tabs || tabs.some(t => t.id === tabId)) throw error;
+    }
+}
+// Повторная очистка доказанно собственных остатков. Возвращает ID, которые
+// удалить не удалось; отсутствие подтверждается полным списком вкладок.
+async function removeLeftovers() {
+    const list = await leftovers();
+    if (!list.length) return [];
+    const present = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
+    const remaining = [];
+    for (const id of list) {
+        const tab = present.get(id);
+        if (!tab || leftoverAdopted(tab)) continue;
+        try {
+            await removeTab(id);
+        } catch {
+            remaining.push(id);
+        }
+    }
+    await chrome.storage.session.set({[LEFTOVER_KEY]: remaining});
+    return remaining;
+}
+function cleanupFailed(primary, cleanup) {
+    return new Failure('tab_cleanup_failed', `${primary}; cleanup: ${String(cleanup?.message || cleanup)}`);
+}
+
 // Chromium разрешает вкладке без жеста пользователя только первую загрузку
 // (DownloadRequestLimiter); следующие блокируются или вызывают панель «Скачать
 // несколько файлов». Поэтому вкладка, уже начавшая загрузку, заменяется свежей
 // в той же группе, а настройки браузера не меняются.
+//
+// Создание — одна операция владения: новая вкладка сначала записывается как
+// остаток и только после группировки становится own. Отказ отката не скрывается:
+// вкладка остаётся в списке остатков, команда получает tab_cleanup_failed, а
+// следующие open/close повторяют удаление.
 async function ensureTab() {
+    const stuck = await removeLeftovers();
+    if (stuck.length) throw new Failure('tab_cleanup_failed', `leftover tabs: ${stuck.length}`);
     const existing = await ownTab();
     const {own} = await chrome.storage.session.get('own');
     if (existing && !own?.download_used) return {tab: existing, created: false, replaced: false};
@@ -259,19 +327,52 @@ async function ensureTab() {
     await windowLaidOut(window.id);
     const tab = await chrome.tabs.create({windowId: window.id, url: FORVO_ORIGIN + '/', active: false});
     try {
+        await rememberLeftover(tab.id);
+    } catch (error) {
+        // Доказательство не сохранилось: вкладку нужно убрать сейчас.
+        try {
+            await removeTab(tab.id);
+        } catch (cleanup) {
+            throw cleanupFailed('leftover_not_recorded', cleanup);
+        }
+        throw new Failure('tab_group_failed', String(error?.message || error));
+    }
+    let groupId;
+    try {
         await navigationVisible(tab.id);
-        const groupId = existing
+        groupId = existing
             ? await chrome.tabs.group({tabIds: [tab.id], groupId: existing.groupId})
             : await chrome.tabs.group({tabIds: [tab.id], createProperties: {windowId: window.id}});
         await chrome.tabGroups.update(groupId, {title: GROUP_TITLE, color: 'blue', collapsed: true});
         await chrome.tabs.update(tab.id, {autoDiscardable: false});
-        await chrome.storage.session.set({own: {tabId: tab.id, groupId, windowId: window.id, download_used: false}});
-        if (existing) await chrome.tabs.remove(existing.id).catch(() => {});
-        return {tab: await chrome.tabs.get(tab.id), created: true, replaced: !!existing};
+        // Одной записью: новая вкладка становится own, прежняя — остатком до
+        // подтверждённого удаления.
+        const rest = (await leftovers()).filter(id => id !== tab.id);
+        await chrome.storage.session.set({
+            own: {tabId: tab.id, groupId, windowId: window.id, download_used: false},
+            [LEFTOVER_KEY]: existing ? [...rest, existing.id] : rest,
+        });
     } catch (error) {
-        await chrome.tabs.remove(tab.id).catch(() => {});
-        throw new Failure('tab_group_failed', String(error?.message || error));
+        const primary = String(error?.message || error);
+        try {
+            await removeTab(tab.id);
+        } catch (cleanup) {
+            throw cleanupFailed(primary, cleanup);
+        }
+        // Вкладка удалена; если запись не снимется, повтор увидит её отсутствие.
+        await forgetLeftover(tab.id).catch(() => {});
+        throw new Failure('tab_group_failed', primary);
     }
+    if (existing) {
+        try {
+            await removeTab(existing.id);
+        } catch (cleanup) {
+            // Новая вкладка уже собственная; прежняя остаётся остатком для повтора.
+            throw cleanupFailed('previous_tab_not_removed', cleanup);
+        }
+        await forgetLeftover(existing.id).catch(() => {});
+    }
+    return {tab: await chrome.tabs.get(tab.id), created: true, replaced: !!existing};
 }
 
 // Сразу после запуска браузера окно может быть ещё не размечено: у Vivaldi интерфейс
@@ -783,6 +884,7 @@ const OPERATIONS = {
         return await snapshot();
     },
     async close() {
+        const stuck = await removeLeftovers();
         const {own} = await chrome.storage.session.get('own');
         // Идентичность текущей сессии обязательна; название группы не даёт права удаления.
         const tab = own ? (await chrome.tabs.query({})).find(t => t.id === own.tabId) : null;
@@ -790,12 +892,17 @@ const OPERATIONS = {
             throw new Failure('ownership_unproven');
         }
         if (tab) await chrome.tabs.remove(tab.id);
+        // Своя группа — только сохранённый ID этой сессии. Одноимённая группа другой
+        // цели того же профиля или восстановленная группа прошлой сессии не
+        // доказаны своими: они не закрываются и не мешают закрытию своей цели,
+        // а только учитываются.
         const groups = await chrome.tabGroups.query({});
-        if (groups.some(g => g.id === own?.groupId || g.title === GROUP_TITLE)) {
-            throw new Failure('ownership_unproven');
-        }
+        if (own && groups.some(g => g.id === own.groupId)) throw new Failure('ownership_unproven');
         await chrome.storage.session.remove('own');
-        return {closed: !!tab, tab_closed: !!tab, own_tab_absent: true, own_group_absent: true, recovery_required: false};
+        if (stuck.length) throw new Failure('tab_cleanup_failed', `leftover tabs: ${stuck.length}`);
+        const unproven = groups.filter(g => g.title === GROUP_TITLE).length;
+        return {closed: !!tab, tab_closed: !!tab, own_tab_absent: true, own_group_absent: true, recovery_required: false,
+            unproven_groups_kept: unproven};
     },
     async reload() {
         setTimeout(() => chrome.runtime.reload(), 100);

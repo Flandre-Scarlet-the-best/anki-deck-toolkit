@@ -92,7 +92,7 @@ pub async fn download_candidate(
     if before.code != "ok" || !before.candidates.contains(candidate) {
         return Err(bridge_error(
             "candidate_changed",
-            "Строка кандидата изменилась после выбора; проверьте страницу и продолжите через forvo brave batch-resume",
+            "Строка кандидата изменилась после выбора; проверьте страницу слова и повторите команду",
         ));
     }
     download::acquire_bytes(
@@ -102,29 +102,41 @@ pub async fn download_candidate(
 }
 
 /// Ошибка входа/проверки сайта с действием для обычного браузера цели, а не для CDP-профиля.
-pub(crate) fn browser_auth_error(mut error: AssetError, state: &super::AdapterState) -> AssetError {
+/// `resume` — команда продолжения, только если операция идёт в существующем пакете;
+/// одиночные `fetch`/`smoke` получают совет повторить команду.
+pub(crate) fn browser_auth_error(
+    mut error: AssetError,
+    state: &super::AdapterState,
+    resume: Option<&str>,
+) -> AssetError {
     let browser = state.browser.display();
-    let resume = format!("{} batch-resume", state.command_prefix());
+    let retry = match resume {
+        Some(resume) => format!("продолжите пакет: {resume}"),
+        None => "повторите команду".to_owned(),
+    };
     let code = provider_code(&error).to_owned();
     let action = match code.as_str() {
-        "challenge_required" => format!(
-            "Откройте forvo.com в {browser}, пройдите проверку сайта вручную и повторите команду (пакет — {resume})"
-        ),
+        "challenge_required" => {
+            format!("Откройте forvo.com в {browser}, пройдите проверку сайта вручную и {retry}")
+        }
         "login_required" | "session_expired" => {
-            format!("Войдите в Forvo в обычном {browser} и повторите команду (пакет — {resume})")
+            format!("Войдите в Forvo в обычном {browser} и {retry}")
         }
         "access_denied" | "rate_limited" => {
             format!("Forvo ограничил доступ; проверьте страницу в {browser} и продолжите позже")
         }
         "save_as_required" | "save_as_suspected" => format!(
-            "Откройте {} в {browser}, выключите «Спрашивать, куда сохранять каждый файл» и повторите (пакет — {resume})",
+            "Откройте {} в {browser}, выключите «Спрашивать, куда сохранять каждый файл» и {retry}",
             state.browser.downloads_settings_uri()
         ),
         // Vivaldi по умолчанию спрашивает подтверждение каждой загрузки в своём интерфейсе;
         // расширению этот запрос не виден, загрузка просто не начинается.
         "download_not_started" if state.browser == super::BrowserKind::Vivaldi => format!(
-            "Откройте {} в {browser}, включите «Начинать загрузки автоматически», закройте окно подтверждения загрузки, если оно открыто, и повторите (пакет — {resume})",
+            "Откройте {} в {browser}, включите «Начинать загрузки автоматически», закройте окно подтверждения загрузки, если оно открыто, и {retry}",
             state.browser.downloads_settings_uri()
+        ),
+        "candidate_changed" => format!(
+            "Строка выбранной записи изменилась после выбора; проверьте страницу слова в {browser} и {retry}"
         ),
         _ => return error,
     };
@@ -183,6 +195,8 @@ pub struct BraveSession {
     operations: Vec<Value>,
     recovered: Option<Value>,
     reconnects: u32,
+    /// Команда продолжения, если сессия обслуживает существующий пакет.
+    resume: Option<String>,
 }
 
 impl BraveSession {
@@ -224,12 +238,25 @@ impl BraveSession {
             operations: Vec::new(),
             recovered,
             reconnects: 0,
+            resume: None,
         })
     }
 
     /// Сигнал прерывания: загрузка останавливается, собственная операция освобождается.
     pub fn set_interrupt(&mut self, interrupt: Option<watch::Receiver<bool>>) {
         self.interrupt = interrupt;
+    }
+
+    /// Сессия обслуживает пакет: советы пользователю ведут к его продолжению.
+    pub fn set_batch(&mut self, batch_id: &str) {
+        self.resume = Some(format!(
+            "{} batch-resume --batch-id {batch_id}",
+            self.connection.state.command_prefix()
+        ));
+    }
+
+    fn guided(&self, error: AssetError) -> AssetError {
+        browser_auth_error(error, &self.connection.state, self.resume.as_deref())
     }
 
     pub fn binding(&self) -> BrowserBinding {
@@ -284,7 +311,7 @@ impl BraveSession {
                     return Ok(());
                 }
                 Err(e) if attempt == 0 && reconnectable(&e) => self.reconnect().await?,
-                Err(e) => return Err(browser_auth_error(e, &self.connection.state)),
+                Err(e) => return Err(self.guided(e)),
             }
         }
         unreachable!("ограниченные попытки")
@@ -345,7 +372,7 @@ impl BraveSession {
             &mut interrupt,
         )
         .await;
-        let outcome = outcome.map_err(|e| browser_auth_error(e, &self.connection.state));
+        let outcome = outcome.map_err(|e| self.guided(e));
         // Освобождение — при любом исходе: собственная связанная загрузка
         // отменяется или удаляется; несвязанная операция ничего не трогает.
         let released = self.release(&op_id).await.and_then(|value| {

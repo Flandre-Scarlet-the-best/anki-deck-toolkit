@@ -134,13 +134,11 @@ impl AdapterFile {
             return Err(corrupt());
         }
         let mut ports = std::collections::BTreeSet::new();
-        let mut dirs = std::collections::BTreeSet::new();
         for (name, target) in &self.targets {
             if !valid_target_name(name)
                 || target.secret_bytes().is_err()
                 || target.port < 1024
                 || !ports.insert(target.port)
-                || !dirs.insert(target.install_dir.clone())
                 || target
                     .extension_id
                     .as_deref()
@@ -153,7 +151,32 @@ impl AdapterFile {
                 return Err(corrupt());
             }
         }
+        // Тот же критерий, что у `setup`: алиас каталога другой цели — конфликт.
+        let mut seen: Vec<(&str, DirIdentity)> = Vec::new();
+        for (name, target) in &self.targets {
+            let identity = DirIdentity::of(&target.install_dir, target.platform)?;
+            if let Some((other, _)) = seen.iter().find(|(_, known)| *known == identity) {
+                return Err(dir_conflict(other, Some(name)));
+            }
+            seen.push((name, identity));
+        }
         Ok(())
+    }
+
+    /// Цель, чей каталог физически совпадает с `dir`, кроме самой цели `name`.
+    fn dir_owner(
+        &self,
+        name: &str,
+        dir: &Path,
+        platform: Platform,
+    ) -> Result<Option<&str>, AssetError> {
+        let identity = DirIdentity::of(dir, platform)?;
+        for (other, target) in self.targets.iter().filter(|(n, _)| *n != name) {
+            if DirIdentity::of(&target.install_dir, target.platform)? == identity {
+                return Ok(Some(other));
+            }
+        }
+        Ok(None)
     }
 
     /// Цель по явному имени, иначе по умолчанию, иначе единственная.
@@ -187,6 +210,102 @@ impl AdapterFile {
         state.target = name;
         Ok(state)
     }
+}
+
+/// Физическая идентичность каталога расширения — только для сравнения целей.
+/// Сохранённые `install_dir`/`load_unpacked_path` не канонизируются: от строки
+/// пути зависит ID распакованного расширения.
+///
+/// Ближайший существующий предок пути (с разрешением символьных ссылок и `..`)
+/// задаётся устройством и inode, несуществующий остаток — лексически. Остаток
+/// создаётся внутри известного каталога и потому сам ссылкой быть не может.
+/// Если одна из целей — браузер Windows из WSL, остаток сравнивается без учёта
+/// регистра: NTFS по умолчанию регистронезависима, а существующие части пути
+/// покрывает inode. Для Linux-целей регистр различается.
+#[derive(Debug)]
+struct DirIdentity {
+    device: u64,
+    inode: u64,
+    tail: Vec<String>,
+    case_insensitive: bool,
+}
+
+impl PartialEq for DirIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        let fold = self.case_insensitive || other.case_insensitive;
+        (self.device, self.inode) == (other.device, other.inode)
+            && self.tail.len() == other.tail.len()
+            && self.tail.iter().zip(&other.tail).all(|(a, b)| {
+                if fold {
+                    a.to_lowercase() == b.to_lowercase()
+                } else {
+                    a == b
+                }
+            })
+    }
+}
+
+impl DirIdentity {
+    fn of(dir: &Path, platform: Platform) -> Result<Self, AssetError> {
+        use std::os::unix::fs::MetadataExt;
+        let unverifiable = |reason: &str| {
+            let mut e = bridge_error(
+                "install_dir_unverifiable",
+                "Не удалось проверить, что каталог расширения не принадлежит другой цели; проверьте доступ к пути или задайте другой --install-dir",
+            );
+            e.details["install_dir"] = json!(dir);
+            e.details["reason"] = json!(reason);
+            e
+        };
+        let absolute = std::path::absolute(dir).map_err(|_| unverifiable("absolute"))?;
+        let mut anchor = None;
+        for ancestor in absolute.ancestors() {
+            match std::fs::metadata(ancestor) {
+                Ok(meta) => {
+                    anchor = Some((ancestor, meta));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(unverifiable("metadata")),
+            }
+        }
+        let (base, meta) = anchor.ok_or_else(|| unverifiable("no_existing_ancestor"))?;
+        let rest = absolute
+            .strip_prefix(base)
+            .map_err(|_| unverifiable("prefix"))?;
+        let mut tail = Vec::new();
+        for part in rest.components() {
+            match part {
+                // Неоднозначность lossy-имён даёт лишь осторожный отказ.
+                std::path::Component::Normal(name) => {
+                    tail.push(name.to_string_lossy().into_owned())
+                }
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    tail.pop().ok_or_else(|| unverifiable("parent"))?;
+                }
+                _ => return Err(unverifiable("component")),
+            }
+        }
+        Ok(Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+            tail,
+            case_insensitive: platform == Platform::Wsl,
+        })
+    }
+}
+
+fn dir_conflict(other: &str, target: Option<&str>) -> AssetError {
+    let mut e = bridge_error(
+        "install_dir_conflict",
+        "Каталог расширения уже принадлежит другой цели: общий каталог дал бы общий ID и секрет",
+    );
+    e.details["other_target"] = json!(other);
+    if let Some(target) = target {
+        e.details["target"] = json!(target);
+    }
+    e
 }
 
 /// Прочитанное состояние и исходные байты версии 1 (для резервной копии при первой записи).
@@ -767,15 +886,12 @@ pub fn setup(options: &SetupOptions) -> Result<Value, AssetError> {
         (None, Some(state)) if state.platform == platform => state.install_dir.clone(),
         _ => default_install_dir(platform, &name)?,
     };
-    let others = || file.targets.iter().filter(|(n, _)| **n != name);
-    if let Some((other, _)) = others().find(|(_, t)| t.install_dir == install_dir) {
-        let mut e = bridge_error(
-            "install_dir_conflict",
-            "Каталог расширения уже принадлежит другой цели: общий каталог дал бы общий ID и секрет",
-        );
-        e.details["other_target"] = json!(other);
-        return Err(e);
+    // До любой записи: алиас (ссылка, `..`, родительская ссылка) каталога
+    // другой цели переписал бы её pairing.json.
+    if let Some(other) = file.dir_owner(&name, &install_dir, platform)? {
+        return Err(dir_conflict(other, None));
     }
+    let others = || file.targets.iter().filter(|(n, _)| **n != name);
     let taken: Vec<u16> = others().map(|(_, t)| t.port).collect();
     let requested_port = options.port.or(previous.as_ref().map(|p| p.port));
     if let Some(port) = requested_port {

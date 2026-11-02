@@ -404,30 +404,103 @@ fn executable(path: &Path) -> bool {
 
 /// Запуск `--version` с ограничением по времени; браузер не открывает окон.
 fn version_output(path: &Path) -> Option<String> {
-    let mut child = std::process::Command::new(path)
+    version_output_within(path, VERSION_TIMEOUT)
+}
+
+/// Предел вывода `--version`: настоящая строка версии — десятки байт.
+const MAX_VERSION_BYTES: usize = 64 * 1024;
+/// Сколько после выхода процесса ждать EOF от потомков, унаследовавших stdout.
+const VERSION_EXIT_GRACE: Duration = Duration::from_millis(500);
+
+/// Весь `--version` укладывается в `timeout`: запуск, ожидание, чтение stdout
+/// и уборка. Процесс получает собственную группу; потомки обёртки, унаследовавшие
+/// stdout, не продлевают ожидание EOF, а при выходе за срок завершается вся группа.
+/// Чтение неблокирующее и ограничено `MAX_VERSION_BYTES`, поэтому переполнение
+/// pipe не блокирует процесс, а память не растёт без предела.
+fn version_output_within(path: &Path, timeout: Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    read_version(version_command(path).spawn().ok()?, deadline)
+}
+
+fn version_command(path: &Path) -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(path);
+    command
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + VERSION_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
+        .process_group(0);
+    command
+}
+
+fn read_version(mut child: std::process::Child, deadline: std::time::Instant) -> Option<String> {
+    use std::io::Read;
+    use std::time::Instant;
+
+    let group = rustix::process::Pid::from_raw(child.id() as i32);
+    let stop_group = |child: &mut std::process::Child| {
+        if let Some(group) = group {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        stop_group(&mut child);
+        return None;
+    };
+    let nonblocking = rustix::fs::fcntl_getfl(&stdout)
+        .and_then(|flags| rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK));
+    if nonblocking.is_err() {
+        stop_group(&mut child);
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut exited_at: Option<Instant> = None;
+    let complete = loop {
+        match stdout.read(&mut buffer) {
+            Ok(0) => break true,
+            Ok(read) => {
+                if bytes.len() + read > MAX_VERSION_BYTES {
+                    break false;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+                continue;
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break false,
+        }
+        let now = Instant::now();
+        if exited_at.is_none() {
+            // NOWAIT оставляет зомби до финального `wait`: номер группы не
+            // освобождается, и её сигнал не попадёт в чужой процесс.
+            let Some(pid) = group else { break false };
+            match rustix::process::waitid(
+                rustix::process::WaitId::Pid(pid),
+                rustix::process::WaitIdOptions::EXITED
+                    | rustix::process::WaitIdOptions::NOHANG
+                    | rustix::process::WaitIdOptions::NOWAIT,
+            ) {
+                Ok(Some(_)) => exited_at = Some(now),
+                Ok(None) => {}
+                Err(_) => break false,
             }
         }
+        match exited_at {
+            // Процесс вышел, а pipe держит потомок: берём уже прочитанное.
+            Some(at) if now >= deadline.min(at + VERSION_EXIT_GRACE) => break true,
+            None if now >= deadline => break false,
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    stop_group(&mut child);
+    if !complete {
+        return None;
     }
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
-    Some(text)
+    String::from_utf8(bytes).ok()
 }
 
 /// Подтверждает разновидность исполняемого файла Windows по ресурсу версии.
