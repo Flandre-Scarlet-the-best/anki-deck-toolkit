@@ -1137,21 +1137,30 @@ async fn browser_restart(env: &mut Env<'_>) -> Result<()> {
     let pages = env.browser.page_urls().await?;
     let snapshot = env.call("snapshot", json!({})).await.map_err(err)?;
     env.out.check(
-        "первая команда закрыла только восстановленную группу адаптера",
-        ping["restored_cleanup"] == json!({"groups_closed":1,"tabs_closed":1,"groups_kept":0})
-            && !pages.iter().any(|u| u == "https://forvo.com/")
+        "первая команда сохранила восстановленную группу без доказательства владения",
+        ping["restored_cleanup"] == json!({"groups_closed":0,"tabs_closed":0,"groups_kept":1,"ownership_unproven":1,"status":"ownership_unproven"})
+            && pages.iter().any(|u| u == "https://forvo.com/")
             && pages.contains(&user_url)
-            && snapshot["groups"].as_array().is_some_and(Vec::is_empty),
+            && snapshot["groups"].as_array().is_some_and(|g| g.len() == 1),
         json!({"restored_cleanup":ping["restored_cleanup"],"pages":pages,"foreign_groups":snapshot["groups"]}),
     );
+    let preserved = snapshot;
     let reopened = env.call("open", json!({})).await.map_err(err)?;
     let snapshot = env.call("snapshot", json!({})).await.map_err(err)?;
     env.out.check(
-        "новая собственная вкладка создана в единственной группе Anki Deck Toolkit",
+        "новая собственная вкладка создана отдельно от восстановленной группы",
         reopened["created"] == true
             && reopened["group_title"] == GROUP_TITLE
-            && snapshot["groups"].as_array().is_some_and(Vec::is_empty),
+            && snapshot["groups"] == preserved["groups"]
+            && snapshot["tabs"] == preserved["tabs"],
         json!({"open":reopened,"foreign_groups":snapshot["groups"]}),
+    );
+    let closed = env.call("close", json!({})).await.map_err(err)?;
+    let after = env.call("snapshot", json!({})).await.map_err(err)?;
+    env.out.check(
+        "close удаляет новую собственную вкладку, сохраняя восстановленную группу и вкладки пользователя",
+        closed["closed"] == true && after["groups"] == preserved["groups"] && after["tabs"] == preserved["tabs"],
+        json!({"close":closed,"after":after}),
     );
     env.residual_clean().await
 }

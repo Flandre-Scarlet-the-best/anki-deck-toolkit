@@ -4,7 +4,7 @@
 //! в аккаунт и проверки сайта пользователь проходит вручную через noVNC.
 //!
 //! Профиль Brave с авторизацией, сопряжение и пароль VNC живут в именованных
-//! volumes стенда и удаляются только явным `real-site purge`. Ресурсы помечены
+//! томах стенда и удаляются только явным `real-site purge`. Ресурсы помечены
 //! собственной меткой [`LABEL_REAL_SITE`], поэтому `clean` их не трогает.
 //! В CI и `cargo test` стенд не запускается.
 
@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 pub const CONTAINER: &str = "anki-e2e-real-site";
 pub const LABEL_REAL_SITE: &str = "io.github.anki-deck-toolkit.e2e.real-site";
 const IMAGE_REPO: &str = "anki-e2e/real-site";
-/// Volume → точка монтирования. Профиль хранит авторизацию: это чувствительные данные.
+/// Том → точка монтирования. Профиль хранит авторизацию: это чувствительные данные.
 pub const VOLUMES: [(&str, &str); 3] = [
     (
         "anki-e2e-real-site-profile",
@@ -63,11 +63,11 @@ pub enum Action {
         #[arg(long)]
         rebuild: bool,
         /// Порт noVNC на 127.0.0.1 хоста
-        #[arg(long, default_value_t = 6080)]
-        vnc_port: u16,
+        #[arg(long)]
+        vnc_port: Option<u16>,
         /// Порт VNC для нативного клиента на 127.0.0.1 хоста
-        #[arg(long, default_value_t = 5900)]
-        rfb_port: u16,
+        #[arg(long)]
+        rfb_port: Option<u16>,
         /// HTTP-прокси для Brave; по умолчанию — прокси Docker из `docker info`, если он задан
         #[arg(long)]
         proxy: Option<String>,
@@ -82,11 +82,11 @@ pub enum Action {
         #[arg(long, default_value = "げんき")]
         reading: String,
     },
-    /// Состояние контейнера, Brave и volumes
+    /// Состояние контейнера, Brave и томов
     Status,
-    /// Штатно закрыть Brave и удалить контейнер; volumes сохраняются
+    /// Штатно закрыть Brave и удалить контейнер; тома сохраняются
     Down,
-    /// Удалить контейнер, volumes (профиль с авторизацией) и образы стенда
+    /// Удалить контейнер, тома (профиль с авторизацией) и образы стенда
     Purge {
         /// Подтверждение удаления авторизации и профиля
         #[arg(long)]
@@ -175,6 +175,49 @@ impl Stand {
         let mut full = vec!["exec", CONTAINER];
         full.extend_from_slice(args);
         self.docker.output(&full)
+    }
+
+    /// Сначала перечисление: ошибка inspect не считается отсутствием ресурса.
+    fn owned_resource(&self, kind: &str, name: &str) -> Result<Option<Value>> {
+        let args = if kind == "container" {
+            vec!["container", "ls", "--all", "--format", "{{.Names}}"]
+        } else {
+            vec!["volume", "ls", "--format", "{{.Name}}"]
+        };
+        let names = self.docker.text(&args)?;
+        if !names.lines().any(|line| line == name) {
+            return Ok(None);
+        }
+        let data = self.docker.json(&[kind, "inspect", name])?;
+        let resource = data.get(0).ok_or("Docker inspect: пустой результат")?;
+        let labels = if kind == "container" {
+            &resource["Config"]["Labels"]
+        } else {
+            &resource["Labels"]
+        };
+        if labels[LABEL_REAL_SITE] != "1" {
+            return Err(format!(
+                "конфликт владения: {kind} {name} не имеет метки {LABEL_REAL_SITE}=1; ресурс оставлен без изменений"
+            ));
+        }
+        Ok(Some(resource.clone()))
+    }
+
+    fn check_resources(&self) -> Result<()> {
+        self.owned_resource("container", CONTAINER)?;
+        for (name, _) in VOLUMES {
+            self.owned_resource("volume", name)?;
+        }
+        Ok(())
+    }
+
+    fn print_ports(&self) -> Result<()> {
+        let container = self
+            .owned_resource("container", CONTAINER)?
+            .ok_or("контейнер отсутствует")?;
+        let (vnc, rfb) = published_ports(&container)?;
+        println!("noVNC: http://127.0.0.1:{vnc}/vnc.html; VNC-клиент: 127.0.0.1:{rfb}");
+        Ok(())
     }
 
     fn container_state(&self) -> Option<String> {
@@ -318,7 +361,7 @@ impl Stand {
     /// Старые образы стенда, кроме текущего; используемые контейнером Docker не удалит.
     fn prune_images(&self, keep: &str) {
         let keep_id = self.docker.image_id(keep).unwrap_or_default();
-        let filter = format!("label={LABEL_REAL_SITE}");
+        let filter = format!("label={LABEL_REAL_SITE}=1");
         if let Ok(text) = self
             .docker
             .text(&["images", "--filter", &filter, "--format", "{{.ID}}"])
@@ -356,6 +399,10 @@ pub fn run(args: &RealSiteArgs, interrupted: Arc<AtomicBool>) -> u8 {
             return status.exit_code();
         }
     };
+    if let Err(message) = stand.check_resources() {
+        eprintln!("ERROR: {message}");
+        return Status::Error.exit_code();
+    }
     let result = match &args.action {
         Action::Up {
             rebuild,
@@ -392,16 +439,46 @@ fn error(message: impl Into<String>) -> (Status, String) {
     (Status::Error, message.into())
 }
 
+/// Адреса публикуются только при подтверждённой привязке к loopback.
+fn published_ports(container: &Value) -> Result<(u16, u16)> {
+    let port = |key: &str| -> Result<u16> {
+        let bindings = container["NetworkSettings"]["Ports"][key]
+            .as_array()
+            .ok_or_else(|| format!("не удалось прочитать опубликованный порт {key}"))?;
+        if bindings.len() != 1 || bindings[0]["HostIp"] != "127.0.0.1" {
+            return Err(format!(
+                "порт {key} должен иметь единственную привязку к 127.0.0.1"
+            ));
+        }
+        bindings[0]["HostPort"]
+            .as_str()
+            .and_then(|s| s.parse::<u16>().ok())
+            .filter(|p| *p != 0)
+            .ok_or_else(|| format!("некорректный опубликованный порт {key}"))
+    };
+    Ok((port("6080/tcp")?, port("5900/tcp")?))
+}
+
 fn up(
     stand: &Stand,
     info: &Value,
     rebuild: bool,
-    (vnc_port, rfb_port): (u16, u16),
+    (vnc_port, rfb_port): (Option<u16>, Option<u16>),
     proxy: Option<String>,
     no_proxy: bool,
     interrupted: &AtomicBool,
 ) -> Outcome {
+    stand.check_resources().map_err(error)?;
+    if stand.running()
+        && (rebuild || vnc_port.is_some() || rfb_port.is_some() || proxy.is_some() || no_proxy)
+    {
+        return Err(error(
+            "для применения --rebuild, портов или прокси работающего стенда выполните real-site down, затем real-site up с нужными параметрами; тома сохраняются",
+        ));
+    }
     if !stand.running() {
+        let vnc_port = vnc_port.unwrap_or(6080);
+        let rfb_port = rfb_port.unwrap_or(5900);
         let (tag, provenance) = stand
             .build_image(info, rebuild, interrupted)
             .map_err(error)?;
@@ -412,7 +489,11 @@ fn up(
             proxy.or_else(|| docker_proxy_url(info))
         };
         for (volume, _) in VOLUMES {
-            if stand.docker.text(&["volume", "inspect", volume]).is_err() {
+            if stand
+                .owned_resource("volume", volume)
+                .map_err(error)?
+                .is_none()
+            {
                 stand
                     .docker
                     .text(&[
@@ -425,7 +506,13 @@ fn up(
                     .map_err(error)?;
             }
         }
-        let _ = stand.docker.remove_container(CONTAINER);
+        if stand
+            .owned_resource("container", CONTAINER)
+            .map_err(error)?
+            .is_some()
+        {
+            stand.docker.remove_container(CONTAINER).map_err(error)?;
+        }
         let mut run: Vec<String> = [
             "run",
             "-d",
@@ -510,7 +597,7 @@ fn up(
         sandbox["isolated"]
     );
     println!("Brave: {}", stand.brave_version().unwrap_or_default());
-    println!("noVNC: http://127.0.0.1:{vnc_port}/vnc.html; VNC-клиент: 127.0.0.1:{rfb_port}");
+    stand.print_ports().map_err(error)?;
     println!("Пароль VNC: docker exec {CONTAINER} cat /home/tester/state/vnc.txt");
     println!(
         "Расширение загружается автоматически (--load-extension). При первом запуске войдите в Forvo через VNC. Дальше: anki-e2e real-site run"
@@ -749,21 +836,20 @@ fn status(stand: &Stand) -> Outcome {
             "Процессов Brave: {brave}; {}",
             stand.brave_version().unwrap_or_default()
         );
-        if let Ok(ports) = stand.docker.text(&["port", CONTAINER, "6080"]) {
-            println!(
-                "noVNC: http://{}/vnc.html",
-                ports.lines().next().unwrap_or("")
-            );
-        }
+        stand.print_ports().map_err(error)?;
     }
     for (volume, _) in VOLUMES {
-        let exists = stand.docker.text(&["volume", "inspect", volume]).is_ok();
-        println!("Volume {volume}: {}", if exists { "есть" } else { "нет" });
+        let exists = stand
+            .owned_resource("volume", volume)
+            .map_err(error)?
+            .is_some();
+        println!("Том {volume}: {}", if exists { "есть" } else { "нет" });
     }
     Ok(Status::Pass)
 }
 
 fn down(stand: &Stand) -> Outcome {
+    stand.check_resources().map_err(error)?;
     if stand.container_state().is_none() {
         println!("Контейнер {CONTAINER} не найден");
         return Ok(Status::Pass);
@@ -777,29 +863,33 @@ fn down(stand: &Stand) -> Outcome {
         }
     }
     stand.docker.remove_container(CONTAINER).map_err(error)?;
-    println!("Контейнер {CONTAINER} удалён; volumes с профилем сохранены");
+    println!("Контейнер {CONTAINER} удалён; тома с профилем сохранены");
     Ok(Status::Pass)
 }
 
 fn purge(stand: &Stand, yes: bool) -> Outcome {
     if !yes {
-        println!("Будут удалены контейнер, образы и volumes (профиль Brave с авторизацией Forvo):");
+        println!("Будут удалены контейнер, образы и тома (профиль Brave с авторизацией Forvo):");
         for (volume, _) in VOLUMES {
             println!("  {volume}");
         }
         println!("Повторите с --yes");
         return Ok(Status::Blocked);
     }
+    stand.check_resources().map_err(error)?;
     down(stand)?;
     let mut failures = Vec::new();
     for (volume, _) in VOLUMES {
-        if stand.docker.text(&["volume", "inspect", volume]).is_ok()
+        if stand
+            .owned_resource("volume", volume)
+            .map_err(error)?
+            .is_some()
             && let Err(e) = stand.docker.text(&["volume", "rm", volume])
         {
             failures.push(e);
         }
     }
-    let filter = format!("label={LABEL_REAL_SITE}");
+    let filter = format!("label={LABEL_REAL_SITE}=1");
     if let Ok(ids) = stand
         .docker
         .text(&["images", "--filter", &filter, "--format", "{{.ID}}"])

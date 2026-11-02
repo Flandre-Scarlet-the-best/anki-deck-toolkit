@@ -25,7 +25,8 @@ function harness(t) {
         constructor(url) { this.url = url; this.readyState = 0; }
         send() {}
     }
-    const data = {own: {tabId: 1, groupId: 2}};
+    const data = {};
+    const session = {own: {tabId: 1, groupId: 2}};
     const tab = {id: 1, groupId: 2, url: 'https://forvo.com/word/%E5%85%83%E6%B0%97/'};
     const items = [];
     const failures = new Set();
@@ -64,13 +65,21 @@ function harness(t) {
             fetch: async () => {pairingFetches += 1; return {json: async () => ({schema_version: 1, port: 47613, secret: pairingSecret})};},
             WebSocket: WebSocketStub, console: {info() {}, warn() {}}, setTimeout: () => ++nextTimerId, clearTimeout() {},
             setInterval: () => ++nextTimerId, clearInterval() {}});
-        vm.runInContext(source.replace(/^import .*;$/m, '').split('const OPERATIONS =')[0] +
-            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
+        vm.runInContext(source.replace(/^import .*;$/m, '').split('chrome.runtime.onStartup.addListener')[0] +
+            '\nglobalThis.api = {downloadBegin, downloadStatus, downloadRelease, downloadCleanup, cleanupRestoredGroups, close: OPERATIONS.close, ownTab, connect, closeCurrent: () => socket?.onclose?.(), setPhase: value => {phase = value;}, hasPairing: () => pairing !== null};', context);
         return context.api;
     }
+    chrome.storage.session = {
+        get: async key => ({[key]: structuredClone(session[key])}),
+        set: async value => Object.assign(session, structuredClone(value)),
+        remove: async key => {delete session[key];},
+    };
     let api = worker();
     return {
-        data, items, failures, calls, tab,
+        data, session, items, failures, calls, tab, chrome,
+        restoredCleanup: () => api.cleanupRestoredGroups(),
+        close: () => api.close(),
+        ownTab: () => api.ownTab(),
         restart() {api = worker();},
         advance(ms) {clock.now += ms;},
         connect: () => api.connect(),
@@ -165,7 +174,7 @@ test('keep, неизвестная и несвязанная операции с
     await h.begin(); const item = h.add(1, 'https://forvo.com/');
     assert.equal((await h.release()).released, true);
     assert.equal(fs.existsSync(item.filename), true);
-    h.data.own.download_used = false;
+    h.session.own.download_used = false;
     await h.begin(); h.request(); const own = h.add(2); await h.status();
     assert.equal((await h.release('keep')).released, true);
     assert.equal(fs.existsSync(own.filename), true);
@@ -242,7 +251,6 @@ test('задержанная запись наблюдателя не воскр
     assert.equal((await h.status()).code, 'operation_unknown');
 });
 
-
 test('разрыв после erase до удаления состояния допускает безопасный повтор', async t => {
     const h = harness(t); await h.begin(); h.request();
     const own = h.add(1); await h.status();
@@ -273,4 +281,63 @@ test('завершение между search и cancel не выдаётся з�
     assert.equal(result.removed_file, true);
     assert.equal(result.released, true);
     assert.equal(fs.existsSync(item.filename), false);
+});
+
+test('похожие восстановленные группы сохраняются независимо от URL и отказа удаления', async t => {
+    const h = harness(t);
+    delete h.session.own;
+    const groups = [{id: 20, title: 'Anki Deck Toolkit', collapsed: true}, {id: 30, title: 'Anki Deck Toolkit', collapsed: true}];
+    const tabs = [{id: 21, groupId: 20, active: false, pinned: false, url: 'https://forvo.com/'},
+        {id: 31, groupId: 30, active: false, pinned: false, url: 'https://example.org/'}];
+    h.chrome.tabGroups = {query: async () => structuredClone(groups)};
+    h.chrome.tabs.query = async ({groupId}) => tabs.filter(t => t.groupId === groupId);
+    h.chrome.tabs.remove = async () => {assert.fail('неподтверждённая вкладка не удаляется');};
+    for (let i = 0; i < 2; i++) {
+        await h.restoredCleanup();
+        assert.deepEqual(h.data.restoredCleanup, {groups_closed: 0, tabs_closed: 0, groups_kept: 2, ownership_unproven: 2, status: 'ownership_unproven'});
+        assert.equal(tabs.length, 2);
+    }
+});
+
+test('ошибка запроса групп видна и не препятствует повторной диагностике', async t => {
+    const h = harness(t);
+    h.chrome.tabGroups = {query: async () => {throw Error('unavailable');}};
+    await assert.rejects(h.restoredCleanup());
+    assert.equal(h.data.restoredCleanup.status, 'error');
+    assert.equal(h.data.restoredCleanup.groups_closed, 0);
+    h.chrome.tabGroups.query = async () => [];
+    await h.restoredCleanup();
+    assert.equal(h.data.restoredCleanup.status, 'complete');
+});
+
+test('отказ close сохраняет доказанную собственную вкладку для повтора', async t => {
+    const h = harness(t);
+    h.chrome.tabs.remove = async () => {throw Error('remove denied');};
+    await assert.rejects(h.close());
+    assert.equal(h.session.own.tabId, 1);
+    const removed = [];
+    h.chrome.tabs.remove = async id => removed.push(id);
+    assert.equal((await h.close()).closed, true);
+    assert.deepEqual(removed, [1]);
+    assert.equal(h.session.own, undefined);
+});
+
+test('локальные ID предыдущей сессии не усыновляют вкладку', async t => {
+    const h = harness(t);
+    h.data.own = h.session.own;
+    h.chrome.storage.session = {get: async () => ({}), remove: async () => {}};
+    assert.equal(await h.ownTab(), null);
+    assert.equal((await h.close()).closed, false);
+    assert.equal(h.session.own.tabId, 1);
+});
+
+test('перезапуск worker сохраняет сессионное владение, живая группа исключена из диагностики', async t => {
+    const h = harness(t);
+    h.chrome.tabGroups = {query: async () => [{id: 2}, {id: 3}]};
+    h.restart();
+    assert.equal((await h.ownTab()).id, 1);
+    await h.restoredCleanup();
+    assert.equal(h.data.restoredCleanup.groups_kept, 1);
+    assert.equal(h.data.restoredCleanup.groups_closed, 0);
+    assert.equal(h.session.own.tabId, 1);
 });

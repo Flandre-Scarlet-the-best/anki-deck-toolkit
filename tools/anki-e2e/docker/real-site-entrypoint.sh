@@ -1,6 +1,6 @@
 #!/bin/bash
 # Графическая сессия Real-Site стенда. VNC и noVNC runner публикует только на
-# 127.0.0.1 хоста; пароль VNC случайный и хранится в volume состояния (0600).
+# 127.0.0.1 хоста; пароль VNC случайный и хранится в томе состояния (0600).
 set -euo pipefail
 PROFILE=/home/tester/.config/BraveSoftware/Brave-Browser
 STATE=/home/tester/state

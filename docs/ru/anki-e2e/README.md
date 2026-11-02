@@ -278,7 +278,7 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 | `own_tab_closed` | закрытие собственной вкладки до начала загрузки |
 | `interrupt` | прерывание как Ctrl+C: `INTERRUPTED`, собственная загрузка отменена |
 | `save_as_prompt` | профиль с «Спрашивать, куда сохранять» → `BLOCKED save_as_required` |
-| `browser_restart` | перезапуск браузера с восстановлением сессии: восстановленная группа адаптера закрыта перед первой командой, вкладка пользователя на `forvo.com` осталась, новая вкладка — в единственной группе |
+| `browser_restart` | перезапуск браузера с восстановлением сессии: восстановленная группа без доказанного владения и вкладка пользователя сохранены; новая собственная вкладка создаётся отдельно |
 
 Отчёт `target/anki-e2e/browser-runs/<run_id>/report.{json,md}` содержит:
 - ревизию, версию браузера и флаги;
@@ -302,7 +302,7 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 cargo run -p anki-e2e -- real-site up        # образ, контейнер, Brave; печатает адрес noVNC
 cargo run -p anki-e2e -- real-site run       # doctor --forvo и smoke 元気/げんき
 cargo run -p anki-e2e -- real-site down      # штатно закрыть Brave, удалить контейнер
-cargo run -p anki-e2e -- real-site purge --yes   # удалить также volumes с авторизацией и образы
+cargo run -p anki-e2e -- real-site purge --yes   # удалить также тома с авторизацией и образы
 ```
 
 Устройство:
@@ -319,12 +319,17 @@ cargo run -p anki-e2e -- real-site purge --yes   # удалить также vol
   (`PromptForDownloadLocation`). Пользовательский Brave не меняется;
 - noVNC (`--vnc-port`, по умолчанию 6080) и VNC для нативного клиента (`--rfb-port`,
   по умолчанию 5900) публикуются только на `127.0.0.1` хоста. Пароль VNC случайный,
-  хранится в volume состояния (0600): `docker exec anki-e2e-real-site cat /home/tester/state/vnc.txt`.
+  хранится в томе состояния (0600): `docker exec anki-e2e-real-site cat /home/tester/state/vnc.txt`.
   Нативный клиент (например, TigerVNC Viewer) надёжнее браузерного noVNC передаёт буфер
   обмена и раскладку. x11vnc запущен с `-skip_lockkeys`: регистр берётся из символа клиента,
   и Caps Lock не применяется повторно;
 - прокси для Brave берётся из `docker info` (Docker Desktop), явно — `--proxy`,
   отключается `--no-proxy`.
+
+Повторный `up` без параметров сохраняет работающую конфигурацию и, как `status`,
+показывает фактические порты Docker. Явные `--rebuild`, `--vnc-port`, `--rfb-port`,
+`--proxy` и `--no-proxy` на работающем стенде отклоняются: сначала выполните `down`,
+затем `up` с нужными параметрами. Профиль и остальные тома сохранятся.
 
 Изоляция контейнера: `--cap-drop ALL --cap-add SYS_CHROOT`, `no-new-privileges`, без
 `privileged` и без `seccomp=unconfined`. Процесс Brave работает от uid 1000 без действующих
@@ -336,11 +341,13 @@ SHA-256) и добавляет одно правило: `clone` и `unshare` р�
 mount-, cgroup-, UTS- и IPC-namespaces. Brave получает user-, PID- и network-namespaces,
 `setns` не разрешается. Профиль лежит в `target/anki-e2e/real-site/`.
 
-**Volumes — чувствительные локальные данные.** `anki-e2e-real-site-profile` хранит профиль
+**Тома — чувствительные локальные данные.** `anki-e2e-real-site-profile` хранит профиль
 Brave с авторизацией Forvo, `anki-e2e-real-site-state` — сопряжение адаптера, журналы,
 evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузки. Ресурсы помечены
 собственной меткой `io.github.anki-deck-toolkit.e2e.real-site`. `clean` их не трогает,
-`down` сохраняет volumes, удаляет их только `purge --yes`. В образ, отчёты и Git они не попадают.
+Перед использованием и удалением контейнера и томов проверяется значение метки `1`;
+конфликт имён с чужими ресурсами завершает команду без их изменения.
+`down` сохраняет тома, удаляет их только `purge --yes`. В образ, отчёты и Git они не попадают.
 
 Отчёт `target/anki-e2e/real-site-runs/<run_id>/report.{json,md}` содержит:
 - версию Brave, образ и коммит исходников;
