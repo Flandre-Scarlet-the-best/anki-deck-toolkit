@@ -618,8 +618,8 @@ fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
     let store = store(workspace.path());
     // Состояние версии 1 так, как его сохранял прежний код: без поля transport.
     let legacy = json!({"schema_version":1,"provider":"forvo_web","batch_id":"old","revision":0,
-        "cancelled":false,"paused":null,"items":[{"request":Pronunciation::new("元気","げんき").unwrap(),
-        "replace_expected_sha256":null,"acquisition":null,"outcome":null}]});
+        "cancelled":false,"paused":{"code":"challenge_required","message":"ожидание"},"items":[{"request":Pronunciation::new("元気","げんき").unwrap(),
+        "replace_expected_sha256":null,"acquisition":null,"outcome":{"code":"not_found","message":"нет записи"}}]});
     let batch: batch::ForvoBatch = serde_json::from_value(legacy.clone()).unwrap();
     let mut runtime = SafeBatchRuntime::open(store.root(), "old").unwrap();
     runtime.save(&batch).unwrap();

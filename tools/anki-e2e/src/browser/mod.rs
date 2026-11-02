@@ -328,6 +328,23 @@ async fn execute(
         report["stop"] = json!(stop);
         status
     };
+    let cli = find_cli(args.cli.as_deref());
+    report["cli"] = json!({"pronunciation_assets": cli, "used_by": "сценарии cli_*"});
+    if selected.iter().any(|name| name.starts_with("cli_"))
+        && let (Some(explicit), None) = (args.cli.as_deref(), &cli)
+    {
+        return stop(
+            report,
+            Stop::blocked(
+                "prerequisites",
+                "cli_not_executable",
+                format!(
+                    "--cli {}: файл отсутствует или не исполняемый",
+                    explicit.display()
+                ),
+            ),
+        );
+    }
     let Some(chrome) = chrome::find_chrome(args.chrome.as_deref()) else {
         return stop(
             report,
@@ -440,8 +457,6 @@ async fn execute(
             }
         })
     };
-    let cli = find_cli(args.cli.as_deref());
-    report["cli"] = json!({"pronunciation_assets": cli, "used_by": "сценарии cli_*"});
     let ctx = Ctx {
         chrome,
         cli,
@@ -501,7 +516,41 @@ async fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::deduplicate_scenarios;
+    use super::{BrowserArgs, deduplicate_scenarios, execute};
+    use crate::report::Status;
+    use std::{
+        path::Path,
+        sync::{Arc, atomic::AtomicBool},
+    };
+
+    #[tokio::test]
+    async fn invalid_explicit_cli_is_reported_before_browser_setup() {
+        let args = BrowserArgs {
+            scenarios: vec![],
+            chrome: None,
+            work_dir: None,
+            cli: Some("missing-anki-e2e-cli/cli".into()),
+            keep_profiles: false,
+        };
+        let mut report = serde_json::json!({});
+        let status = execute(
+            &args,
+            Path::new("."),
+            Path::new("."),
+            &["cli_fetch".into()],
+            &mut report,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        assert_eq!(status, Status::Blocked);
+        assert_eq!(report["stop"]["reason"], "cli_not_executable");
+        assert!(
+            report["stop"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing-anki-e2e-cli/cli")
+        );
+    }
 
     #[test]
     fn duplicate_scenarios_keep_the_first_occurrence_and_order() {

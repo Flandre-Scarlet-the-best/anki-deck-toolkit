@@ -71,7 +71,7 @@ pub struct FetchItem {
 pub struct Failure {
     pub code: String,
     pub message: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovery_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<CandidateReport>,

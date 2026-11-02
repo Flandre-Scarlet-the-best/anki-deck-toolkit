@@ -241,7 +241,7 @@ x86_64 или aarch64, сеть до GitHub, AnkiWeb, Docker Hub и зеркал
 
 ## Браузерный набор Forvo-Brave
 
-`cargo run -p anki-e2e -- browser [--scenarios a,b] [--chrome <путь>] [--work-dir <каталог>] [--keep-profiles]` —
+`cargo run -p anki-e2e -- browser [--scenarios a,b] [--chrome <путь>] [--cli <путь>] [--work-dir <каталог>] [--keep-profiles]` —
 отдельный явный набор для адаптера [Forvo через обычный Brave](../asset-store/forvo-brave.md).
 Он не требует Docker, Anki Desktop, персонального Brave, профиля и аккаунта Forvo и не
 выходит во внешнюю сеть. Это минимальная изолированная граница внутри того же runner.
