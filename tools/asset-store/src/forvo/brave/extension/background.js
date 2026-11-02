@@ -266,14 +266,17 @@ async function forgetLeftover(tabId) {
     const list = await leftovers();
     if (list.includes(tabId)) await chrome.storage.session.set({[LEFTOVER_KEY]: list.filter(id => id !== tabId)});
 }
+// Проверяются оба адреса: во время навигации `url` ещё указывает на forvo.com,
+// а `pendingUrl` — уже туда, куда пользователь уводит вкладку.
 function leftoverAdopted(tab) {
-    const raw = tab.url || tab.pendingUrl || '';
-    if (raw === '' || raw === 'about:blank') return false;
-    try {
-        return new URL(raw).origin !== FORVO_ORIGIN;
-    } catch {
-        return true;
-    }
+    return [tab.url, tab.pendingUrl].some(raw => {
+        if (!raw || raw === 'about:blank') return false;
+        try {
+            return new URL(raw).origin !== FORVO_ORIGIN;
+        } catch {
+            return true;
+        }
+    });
 }
 // Отказ remove по уже закрытой вкладке — не остаток: отсутствие подтверждает
 // полный список вкладок, а не текст ошибки.
@@ -329,7 +332,9 @@ async function ensureTab() {
     try {
         await rememberLeftover(tab.id);
     } catch (error) {
-        // Доказательство не сохранилось: вкладку нужно убрать сейчас.
+        // Доказательство не сохранилось: вкладку нужно убрать сейчас. При двойном
+        // отказе её ID нигде не остаётся — повтор её не найдёт, закрыть её может
+        // только пользователь; ошибка об этом сообщает (leftover_not_recorded).
         try {
             await removeTab(tab.id);
         } catch (cleanup) {

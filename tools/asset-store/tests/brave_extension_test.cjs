@@ -545,6 +545,19 @@ test('остаток, уведённый пользователем на дру�
     assert.deepEqual(h.session.leftoverTabs, []);
 });
 
+test('остаток в процессе ухода на другой сайт не закрывается, переход на forvo.com — закрывается', async t => {
+    const h = harness(t);
+    const p = profile(h);
+    // Навигация не завершена: url ещё Forvo, pendingUrl уже чужой сайт.
+    p.tabs.push({id: 41, windowId: 7, groupId: -1, url: 'https://forvo.com/', pendingUrl: 'https://example.org/', width: 800});
+    // Начальная about:blank собственной вкладки, переходящей на forvo.com.
+    p.tabs.push({id: 42, windowId: 7, groupId: -1, url: 'about:blank', pendingUrl: 'https://forvo.com/', width: 800});
+    h.session.leftoverTabs = [41, 42];
+    await h.close();
+    assert.deepEqual(p.tabs.map(t => t.id), [41]);
+    assert.deepEqual(h.session.leftoverTabs, []);
+});
+
 test('две цели в одном профиле: close каждой закрывает только своё', async t => {
     const a = harness(t);
     const b = harness(t);
