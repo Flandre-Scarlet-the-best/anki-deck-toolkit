@@ -73,5 +73,7 @@ elif args[0] == 'run':
     save()
 elif args[0] == 'logs':
     print('real-site session ready')
+elif args[:2] == ['builder', 'prune']:
+    pass
 else:
     fail()

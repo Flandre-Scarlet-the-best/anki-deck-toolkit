@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 pub const CONTAINER: &str = "anki-e2e-real-site";
 pub const LABEL_REAL_SITE: &str = "io.github.anki-deck-toolkit.e2e.real-site";
 const IMAGE_REPO: &str = "anki-e2e/real-site";
+const REAL_SITE_BUILD_CACHE: &str = "anki-e2e-real-site-target";
 /// Том → точка монтирования. Профиль хранит авторизацию: это чувствительные данные.
 pub const VOLUMES: [(&str, &str); 3] = [
     (
@@ -952,7 +953,9 @@ fn down(stand: &Stand) -> Outcome {
 
 fn purge(stand: &Stand, yes: bool) -> Outcome {
     if !yes {
-        println!("Будут удалены контейнер, образы и тома (профиль Brave с авторизацией Forvo):");
+        println!(
+            "Будут удалены контейнер, образы, сборочный кэш и тома (профиль Brave с авторизацией Forvo):"
+        );
         for (volume, _) in VOLUMES {
             println!("  {volume}");
         }
@@ -984,6 +987,12 @@ fn purge(stand: &Stand, yes: bool) -> Outcome {
         }
     }
     let _ = std::fs::remove_dir_all(stand.work.join("real-site"));
+    if let Err(e) = stand
+        .docker
+        .prune_cache_mounts_for(&[REAL_SITE_BUILD_CACHE])
+    {
+        failures.push(e);
+    }
     if failures.is_empty() {
         println!("Стенд удалён полностью");
         Ok(Status::Pass)

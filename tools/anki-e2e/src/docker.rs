@@ -261,12 +261,14 @@ impl Docker {
     /// Прицельное удаление cache mounts стенда: только `exec.cachemount` с
     /// точным идентификатором в конце описания, без общего prune.
     pub fn prune_cache_mounts(&self) -> Result<()> {
-        let ids = CACHE_MOUNTS
-            .iter()
-            .map(|id| id.strip_prefix("anki-e2e-cargo-").unwrap_or(id))
-            .collect::<Vec<_>>()
-            .join("|");
-        let description = format!(r#"description~="with id \"/anki-e2e-cargo-({ids})\"$""#);
+        self.prune_cache_mounts_for(&CACHE_MOUNTS)
+    }
+
+    pub(crate) fn prune_cache_mounts_for(&self, ids: &[&str]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let description = cache_mount_description(ids);
         self.text(&[
             "builder",
             "prune",
@@ -329,6 +331,10 @@ fn is_stand_cache_mount(record: &Value) -> bool {
         && CACHE_MOUNTS
             .iter()
             .any(|id| description.ends_with(&format!("with id \"/{id}\"")))
+}
+
+fn cache_mount_description(ids: &[&str]) -> String {
+    format!(r#"description~="with id \"/({})\"$"#, ids.join("|"))
 }
 
 /// Ожидание дочернего процесса с отменой: SIGINT группе (штатная отмена Docker
@@ -557,6 +563,18 @@ mod tests {
             "regular",
             "anki-e2e-cargo-target"
         )));
+    }
+
+    #[test]
+    fn cache_mount_prune_filter_uses_only_requested_ids() {
+        assert_eq!(
+            cache_mount_description(&CACHE_MOUNTS),
+            r#"description~="with id \"/(anki-e2e-cargo-registry|anki-e2e-cargo-target)\"$"#
+        );
+        assert_eq!(
+            cache_mount_description(&["anki-e2e-real-site-target"]),
+            r#"description~="with id \"/(anki-e2e-real-site-target)\"$"#
+        );
     }
 
     #[test]

@@ -179,6 +179,20 @@ fn owned_down_preserves_volumes_and_purge_removes_them() {
     assert_eq!(f.state()["volumes"], owned()["volumes"]);
     success(&f.run(&["purge", "--yes"]));
     assert_eq!(f.state()["volumes"], json!({}));
+    let cache_filter = r#"description~="with id \"/(anki-e2e-real-site-target)\"$"#;
+    let expected: Vec<String> = [
+        "builder",
+        "prune",
+        "--force",
+        "--filter",
+        "type=exec.cachemount",
+        "--filter",
+        cache_filter,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert!(f.calls().contains(&expected));
 }
 
 #[test]

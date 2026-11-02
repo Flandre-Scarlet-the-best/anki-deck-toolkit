@@ -302,7 +302,7 @@ forvo brave setup`: manifest и ограничение `https://forvo.com` не 
 cargo run -p anki-e2e -- real-site up        # образ, контейнер, Brave; печатает адрес noVNC
 cargo run -p anki-e2e -- real-site run       # doctor --forvo и smoke 元気/げんき
 cargo run -p anki-e2e -- real-site down      # штатно закрыть Brave, удалить контейнер
-cargo run -p anki-e2e -- real-site purge --yes   # удалить также тома с авторизацией и образы
+cargo run -p anki-e2e -- real-site purge --yes   # удалить тома, образы и cache mount сборки стенда
 ```
 
 Устройство:
@@ -348,6 +348,8 @@ evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузк�
 Перед использованием и удалением контейнера и томов проверяется значение метки `1`;
 конфликт имён с чужими ресурсами завершает команду без их изменения.
 `down` сохраняет тома, удаляет их только `purge --yes`. В образ, отчёты и Git они не попадают.
+`purge --yes` удаляет также BuildKit cache mount `anki-e2e-real-site-target` точным фильтром;
+общий слоевой кэш Docker не затрагивается.
 
 Отчёт `target/anki-e2e/real-site-runs/<run_id>/report.{json,md}` содержит:
 - версию Brave, образ и коммит исходников;
