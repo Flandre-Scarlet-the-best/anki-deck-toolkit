@@ -26,6 +26,20 @@ pub const CACHE_MOUNTS: [&str; 2] = ["anki-e2e-cargo-registry", "anki-e2e-cargo-
 /// Сколько ждать штатной отмены `docker build` после SIGINT до SIGKILL.
 const BUILD_CANCEL_GRACE: Duration = Duration::from_secs(15);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildError {
+    Failed(String),
+    Interrupted(String),
+}
+
+impl std::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(message) | Self::Interrupted(message) => f.write_str(message),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Docker {
     config: Option<PathBuf>,
@@ -137,7 +151,7 @@ impl Docker {
     }
 
     /// Сборка с потоковым журналом; при неудаче возвращает хвост журнала.
-    pub fn build(&self, spec: &Build) -> Result<()> {
+    pub fn build(&self, spec: &Build) -> std::result::Result<(), BuildError> {
         let Build {
             dockerfile,
             context,
@@ -164,32 +178,35 @@ impl Docker {
             c.arg("--label").arg(format!("{k}={v}"));
         }
         c.arg(context);
-        let file = std::fs::File::create(log).map_err(|e| e.to_string())?;
+        let file = std::fs::File::create(log).map_err(|e| BuildError::Failed(e.to_string()))?;
         // Собственная группа процессов: отмену доставляет runner, а не терминал.
         let child = c
-            .stdout(file.try_clone().map_err(|e| e.to_string())?)
+            .stdout(
+                file.try_clone()
+                    .map_err(|e| BuildError::Failed(e.to_string()))?,
+            )
             .stderr(file)
             .process_group(0)
             .spawn()
-            .map_err(|e| format!("docker build: {e}"))?;
+            .map_err(|e| BuildError::Failed(format!("docker build: {e}")))?;
         let Some(status) = wait_interruptible(child, *interrupted, BUILD_CANCEL_GRACE)
-            .map_err(|e| format!("docker build: {e}"))?
+            .map_err(|e| BuildError::Failed(format!("docker build: {e}")))?
         else {
-            return Err(format!(
+            return Err(BuildError::Interrupted(format!(
                 "docker build прерван пользователем; журнал {}",
                 log.display()
-            ));
+            )));
         };
         if status.success() {
             return Ok(());
         }
         let text = std::fs::read_to_string(log).unwrap_or_default();
         let tail: Vec<&str> = text.lines().rev().take(25).collect();
-        Err(format!(
+        Err(BuildError::Failed(format!(
             "docker build завершился {status}; журнал {}:\n{}",
             log.display(),
             tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-        ))
+        )))
     }
 
     pub fn remove_container(&self, id: &str) -> Result<()> {

@@ -349,7 +349,7 @@ impl Stand {
         info: &Value,
         rebuild: bool,
         interrupted: &AtomicBool,
-    ) -> Result<(String, source::Provenance)> {
+    ) -> std::result::Result<(String, source::Provenance), BuildImageError> {
         let build = self.work.join("real-site").join("build");
         let staging = build.join(format!("src-staging-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&staging);
@@ -484,6 +484,36 @@ pub fn run(args: &RealSiteArgs, interrupted: Arc<AtomicBool>) -> u8 {
 
 type Outcome = std::result::Result<Status, (Status, String)>;
 
+#[derive(Debug, PartialEq, Eq)]
+enum BuildImageError {
+    Failed(String),
+    Interrupted(String),
+}
+
+impl From<String> for BuildImageError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<docker::BuildError> for BuildImageError {
+    fn from(error: docker::BuildError) -> Self {
+        match error {
+            docker::BuildError::Failed(message) => Self::Failed(message),
+            docker::BuildError::Interrupted(message) => Self::Interrupted(message),
+        }
+    }
+}
+
+impl BuildImageError {
+    fn into_outcome(self) -> (Status, String) {
+        match self {
+            Self::Failed(message) => error(message),
+            Self::Interrupted(message) => (Status::Interrupted, message),
+        }
+    }
+}
+
 fn error(message: impl Into<String>) -> (Status, String) {
     (Status::Error, message.into())
 }
@@ -530,7 +560,7 @@ fn up(
         let rfb_port = rfb_port.unwrap_or(5900);
         let (tag, provenance) = stand
             .build_image(info, rebuild, interrupted)
-            .map_err(error)?;
+            .map_err(BuildImageError::into_outcome)?;
         let seccomp = stand.seccomp_profile().map_err(error)?;
         let proxy = if no_proxy {
             None
@@ -1008,6 +1038,21 @@ mod tests {
         std::fs::write(&path, b"{}").unwrap();
         assert!(find_cached_seccomp_profile(&dir, &policy_hash).is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn image_build_maps_only_typed_cancellation_to_interrupted() {
+        let canceled = "docker build прерван пользователем; журнал build.log".to_owned();
+        assert_eq!(
+            BuildImageError::Interrupted(canceled.clone()).into_outcome(),
+            (Status::Interrupted, canceled)
+        );
+
+        let failed = "docker build прерван пользователем; журнал build.log".to_owned();
+        assert_eq!(
+            BuildImageError::Failed(failed.clone()).into_outcome(),
+            (Status::Error, failed)
+        );
     }
 
     #[test]

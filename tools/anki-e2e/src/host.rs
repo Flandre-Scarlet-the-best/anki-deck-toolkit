@@ -672,15 +672,17 @@ fn execute(
             no_cache: args.rebuild,
             interrupted: &|| interrupted.load(Ordering::SeqCst),
         }) {
-            if interrupted.load(Ordering::SeqCst) {
-                return run.stop(Stop {
+            return run.stop(match e {
+                docker::BuildError::Interrupted(message) => Stop {
                     status: Status::Interrupted,
                     stage: "image_build",
                     reason: "interrupted".into(),
-                    message: e,
-                });
-            }
-            return run.stop(Stop::error("image_build", "anki_image_build_failed", e));
+                    message,
+                },
+                docker::BuildError::Failed(message) => {
+                    Stop::error("image_build", "anki_image_build_failed", message)
+                }
+            });
         }
     } else {
         log.line(&format!(
@@ -722,15 +724,17 @@ fn execute(
             no_cache: args.rebuild,
             interrupted: &|| interrupted.load(Ordering::SeqCst),
         }) {
-            if interrupted.load(Ordering::SeqCst) {
-                return run.stop(Stop {
+            return run.stop(match e {
+                docker::BuildError::Interrupted(message) => Stop {
                     status: Status::Interrupted,
                     stage: "image_build",
                     reason: "interrupted".into(),
-                    message: e,
-                });
-            }
-            return run.stop(Stop::error("image_build", "run_image_build_failed", e));
+                    message,
+                },
+                docker::BuildError::Failed(message) => {
+                    Stop::error("image_build", "run_image_build_failed", message)
+                }
+            });
         }
     } else {
         log.line(&format!(

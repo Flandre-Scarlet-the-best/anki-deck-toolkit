@@ -65,6 +65,13 @@ impl Fixture {
                 format!("{}:{}", self.0.display(), std::env::var("PATH").unwrap()),
             )
             .env("DOCKER_FIXTURE_STATE", self.0.join("state"))
+            // Промах кэша seccomp должен падать, а не обращаться к сети.
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("https_proxy", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("all_proxy", "http://127.0.0.1:9")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
             .output()
             .unwrap()
     }
