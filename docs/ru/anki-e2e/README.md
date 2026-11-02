@@ -367,10 +367,13 @@ evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузк�
 - production-шаги после зелёного `smoke` (`--acceptance-only` их отключает):
   - `fetch` в отдельное тестовое хранилище: SHA ресурса равен `downloaded_sha256`,
     ресурс не `Verified`, вкладки пользователя не изменены, `verify` проходит;
-  - пакет из `--surface` и `--batch-surface` (по умолчанию `猫`/`ねこ`): `batch-start
+  - пакет из `--surface` и `--batch-surface`/`--batch-reading` (по умолчанию `猫`/`ねこ`): `batch-start
     --max-items 1` обрабатывает одно слово, `batch-resume` завершает второе. Число
     начатых загрузок в журнале запуска равно числу попыток второго слова;
   - повторный `batch-resume` не меняет ревизию и не начинает загрузок.
+
+Машинные имена шагов пакета и завершающей очистки в отчёте: `batch_start`,
+`batch_resume`, `batch_resume_again` и `cleanup`.
 
 Тестовые хранилища лежат в volume состояния
 (`/home/tester/state/real-site-stores/<run_id>`). Они не попадают в Git и

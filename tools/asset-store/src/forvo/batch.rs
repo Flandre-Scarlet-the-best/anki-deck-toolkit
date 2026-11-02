@@ -535,10 +535,12 @@ pub async fn resume(
         // всё равно требует сопряжения до импорта.
         if batch.paused.as_ref().is_some_and(|p| p.recovery_required) {
             runtime.release_lock()?;
-            let connected = launch(store, id, &backend).await;
+            let connected = launch(store, id, &backend).await.map(|s| {
+                session = Some(s);
+            });
             runtime.reacquire_lock()?;
             batch = reload_after_acquisition(&mut runtime)?;
-            session = Some(connected?);
+            connected?;
             batch.paused = None;
             batch.revision += 1;
             runtime.save(&batch)?;
@@ -713,11 +715,13 @@ fn finish_resume(
         if let Some(original) = &mut batch.paused {
             original.recovery_required = true;
         } else {
-            batch.paused = Some(Failure::from(AssetError::with_details(
+            let mut failure = Failure::from(AssetError::with_details(
                 cleanup.code,
                 cleanup.message.clone(),
                 cleanup.details.clone(),
-            )));
+            ));
+            failure.recovery_required = true;
+            batch.paused = Some(failure);
         }
         batch.revision += 1;
         if let Err(save) = runtime.save(&batch) {
@@ -785,6 +789,21 @@ mod cleanup_tests {
         assert!(
             error.details["browser_cleanup"]["details"]["checkpoint_error"]["message"].is_string()
         );
+        runtime.reacquire_lock().unwrap();
+        let batch = load(&mut runtime).unwrap();
+        let cleanup = AssetError::with_details(
+            ErrorCode::InvalidTransition,
+            "ошибка очистки CDP",
+            serde_json::json!({"code":"browser_cleanup_failed"}),
+        );
+        assert!(finish_resume(&mut runtime, batch, Ok(()), Err(cleanup)).is_err());
+        drop(runtime);
+        let saved = status(&store, "failure").unwrap();
+        assert_eq!(
+            saved.paused.as_ref().unwrap().code,
+            "browser_cleanup_failed"
+        );
+        assert!(saved.paused.unwrap().recovery_required);
     }
 
     #[tokio::test]

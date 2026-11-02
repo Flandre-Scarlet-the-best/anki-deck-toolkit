@@ -165,10 +165,10 @@ fn signal(child: &tokio::process::Child, signal: rustix::process::Signal) -> Res
     rustix::process::kill_process(pid, signal).map_err(|e| e.to_string())
 }
 
+pub(super) const MISSING_CLI: &str = "нет pronunciation-assets: соберите cargo build -p asset-store --bin pronunciation-assets или задайте --cli";
+
 fn blocked_without_cli(env: &mut Env) -> Result<Cli> {
-    Cli::new(env).ok_or_else(|| {
-        "нет pronunciation-assets: соберите cargo build -p asset-store --bin pronunciation-assets или задайте --cli".to_owned()
-    })
+    Cli::new(env).ok_or_else(|| MISSING_CLI.to_owned())
 }
 
 fn sha(env: &Env, record: &str) -> String {

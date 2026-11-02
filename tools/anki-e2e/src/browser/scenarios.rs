@@ -3,6 +3,7 @@
 //! файлы каталога загрузок и их SHA-256, а не наличие строк в коде.
 
 use super::chrome::{LaunchOptions, TestBrowser, download_files};
+use super::cli_scenarios;
 use super::fixture::{self, Behavior, Gate};
 use super::{Ctx, Outcome};
 use crate::report::Status;
@@ -62,6 +63,13 @@ async fn wait_true(rx: &mut tokio::sync::watch::Receiver<bool>) {
 }
 
 pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
+    if name.starts_with("cli_") && ctx.cli.is_none() {
+        return (
+            Status::Blocked,
+            Some(cli_scenarios::MISSING_CLI.into()),
+            Outcome::default(),
+        );
+    }
     let dir = ctx.run_dir.join("scenarios").join(name);
     let browser = match TestBrowser::launch(LaunchOptions {
         executable: &ctx.chrome,
@@ -84,14 +92,6 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
         conn: None,
         out: Outcome::default(),
     };
-    if name.starts_with("cli_") && ctx.cli.is_none() {
-        let _ = env.browser.shutdown().await;
-        return (
-            Status::Blocked,
-            Some("нет pronunciation-assets: cargo build -p asset-store --bin pronunciation-assets или --cli".into()),
-            Outcome::default(),
-        );
-    }
     let mut interrupt = ctx.interrupt.clone();
     let result = tokio::select! {
         result = tokio::time::timeout(SCENARIO_LIMIT, body(name, &mut env)) => match result {
