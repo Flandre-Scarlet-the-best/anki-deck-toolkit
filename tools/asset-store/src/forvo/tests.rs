@@ -355,6 +355,28 @@ fn execution_lease_survives_releasing_state_lock_and_rejects_another_runner() {
     assert!(second.execution_lease().is_ok());
 }
 
+/// Дочерний процесс, созданный `fork` в другом потоке, до `exec` держит копию
+/// дескриптора lease с тем же открытым файловым описанием. Завершение
+/// исполнителя обязано снять блокировку, не дожидаясь закрытия такой копии.
+#[test]
+fn execution_lease_release_does_not_wait_for_inherited_descriptor_copy() {
+    let workspace =
+        crate::temp_workspace::TempWorkspace::create("forvo-execution-lease-copy").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), "copy").unwrap();
+    let lease = runtime.execution_lease().unwrap();
+    let inherited = lease.duplicate_descriptor_for_test();
+    drop(lease);
+    drop(runtime);
+    let next = crate::batch_runtime::SafeBatchRuntime::open(store.root(), "copy").unwrap();
+    assert!(next.execution_lease().is_ok());
+    drop(inherited);
+}
+
 pub(crate) fn candidate(
     id: &str,
     votes: Option<i64>,
