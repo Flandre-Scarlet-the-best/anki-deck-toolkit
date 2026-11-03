@@ -120,7 +120,9 @@ impl Tree {
         }
         json!({"status":"partial","samples":self.samples,
             "rss_sum_peak_bytes":self.rss_peak,"rss_sum_last_bytes":self.rss_last,"processes_last":self.processes_last,"trajectory":self.trajectory,"root_hwm_observed_bytes":self.root_hwm,
-            "cpu_observed_ticks":self.peaks.values().map(|(first,last)|last-first).sum::<u64>(),
+            "cpu_observed_ticks":(self.samples>1).then(||self.peaks.values().map(|(first,last)|last-first).sum::<u64>()),
+            "cpu_status":if self.samples>1 {"partial"} else {"unavailable"},
+            "cpu_reason":if self.samples>1 {"нижний наблюдённый прирост между выборками"} else {"единственная выборка не задаёт интервал CPU"},
             "reason":"выборка 250 мс; CPU — прирост между первой и последней выборкой каждого PID/starttime; короткие процессы и края интервала могут отсутствовать; RSS суммирует shared pages"})
     }
 }

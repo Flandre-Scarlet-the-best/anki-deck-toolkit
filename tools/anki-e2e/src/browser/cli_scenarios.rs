@@ -64,7 +64,7 @@ impl Cli {
         })
     }
 
-    fn command(&self, brave: bool, args: &[&str]) -> tokio::process::Command {
+    pub(super) fn command(&self, brave: bool, args: &[&str]) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.bin);
         command
             .arg("--repository-root")

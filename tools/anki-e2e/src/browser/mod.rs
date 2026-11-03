@@ -9,6 +9,7 @@
 
 mod chrome;
 mod cli_scenarios;
+mod crash_windows;
 mod faults;
 mod fixture;
 mod load;
@@ -50,7 +51,12 @@ pub const SCENARIOS: &[&str] = &[
 ];
 
 // Долгие проверки никогда не входят в неявный короткий набор.
-const OPT_IN_SCENARIOS: &[&str] = &["cli_batch_load", "cli_batch_faults", "cli_batch_enospc"];
+const OPT_IN_SCENARIOS: &[&str] = &[
+    "cli_batch_load",
+    "cli_batch_faults",
+    "cli_batch_enospc",
+    "cli_batch_crash_windows",
+];
 
 #[derive(Debug, Clone, Args)]
 pub struct BrowserArgs {

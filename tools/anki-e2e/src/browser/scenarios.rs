@@ -63,6 +63,11 @@ async fn wait_true(rx: &mut tokio::sync::watch::Receiver<bool>) {
 }
 
 pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
+    if name == "cli_batch_crash_windows"
+        && let Some(reason) = super::crash_windows::prerequisite()
+    {
+        return (Status::Blocked, Some(reason), Outcome::default());
+    }
     if name == "cli_batch_enospc" && ctx.fault_volume.is_none() {
         return (
             Status::Blocked,
@@ -173,6 +178,7 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "cli_batch_load" => super::load::run(env).await,
         "cli_batch_faults" => super::faults::run(env).await,
         "cli_batch_enospc" => super::faults::enospc(env).await,
+        "cli_batch_crash_windows" => super::crash_windows::run(env).await,
         "cli_batch_recovery" => super::cli_scenarios::cli_batch_recovery(env).await,
         "cli_foreign_downloads" => super::cli_scenarios::cli_foreign_downloads(env).await,
         "adapter_doctor" => super::target_scenarios::adapter_doctor(env).await,

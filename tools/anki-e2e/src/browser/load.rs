@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 async fn resources(env: &mut Env<'_>, page: &chromiumoxide::Page) -> Result<Value> {
     env.connect().await?;
     let ping = env.call("ping", json!({})).await.map_err(err)?;
-    let snapshot = env.call("snapshot", json!({})).await.map_err(err)?;
+    let mut snapshot = env.call("snapshot", json!({})).await.map_err(err)?;
+    let mut page_urls = env.browser.page_urls().await?;
+    page_urls.sort();
+    snapshot["cdp_page_urls"] = json!(page_urls);
     env.conn.take().expect("bridge").bridge.disconnect().await;
     // API расширения читается из его собственной страницы; никаких новых
     // permissions или диагностических команд в production-расширении.
@@ -205,7 +208,8 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             }
         };
         let seconds = started.elapsed().as_secs_f64();
-        let mut evidence_ok = run.code == 0;
+        let mut evidence_ok =
+            run.code == 0 && run.out["result"]["effective_transport"] == "brave_extension";
         let store = cli.open_store()?;
         let integrity = store.verify_integrity().map_err(|e| e.message)?;
         let mut runtime = SafeBatchRuntime::open(store.root(), &id).map_err(|e| e.message)?;

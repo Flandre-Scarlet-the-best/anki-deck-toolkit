@@ -328,7 +328,8 @@ Vivaldi получают `BLOCKED` с этой причиной. Вкладка 
 
 ### Длительные изолированные пакеты
 
-`cli_batch_load`, `cli_batch_faults` и `cli_batch_enospc` запускаются **только явно** и не входят
+`cli_batch_load`, `cli_batch_faults`, `cli_batch_enospc` и
+`cli_batch_crash_windows` запускаются **только явно** и не входят
 в набор без `--scenarios`, обычные тесты или CI. Нужны те же браузер, fixture,
 расширение и production CLI; отдельного пакетного движка нет.
 
@@ -339,6 +340,7 @@ target/debug/anki-e2e browser --scenarios cli_batch_load --chrome "$CHROME_BIN" 
 target/debug/anki-e2e browser --scenarios cli_batch_load --chrome "$CHROME_BIN" --batch-items 128
 target/debug/anki-e2e browser --scenarios cli_batch_load --chrome "$CHROME_BIN" --batch-items 128 --batch-count 3
 target/debug/anki-e2e browser --scenarios cli_batch_faults --chrome "$CHROME_BIN"
+target/debug/anki-e2e browser --scenarios cli_batch_crash_windows --chrome "$CHROME_BIN"
 ```
 
 `--batch-items` принимает 1…128, `--batch-count` — 1…8. Один сценарий
@@ -406,12 +408,32 @@ sudo umount "$volume"
 rmdir "$volume"
 ```
 
-SIGKILL точно внутри
-`fsync`/`rename` или CAS-импорта требует контролируемой точки остановки.
-Эти окна перечислены в `cli_batch_faults/evidence.not_tested` с `NOT_TESTED`, а не покрыты
-успехом соседнего сценария. Прежний `cli_batch_recovery` отдельно проверяет
-чтение библиотечно созданных состояний checkpoint/импорта; он не доказывает
-реального убийства CLI в этих окнах.
+`cli_batch_crash_windows` (тоже только явно) убивает настоящий production
+CLI сигналом SIGKILL точно в четырёх окнах durable-записи второго элемента
+после импорта первого: `fsync` временного blob (`blob_sync`), `fsync`
+нового `state.json` до публикации (`checkpoint_sync`), `fdatasync` журнала
+CAS-импорта (`import_sync`) и `fsync` состояния с итогом импорта
+(`outcome_sync`). Окно ловит GDB (`catch syscall fsync fdatasync`,
+сценарий `crash-window.gdb`) по дескриптору из `/proc` и уже записанному
+состоянию; сам GDB ничего не пишет и не подменяет. Факт убийства
+подтверждается независимо через `strace` (`CLD_KILLED`/`SIGKILL` у
+наблюдённого PID), а прежний `state.json` — по SHA-256 до убийства.
+Нужны Linux x86_64, GDB с Python и `strace`; иначе `BLOCKED` с причиной.
+
+Ожидаемые постусловия: первая запись и подтверждённые blobs читаются;
+до опубликованного checkpoint (`blob_sync`, `checkpoint_sync`) вторая
+загрузка повторяется ровно один раз, после него (`import_sync`,
+`outcome_sync`) — не повторяется; повторный `resume` идемпотентен.
+Временные файлы атомарной записи пакета (`.tmp-<pid>-<n>`) удаляются при
+следующем открытии пакета под его эксклюзивной блокировкой. Staging импорта
+хранилища (`.runtime/.tmp/ingest-*.tmp`) создаётся до блокировки
+хранилища, поэтому после SIGKILL в окне `import_sync` остаётся не больше
+одного такого файла — это известное ограничение, оно фиксируется отдельной
+проверкой, а не скрывается. `resume` одних сохранённых байтов работает
+офлайн и браузер не подключает: вкладку убитого процесса освобождает
+следующая подключённая сессия с `--close-tab`, что проверяется в конце
+сценария. Прежний `cli_batch_recovery` по-прежнему проверяет чтение
+библиотечно созданных состояний.
 
 Относительный `--work-dir` разрешается в абсолютный до создания профиля,
 чтобы Chromium получил абсолютный `download.default_directory`.

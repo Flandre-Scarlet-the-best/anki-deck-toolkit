@@ -265,7 +265,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     env.out.check("SIGKILL при второй загрузке: первая сохранена, второй нужен один повтор; зависания нет",!exit.success() && recovered.code==0 && fixture.requests_for(fixture::RECORD_A)==counts.0+1 && fixture.requests_for(fixture::RECORD_3)==counts.1+2,json!({"killed_status":exit.to_string(),"exit":recovered.code,"downloads_first":fixture.requests_for(fixture::RECORD_A)-counts.0,"downloads_second":fixture.requests_for(fixture::RECORD_3)-counts.1}));
     env.out.evidence.insert("not_tested".into(),json!([
         {"case":"ENOSPC","status":"NOT_TESTED","reason":"отдельный сценарий cli_batch_enospc требует --fault-volume с пустым ограниченным tmpfs; этот сценарий его не заполняет"},
-        {"case":"SIGKILL внутри fsync/rename checkpoint или CAS-import","status":"NOT_TESTED","reason":"нет production failpoint для точного синхронного окна; проверены реальные отказы записи и SIGKILL после предыдущего checkpoint, но они не доказывают это окно"}
+        {"case":"SIGKILL внутри fsync/rename checkpoint или CAS-import","status":"NOT_TESTED","reason":"в этом сценарии не проверяется; точные fsync-окна покрывает отдельный opt-in cli_batch_crash_windows (GDB + strace)"}
     ]));
     env.connect().await?;
     env.residual_clean().await
