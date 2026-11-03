@@ -294,11 +294,16 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         );
         env.out.check(format!("{id}: полные таймеры без смешения вложенных items"), timing_ok, json!({"outer_items":diagnostics["items"].as_array().map(Vec::len),"inner_items":diagnostics["acquisition_items"].as_array().map(Vec::len)}));
         env.out.check(format!("{id}: resume без повторных загрузок и смены ревизии"), no_repeat && resumed.code == 0 && resumed.out["result"]["revision"] == revision, json!({"revision":revision,"resume_revision":resumed.out["result"]["revision"],"requests":requests_after}));
+        // Подусловия сохраняются отдельно: провал виден без повторного прогона.
+        let resources_clean = clean(&snapshot, &baseline_records, &baseline_tabs);
+        let downloads_now = super::chrome::download_files(&env.downloads());
+        let mut resources_evidence = snapshot.clone();
+        resources_evidence["check"] = json!({"resources_clean":resources_clean,
+            "user_files_kept":downloads_now == user_files,"downloads_now":downloads_now});
         env.out.check(
             format!("{id}: ресурсы освобождены, чужие вкладки, records и файл сохранены"),
-            clean(&snapshot, &baseline_records, &baseline_tabs)
-                && super::chrome::download_files(&env.downloads()) == user_files,
-            snapshot,
+            resources_clean && downloads_now == user_files,
+            resources_evidence,
         );
         batches.push(batch_report);
         // Сохраняем и при последующей ошибке: динамика уже завершённых пакетов не теряется.
