@@ -429,6 +429,27 @@ fn page(body: &str, account: bool) -> String {
 }
 
 fn word_page(word: &str) -> Option<String> {
+    // Только ограниченный синтетический корпус; произвольные слова fixture
+    // по-прежнему отклоняет. Байты каждой записи готовит корпус прогона.
+    if let Some((surface, _, record)) = (0..1024)
+        .map(load_word)
+        .find(|(surface, _, _)| surface == word)
+    {
+        return Some(page(
+            &ja_section(
+                &surface,
+                &[Row {
+                    id: &record,
+                    votes: 5,
+                    speaker: "Female from Japan",
+                    button_word: &surface,
+                    button_record: &record,
+                    href_record: &record,
+                }],
+            ),
+            true,
+        ));
+    }
     let word: &'static str = [
         WORD,
         WORD_LOGIN,
@@ -545,6 +566,42 @@ fn word_page(word: &str) -> Option<String> {
         ),
         _ => return None,
     })
+}
+
+/// Детерминированные разные японские пары для нагрузки (не словарные статьи).
+pub(super) fn load_word(index: usize) -> (String, String, String) {
+    assert!(index < 1024);
+    const KANA: &[char] = &[
+        'あ', 'い', 'う', 'え', 'お', 'か', 'き', 'く', 'け', 'こ', 'さ', 'し', 'す', 'せ', 'そ',
+        'た', 'ち', 'つ', 'て', 'と', 'な', 'に', 'ぬ', 'ね', 'の', 'は', 'ひ', 'ふ', 'へ', 'ほ',
+        'ま', 'み',
+    ];
+    let suffix = format!("{}{}", KANA[index / 32], KANA[index % 32]);
+    (
+        format!("試験{suffix}"),
+        format!("しけん{suffix}"),
+        (8_000_000 + index).to_string(),
+    )
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+    #[test]
+    fn load_corpus_has_distinct_valid_pairs_and_record_buttons() {
+        let mut pairs = std::collections::HashSet::new();
+        let mut records = std::collections::HashSet::new();
+        for i in 0..1024 {
+            let (surface, reading, record) = load_word(i);
+            asset_store::pronunciation::Pronunciation::new(&surface, &reading).unwrap();
+            assert!(pairs.insert((surface.clone(), reading)));
+            assert!(records.insert(record.clone()));
+            let page = word_page(&surface).unwrap();
+            assert!(page.contains(&format!("data-p4=\"{record}\"")));
+            assert!(page.contains(&format!("/ja/{record}")));
+        }
+        assert!(word_page("試験xx").is_none());
+    }
 }
 
 #[cfg(test)]

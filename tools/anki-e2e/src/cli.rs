@@ -218,6 +218,33 @@ mod tests {
 
     #[cfg(feature = "browser")]
     #[test]
+    fn browser_load_keeps_batch_limit_and_requires_explicit_scenario() {
+        let cli = Cli::try_parse_from(["anki-e2e", "browser"]).unwrap();
+        let Command::Browser(args) = cli.command else {
+            panic!("browser")
+        };
+        assert!(args.scenarios.is_empty());
+        for value in ["0", "129", "65536"] {
+            assert!(Cli::try_parse_from(["anki-e2e", "browser", "--batch-items", value]).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "anki-e2e",
+                "browser",
+                "--batch-items",
+                "128",
+                "--batch-count",
+                "3",
+                "--scenarios",
+                "cli_batch_load"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["anki-e2e", "browser", "--batch-count", "9"]).is_err());
+    }
+
+    #[cfg(feature = "browser")]
+    #[test]
     fn browser_suite_is_a_separate_command_with_scenario_list() {
         let cli = Cli::try_parse_from([
             "anki-e2e",

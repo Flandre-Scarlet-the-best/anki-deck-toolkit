@@ -4,6 +4,288 @@ schema_version = 1
 module = "anki-e2e"
 
 [[scenario]]
+id = "anki-e2e.forvo-batch"
+title = "Изолированный полный Forvo MV3 пакет и последовательная сессия"
+revision = 1
+kind = "long-e2e"
+status = "executable"
+description = "Реальный CLI, SafeBatchRuntime и MV3-расширение в настоящем тестовом Chromium против локального HTTPS fixture. Разные синтетические японские пары, контроль SHA/evidence/import, idempotent resume и ресурсов между пакетами. Живой Forvo не используется."
+measured = "Весь вызов anki-e2e browser: генерация HTTPS/MP3 fixture, setup адаптера, запуск временного браузера, batch_count последовательных batch-start по batch_items, проверка store/blob/evidence и повторный resume каждого пакета, наблюдения ресурсов и закрытие браузера. Сборка обоих release-бинарников вне интервала. batch_wall_s в module-report отдельно охватывает только CLI batch-start."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "anki-e2e", bin = "anki-e2e" }
+args = ["browser", "--scenarios", "cli_batch_load", "--batch-items", "{param.batch_items}", "--batch-count", "{param.batch_count}", "--chrome", "{param.chrome}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH", "HOME"]
+
+[[scenario.parameter]]
+name = "batch_items"
+description = "Разных японских пар в каждом пакете; рекомендуемые масштабы 10/50/128."
+default = "10"
+choices = ["10", "50", "128"]
+record = true
+affects_comparability = true
+
+[[scenario.parameter]]
+name = "batch_count"
+description = "Самостоятельных последовательных пакетов в одном браузерном профиле; пары между пакетами не повторяются."
+default = "1"
+choices = ["1", "3", "8"]
+record = true
+affects_comparability = true
+
+[[scenario.parameter]]
+name = "chrome"
+description = "Исполняемый файл тестового Chromium; личные профили не используются. Фактическая версия записывается из module-report."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "fixture"
+kind = "repo-file"
+role = "workload"
+identity = "file-sha256"
+path = "tools/anki-e2e/src/browser/fixture.rs"
+description = "Детерминированный генератор ограниченного корпуса разных японских пар и record_id; размеры пакетов дополнительно закреплены параметрами."
+size = [{ name = "generator_bytes", unit = "byte", description = "Размер исходника генератора fixture.", measure = { kind = "tree-bytes" } }]
+
+[[scenario.input]]
+id = "fixture-audio"
+kind = "downloaded-artifact"
+role = "workload"
+identity = "file-sha256"
+report_identity = "/fixture/load_corpus_sha256"
+description = "Артефакт fixture, синтезированный локально (внешних загрузок нет): load-corpus.json с упорядоченными парами, record_id и SHA каждого отличающегося MP3. Идентичность подтверждается каждым отчётом."
+size = [{ name = "pairs", unit = "count", description = "Разных пар с отдельными оригинальными MP3.", measure = { kind = "report", pointer = "/fixture/load_pairs" } }]
+
+[[scenario.input]]
+id = "toolkit"
+kind = "repo-tree"
+role = "subject"
+identity = "content-tree-sha256"
+description = "Снимок исходников, из которых исполнитель собирает production CLI и browser E2E."
+
+[[scenario.setup]]
+description = "Гарантированная сборка production pronunciation-assets в той же release-области Cargo, что anki-e2e; E2E находит его рядом со своим бинарником."
+program = { kind = "cargo-bin", package = "asset-store", bin = "pronunciation-assets" }
+args = ["--help"]
+touches = "read-only"
+timeout_seconds = 30
+
+[scenario.runs]
+warmup = 1
+min_runs = 2
+max_runs = 5
+single_run_allowed = false
+run_timeout_seconds = 10800
+total_budget_seconds = 86400
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Прогреты бинарники и page cache ОС одним неизмеряемым вызовом. Каждый вызов создаёт новый уникальный каталог прогона, новый пустой AssetStore и временный профиль браузера: сохранённые acquisition/checkpoint между вызовами никогда не переиспользуются. Внутри длительной сессии store и профиль общие; новые пары в каждом самостоятельном пакете требуют новых загрузок. Профиль warm относится к ОС/бинарникам, получение всегда холодное по данным."
+cleared = []
+retained = ["page cache ОС", "собранные release-бинарники", "между пакетами одного вызова: временный профиль и store с предыдущими разными парами"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+description = "Максимальный отдельный процесс дерева; не сумма Rust и браузера. Раздельные выборки есть в module-report."
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+
+[[scenario.metric]]
+metric = "module_counter"
+scope = "module-report"
+source = "module-report"
+label = "imports"
+pointer = "/scenarios/*/evidence/batches/*/imports"
+required = false
+
+[[scenario.metric]]
+metric = "module_counter"
+scope = "module-report"
+source = "module-report"
+label = "downloads"
+pointer = "/scenarios/*/evidence/batches/*/requests_before_resume/*"
+required = false
+
+[[scenario.metric]]
+metric = "module_counter"
+scope = "module-report"
+source = "module-report"
+label = "acquire_ms"
+pointer = "/scenarios/*/evidence/batches/*/diagnostics/stage_duration_ms/acquire/*"
+required = false
+
+[[scenario.metric]]
+metric = "module_counter"
+scope = "module-report"
+source = "module-report"
+label = "import_mp3_ms"
+pointer = "/scenarios/*/evidence/batches/*/diagnostics/stage_duration_ms/import_mp3/*"
+required = false
+
+[scenario.module_report]
+runs_dir = "target/anki-e2e/browser-runs"
+report = "report.json"
+description = "Штатный browser report.json: отдельный каталог для каждого вызова, все исходные наблюдения и проверки внутри evidence."
+
+[[scenario.requires]]
+kind = "executable"
+name = "ffmpeg"
+
+[[scenario.requires]]
+kind = "executable"
+name = "ffprobe"
+
+[[scenario.requires]]
+kind = "executable"
+name = "openssl"
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version", "browser_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus", "browser_version"]
+
+[[scenario.environment.fact]]
+name = "browser_version"
+description = "Фактическая версия исполняемого файла тестового Chromium."
+report = ["/browser/version"]
+
+[[scenario]]
+id = "anki-e2e.forvo-enospc"
+title = "Отказ полного Forvo-пакета при ENOSPC и восстановление"
+revision = 1
+kind = "long-e2e"
+status = "executable"
+description = "Настоящий CLI и MV3 против HTTPS fixture: первая запись импортируется, при активной второй загрузке отдельная tmpfs заполняется до ENOSPC; прежнее состояние проверяется, место освобождается, resume заканчивает пакет."
+measured = "Весь anki-e2e browser cli_batch_enospc: подготовка fixture/профиля, реальный отказ записи, завершение диагностики CLI, восстановление без повторной загрузки первой записи, постусловия, копирование свидетельств, очистка собственного store с tmpfs и закрытие браузера. Монтирование оператором и сборка обоих release-бинарников вне интервала."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "anki-e2e", bin = "anki-e2e" }
+args = ["browser", "--scenarios", "cli_batch_enospc", "--chrome", "{param.chrome}", "--fault-volume", "{param.fault_volume}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH", "HOME"]
+
+[[scenario.parameter]]
+name = "chrome"
+description = "Исполняемый файл тестового Chromium; фактическая версия — из отчёта."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.parameter]]
+name = "fault_volume"
+description = "Заранее выделенная пустая отдельная tmpfs <=64 MiB; обычные файловые системы отклоняются. Каждый успешный вызов сохраняет свидетельства в отчёте и удаляет только созданный им store, оставляя том пустым."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "fixture"
+kind = "repo-file"
+role = "workload"
+identity = "file-sha256"
+path = "tools/anki-e2e/src/browser/fixture.rs"
+description = "Генератор страниц и двух отдельных записей с оригинальными синтетическими MP3."
+size = [{ name = "generator_bytes", unit = "byte", description = "Размер исходника fixture.", measure = { kind = "tree-bytes" } }]
+
+[[scenario.input]]
+id = "toolkit"
+kind = "repo-tree"
+role = "subject"
+identity = "content-tree-sha256"
+description = "Исходники реального CLI, общей диагностики и стенда."
+
+[[scenario.setup]]
+description = "Сборка production CLI рядом с anki-e2e."
+program = { kind = "cargo-bin", package = "asset-store", bin = "pronunciation-assets" }
+args = ["--help"]
+touches = "read-only"
+timeout_seconds = 30
+
+[scenario.runs]
+warmup = 1
+min_runs = 2
+max_runs = 5
+single_run_allowed = false
+run_timeout_seconds = 600
+total_budget_seconds = 5400
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Прогретая ОС и бинарники, каждый вызов начинает с пустой выделенной tmpfs и нового временного браузерного профиля; сохранённые результаты между вызовами не переиспользуются."
+cleared = []
+retained = ["page cache ОС", "release-бинарники", "сама выделенная оператором пустая tmpfs"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[scenario.module_report]
+runs_dir = "target/anki-e2e/browser-runs"
+report = "report.json"
+description = "Штатные отчёт и копия store-evidence каждого прогона."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "module_version", "rustc_version", "hyperfine_version", "browser_version", "volume_capacity"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus", "browser_version", "volume_capacity"]
+
+[[scenario.environment.fact]]
+name = "browser_version"
+description = "Фактическая версия Chromium."
+report = ["/browser/version"]
+
+[[scenario.environment.fact]]
+name = "volume_capacity"
+description = "Фактическая ёмкость отдельной tmpfs в байтах."
+report = ["/scenarios/0/evidence/volume_capacity_bytes"]
+
+[[scenario]]
 id = "anki-e2e.full"
 title = "Полный набор E2E-сценариев стенда"
 revision = 2

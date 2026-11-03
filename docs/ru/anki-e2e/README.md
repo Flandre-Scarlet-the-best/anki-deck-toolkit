@@ -326,6 +326,100 @@ Vivaldi получают `BLOCKED` с этой причиной. Вкладка 
 удаляются после прогона, если не задан `--keep-profiles`. Живой Forvo в основном браузере
 пользователя этим набором не заменяется.
 
+### Длительные изолированные пакеты
+
+`cli_batch_load`, `cli_batch_faults` и `cli_batch_enospc` запускаются **только явно** и не входят
+в набор без `--scenarios`, обычные тесты или CI. Нужны те же браузер, fixture,
+расширение и production CLI; отдельного пакетного движка нет.
+
+```bash
+cargo build --locked -p anki-e2e -p asset-store --bin anki-e2e --bin pronunciation-assets
+target/debug/anki-e2e browser --scenarios cli_batch_load --chrome "$CHROME_BIN" --batch-items 10
+target/debug/anki-e2e browser --scenarios cli_batch_load --chrome "$CHROME_BIN" --batch-items 50
+target/debug/anki-e2e browser --scenarios cli_batch_load --chrome "$CHROME_BIN" --batch-items 128
+target/debug/anki-e2e browser --scenarios cli_batch_load --chrome "$CHROME_BIN" --batch-items 128 --batch-count 3
+target/debug/anki-e2e browser --scenarios cli_batch_faults --chrome "$CHROME_BIN"
+```
+
+`--batch-items` принимает 1…128, `--batch-count` — 1…8. Один сценарий
+использует один временный профиль и store. Каждый самостоятельный пакет
+получает новые пары и record_id: `試験` + двухсимвольный суффикс хираганы,
+чтение `しけん` + тот же суффикс. Это синтетические японские пары, а не
+словарный корпус. Для каждой пары генерируется свой MP3 с отдельной частотой
+сигнала, поэтому content-addressed checkpoint blobs не прогреваются
+повторением одних байтов. `fixture/load-corpus.json` фиксирует пары,
+record_id и SHA каждого MP3; его SHA входит в идентичность нагрузки.
+
+Нагрузка проверяет фактический checkpoint, чтение blob со сверкой SHA,
+`ForvoEvidence`, импорт всех элементов без `Verified`, ровно один запрос на
+запись и повторный `resume` без новых запросов/смены ревизии. С `--close-tab`
+каждый пакет освобождает собственную вкладку. Исходный снимок и снимок после
+каждого пакета содержат вкладки, `downloads.search`, собственную операцию,
+наблюдателей и файлы. Контрольная чужая вкладка, download record и файл с
+известным SHA должны сохраниться. Для чтения download records драйвер
+открывает страницу самого расширения; production permissions не расширены.
+
+В штатном `report.json`, `scenarios[].evidence.batches[]`:
+
+- `batch_wall_s`, `seconds_per_word`, `successful_words_per_second`,
+  `resume_wall_s`, ревизии и реальные счётчики импортов/загрузок;
+- исходные `BrowserItemTimer`: внешний элемент отдельно от вложенного
+  получения, фазы `candidates`, `download_and_validate_mp3`, `acquire`,
+  `import_mp3`. Навигация входит в `candidates`, проверка и освобождение
+  файла — в `download_and_validate_mp3`; подключение — в первый `acquire`.
+  Фазы вложены, складывать их с `acquire` нельзя. Checkpoint и окончательная
+  очистка отдельно не хронометрируются: входят в `batch_wall_s`;
+- среднее, σ, медиана, минимум/максимум внешних элементов. p95 не вычисляется
+  при n < 100; при большем n это описательный nearest-rank одной
+  последовательности, без заявления статистической надёжности;
+- выборки `/proc` раз в 250 мс отдельно для CLI и дерева браузера: сумма RSS,
+  наблюдённый VmHWM корневого процесса, CPU ticks, число процессов и динамика
+  каждые 20 выборок. Статус `partial`: короткие процессы и края интервала
+  пропускаются, shared pages в сумме RSS считаются повторно. CPU переводится
+  в секунды через `getconf CLK_TCK`; это не полный CPU всех потомков;
+- рост файлов store/адаптера и журнала отражается фактическими размерами.
+  Сохранённые ресурсы, checkpoint и журналы закономерно растут с числом слов;
+  собственные вкладки, операции, records и незавершённые загрузки расти не должны.
+
+`cli_batch_faults` использует реальные CLI-записи, затем моделирует внешний
+отказ: запрет записи в каталог checkpoint, усечение созданного blob и
+SIGKILL при второй активной загрузке после импорта первой. Дополнительно
+запрещается CAS-импорт после durable checkpoint: после снятия запрета
+resume использует сохранённые байты без скачивания. Проверяются
+сохранность предыдущего состояния и число повторов после восстановления.
+Повтор второй загрузки при отсутствии checkpoint неизбежен и показывается
+явно. Это не подстановка готового состояния пакета библиотечным тестом.
+`cli_batch_enospc --fault-volume <каталог>` требует заранее выделенной пустой
+tmpfs не больше 64 MiB. Проверяются тип, ёмкость и самостоятельная точка
+монтирования, затем только эта файловая система заполняется до настоящего
+ENOSPC при активной второй загрузке. Прежний checkpoint обязан сохраниться;
+после удаления файла резерва resume завершает пакет с одним явным повтором
+второй загрузки. Оператор монтирует и размонтирует только свой том; без
+`--fault-volume` сценарий получает `BLOCKED`. Пример для Linux с правом mount:
+
+```bash
+volume=$(mktemp -d)
+sudo mount -t tmpfs -o "size=8M,nodev,nosuid,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$volume"
+target/debug/anki-e2e browser --scenarios cli_batch_enospc --chrome "$CHROME_BIN" --fault-volume "$volume"
+# Перед размонтированием при необходимости сохраните тестовый store из своего тома.
+sudo umount "$volume"
+rmdir "$volume"
+```
+
+SIGKILL точно внутри
+`fsync`/`rename` или CAS-импорта требует контролируемой точки остановки.
+Эти окна перечислены в `cli_batch_faults/evidence.not_tested` с `NOT_TESTED`, а не покрыты
+успехом соседнего сценария. Прежний `cli_batch_recovery` отдельно проверяет
+чтение библиотечно созданных состояний checkpoint/импорта; он не доказывает
+реального убийства CLI в этих окнах.
+
+Относительный `--work-dir` разрешается в абсолютный до создания профиля,
+чтобы Chromium получил абсолютный `download.default_directory`.
+Профили и секреты убираются штатно; отчёты и тестовый store остаются для
+проверки в игнорируемой области. Нагрузки на настоящий Forvo здесь нет.
+Серии времени запускаются через
+[`anki-e2e.forvo-batch`](../performance/benchmarks.md), а не отдельным runner.
+
 ## Real-Site стенд Forvo-Brave
 
 `cargo run -p anki-e2e -- real-site <up|run|status|down|purge>` — ручной стенд для

@@ -9,7 +9,10 @@
 
 mod chrome;
 mod cli_scenarios;
+mod faults;
 mod fixture;
+mod load;
+mod observation;
 mod scenarios;
 mod target_scenarios;
 
@@ -46,8 +49,20 @@ pub const SCENARIOS: &[&str] = &[
     "target_isolation",
 ];
 
+// Долгие проверки никогда не входят в неявный короткий набор.
+const OPT_IN_SCENARIOS: &[&str] = &["cli_batch_load", "cli_batch_faults", "cli_batch_enospc"];
+
 #[derive(Debug, Clone, Args)]
 pub struct BrowserArgs {
+    /// Заранее выделенный пустой tmpfs <=64 MiB только для cli_batch_enospc.
+    #[arg(long)]
+    pub fault_volume: Option<PathBuf>,
+    /// Размер каждого пакета cli_batch_load (разные синтетические японские пары).
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=128))]
+    pub batch_items: u16,
+    /// Последовательные самостоятельные пакеты в одном браузерном профиле.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=8))]
+    pub batch_count: u16,
     /// Сценарии через запятую; по умолчанию — весь набор.
     #[arg(long, value_delimiter = ',')]
     pub scenarios: Vec<String>,
@@ -109,6 +124,9 @@ impl Outcome {
 }
 
 pub struct Ctx {
+    pub fault_volume: Option<PathBuf>,
+    pub batch_items: u16,
+    pub batch_count: u16,
     pub chrome: PathBuf,
     /// Разновидность тестового браузера, подтверждённая по исполняемому файлу.
     pub kind: brave::BrowserKind,
@@ -255,10 +273,18 @@ pub fn run(args: &BrowserArgs, interrupted: Arc<AtomicBool>) -> u8 {
     } else {
         args.scenarios.clone()
     });
-    if let Some(unknown) = selected.iter().find(|s| !SCENARIOS.contains(&s.as_str())) {
+    if let Some(unknown) = selected
+        .iter()
+        .find(|s| !SCENARIOS.contains(&s.as_str()) && !OPT_IN_SCENARIOS.contains(&s.as_str()))
+    {
         eprintln!(
             "Неизвестный сценарий {unknown}; доступны: {}",
-            SCENARIOS.join(", ")
+            SCENARIOS
+                .iter()
+                .chain(OPT_IN_SCENARIOS)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         return Status::Error.exit_code();
     }
@@ -266,6 +292,15 @@ pub fn run(args: &BrowserArgs, interrupted: Arc<AtomicBool>) -> u8 {
         .work_dir
         .clone()
         .unwrap_or_else(|| repo.join("target").join("anki-e2e"));
+    // Chromium принимает только абсолютный download.default_directory.
+    // Иначе относительный --work-dir уводит загрузки за пределы стенда.
+    let work = match std::path::absolute(&work) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("Каталог отчётов {}: {e}", work.display());
+            return Status::Error.exit_code();
+        }
+    };
     let started = util::unix_now();
     let id = format!(
         "{}-{}",
@@ -376,7 +411,8 @@ async fn execute(
         status
     };
     let cli = find_cli(args.cli.as_deref());
-    report["cli"] = json!({"pronunciation_assets": cli, "used_by": "сценарии cli_*"});
+    report["cli"] = json!({"pronunciation_assets": cli, "used_by": "сценарии cli_*",
+        "sha256":cli.as_ref().and_then(|p|std::fs::read(p).ok()).map(|bytes|util::sha256_hex(&bytes))});
     if selected.iter().any(|name| name.starts_with("cli_"))
         && let (Some(explicit), None) = (args.cli.as_deref(), &cli)
     {
@@ -464,6 +500,21 @@ async fn execute(
                 )?,
             );
         }
+        // Разные пары получают разные оригинальные байты: общий MP3 создал бы
+        // искусственный прогрев content-addressed blobs уже после первого слова.
+        if selected.iter().any(|name| name == "cli_batch_load") {
+            for index in 0..usize::from(args.batch_items) * usize::from(args.batch_count) {
+                let (_, _, record) = fixture::load_word(index);
+                extra.insert(
+                    record.clone(),
+                    synthetic_mp3(
+                        &fixture_dir.join(format!("record-{record}.mp3")),
+                        300 + index as u32 * 10,
+                        "0.6",
+                    )?,
+                );
+            }
+        }
         let (cert, key) = certificate(&fixture_dir)?;
         Ok::<_, String>((a, b, extra, cert, key))
     })();
@@ -490,6 +541,39 @@ async fn execute(
         "user_file_sha256": util::sha256_hex(&fixture.user_file),
         "generator": "ffmpeg lavfi sine → libmp3lame",
     });
+    if selected.iter().any(|name| name == "cli_batch_load") {
+        let corpus:Vec<_>=(0..usize::from(args.batch_items)*usize::from(args.batch_count)).map(|index| {
+            let (surface,reading,record)=fixture::load_word(index);
+            json!({"surface":surface,"reading":reading,"record_id":record,"sha256":util::sha256_hex(&fixture.bytes_for(&record))})
+        }).collect();
+        if corpus
+            .iter()
+            .filter_map(|row| row["sha256"].as_str())
+            .collect::<HashSet<_>>()
+            .len()
+            != corpus.len()
+        {
+            fixture.shutdown();
+            return stop(
+                report,
+                Stop::error(
+                    "fixture",
+                    "load_audio_not_distinct",
+                    "MP3 нагрузочного корпуса должны отличаться по SHA-256",
+                ),
+            );
+        }
+        let bytes = serde_json::to_vec(&corpus).expect("JSON");
+        if let Err(e) = std::fs::write(fixture_dir.join("load-corpus.json"), &bytes) {
+            fixture.shutdown();
+            return stop(
+                report,
+                Stop::error("fixture", "corpus_manifest_failed", e.to_string()),
+            );
+        }
+        report["fixture"]["load_corpus_sha256"] = json!(util::sha256_hex(&bytes));
+        report["fixture"]["load_pairs"] = json!(corpus.len());
+    }
     let adapter_dir = dir.join("adapter");
     let state_dir = adapter_dir.join("state");
     let extension_dir = adapter_dir.join("extension");
@@ -528,6 +612,9 @@ async fn execute(
         })
     };
     let ctx = Ctx {
+        fault_volume: args.fault_volume.clone(),
+        batch_items: args.batch_items,
+        batch_count: args.batch_count,
         chrome,
         kind,
         loader,
@@ -643,6 +730,9 @@ mod tests {
     #[tokio::test]
     async fn invalid_explicit_cli_is_reported_before_browser_setup() {
         let args = BrowserArgs {
+            fault_volume: None,
+            batch_items: 10,
+            batch_count: 1,
             scenarios: vec![],
             chrome: None,
             work_dir: None,
