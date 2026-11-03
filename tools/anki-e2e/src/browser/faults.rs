@@ -175,6 +175,25 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         fixture.requests_for(fixture::RECORD_3),
     );
     // Внешнее повреждение: production runtime должен отказать до получения/импорта.
+    let original_permissions = blob.metadata().map_err(|e| e.to_string())?.permissions();
+    std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o000))
+        .map_err(|e| e.to_string())?;
+    let unreadable = corrupt
+        .run(true, &["batch-resume", "--batch-id", "corrupt"])
+        .await;
+    std::fs::set_permissions(&blob, original_permissions).map_err(|e| e.to_string())?;
+    let unreadable = unreadable?;
+    env.out.check(
+        "ошибка чтения blob отклоняется без потери checkpoint и новых загрузок",
+        unreadable.code != 0
+            && std::fs::read(root.join("state.json")).map_err(|e| e.to_string())? == state_before
+            && counts
+                == (
+                    fixture.requests_for(fixture::RECORD_A),
+                    fixture.requests_for(fixture::RECORD_3),
+                ),
+        json!({"exit":unreadable.code,"error":unreadable.out["error"]}),
+    );
     std::fs::write(&blob, &original[..original.len() / 2]).map_err(|e| e.to_string())?;
     let refused = corrupt
         .run(true, &["batch-resume", "--batch-id", "corrupt"])
