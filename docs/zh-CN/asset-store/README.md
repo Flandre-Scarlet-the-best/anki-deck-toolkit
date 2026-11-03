@@ -68,6 +68,10 @@
 
 公共批处理运行时负责 `.runtime/batches/<batch-id>` 下安全的文件机制：`NOFOLLOW`、锁、修订号/CAS、原子状态写入、有界读取和按 SHA 寻址的内容。它不依赖 `KanjiBatch`、`KanjiMetrics`、Yarxi 数据或 HTML 报告，这些都由领域适配器负责。纯文本测试状态验证重新打开和读取内容，无需汉字或图片规则。
 
+用逐字节相同的状态再次保存已加载的批处理时，不会产生新的发布。`save` 的全部检查（锁、当前快照、修订号、`validate`、`batch_id`、blob 引用）照旧执行；随后按与原子替换前相同的 `NOFOLLOW`、类型和大小规则，流式比较 `state.json` 的字节。若相同，则不创建临时文件、不写入、不执行 `renameat`。只有当同一对象在持续持有锁期间已经持久发布了正是这个 inode，或已确认其持久性（设备、inode、大小、`mtime` 与 `ctime` 一致）时才跳过同步；否则通过对现有文件和目录执行 `fsync` 确认持久性，并将该 inode 记为已确认。首次状态、字节不同（包括修订号相同）、文件缺失、比较时读取失败或确认失败都会回退到常规原子写入；符号链接、目录或超出大小限制仍按原规则拒绝。释放锁以及任何写入失败都会清除对象自身的确认。日志用 `state_save_succeeded`、`state_save_unchanged_already_durable` 与 `state_save_unchanged_durability_confirmed` 区分结果。
+
+这些保证适用于在运行时锁下通过运行时修改批处理的写入者。`flock` 是建议性锁：绕过锁、与 `save` 并发替换 `state.json` 的进程不在契约范围内——此前的原子写入同样无法防止在 `renameat` 之后立即发生的此类替换。两次 `save` 调用之间的外部替换或损坏会被发现：内容一致的外部文件通过同步确认，内容不同的文件会被覆盖。
+
 公共 Chromium 会话、可执行文件定位、启动诊断、CDP 指标和网络技术遥测在 `browser_runtime.rs` 中。Yarxi 保留自身选择器、URL、TLS 策略、过滤器、后备来源、深色主题和截图几何；公共运行时支持独立的 `3.0` 缩放系数。JPDB 使用隔离会话，`pitch-assets` 独立处理批次并发布已验证 PNG。与 `anki-repo` 的集成仍是单独能力。
 
 Chromium 进程由 `browser_process.rs` 拥有，而不是 `chromiumoxide`：浏览器使用与原 `Browser::launch` 相同的参数启动，但位于**自己的进程组**（`process_group(0)`），CDP 连接到其打印的 DevTools 地址。因此终端 `Ctrl+C` 只把 `SIGINT` 发送给 CLI，而不发送给浏览器：取消由协调器执行，正在进行的请求不会因浏览器退出而变成伪造的 `technical_failure`。停止过程区分各阶段：关闭 CDP（`browser_transport_stop`）、进程组首进程在最多 10 秒窗口内自行退出（`browser_process_exited`）或强制结束整个组（`browser_process_killed`），随后回收组内后代直到 `ESRCH`；组内残留的 zombie（例如没有 reaper、CLI 是容器的 PID 1 时）根据 `/proc` 不计为组成员。信号只发送给本次启动创建的组：在首进程被回收（`wait`）之前，组号不会转给其他进程；回收之后，仅当探测确认组内仍有进程时才向后代发送 `SIGKILL`，探测与发送信号之间仍存在一个狭窄窗口。CLI 自身因 `SIGKILL`/`SIGQUIT` 异常退出时不经过此路径：只要残留进程仍引用运行目录树，孤立运行清理就拒绝删除它。

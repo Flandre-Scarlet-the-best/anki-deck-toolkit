@@ -22,7 +22,7 @@
 | `asset-store.ingest` | 单个写入者以 `ingest_verified` 发布新身份 | staging、验证器检查、原子提交文件、重写清单、日志意图与关闭、`fsync` |
 | `asset-store.ingest-contention` | 同样的发布量分给 `writers` 个独立句柄 | 同一进程内写入线程之间在常规 `flock` 上的串行化 |
 | `asset-store.batch-reopen` | `SafeBatchRuntime::open` 与 `load` | 批处理锁、读取并检查状态、完整校验每个 blob |
-| `asset-store.batch-checkpoint` | `open`、`load` 与 `save`；`change` = `unchanged` 或 `modified` | 原子写入状态并同步文件与目录；`modified` 还会写入新 blob 并提升修订号 |
+| `asset-store.batch-checkpoint` | `open`、`load` 与 `save`；`change` = `unchanged` 或 `modified` | `modified`：写入新 blob、提升修订号，并原子写入状态、同步文件与目录；`unchanged`：流式比较字节，对现有文件和目录执行 `fsync`，不产生新写入 |
 
 所有场景的区间都是已构建的 release 二进制 `asset-store-bench` 从进程启动到退出的一次运行，包括
 打开存储。构建模板、恢复工作副本和检查后置条件不在区间内。指标：`time_wall_clock`（必需）、
