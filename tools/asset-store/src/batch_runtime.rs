@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustix::fs::{
-    AtFlags, FlockOperation, Mode, OFlags, RenameFlags, flock, mkdirat, open, openat, renameat,
-    renameat_with, unlinkat,
+    AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, flock, mkdirat, open,
+    openat, renameat, renameat_with, statat, unlinkat,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -266,6 +266,8 @@ impl SafeBatchRuntime {
         let directory = ensure_directory(&batches, batch_id)?;
         flock(&directory, FlockOperation::LockExclusive).map_err(boundary_io)?;
         let blobs = ensure_directory(&directory, "candidates")?;
+        remove_orphan_temporaries(&directory, batch_id)?;
+        remove_orphan_temporaries(&blobs, batch_id)?;
         Ok(Self {
             directory,
             blobs,
@@ -978,6 +980,67 @@ fn confirm_durability(file: &File, parent: &File) -> Result<(), AssetError> {
     inject_fault(FaultPoint::ConfirmDirectorySync)
         .and_then(|()| parent.sync_all())
         .map_err(|error| AssetError::io("синхронизация каталога runtime", error))
+}
+
+/// Удаляет промежуточные файлы атомарной записи, оставшиеся от процесса,
+/// завершённого до переименования (например, SIGKILL между `fsync` и
+/// `rename`). Вызывается только сразу после захвата эксклюзивной блокировки
+/// каталога пакета: каждая запись в каталог состояния и `candidates`
+/// выполняется под этой блокировкой и до её снятия либо переименовывает, либо
+/// удаляет свой временный файл. Поэтому файл с таким именем не может
+/// принадлежать живому исполнителю. Удаляются только обычные файлы точной
+/// формы `.tmp-<pid>-<n>`; символические ссылки и прочие имена не трогаются.
+fn remove_orphan_temporaries(directory: &File, batch_id: &str) -> Result<(), AssetError> {
+    let mut removed = 0_u64;
+    for entry in Dir::read_from(directory).map_err(boundary_io)? {
+        let entry = entry.map_err(boundary_io)?;
+        let name = entry.file_name().to_bytes();
+        if !is_runtime_temporary_name(name) {
+            continue;
+        }
+        let name = entry.file_name();
+        let stat = match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(error) if error == rustix::io::Errno::NOENT => continue,
+            Err(error) => return Err(boundary_io(error)),
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            continue;
+        }
+        match unlinkat(directory, name, AtFlags::empty()) {
+            Ok(()) => removed += 1,
+            Err(error) if error == rustix::io::Errno::NOENT => {}
+            Err(error) => return Err(boundary_io(error)),
+        }
+    }
+    if removed > 0 {
+        directory
+            .sync_all()
+            .map_err(|error| AssetError::io("синхронизация каталога runtime", error))?;
+        tracing::info!(
+            operation = "batch_runtime_open",
+            stage = "orphan_temporaries",
+            code = "orphan_temporaries_removed",
+            batch_id,
+            removed,
+            "Удалены временные файлы прерванной атомарной записи"
+        );
+    }
+    Ok(())
+}
+
+fn is_runtime_temporary_name(name: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(b".tmp-") else {
+        return false;
+    };
+    let mut parts = rest.split(|byte| *byte == b'-');
+    let (Some(pid), Some(sequence), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !pid.is_empty()
+        && !sequence.is_empty()
+        && pid.iter().all(u8::is_ascii_digit)
+        && sequence.iter().all(u8::is_ascii_digit)
 }
 
 fn atomic_write(parent: &File, name: &str, bytes: &[u8], maximum: u64) -> Result<(), AssetError> {

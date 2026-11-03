@@ -130,10 +130,14 @@ impl RunLogGuard {
         let (next, _) = self
             .progress
             .changed
-            .wait_timeout_while(state, FLUSH_TIMEOUT, |state| state.flushed < target)
+            // После ошибки записи tracing-appender не вызывает flush до Shutdown:
+            // ждать дальше бессмысленно, известная I/O-ошибка важнее таймаута.
+            .wait_timeout_while(state, FLUSH_TIMEOUT, |state| {
+                state.flushed < target && state.error.is_none()
+            })
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state = next;
-        let flush_error = (state.flushed < target).then(|| {
+        let flush_error = (state.flushed < target && state.error.is_none()).then(|| {
             format!(
                 "истёк срок ожидания записи диагностического файла: обработано {} из {target} строк",
                 state.flushed
@@ -146,11 +150,11 @@ impl RunLogGuard {
         // обработаны ещё до этой границы.
         drop(self.worker.take());
 
-        if let Some(error) = flush_error {
-            return Err(error);
-        }
         if let Some(error) = self.progress.lock().error.clone() {
             return Err(format!("ошибка записи диагностического файла: {error}"));
+        }
+        if let Some(error) = flush_error {
+            return Err(error);
         }
         let dropped = self.error_counter.dropped_lines();
         if dropped != 0 {
@@ -667,6 +671,27 @@ mod tests {
                 .iter()
                 .all(|event| event["fields"]["batch_id"] == "synthetic")
         );
+    }
+
+    #[test]
+    fn write_error_is_reported_instead_of_flush_timeout() {
+        // /dev/full даёт настоящий ENOSPC на каждую запись.
+        let Ok(file) = fs::OpenOptions::new().write(true).open("/dev/full") else {
+            return;
+        };
+        let logger = RunLogGuard::with_buffered_lines(file, OutputMode::Json, 1);
+        logger.with_default(|| {
+            tracing::info!(operation = "batch_run", "контрольная точка завершена");
+        });
+        let started = std::time::Instant::now();
+        let error = logger.finish().unwrap_err();
+        // Известная ошибка записи не должна дожидаться срока сброса.
+        assert!(started.elapsed() < super::FLUSH_TIMEOUT);
+        assert!(
+            error.starts_with("ошибка записи диагностического файла"),
+            "{error}"
+        );
+        assert!(!error.contains("истёк срок"), "{error}");
     }
 
     #[test]
