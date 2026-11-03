@@ -82,7 +82,7 @@ flowchart LR
 Требуются Linux и набор инструментов Rust. Минимальная поддерживаемая версия Rust объявлена в корневом `Cargo.toml`; отдельной копии версии в документации нет.
 
 ```bash
-git clone https://github.com/AliceLiddell01/anki-deck-toolkit.git
+git clone https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.git
 cd anki-deck-toolkit
 
 cargo build --release --workspace
