@@ -2579,6 +2579,53 @@ mod tests {
         }
     }
 
+    fn host_samples(available: &[Option<u64>]) -> Samples {
+        let mut samples = Samples::default();
+        for (index, mem_available) in available.iter().enumerate() {
+            samples.host.push(crate::sampler::HostSample {
+                at: index as f64 * 0.05,
+                busy_ticks: 0,
+                mem_available: *mem_available,
+            });
+        }
+        samples
+    }
+
+    #[test]
+    fn host_memory_increase_is_the_deepest_drop_below_the_first_sample() {
+        let request: MetricRequest = toml::from_str(
+            "metric = \"memory_host_peak_increase\"\nscope = \"host\"\nsource = \"procfs\"\nrequired = false",
+        )
+        .unwrap();
+        let value = |available: &[Option<u64>]| host_value(&request, &host_samples(available));
+        // Глубина провала не на краю ряда; рост выше базы и пропуски не вычитаются.
+        assert_eq!(
+            value(&[
+                Some(1000),
+                Some(900),
+                None,
+                Some(700),
+                Some(800),
+                Some(1100)
+            ])
+            .measured(),
+            Some(300.0)
+        );
+        // Освобождение во время прогона не даёт отрицательного прироста.
+        assert_eq!(
+            value(&[Some(1000), Some(1200), Some(1100)]).measured(),
+            Some(0.0)
+        );
+        assert_eq!(value(&[Some(1000), Some(1000)]).measured(), Some(0.0));
+        // Без базы или второго снимка значение недоступно, а не ноль.
+        for available in [&[][..], &[Some(1000)], &[None, Some(900), Some(800)]] {
+            assert!(
+                matches!(value(available), MetricValue::Unavailable { .. }),
+                "{available:?}"
+            );
+        }
+    }
+
     #[test]
     fn io_values_have_exact_units_and_missing_final_is_not_zero() {
         let io = cgroup::IoCounters {

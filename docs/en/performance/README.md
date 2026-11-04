@@ -105,7 +105,7 @@ skill. It builds on these rules and on the regular `benchmark-runner` and
 | Container memory peak | cgroup v2 `memory.peak` | exact peak tracked by the kernel |
 | Container CPU | `usage_usec` in the cgroup `cpu.stat` | exact for the total; average and peak cores come from differences between samples |
 | Peak cores over 1 s | difference of `usage_usec` between adjacent samples | lower bound: bursts shorter than the interval are smoothed out |
-| Host load and memory | `/proc/stat`, `MemAvailable` in `/proc/meminfo` | the whole system: a host observation, not a bound — it includes other allocations and is offset by concurrent releases |
+| Host load and memory | `/proc/stat`, `MemAvailable` in `/proc/meminfo` | the whole system: a host observation, not a bound — it includes other allocations and is offset by concurrent releases; the kernel serves part of the pages from per-CPU lists not counted in `MemFree`, so the drop can be noticeably smaller than the target's own allocation |
 | Disk | `du -sb`, `docker image ls`, `docker system df -v` | sizes of images with shared layers are not summed |
 
 ## How to update a snapshot

@@ -81,7 +81,7 @@ skill [`performance-benchmarking`](../../../.agents/skills/performance-benchmark
 | 容器内存峰值 | cgroup v2 的 `memory.peak` | 内核记录的精确峰值 |
 | 容器 CPU | cgroup `cpu.stat` 中的 `usage_usec` | 总量精确；平均和峰值核数由采样之间的差值得出 |
 | 1 秒内峰值核数 | 相邻采样 `usage_usec` 的差值 | 下限：短于间隔的突发会被平滑 |
-| 主机负载与内存 | `/proc/stat`、`/proc/meminfo` 中的 `MemAvailable` | 整个系统：主机观测值而非界限——包含其他分配，并会被同时发生的释放抵消 |
+| 主机负载与内存 | `/proc/stat`、`/proc/meminfo` 中的 `MemAvailable` | 整个系统：主机观测值而非界限——包含其他分配，并会被同时发生的释放抵消；内核会从未计入 `MemFree` 的每 CPU 空闲页列表分配部分页面，因此下降值可能明显小于目标自身的分配 |
 | 磁盘 | `du -sb`、`docker image ls`、`docker system df -v` | 共享层的镜像大小不相加 |
 
 ## 如何更新快照

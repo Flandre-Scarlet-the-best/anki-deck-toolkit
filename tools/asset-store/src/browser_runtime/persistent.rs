@@ -7,7 +7,22 @@ use std::path::{Component, Path, PathBuf};
 
 pub(super) struct PersistentProfile {
     pub path: PathBuf,
-    _lock: File,
+    _lock: ProfileLock,
+}
+
+/// Блокировка `flock` принадлежит открытому описанию файла, а не дескриптору.
+/// Дескриптор открыт с `O_CLOEXEC`, но между `fork` и `exec` любой параллельный
+/// запуск процесса держит его копию, и простое закрытие оставило бы профиль
+/// занятым до `exec` этого потомка. Явное снятие освобождает именно описание
+/// владельца — и при освобождении профиля, и при отказе `open` после захвата.
+/// Пережившие владельца процессы Chromium дескриптор не наследуют: их отсекают
+/// проверка живых ссылок и маркер временной области в `open`.
+struct ProfileLock(File);
+
+impl Drop for ProfileLock {
+    fn drop(&mut self) {
+        let _ = flock(&self.0, FlockOperation::Unlock);
+    }
 }
 const OWNER: &str = "anki-asset-store/forvo-browser-profile/v1\n";
 const ACTIVE_WORKSPACE: &str = ".forvo-browser-workspace";
@@ -34,12 +49,18 @@ impl PersistentProfile {
                 Err(e) => return Err(e),
             }
         }
-        let lock = fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .read(true)
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
             .open(path)?;
-        flock(&lock, FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| io::Error::other("browser_profile_busy: закройте другой процесс Forvo"))?;
+        flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            if error == rustix::io::Errno::WOULDBLOCK {
+                io::Error::other("browser_profile_busy: закройте другой процесс Forvo")
+            } else {
+                io::Error::other(format!("не удалось заблокировать профиль Forvo: {error}"))
+            }
+        })?;
+        let lock = ProfileLock(file);
         // После аварии предыдущего владельца flock уже освобождён, но Chromium
         // мог пережить процесс CLI. Его профиль нельзя открыть повторно.
         crate::temp_workspace::TempWorkspace::ensure_no_live_process_references(path).map_err(
@@ -47,7 +68,7 @@ impl PersistentProfile {
                 io::Error::other("browser_profile_busy: предыдущий Chromium ещё использует профиль")
             },
         )?;
-        let metadata = lock.metadata()?;
+        let metadata = lock.0.metadata()?;
         if metadata.uid() != rustix::process::getuid().as_raw()
             || metadata.permissions().mode() & 0o077 != 0
         {
@@ -237,6 +258,88 @@ mod tests {
         assert!(!path.join(ACTIVE_WORKSPACE).exists());
         drop(reopened);
         browser_tree.close().unwrap();
+        workspace.close().unwrap();
+    }
+
+    #[test]
+    fn released_profile_reopens_despite_a_copy_of_the_lock_descriptor() {
+        let workspace = TempWorkspace::create("persistent-profile-descriptor-copy").unwrap();
+        let path = workspace.path().join("forvo");
+        let profile = PersistentProfile::open(&path).unwrap();
+        // Копия того же описания файла — то, что держит потомок между fork и exec.
+        let inherited = profile._lock.0.try_clone().unwrap();
+        let busy = PersistentProfile::open(&path).err().unwrap().to_string();
+        assert!(busy.starts_with("browser_profile_busy:"), "{busy}");
+        drop(profile);
+        let reopened = PersistentProfile::open(&path).unwrap();
+        let busy = PersistentProfile::open(&path).err().unwrap().to_string();
+        assert!(busy.starts_with("browser_profile_busy:"), "{busy}");
+        drop(reopened);
+        drop(inherited);
+        drop(PersistentProfile::open(&path).unwrap());
+        workspace.close().unwrap();
+    }
+
+    #[test]
+    fn lock_guard_releases_the_description_shared_with_copies() {
+        let workspace = TempWorkspace::create("persistent-profile-lock-guard").unwrap();
+        let file = File::open(workspace.path()).unwrap();
+        flock(&file, FlockOperation::NonBlockingLockExclusive).unwrap();
+        let guard = ProfileLock(file);
+        let inherited = guard.0.try_clone().unwrap();
+        let contender = File::open(workspace.path()).unwrap();
+        assert_eq!(
+            flock(&contender, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        );
+        // Так освобождается и отказ `open` после захвата: копия не держит профиль.
+        drop(guard);
+        flock(&contender, FlockOperation::NonBlockingLockExclusive).unwrap();
+        drop((inherited, contender));
+        workspace.close().unwrap();
+    }
+
+    #[test]
+    fn reopening_is_not_blocked_by_concurrent_process_spawns() {
+        let workspace = TempWorkspace::create("persistent-profile-concurrent-spawn").unwrap();
+        let path = workspace.path().join("forvo");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut spawned = 0u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::process::Command::new("true").status().unwrap();
+                    spawned += 1;
+                }
+                spawned
+            })
+        };
+        let mut failures = Vec::new();
+        for _ in 0..300 {
+            let profile = PersistentProfile::open(&path).unwrap();
+            assert!(PersistentProfile::open(&path).is_err());
+            drop(profile);
+            // Отказ после захвата блокировки тоже не оставляет профиль занятым.
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+            let refused = PersistentProfile::open(&path).err().unwrap().to_string();
+            assert!(
+                refused.starts_with("browser_profile_not_owned:"),
+                "{refused}"
+            );
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            if let Err(error) = PersistentProfile::open(&path).map(drop) {
+                failures.push(error.to_string());
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(spawner.join().unwrap() > 0);
+        assert!(
+            failures.is_empty(),
+            "{} отказов: {:?}",
+            failures.len(),
+            failures.first()
+        );
         workspace.close().unwrap();
     }
 }
