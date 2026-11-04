@@ -1,7 +1,7 @@
 //! Владение выделенным томом `cli_batch_enospc`: доказательство, что заполняемая
 //! файловая система — отдельная ограниченная tmpfs, исключительная межпроцессная
 //! блокировка тома и очистка только созданного этим запуском — при успехе,
-//! ошибке и отмене future.
+//! ошибке и отмене асинхронной операции.
 //!
 //! Граница доверия: проверяется пространство имён монтирования текущего процесса.
 //! Копии того же суперблока в чужих пространствах имён отсюда не видны; рецепт
@@ -39,12 +39,13 @@ const SHARED_PREFIXES: [&str; 4] = ["/run/user/", "/proc/", "/sys/", "/dev/"];
 
 /// Строка `/proc/self/mountinfo` (proc(5)) — только нужные поля.
 #[derive(Debug, PartialEq)]
-struct MountEntry {
-    device: (u32, u32),
-    root: String,
-    mount_point: String,
-    propagation: Vec<String>,
-    fs_type: String,
+pub(super) struct MountEntry {
+    pub(super) device: (u32, u32),
+    pub(super) root: String,
+    pub(super) mount_point: String,
+    pub(super) propagation: Vec<String>,
+    pub(super) fs_type: String,
+    pub(super) source: String,
 }
 
 /// Декодирование `\ooo`, которым ядро экранирует пробел, табуляцию, перевод строки и `\`.
@@ -69,7 +70,7 @@ fn unescape(field: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn parse_line(line: &str) -> Option<MountEntry> {
+pub(super) fn parse_line(line: &str) -> Option<MountEntry> {
     let fields: Vec<&str> = line.split(' ').collect();
     let separator = fields.iter().position(|f| *f == "-")?;
     if separator < 6 {
@@ -82,6 +83,7 @@ fn parse_line(line: &str) -> Option<MountEntry> {
         mount_point: unescape(fields[4]),
         propagation: fields[6..separator].iter().map(|f| f.to_string()).collect(),
         fs_type: fields.get(separator + 1)?.to_string(),
+        source: unescape(fields.get(separator + 2)?),
     })
 }
 
@@ -323,9 +325,8 @@ impl FaultVolume {
 
     /// Штатное завершение: store копируется в каталог прогона и удаляется с тома.
     pub(super) fn save_and_clear_store(&mut self) -> Result<()> {
-        if !self.save_store() {
-            return Err("не удалось сохранить store ENOSPC в каталоге прогона".into());
-        }
+        self.save_store()
+            .map_err(|e| format!("store ENOSPC не сохранён в каталоге прогона: {e}"))?;
         if !same_directory(&self.path, &self.dir) {
             return Err("fault-volume заменён: store не удаляется".into());
         }
@@ -334,14 +335,30 @@ impl FaultVolume {
         Ok(())
     }
 
-    fn save_store(&self) -> bool {
-        !self.evidence.exists()
-            && std::process::Command::new("cp")
-                .args(["-a", "--"])
-                .arg(self.store())
-                .arg(&self.evidence)
-                .status()
-                .is_ok_and(|s| s.success())
+    /// Store копируется без внешних программ: недоступная утилита не может
+    /// обнаружиться только после заполнения тома. Копия собирается в соседнем
+    /// `<имя>.partial` и получает имя свидетельства только целиком; при ошибке
+    /// удаляется лишь эта собственная неполная копия, store остаётся на томе.
+    fn save_store(&self) -> Result<()> {
+        if self.evidence.symlink_metadata().is_ok() {
+            return Err(format!("{} уже существует", self.evidence.display()));
+        }
+        let name = self
+            .evidence
+            .file_name()
+            .ok_or("у пути свидетельства нет имени")?;
+        let partial = self
+            .evidence
+            .with_file_name(format!("{}.partial", name.to_string_lossy()));
+        // create_dir отказывает для существующего пути: удаляется только своё.
+        std::fs::create_dir(&partial).map_err(|e| format!("{}: {e}", partial.display()))?;
+        let copied = copy_tree_into(&self.store(), &partial)
+            .and_then(|()| std::fs::rename(&partial, &self.evidence).map_err(|e| e.to_string()));
+        if let Err(e) = copied {
+            let _ = std::fs::remove_dir_all(&partial);
+            return Err(e);
+        }
+        Ok(())
     }
 
     pub(super) fn is_empty(&self) -> Result<bool> {
@@ -394,9 +411,9 @@ impl Drop for FaultVolume {
             eprintln!("cli_batch_enospc: fault-volume заменён; store не удаляется");
             return;
         }
-        if !self.save_store() {
+        if let Err(e) = self.save_store() {
             eprintln!(
-                "cli_batch_enospc: store не сохранён в {}; оставлен на fault-volume как свидетельство",
+                "cli_batch_enospc: store не сохранён в {} ({e}); оставлен на fault-volume как свидетельство",
                 self.evidence.display()
             );
             return;
@@ -405,6 +422,53 @@ impl Drop for FaultVolume {
             eprintln!("cli_batch_enospc: удаление store: {e}");
         }
     }
+}
+
+/// Содержимое каталога `source` в существующий пустой `target`: каталоги,
+/// обычные файлы с правами и временем изменения, символические ссылки как
+/// ссылки. Иной тип файла — ошибка, а не молча пропущенное свидетельство.
+fn copy_tree_into(source: &Path, target: &Path) -> Result<()> {
+    let context = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
+    for entry in std::fs::read_dir(source).map_err(|e| context(source, e))? {
+        let entry = entry.map_err(|e| context(source, e))?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let meta = from.symlink_metadata().map_err(|e| context(&from, e))?;
+        let kind = meta.file_type();
+        if kind.is_dir() {
+            std::fs::create_dir(&to).map_err(|e| context(&to, e))?;
+            copy_tree_into(&from, &to)?;
+            std::fs::set_permissions(&to, meta.permissions()).map_err(|e| context(&to, e))?;
+        } else if kind.is_file() {
+            let mut input = std::fs::File::open(&from).map_err(|e| context(&from, e))?;
+            let mut output = std::fs::File::options()
+                .write(true)
+                .create_new(true)
+                .open(&to)
+                .map_err(|e| context(&to, e))?;
+            let bytes = std::io::copy(&mut input, &mut output).map_err(|e| context(&from, e))?;
+            if bytes != meta.len() {
+                return Err(format!(
+                    "{}: скопировано {bytes} байт из {}",
+                    from.display(),
+                    meta.len()
+                ));
+            }
+            let modified = meta.modified().map_err(|e| context(&from, e))?;
+            output.set_modified(modified).map_err(|e| context(&to, e))?;
+            // Права — последними: файл только для чтения иначе не дописать.
+            std::fs::set_permissions(&to, meta.permissions()).map_err(|e| context(&to, e))?;
+        } else if kind.is_symlink() {
+            let link = std::fs::read_link(&from).map_err(|e| context(&from, e))?;
+            std::os::unix::fs::symlink(link, &to).map_err(|e| context(&to, e))?;
+        } else {
+            return Err(format!(
+                "{}: тип файла не копируется в свидетельства",
+                from.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -597,6 +661,83 @@ mod tests {
             status.is_empty() || status.contains("State:\tZ"),
             "CLI ещё работает: {status}"
         );
+    }
+
+    #[test]
+    fn evidence_copy_keeps_tree_modes_and_links() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDirectory::create("copy");
+        let evidence_root = TempDirectory::create("copy-evidence");
+        let evidence = evidence_root.0.join("store-evidence");
+        let mut volume = test_volume(&dir.0, evidence.clone());
+        let store = volume.store();
+        std::fs::create_dir_all(store.join("blobs")).unwrap();
+        std::fs::write(store.join("blobs/a.mp3"), b"mp3").unwrap();
+        std::fs::set_permissions(
+            store.join("blobs/a.mp3"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("blobs/a.mp3", store.join("latest")).unwrap();
+        volume.save_and_clear_store().unwrap();
+        assert_eq!(std::fs::read(evidence.join("blobs/a.mp3")).unwrap(), b"mp3");
+        let mode = std::fs::metadata(evidence.join("blobs/a.mp3"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o444);
+        assert_eq!(
+            std::fs::read_link(evidence.join("latest")).unwrap(),
+            Path::new("blobs/a.mp3")
+        );
+        assert!(!store.exists());
+        assert!(!evidence_root.0.join("store-evidence.partial").exists());
+        drop(volume);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failed_evidence_copy_keeps_the_store_and_leaves_no_partial_evidence() {
+        let dir = TempDirectory::create("copy-fail");
+        let evidence_root = TempDirectory::create("copy-fail-evidence");
+        let evidence = evidence_root.0.join("store-evidence");
+        let mut volume = test_volume(&dir.0, evidence.clone());
+        let store = volume.store();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("state.json"), b"{}").unwrap();
+        // FIFO не копируется: копия обрывается после части файлов.
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            store.join("pipe"),
+            rustix::fs::FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        let error = volume.save_and_clear_store().unwrap_err();
+        assert!(error.contains("не копируется"), "{error}");
+        assert!(!evidence.exists());
+        assert!(!evidence_root.0.join("store-evidence.partial").exists());
+        assert_eq!(std::fs::read(store.join("state.json")).unwrap(), b"{}");
+        // Аварийная очистка тоже не удаляет store без сохранённой копии.
+        drop(volume);
+        assert_eq!(std::fs::read(store.join("state.json")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn existing_evidence_is_never_overwritten() {
+        let dir = TempDirectory::create("copy-exists");
+        let evidence_root = TempDirectory::create("copy-exists-evidence");
+        let evidence = evidence_root.0.join("store-evidence");
+        std::fs::create_dir(&evidence).unwrap();
+        std::fs::write(evidence.join("foreign"), b"x").unwrap();
+        let mut volume = test_volume(&dir.0, evidence.clone());
+        std::fs::create_dir_all(volume.store()).unwrap();
+        assert!(volume.save_and_clear_store().is_err());
+        assert!(volume.store().exists());
+        assert_eq!(std::fs::read(evidence.join("foreign")).unwrap(), b"x");
+        drop(volume);
+        assert!(dir.0.join(STORE).exists());
     }
 
     #[test]

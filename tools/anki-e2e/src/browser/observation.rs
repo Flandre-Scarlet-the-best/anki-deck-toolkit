@@ -123,7 +123,7 @@ impl Tree {
             "cpu_observed_ticks":(self.samples>1).then(||self.peaks.values().map(|(first,last)|last-first).sum::<u64>()),
             "cpu_status":if self.samples>1 {"partial"} else {"unavailable"},
             "cpu_reason":if self.samples>1 {"нижний наблюдённый прирост между выборками"} else {"единственная выборка не задаёт интервал CPU"},
-            "reason":"выборка 250 мс; CPU — прирост между первой и последней выборкой каждого PID/starttime; короткие процессы и края интервала могут отсутствовать; RSS суммирует shared pages"})
+            "reason":"выборка 250 мс; CPU — прирост между первой и последней выборкой каждого PID/starttime; короткие процессы и края интервала могут отсутствовать; RSS суммирует и разделяемые страницы памяти"})
     }
 }
 

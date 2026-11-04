@@ -92,7 +92,7 @@ fn timings(run: &Run) -> Value {
             .collect(),
     );
     json!({"items":items,"item_distribution_ms":distribution,"acquisition_items":acquisition_items,"stage_duration_ms":stages,"events":events,
-        "coverage":"outer items определяются предшествующей import_mp3; candidates включает вкладку/навигацию/кандидатов; download_and_validate_mp3 включает загрузку, проверку и освобождение файла; acquire охватывает эти фазы и первое подключение; import_mp3 включает чтение blob и CAS-импорт; checkpoint и окончательная очистка входят только в batch_wall_s; вложенные фазы не суммируются с acquire"})
+        "coverage":"границы внешних элементов items задаёт предшествующий import_mp3; candidates включает вкладку/навигацию/кандидатов; download_and_validate_mp3 включает загрузку, проверку и освобождение файла; acquire охватывает эти фазы и первое подключение; import_mp3 включает чтение blob и CAS-импорт; checkpoint и окончательная очистка входят только в batch_wall_s; вложенные фазы не суммируются с acquire"})
 }
 
 fn distribution(mut values: Vec<u64>) -> Value {

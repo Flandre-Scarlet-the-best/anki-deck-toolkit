@@ -224,15 +224,26 @@ mod tests {
             panic!("browser")
         };
         assert!(args.scenarios.is_empty());
-        for value in ["0", "129", "65536"] {
-            assert!(Cli::try_parse_from(["anki-e2e", "browser", "--batch-items", value]).is_err());
+        // Граница берётся у production-владельца, а не из снимка числа.
+        let production = asset_store::pronunciation::batch::MAX_BATCH_ITEMS;
+        assert_eq!(usize::from(crate::browser::MAX_BATCH_ITEMS), production);
+        let parse = |flag: &str, value: String| {
+            Cli::try_parse_from(["anki-e2e", "browser", flag, &value]).is_ok()
+        };
+        assert!(parse("--batch-items", production.to_string()));
+        assert!(parse("--batch-items", "1".into()));
+        for value in [0, production + 1, usize::from(u16::MAX) + 1] {
+            assert!(!parse("--batch-items", value.to_string()), "{value}");
         }
+        let count = usize::from(crate::browser::MAX_BATCH_COUNT);
+        assert!(parse("--batch-count", count.to_string()));
+        assert!(!parse("--batch-count", (count + 1).to_string()));
         assert!(
             Cli::try_parse_from([
                 "anki-e2e",
                 "browser",
                 "--batch-items",
-                "128",
+                &production.to_string(),
                 "--batch-count",
                 "3",
                 "--scenarios",
@@ -240,7 +251,6 @@ mod tests {
             ])
             .is_ok()
         );
-        assert!(Cli::try_parse_from(["anki-e2e", "browser", "--batch-count", "9"]).is_err());
     }
 
     #[cfg(feature = "browser")]

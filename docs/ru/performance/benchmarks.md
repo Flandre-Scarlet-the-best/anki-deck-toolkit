@@ -75,6 +75,21 @@ cargo run -p benchmark-runner -- run anki-e2e.forvo-batch --profile warm --param
 очистку; чистое время каждого пакета и раздельные наблюдения Rust/браузера
 остаются в штатном browser module-report. `batch_items` и `batch_count`
 влияют на сопоставимость; версия Chromium — обязательный сравниваемый факт.
+Сравниваются и факты накопителя из раздела `storage` отчёта
+([стенд](../anki-e2e/README.md#длительные-изолированные-пакеты)):
+`guest_storage` — наблюдаемые стендом ФС и устройства, `storage` — физический
+накопитель вместе с происхождением, `provenance=observed,physical=…` или
+`provenance=operator_declared,physical=…`. В виртуальной машине, в том числе
+WSL2, накопитель стенду не виден: его описывает оператор параметром
+`declared_storage`, иначе факт `storage` неизвестен, и `compare` и снимок
+отказывают. Заявленное и наблюдаемое описания — разные значения, поэтому
+результаты разного происхождения не сопоставляются, даже если названия
+накопителя совпадают; заявленное значение в снимке остаётся помеченным
+`operator_declared`.
+
+```bash
+cargo run -p benchmark-runner -- run anki-e2e.forvo-batch --profile warm --param chrome="$CHROME_BIN" --param batch_items=128 --param "declared_storage=Samsung SSD 980 1TB (NVMe)" --runs 2
+```
 Генератор fixture и манифест разных оригинальных MP3 — входы нагрузки по
 SHA-256. Локальные результаты не
 характеризуют скорость внешнего Forvo. Историю и сравнение ведёт

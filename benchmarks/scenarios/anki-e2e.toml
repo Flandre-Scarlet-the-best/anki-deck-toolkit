@@ -6,16 +6,16 @@ module = "anki-e2e"
 [[scenario]]
 id = "anki-e2e.forvo-batch"
 title = "Изолированный полный Forvo MV3 пакет и последовательная сессия"
-revision = 1
+revision = 2
 kind = "long-e2e"
 status = "executable"
-description = "Реальный CLI, SafeBatchRuntime и MV3-расширение в настоящем тестовом Chromium против локального HTTPS fixture. Разные синтетические японские пары, контроль SHA/evidence/import, idempotent resume и ресурсов между пакетами. Живой Forvo не используется."
+description = "Реальный CLI, SafeBatchRuntime и MV3-расширение в настоящем тестовом Chromium против локального HTTPS fixture. Разные синтетические японские пары, контроль SHA/evidence/import, идемпотентное возобновление (resume) и ресурсы между пакетами. Живой Forvo не используется."
 measured = "Весь вызов anki-e2e browser: генерация HTTPS/MP3 fixture, setup адаптера, запуск временного браузера, batch_count последовательных batch-start по batch_items, проверка store/blob/evidence и повторный resume каждого пакета, наблюдения ресурсов и закрытие браузера. Сборка обоих release-бинарников вне интервала. batch_wall_s в module-report отдельно охватывает только CLI batch-start."
 platforms = ["linux"]
 
 [scenario.target]
 program = { kind = "cargo-bin", package = "anki-e2e", bin = "anki-e2e" }
-args = ["browser", "--scenarios", "cli_batch_load", "--batch-items", "{param.batch_items}", "--batch-count", "{param.batch_count}", "--chrome", "{param.chrome}"]
+args = ["browser", "--scenarios", "cli_batch_load", "--batch-items", "{param.batch_items}", "--batch-count", "{param.batch_count}", "--chrome", "{param.chrome}", "--declared-storage", "{param.declared_storage}"]
 expect_exit_codes = [0]
 
 [scenario.target.env]
@@ -41,6 +41,13 @@ affects_comparability = true
 name = "chrome"
 description = "Исполняемый файл тестового Chromium; личные профили не используются. Фактическая версия записывается из module-report."
 required = true
+record = false
+affects_comparability = false
+
+[[scenario.parameter]]
+name = "declared_storage"
+description = "Физический накопитель каталога прогона по заявлению оператора, например модель NVMe. Нужен, только когда стенд не наблюдает накопитель сам (виртуальная машина, в том числе WSL2, overlay контейнера, сетевая ФС): иначе факт storage неизвестен и сравнение блокируется. Наблюдаемый накопитель заявлением не заменяется. Пустое значение — не заявлено."
+default = ""
 record = false
 affects_comparability = false
 
@@ -171,13 +178,23 @@ kind = "executable"
 name = "openssl"
 
 [scenario.environment]
-record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version", "browser_version"]
-comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus", "browser_version"]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version", "browser_version", "storage", "guest_storage"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus", "browser_version", "storage", "guest_storage"]
 
 [[scenario.environment.fact]]
 name = "browser_version"
 description = "Фактическая версия исполняемого файла тестового Chromium."
 report = ["/browser/version"]
+
+[[scenario.environment.fact]]
+name = "storage"
+description = "Физический накопитель каталога прогона, где лежат store, профиль и fixture, вместе с происхождением: provenance=observed — модель прочитана стендом в sysfs вне виртуальной машины; provenance=operator_declared — накопитель стенду не виден и описан оператором параметром declared_storage, аппаратно не подтверждён. Разное происхождение даёт разные значения, поэтому наблюдаемое и заявленное описания не сопоставляются друг с другом; без наблюдения и заявления факт неизвестен."
+report = ["/storage/provenance", "/storage/physical"]
+
+[[scenario.environment.fact]]
+name = "guest_storage"
+description = "Что стенд сам наблюдает для каталога прогона: тип ФС и модели блочных устройств ядра, на котором он работает (в виртуальной машине — виртуальные устройства). Серийные номера не записываются."
+report = ["/storage/guest"]
 
 [[scenario]]
 id = "anki-e2e.forvo-enospc"

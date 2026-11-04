@@ -16,6 +16,7 @@ mod fixture;
 mod load;
 mod observation;
 mod scenarios;
+mod storage;
 mod target_scenarios;
 
 use crate::report::{self, Status, Stop};
@@ -29,9 +30,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Пределы `--batch-items` и `--batch-count`; их произведение ограничено корпусом fixture.
-const MAX_BATCH_ITEMS: u16 = 128;
-const MAX_BATCH_COUNT: u16 = 8;
+/// Предел `--batch-items` — production-лимит пакета `pronunciation-assets`; в
+/// стенде он не дублируется. Значение обязано помещаться в `u16` аргумента.
+pub(crate) const MAX_BATCH_ITEMS: u16 = {
+    let production = asset_store::pronunciation::batch::MAX_BATCH_ITEMS;
+    assert!(production >= 1 && production <= u16::MAX as usize);
+    production as u16
+};
+/// Собственный предел стенда: число пакетов ограничено корпусом fixture.
+pub(crate) const MAX_BATCH_COUNT: u16 = 8;
 
 pub const SCENARIOS: &[&str] = &[
     "extension_bridge_tab",
@@ -95,6 +102,11 @@ pub struct BrowserArgs {
     /// для брендированного Chrome (он игнорирует --load-extension), иначе флаг.
     #[arg(long, value_enum)]
     pub extension_loader: Option<LoaderArg>,
+    /// Физический накопитель каталога прогона по заявлению оператора. Нужен, только
+    /// если стенд не наблюдает его сам (виртуальная машина, в том числе WSL2,
+    /// overlay контейнера, сетевая ФС); в отчёте помечается `operator_declared`.
+    #[arg(long, value_parser = storage::parse_declared)]
+    pub declared_storage: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -324,11 +336,12 @@ pub fn run(args: &BrowserArgs, interrupted: Arc<AtomicBool>) -> u8 {
         return Status::Error.exit_code();
     }
     println!("anki-e2e browser: прогон {id}, отчёт {}", dir.display());
+    let storage = storage::describe(&dir, args.declared_storage.as_deref());
     let mut report = json!({
         "schema_version": 1, "suite": "browser", "run_id": id, "scenarios_requested": selected,
         "started_at": util::utc_rfc3339(started), "command": std::env::args().collect::<Vec<_>>(),
         "host": {"os":std::env::consts::OS,"arch":std::env::consts::ARCH},
-        "source": revision(&repo), "paths": {"run_dir": dir},
+        "source": revision(&repo), "paths": {"run_dir": dir}, "storage": storage,
         "boundary": "изолированный тестовый Chromium и локальный fixture; живой Forvo, авторизация и профиль пользователя не используются",
     });
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -760,6 +773,7 @@ mod tests {
             cli: Some("missing-anki-e2e-cli/cli".into()),
             keep_profiles: false,
             extension_loader: None,
+            declared_storage: None,
         };
         let mut report = serde_json::json!({});
         let status = execute(

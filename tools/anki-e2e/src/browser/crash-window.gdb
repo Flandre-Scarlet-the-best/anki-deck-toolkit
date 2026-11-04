@@ -17,7 +17,7 @@ store = pathlib.Path(os.environ['ANKI_E2E_CRASH_STORE']).resolve()
 mode = os.environ['ANKI_E2E_CRASH_WINDOW']
 expected = os.environ['ANKI_E2E_CRASH_SHA256']
 if mode not in ('blob_sync', 'checkpoint_sync', 'import_sync', 'outcome_sync'):
-    raise gdb.GdbError('unknown crash window')
+    raise gdb.GdbError('неизвестное окно аварии %r: ожидается blob_sync, checkpoint_sync, import_sync или outcome_sync' % mode)
 batch = store / '.runtime' / 'batches' / 'window'
 state_path = batch / 'state.json'
 entering = {}
@@ -82,7 +82,7 @@ def on_fsync():
                 'fd_relative': str(path.relative_to(store))}
             gdb.set_convenience_variable('crashpoint', gdb.Value(1))
     except (OSError, ValueError, KeyError, IndexError):
-        # Setup до первого checkpoint ещё не имеет state.json. При ошибке
+        # До первого checkpoint state.json ещё нет. При ошибке
         # наблюдения окно не считается достигнутым: доказательство останется null.
         return
 end

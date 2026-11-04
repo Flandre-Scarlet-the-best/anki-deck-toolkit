@@ -1930,6 +1930,95 @@ fn comparability_requires_same_workload_profile_and_environment() {
     assert!(!comparability::compare(scenario, &base, &other).comparable);
 }
 
+/// Время импорта Forvo-пакетов определяется накопителем store. Перенос данных на
+/// другой накопитель не должен сравниваться как эффект кода, а описание,
+/// заявленное оператором, не равноценно наблюдаемому стендом.
+#[test]
+fn forvo_batch_storage_and_its_provenance_gate_comparability() {
+    let catalog = catalog::load(&repository_catalog()).catalog.unwrap();
+    let scenario = &catalog.scenario("anki-e2e.forvo-batch").unwrap().scenario;
+    let storage = scenario
+        .environment
+        .facts
+        .iter()
+        .find(|fact| fact.name == "storage")
+        .expect("сценарий объявляет факт накопителя");
+    assert!(
+        storage.report.iter().any(|p| p.ends_with("/provenance"))
+            && storage.report.iter().any(|p| p.ends_with("/physical")),
+        "происхождение входит в значение факта: {:?}",
+        storage.report
+    );
+    for name in ["storage", "guest_storage"] {
+        assert!(
+            scenario.environment.comparable.iter().any(|n| n == name),
+            "{name}"
+        );
+    }
+
+    let mut base: BenchmarkResult = serde_json::from_value(cli_result()).unwrap();
+    base.scenario.id = scenario.id.clone();
+    base.scenario.revision = scenario.revision;
+    let template = base.inputs[0].clone();
+    base.inputs = scenario
+        .inputs
+        .iter()
+        .map(|input| InputRecord {
+            id: input.id.clone(),
+            role: input.role,
+            ..template.clone()
+        })
+        .collect();
+    for name in &scenario.environment.comparable {
+        base.environment.insert(
+            name.clone(),
+            Fact::Known {
+                value: format!("одинаковое {name}"),
+            },
+        );
+    }
+    let with = |fact: Fact| {
+        let mut result = base.clone();
+        result.environment.insert("storage".to_owned(), fact);
+        result
+    };
+    let known = |value: &str| {
+        with(Fact::Known {
+            value: value.to_owned(),
+        })
+    };
+    let blocked_by_storage = |a: &BenchmarkResult, b: &BenchmarkResult| {
+        let verdict = comparability::compare(scenario, a, b);
+        !verdict.comparable && verdict.blockers.iter().any(|b| b.contains("storage"))
+    };
+
+    let observed = known("provenance=observed,physical=NVMe A · rotational=0");
+    let verdict = comparability::compare(scenario, &observed, &observed.clone());
+    assert!(verdict.comparable, "{:?}", verdict.blockers);
+    let declared = known("provenance=operator_declared,physical=NVMe A · rotational=0");
+    let verdict = comparability::compare(scenario, &declared, &declared.clone());
+    assert!(verdict.comparable, "{:?}", verdict.blockers);
+
+    // Другой накопитель при остальных совпадающих фактах.
+    let other_disk = known("provenance=operator_declared,physical=HDD B");
+    assert!(blocked_by_storage(&declared, &other_disk));
+    // То же имя накопителя, но заявленное, а не наблюдаемое.
+    assert!(blocked_by_storage(&observed, &declared));
+    // Неизвестный накопитель не доказывает совпадения даже сам с собой.
+    let unknown = with(Fact::Unavailable {
+        reason: "накопитель не наблюдаем и не заявлен".to_owned(),
+    });
+    assert!(blocked_by_storage(&unknown, &unknown.clone()));
+    let mut unrecorded = base.clone();
+    unrecorded.environment.remove("storage");
+    assert!(blocked_by_storage(&unrecorded, &observed));
+
+    // Результат прежней ревизии без факта накопителя не выдаётся за новый.
+    let mut previous = unrecorded.clone();
+    previous.scenario.revision = scenario.revision - 1;
+    assert!(!comparability::compare(scenario, &previous, &observed).comparable);
+}
+
 #[test]
 fn subject_differences_are_expected_and_single_runs_are_flagged() {
     let catalog = load_example();

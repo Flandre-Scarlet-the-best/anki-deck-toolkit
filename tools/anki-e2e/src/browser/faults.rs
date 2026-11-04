@@ -1,5 +1,5 @@
 //! Детерминированные отказы настоящего CLI над изолированным store.
-//! Байты состояния создаёт только production-путь; тест портит/закрывает доступ
+//! Байты состояния создаёт только штатный путь CLI; тест портит/закрывает доступ
 //! к уже созданному временному файлу как внешний отказ и проверяет постусловия.
 
 use super::Ctx;
@@ -158,7 +158,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         recovered.code==0 && fixture.requests_for(fixture::RECORD_A)==1 && fixture.requests_for(fixture::RECORD_3)==2,
         json!({"exit":recovered.code,"requests_first":fixture.requests_for(fixture::RECORD_A),"requests_second":fixture.requests_for(fixture::RECORD_3),"result":recovered.out["result"]}));
 
-    // Отказ CAS-импорта после реального durable checkpoint: resume обязан
+    // Отказ CAS-импорта после реально записанного на диск checkpoint: resume обязан
     // использовать подтверждённые байты, а не повторять загрузку.
     let mut importing = Cli::new(env).expect("cli");
     importing.store = env.dir.join("store-import-failure");
@@ -248,7 +248,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         fixture.requests_for(fixture::RECORD_A),
         fixture.requests_for(fixture::RECORD_3),
     );
-    // Внешнее повреждение: production runtime должен отказать до получения/импорта.
+    // Внешнее повреждение: штатный SafeBatchRuntime должен отказать до получения/импорта.
     let permissions = Permissions::deny(&[&blob], 0o000, Access::READ_OK)?;
     let unreadable = corrupt
         .run(true, &["batch-resume", "--batch-id", "corrupt"])
@@ -337,7 +337,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     env.out.check("SIGKILL при второй загрузке: первая сохранена, второй нужен один повтор; зависания нет",!exit.success() && recovered.code==0 && fixture.requests_for(fixture::RECORD_A)==counts.0+1 && fixture.requests_for(fixture::RECORD_3)==counts.1+2,json!({"killed_status":exit.to_string(),"exit":recovered.code,"downloads_first":fixture.requests_for(fixture::RECORD_A)-counts.0,"downloads_second":fixture.requests_for(fixture::RECORD_3)-counts.1}));
     env.out.evidence.insert("not_tested".into(),json!([
         {"case":"ENOSPC","status":"NOT_TESTED","reason":"отдельный сценарий cli_batch_enospc требует --fault-volume с пустым ограниченным tmpfs; этот сценарий его не заполняет"},
-        {"case":"SIGKILL внутри fsync/rename checkpoint или CAS-import","status":"NOT_TESTED","reason":"в этом сценарии не проверяется; точные fsync-окна покрывает отдельный opt-in cli_batch_crash_windows (GDB + strace)"}
+        {"case":"SIGKILL внутри fsync/rename checkpoint или CAS-импорта","status":"NOT_TESTED","reason":"в этом сценарии не проверяется; точные окна fsync покрывает отдельный, запускаемый только явно cli_batch_crash_windows (GDB + strace)"}
     ]));
     env.connect().await?;
     env.residual_clean().await
@@ -387,7 +387,7 @@ pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
     }
     let state = cli.store.join(".runtime/batches/space/state.json");
     let before = std::fs::read(&state).map_err(|e| e.to_string())?;
-    // При ошибке, отмене future или таймауте reservation и store убирает `Drop`.
+    // При ошибке, отмене асинхронной операции или таймауте reservation и store убирает `Drop`.
     let no_space = volume.fill()?;
     if no_space.raw_os_error() != Some(28) {
         return Err(format!("ожидался ENOSPC, получено {no_space}"));
@@ -415,7 +415,7 @@ pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
         "state_after_failure_sha256".into(),
         json!(crate::util::sha256_hex(&after)),
     );
-    // Штатный browser report сохраняет свидетельства на диске прогона, а том
+    // Штатный отчёт браузерного набора сохраняет свидетельства на диске прогона, а том
     // снова пуст для следующего вызова benchmark-runner.
     volume.save_and_clear_store()?;
     env.out.check(
