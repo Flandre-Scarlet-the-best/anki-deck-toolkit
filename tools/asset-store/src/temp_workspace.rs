@@ -905,6 +905,7 @@ fn workspace_process_references(
         let metadata = match fs::metadata(&process) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) if process_has_disappeared(&process) => continue,
             Err(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -923,6 +924,9 @@ fn workspace_process_references(
                 }
                 continue;
             }
+            // Чтение `/proc/<pid>` исчезающего процесса бывает и `ESRCH`, а не только
+            // `ENOENT`. Пропуск допустим лишь после доказательства исчезновения.
+            Err(_) if process_has_disappeared(&process) => continue,
             Err(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -938,6 +942,7 @@ fn workspace_process_references(
                 }
                 continue;
             }
+            Err(_) if process_has_disappeared(&process) => continue,
             Err(_) if !include_generic && !is_chromium_process(&comm, &[]) => continue,
             Err(_) => {
                 return Err(io::Error::new(
@@ -962,6 +967,7 @@ fn workspace_process_references(
                     }
                     continue;
                 }
+                Err(_) if process_has_disappeared(&process) => continue,
                 Err(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
