@@ -11,18 +11,25 @@ name: Проверки репозитория
 #
 # Исполнитель (`runs-on` задания `lint`, остальные ссылаются на него якорем):
 # по умолчанию `ubuntu-latest`. Self-hosted раннер с меткой `home-wsl-x64`
-# выбирается только так:
+# выбирается, только если и исходный инициатор события (`github.actor`), и
+# инициатор этой попытки (`github.triggering_actor`, отличается при повторном
+# запуске) — владелец репозитория, и при этом:
 # - `workflow_dispatch` с явным `runner=local`;
 # - `pull_request` владельца из ветки этого репозитория (не форк), если
 #   переменная репозитория `CI_RUNNER_MODE` равна `local` (ручной выбор) либо
-#   равна `auto` или не задана и действует аренда `CI_AUTO_LOCAL_UNTIL` (UTC
-#   ISO 8601), которую ставит наблюдатель на машине раннера при подтверждённой
-#   аварии GitHub Actions. Аренда сравнивается с `pull_request.updated_at`:
-#   просроченная или отсутствующая аренда означает облако.
+#   равна `auto` или не задана, это первая попытка запуска и аренда
+#   `CI_AUTO_LOCAL_UNTIL` (UTC, `ГГГГ-ММ-ДДTчч:мм:ссZ`), которую ставит
+#   наблюдатель на машине раннера при подтверждённой аварии GitHub Actions,
+#   позже `pull_request.updated_at`. В выражениях нет текущего времени; для
+#   первой попытки `updated_at` — момент события (push, открытие PR), а
+#   повторный запуск сохраняет событие исходной попытки, поэтому Auto для
+#   повторных попыток не действует: истёкшая аренда не уводит на раннер.
 # `CI_RUNNER_MODE=github` и любое неизвестное значение оставляют облако. `push`,
-# `schedule`, PR из форков и чужие PR (в том числе ботов) всегда идут в облако.
-# Перехода между исполнителями во время ожидания нет: задание, направленное на
-# раннер, ждёт его. Правило и роли — `.codex/context/03-VERIFICATION.md`.
+# `schedule`, PR из форков, чужие PR (в том числе ботов) и запуски не владельца
+# всегда идут в облако. Перехода между исполнителями во время ожидания нет:
+# задание, направленное на раннер, ждёт его. Правило и роли —
+# `.codex/context/03-VERIFICATION.md`; тест выражения —
+# `.github/scripts/test_ci_runner_routing.py`.
 #
 # Push в рабочую ветку создаёт запуск, в котором все задания пропущены (`skipped`):
 # такой запуск не занимает исполнитель, а отказ от события `push` без имени ветки
@@ -76,7 +83,9 @@ jobs:
       || github.ref_name == github.event.repository.default_branch
     runs-on: &runner >-
       ${{
-        (
+        github.actor == github.repository_owner
+        && github.triggering_actor == github.repository_owner
+        && (
           (github.event_name == 'workflow_dispatch' && inputs.runner == 'local')
           || (
             github.event_name == 'pull_request'
@@ -86,6 +95,7 @@ jobs:
               vars.CI_RUNNER_MODE == 'local'
               || (
                 (vars.CI_RUNNER_MODE == '' || vars.CI_RUNNER_MODE == 'auto')
+                && github.run_attempt == '1'
                 && vars.CI_AUTO_LOCAL_UNTIL > github.event.pull_request.updated_at
               )
             )
@@ -106,17 +116,18 @@ jobs:
         name: Подготовить постоянное окружение self-hosted раннера
         # Только self-hosted: сборка Cargo (`target/` рабочей копии, как в
         # облаке после rust-cache), sccache и проверенные архивы инструментов
-        # переживают задания. Рабочая копия, кроме `target/`, очищается до
-        # точного SHA, как это делает checkout по умолчанию. Облачный кэш GitHub
-        # здесь не используется. Размер sccache ограничен LRU; `target/` чистит
-        # отдельная операция обслуживания машины, а не задание.
+        # переживают задания. Облачный кэш GitHub здесь не используется.
+        # Помощник сначала доказывает, что это выделенная копия раннера без
+        # `decks/` и `.asset-store/` (иначе отказ до любого удаления), затем
+        # очищает всё, кроме `target/`, до точного SHA и обслуживает постоянные
+        # данные: лимит `target/`, удержание архивов, минимум свободного места.
+        # Размер sccache ограничен его собственным LRU.
         if: runner.environment == 'self-hosted'
         shell: bash
         run: |
-          git clean -ffdx -e /target/
-          git diff --quiet HEAD
           cache="$HOME/.cache/anki-ci"
           mkdir -p "$cache/sccache" "$cache/tools"
+          python3 .github/scripts/prepare_self_hosted_checkout.py --tool-cache "$cache/tools"
           {
             echo "SCCACHE_DIR=$cache/sccache"
             echo "SCCACHE_CACHE_SIZE=10G"
@@ -141,6 +152,7 @@ jobs:
         run: python3 .github/scripts/check_markdown_links.py
 
       - name: Проверить workflow GitHub Actions (actionlint)
+        timeout-minutes: 2
         # Семантика workflow: выражения `${{ }}`, контексты, `needs`, matrix,
         # события и скрипты `run:` (shellcheck образа исполнителя). Бинарник —
         # официальный релиз закреплённой версии, проверенный по SHA-256;
@@ -148,13 +160,14 @@ jobs:
         env:
           ACTIONLINT_VERSION: 1.7.12
           ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          ACTIONLINT_SIZE: 2353908
           # Каждая ошибка — аннотация `::error` с файлом, строкой и колонкой.
           ACTIONLINT_FORMAT: >-
             {{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}},title=actionlint [{{$err.Kind}}]::{{$err.Message}}\n{{end}}
         run: |
           name="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           archive="$(python3 .github/scripts/fetch_verified_tool.py --name "$name" \
-            --sha256 "$ACTIONLINT_SHA256" \
+            --sha256 "$ACTIONLINT_SHA256" --size "$ACTIONLINT_SIZE" \
             --url "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${name}")"
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -version
@@ -204,7 +217,9 @@ jobs:
       github.event_name != 'push'
       || github.ref_name == github.event.repository.default_branch
     runs-on: *runner
-    timeout-minutes: 20
+    # Запас под холодную загрузку FFmpeg на self-hosted (шаг ниже, до 15 минут)
+    # и последующую сборку; в облаке задание укладывается в прежние минуты.
+    timeout-minutes: 40
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -253,17 +268,23 @@ jobs:
           key: ffmpeg-linux-x64-dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e
 
       - name: Подготовить декодер синтетических MP3
-        timeout-minutes: 3
+        # Облако: архив из actions/cache или быстрый канал. Self-hosted с пустым
+        # кэшем: 137 МБ при наблюдавшихся ~230 КиБ/с — около 10 минут, бюджет
+        # с запасом. Прерванная по тайм-ауту загрузка не теряется: следующий
+        # запуск докачивает неполный файл и проверяет SHA-256 целиком. Модель
+        # бюджета проверяет `.github/scripts/test_ci_runner_routing.py`.
+        timeout-minutes: ${{ runner.environment == 'self-hosted' && 15 || 3 }}
         shell: bash
         env:
           FFMPEG_RELEASE: autobuild-2026-09-30-13-08
           FFMPEG_ARCHIVE: ffmpeg-n8.1.3-9-g29e619e767-linux64-lgpl-8.1.tar.xz
           FFMPEG_SHA256: dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e
+          FFMPEG_SIZE: 137034436
         run: |
           # Имя `ffmpeg.tar.xz` совпадает с путём actions/cache выше: восстановленный
           # архив используется после проверки SHA-256, иначе скачивается заново.
           archive="$(python3 .github/scripts/fetch_verified_tool.py --name ffmpeg.tar.xz \
-            --sha256 "$FFMPEG_SHA256" \
+            --sha256 "$FFMPEG_SHA256" --size "$FFMPEG_SIZE" \
             --url "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$FFMPEG_ARCHIVE")"
           decoder="$RUNNER_TEMP/ffmpeg"
           mkdir -p "$decoder"
@@ -284,10 +305,11 @@ jobs:
         env:
           HYPERFINE_VERSION: 2.0.0
           HYPERFINE_SHA256: 38e59087bd65520930a13cf513d8a493b7043741e8ad62349a8a9929eb61bc5c
+          HYPERFINE_SIZE: 737116
         run: |
           name="hyperfine-v${HYPERFINE_VERSION}-x86_64-unknown-linux-musl"
           archive="$(python3 .github/scripts/fetch_verified_tool.py --name "$name.tar.gz" \
-            --sha256 "$HYPERFINE_SHA256" \
+            --sha256 "$HYPERFINE_SHA256" --size "$HYPERFINE_SIZE" \
             --url "https://github.com/sharkdp/hyperfine/releases/download/v${HYPERFINE_VERSION}/$name.tar.gz")"
           tar -xzf "$archive" -C "$RUNNER_TEMP" "$name/hyperfine"
           echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
@@ -509,15 +531,17 @@ jobs:
         run: rustup toolchain install
 
       - name: Установить cargo-deny
+        timeout-minutes: 2
         # Официальный статический релиз закреплённой версии, проверенный по SHA-256;
         # версию и сумму обновляют вместе.
         env:
           CARGO_DENY_VERSION: 0.20.2
           CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+          CARGO_DENY_SIZE: 4936832
         run: |
           name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
           archive="$(python3 .github/scripts/fetch_verified_tool.py --name "$name.tar.gz" \
-            --sha256 "$CARGO_DENY_SHA256" \
+            --sha256 "$CARGO_DENY_SHA256" --size "$CARGO_DENY_SIZE" \
             --url "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz")"
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
