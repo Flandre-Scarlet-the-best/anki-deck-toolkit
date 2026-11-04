@@ -2,23 +2,93 @@
 //! Байты состояния создаёт только production-путь; тест портит/закрывает доступ
 //! к уже созданному временному файлу как внешний отказ и проверяет постусловия.
 
+use super::Ctx;
 use super::cli_scenarios::{Cli, MISSING_CLI, signal};
+use super::fault_volume::FaultVolume;
 use super::fixture::{self, Behavior, Gate};
 use super::scenarios::{Env, Result};
+use rustix::fs::{Access, AtFlags};
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Capability, при которых биты режима не создают EACCES (capabilities(7)).
+const DAC_BYPASS: [(u32, &str); 2] = [(1, "CAP_DAC_OVERRIDE"), (2, "CAP_DAC_READ_SEARCH")];
+
+/// Capability обхода DAC в наборах `CapEff`/`CapAmb` из `/proc/<pid>/status`.
+/// Набор, который не удалось разобрать, считается привилегированным.
+fn dac_bypass(status: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for set in ["CapEff", "CapAmb"] {
+        let mask = status
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{set}:")))
+            .and_then(|v| u64::from_str_radix(v.trim(), 16).ok());
+        match mask {
+            Some(mask) => found.extend(
+                DAC_BYPASS
+                    .iter()
+                    .filter(|(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, name)| format!("{set}:{name}")),
+            ),
+            None => found.push(format!("{set}:не определён")),
+        }
+    }
+    found
+}
+
+/// `cli_batch_faults` моделирует EACCES битами режима, поэтому запускается
+/// только без обхода DAC у стенда и у CLI; проверка до любых изменений состояния.
+pub(super) fn prerequisite(ctx: &Ctx) -> Option<String> {
+    let mut reasons = Vec::new();
+    if rustix::process::geteuid().is_root() {
+        reasons.push("эффективный UID 0".to_owned());
+    }
+    match std::fs::read_to_string("/proc/self/status") {
+        Ok(status) => reasons.extend(dac_bypass(&status)),
+        Err(e) => reasons.push(format!("/proc/self/status: {e}")),
+    }
+    if let Some(cli) = &ctx.cli {
+        if let Ok(meta) = cli.metadata()
+            && meta.permissions().mode() & 0o6000 != 0
+        {
+            reasons.push("CLI с битом setuid/setgid".into());
+        }
+        if rustix::fs::getxattr(cli, "security.capability", &mut [0_u8; 64]).is_ok() {
+            reasons.push("CLI с файловыми capability".into());
+        }
+    }
+    (!reasons.is_empty()).then(|| {
+        format!(
+            "запрет прав битами режима не создаёт EACCES при обходе DAC ({}); запустите стенд обычным пользователем",
+            reasons.join(", ")
+        )
+    })
+}
+
+/// Временный запрет доступа битами режима с восстановлением в `Drop`. После
+/// смены режима отказ подтверждается `faccessat(AT_EACCESS)`: если доступ всё
+/// ещё разрешён, режим восстанавливается и сценарий не засчитывается.
 struct Permissions(Vec<(PathBuf, std::fs::Permissions)>);
 impl Permissions {
-    fn deny(paths: &[&Path]) -> Result<Self> {
+    fn deny(paths: &[&Path], mode: u32, denied: Access) -> Result<Self> {
         let mut guard = Self(Vec::new());
         for path in paths {
             let old = path.metadata().map_err(|e| e.to_string())?.permissions();
             guard.0.push((path.to_path_buf(), old));
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500))
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
                 .map_err(|e| e.to_string())?;
+            match rustix::fs::accessat(rustix::fs::CWD, *path, denied, AtFlags::EACCESS) {
+                Err(rustix::io::Errno::ACCESS) => (),
+                Ok(()) => {
+                    return Err(format!(
+                        "запрет доступа к {} не действует (обход DAC); отказ не смоделирован",
+                        path.display()
+                    ));
+                }
+                Err(e) => return Err(format!("проверка запрета {}: {e}", path.display())),
+            }
         }
         Ok(guard)
     }
@@ -64,7 +134,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     let state = root.join("state.json");
     let before = std::fs::read(&state).map_err(|e| e.to_string())?;
     // Blob можно надёжно записать; запрещена именно публикация state.json.
-    let permissions = Permissions::deny(&[&root])?;
+    let permissions = Permissions::deny(&[&root], 0o500, Access::WRITE_OK)?;
     gate.open();
     let failed = Cli::finish(child).await?;
     let after = std::fs::read(&state).map_err(|e| e.to_string())?;
@@ -115,7 +185,11 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     {
         return Err("нет второй загрузки для отказа импорта".into());
     }
-    let permissions = Permissions::deny(&[&importing.store.join(".runtime/assets")])?;
+    let permissions = Permissions::deny(
+        &[&importing.store.join(".runtime/assets")],
+        0o500,
+        Access::WRITE_OK,
+    )?;
     gate.open();
     let paused = Cli::finish(child).await?;
     drop(permissions);
@@ -175,13 +249,11 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         fixture.requests_for(fixture::RECORD_3),
     );
     // Внешнее повреждение: production runtime должен отказать до получения/импорта.
-    let original_permissions = blob.metadata().map_err(|e| e.to_string())?.permissions();
-    std::fs::set_permissions(&blob, std::fs::Permissions::from_mode(0o000))
-        .map_err(|e| e.to_string())?;
+    let permissions = Permissions::deny(&[&blob], 0o000, Access::READ_OK)?;
     let unreadable = corrupt
         .run(true, &["batch-resume", "--batch-id", "corrupt"])
         .await;
-    std::fs::set_permissions(&blob, original_permissions).map_err(|e| e.to_string())?;
+    drop(permissions);
     let unreadable = unreadable?;
     env.out.check(
         "ошибка чтения blob отклоняется без потери checkpoint и новых загрузок",
@@ -271,63 +343,22 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     env.residual_clean().await
 }
 
-/// Заполняется только явно переданная отдельная ограниченная tmpfs, никогда
-/// диск рабочей копии. Монтирование и размонтирование принадлежат оператору.
+/// Заполняется только явно переданная выделенная ограниченная tmpfs, никогда
+/// диск рабочей копии. Монтирование и размонтирование принадлежат оператору;
+/// владение томом, проверки и очистка — `FaultVolume`.
 pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
-    use std::io::Write;
-    let volume = std::path::absolute(
-        env.ctx
-            .fault_volume
-            .as_ref()
-            .ok_or("нужен --fault-volume")?,
-    )
-    .map_err(|e| e.to_string())?;
-    if volume
-        .symlink_metadata()
-        .map_err(|e| e.to_string())?
-        .file_type()
-        .is_symlink()
-        || !std::process::Command::new("mountpoint")
-            .arg("-q")
-            .arg(&volume)
-            .status()
-            .is_ok_and(|s| s.success())
-    {
-        return Err(
-            "fault-volume должен быть самостоятельной точкой монтирования без символической ссылки"
-                .into(),
-        );
-    }
-    let stat = std::process::Command::new("stat")
-        .args(["-f", "--format=%T:%S:%b"])
-        .arg(&volume)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&stat.stdout);
-    let parts: Vec<_> = text.trim().split(':').collect();
-    let capacity = parts
-        .get(1)
-        .and_then(|s| s.parse::<u64>().ok())
-        .zip(parts.get(2).and_then(|s| s.parse::<u64>().ok()))
-        .and_then(|(a, b)| a.checked_mul(b));
-    if !stat.status.success()
-        || parts.first() != Some(&"tmpfs")
-        || !capacity.is_some_and(|n| n > 0 && n <= 64 * 1024 * 1024)
-    {
-        return Err("fault-volume должен быть отдельным tmpfs с ёмкостью <=64 MiB; обычный диск не заполняется".into());
-    }
-    if std::fs::read_dir(&volume)
-        .map_err(|e| e.to_string())?
-        .next()
-        .is_some()
-    {
-        return Err("fault-volume не пуст; чужие файлы не изменяются".into());
-    }
+    let requested = env
+        .ctx
+        .fault_volume
+        .as_ref()
+        .ok_or("нужен --fault-volume")?;
+    let mut volume = FaultVolume::acquire(requested, env.dir.join("store-evidence"))?;
+    let capacity = volume.capacity();
     env.out
         .evidence
         .insert("volume_capacity_bytes".into(), json!(capacity));
     let mut cli = Cli::new(env).ok_or(MISSING_CLI)?;
-    cli.store = volume.join("store");
+    cli.store = volume.store();
     let words = [
         (fixture::WORD, fixture::READING),
         (fixture::WORD_3, fixture::READING_3),
@@ -347,6 +378,7 @@ pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
             "--close-tab",
         ],
     )?;
+    volume.track(&child)?;
     if !fixture
         .wait_request(fixture::RECORD_3, 1, Duration::from_secs(60))
         .await
@@ -355,37 +387,25 @@ pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
     }
     let state = cli.store.join(".runtime/batches/space/state.json");
     let before = std::fs::read(&state).map_err(|e| e.to_string())?;
-    let reservation = volume.join("reservation");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&reservation)
-        .map_err(|e| e.to_string())?;
-    let no_space = loop {
-        match file.write_all(&[0_u8; 4096]) {
-            Ok(()) => (),
-            Err(e) => break e,
-        }
-    };
-    drop(file);
+    // При ошибке, отмене future или таймауте reservation и store убирает `Drop`.
+    let no_space = volume.fill()?;
     if no_space.raw_os_error() != Some(28) {
-        let _ = std::fs::remove_file(&reservation);
         return Err(format!("ожидался ENOSPC, получено {no_space}"));
     }
     gate.open();
     let failed = Cli::finish(child).await;
     // Освобождаем место и при ошибке наблюдения/таймауте CLI.
-    std::fs::remove_file(&reservation).map_err(|e| e.to_string())?;
+    volume.release_reservation()?;
     let failed = failed?;
     let after = std::fs::read(&state).map_err(|e| e.to_string())?;
     env.out.check("настоящий ENOSPC не уничтожает подтверждённый checkpoint",failed.code!=0 && before==after,json!({"capacity_bytes":capacity,"fill_errno":no_space.raw_os_error(),"exit":failed.code,"state_unchanged":before==after,"error":failed.out["error"]}));
     fixture.set(fixture::RECORD_3, Behavior::Normal);
-    let resumed = cli
-        .run(
-            true,
-            &["batch-resume", "--batch-id", "space", "--close-tab"],
-        )
-        .await?;
+    let child = cli.spawn(
+        true,
+        &["batch-resume", "--batch-id", "space", "--close-tab"],
+    )?;
+    volume.track(&child)?;
+    let resumed = Cli::finish(child).await?;
     env.out.check("после освобождения места первая запись сохранена, вторая повторяется явно",resumed.code==0 && fixture.requests_for(fixture::RECORD_A)==1 && fixture.requests_for(fixture::RECORD_3)==2,json!({"exit":resumed.code,"downloads_first":fixture.requests_for(fixture::RECORD_A),"downloads_second":fixture.requests_for(fixture::RECORD_3),"state":resumed.out["result"]}));
     env.out.evidence.insert(
         "state_before_sha256".into(),
@@ -396,26 +416,58 @@ pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
         json!(crate::util::sha256_hex(&after)),
     );
     // Штатный browser report сохраняет свидетельства на диске прогона, а том
-    // снова пуст для следующего вызова benchmark-runner. Удаляется только store,
-    // созданный здесь после проверки пустой отдельной tmpfs.
-    let copied = std::process::Command::new("cp")
-        .args(["-a", "--"])
-        .arg(&cli.store)
-        .arg(env.dir.join("store-evidence"))
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !copied.success() {
-        return Err("не удалось сохранить store ENOSPC в каталоге прогона".into());
-    }
-    std::fs::remove_dir_all(&cli.store).map_err(|e| e.to_string())?;
+    // снова пуст для следующего вызова benchmark-runner.
+    volume.save_and_clear_store()?;
     env.out.check(
         "ограниченный том снова пуст, свидетельства сохранены",
-        std::fs::read_dir(&volume)
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_none(),
+        volume.is_empty()?,
         json!({"evidence":"store-evidence"}),
     );
+    drop(volume);
     env.connect().await?;
     env.residual_clean().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dac_bypass_is_read_from_effective_and_ambient_sets() {
+        let plain = "Name:\tx\nCapInh:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\n";
+        assert!(dac_bypass(plain).is_empty());
+        let root = "CapEff:\t000001ffffffffff\nCapAmb:\t0000000000000000\n";
+        assert_eq!(
+            dac_bypass(root),
+            ["CapEff:CAP_DAC_OVERRIDE", "CapEff:CAP_DAC_READ_SEARCH"]
+        );
+        let ambient = "CapEff:\t0000000000000004\nCapAmb:\t0000000000000002\n";
+        assert_eq!(
+            dac_bypass(ambient),
+            ["CapEff:CAP_DAC_READ_SEARCH", "CapAmb:CAP_DAC_OVERRIDE"]
+        );
+        // Другие capability (CAP_CHOWN, CAP_FOWNER) EACCES не отменяют.
+        let other = "CapEff:\t0000000000000009\nCapAmb:\t0000000000000000\n";
+        assert!(dac_bypass(other).is_empty());
+        assert_eq!(
+            dac_bypass("CapEff:\tzz\n"),
+            ["CapEff:не определён", "CapAmb:не определён"]
+        );
+    }
+
+    #[test]
+    fn denied_permissions_are_proven_or_refused_and_always_restored() {
+        let dir = std::env::temp_dir().join(format!("anki-e2e-faults-deny-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let privileged = rustix::process::geteuid().is_root()
+            || !dac_bypass(&std::fs::read_to_string("/proc/self/status").unwrap()).is_empty();
+        let result = Permissions::deny(&[&dir], 0o500, Access::WRITE_OK);
+        // Под обходом DAC запрет не засчитывается; без него отказ доказан.
+        assert_eq!(result.is_ok(), !privileged, "{:?}", result.as_ref().err());
+        drop(result);
+        let mode = dir.metadata().unwrap().permissions().mode() & 0o777;
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(mode, 0o700);
+    }
 }

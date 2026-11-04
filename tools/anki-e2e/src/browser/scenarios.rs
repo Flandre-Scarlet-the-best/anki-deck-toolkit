@@ -68,6 +68,11 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
     {
         return (Status::Blocked, Some(reason), Outcome::default());
     }
+    if name == "cli_batch_faults"
+        && let Some(reason) = super::faults::prerequisite(ctx)
+    {
+        return (Status::Blocked, Some(reason), Outcome::default());
+    }
     if name == "cli_batch_enospc" && ctx.fault_volume.is_none() {
         return (
             Status::Blocked,

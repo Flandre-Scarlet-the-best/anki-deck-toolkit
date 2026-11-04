@@ -10,6 +10,7 @@
 mod chrome;
 mod cli_scenarios;
 mod crash_windows;
+mod fault_volume;
 mod faults;
 mod fixture;
 mod load;
