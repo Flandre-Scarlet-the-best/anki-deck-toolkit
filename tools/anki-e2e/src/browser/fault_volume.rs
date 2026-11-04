@@ -375,12 +375,15 @@ impl Drop for FaultVolume {
         if let Err(e) = self.release_reservation() {
             eprintln!("cli_batch_enospc: {e}");
         }
+        // Отслеживаемые CLI останавливаются до проверки store: живой CLI мог
+        // ещё не создать каталог и создал бы его уже после освобождения тома.
+        let stopped = self.stop_children();
         if self.store_cleared
             || rustix::fs::statat(self.dir.as_fd(), STORE, AtFlags::SYMLINK_NOFOLLOW).is_err()
         {
             return;
         }
-        if !self.stop_children() {
+        if !stopped {
             eprintln!(
                 "cli_batch_enospc: CLI не завершился за {} с; store на fault-volume оставлен",
                 CHILD_EXIT_LIMIT.as_secs()

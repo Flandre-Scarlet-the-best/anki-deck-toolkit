@@ -666,8 +666,18 @@ async fn execute(
     report::overall(statuses)
 }
 
+// Предел `--batch-items` × `--batch-count` обязан помещаться в корпус fixture.
+const _: () = assert!(128 * 8 <= fixture::LOAD_WORDS);
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opt_in_scenarios_never_join_the_implicit_set() {
+        for name in super::OPT_IN_SCENARIOS {
+            assert!(!super::SCENARIOS.contains(name), "{name}");
+        }
+    }
+
     use super::{BrowserArgs, cleanup_browser_artifacts, deduplicate_scenarios, execute, find_cli};
     use crate::report::Status;
     use std::{
