@@ -116,6 +116,10 @@ jobs:
             echo "SCCACHE_DIR=$cache/sccache"
             echo "SCCACHE_CACHE_SIZE=10G"
             echo "SCCACHE_GHA_ENABLED=false"
+            # Клиент и сервер sccache общаются через unix-сокет: в WSL с
+            # `networkingMode=mirrored` подключение к закрытому порту localhost
+            # не отклоняется, а ждёт TCP-таймаута.
+            echo "SCCACHE_SERVER_UDS=$RUNNER_TEMP/sccache.sock"
             echo "CI_TOOL_CACHE=$cache/tools"
           } >> "$GITHUB_ENV"
 
