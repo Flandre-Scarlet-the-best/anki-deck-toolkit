@@ -271,8 +271,20 @@ runs_dir = "target/anki-e2e/browser-runs"
 report = "report.json"
 description = "Штатные отчёт и копия store-evidence каждого прогона."
 
+[[scenario.requires]]
+kind = "executable"
+name = "ffmpeg"
+
+[[scenario.requires]]
+kind = "executable"
+name = "ffprobe"
+
+[[scenario.requires]]
+kind = "executable"
+name = "openssl"
+
 [scenario.environment]
-record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "module_version", "rustc_version", "hyperfine_version", "browser_version", "volume_capacity"]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version", "browser_version", "volume_capacity"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus", "browser_version", "volume_capacity"]
 
 [[scenario.environment.fact]]

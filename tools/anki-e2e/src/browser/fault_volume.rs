@@ -360,7 +360,7 @@ impl FaultVolume {
                 pidfd,
                 rustix::event::PollFlags::IN,
             )];
-            let limit = rustix::time::Timespec {
+            let limit = rustix::event::Timespec {
                 tv_sec: CHILD_EXIT_LIMIT.as_secs() as i64,
                 tv_nsec: 0,
             };
