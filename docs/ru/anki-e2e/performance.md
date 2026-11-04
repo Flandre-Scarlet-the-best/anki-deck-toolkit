@@ -74,17 +74,21 @@ docker system df -v
 хранит одну пару «сценарий · профиль», поэтому их числа приводятся только в
 локальной истории и сводке PR.
 
-- Время растёт линейно: в эталонном окружении ≈3,3–3,5 с на пару при
-  50–150 парах, и на пару пакет не становится дороже ни с ростом пакета, ни от
-  пакета к пакету в сессии. Пиковая память cgroup держится на 325–345 МиБ
-  независимо от размера.
-- Основная часть времени приходится на `import_mp3` (≈1,7 с на пару против
-  ≈0,75 с на получение через браузер). Профиль одного импорта: ≈24 вызова
-  `fsync`/`fdatasync` занимают ≈3,5 с из ≈4,2 с, CPU — около 0,2 с, а
-  `ffprobe`/`ffmpeg` вместе — около 0,1 с. Значит, стоимость определяется
-  протоколом надёжности записи `AssetStore` и диском WSL2, а не разбором MP3. Ослаблять
-  этот протокол ради скорости нельзя: он общий для всех инструментов
-  хранилища.
+- Эталонное окружение снимка: WSL2, виртуальный диск дистрибутива (`ext4.vhdx`)
+  лежит на NVMe-накопителе Samsung SSD 980 1TB. Тип и модель накопителя
+  `benchmark-runner` в факты окружения не записывает, поэтому они указаны здесь:
+  на другом накопителе числа несопоставимы, даже если остальные факты совпадают.
+- Время растёт линейно: ≈0,55–0,7 с на пару при 50–150 парах плюс
+  ≈8–12 с постоянных расходов на запуск браузера, расширения и fixture. Ни с ростом
+  пакета, ни от пакета к пакету в сессии пара не дорожает. Пиковая память cgroup
+  держится на 355–415 МиБ, и в неё входит учтённый cgroup файловый кэш записи.
+- На NVMe основная часть измеренных фаз приходится на получение через браузер
+  (≈0,32 с на пару), `import_mp3` занимает ≈0,14 с на пару. Импорт определяется
+  протоколом надёжности записи `AssetStore` (≈24 вызова `fsync`/`fdatasync` на
+  импорт), поэтому его стоимость сильно зависит от накопителя: тот же код на
+  прежнем, более медленном диске хранилища WSL тратил на импорт ≈1,7 с на пару, и
+  пакет из 128 пар шёл ≈417 с вместо ≈77 с. Ослаблять этот протокол ради скорости
+  нельзя: он общий для всех инструментов хранилища.
 - Для `anki-e2e.forvo-enospc` снимка нет: сценарий не записывает факт
   окружения `memory_total_bytes`, без которого эталонное окружение не
   определено.
@@ -180,10 +184,10 @@ docker system df -v
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"anki-e2e.forvo-batch","profile":"warm","recorded_at":"2026-11-03T13:23:16Z","environment":{"arch":"x86_64","browser_version":"Google Chrome for Testing 153.0.8010.12","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730980352","os":"linux","virtualization":"wsl2"},"workload":{"fixture":{"generator_bytes":{"value":23533.0,"unit":"byte"}},"fixture-audio":{"pairs":{"value":128.0,"unit":"count"}}},"parameters":{"batch_count":"1","batch_items":"128"}} -->
+<!-- benchmark-snapshot: {"scenario":"anki-e2e.forvo-batch","profile":"warm","recorded_at":"2026-11-04T11:41:17Z","environment":{"arch":"x86_64","browser_version":"Google Chrome for Testing 153.0.8010.12","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"fixture":{"generator_bytes":{"value":23533.0,"unit":"byte"}},"fixture-audio":{"pairs":{"value":128.0,"unit":"count"}}},"parameters":{"batch_count":"1","batch_items":"128"}} -->
 ### `anki-e2e.forvo-batch` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-11-03 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 2 из 2, прогревов 1.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 2 из 2, прогревов 1.
 
 | Факт окружения | Значение |
 |---|---|
@@ -193,7 +197,7 @@ docker system df -v
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730980352 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -208,15 +212,15 @@ docker system df -v
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 417.147 s ± 4.05 s | 417.147 s | 414.283 s – 420.011 s | 2 |
-| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 57.498 s ± 27.64 ms | 57.498 s | 57.478 s – 57.517 s | 2 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 238.68 MiB ± 1.52 MiB | 238.68 MiB | 237.6 MiB – 239.75 MiB | 2 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 70.81 s ± 92.32 ms | 70.81 s | 70.745 s – 70.875 s | 2 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 336.02 MiB ± 2.06 MiB | 336.02 MiB | 334.57 MiB – 337.48 MiB | 2 |
+| `time_wall_clock@command` | command / hyperfine | 76.688 s ± 3.154 s | 76.688 s | 74.458 s – 78.918 s | 2 |
+| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 53.093 s ± 882.38 ms | 53.093 s | 52.469 s – 53.717 s | 2 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 241.41 MiB ± 164.05 KiB | 241.41 MiB | 241.29 MiB – 241.52 MiB | 2 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 66.358 s ± 1.117 s | 66.358 s | 65.568 s – 67.147 s | 2 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 412.6 MiB ± 2.85 MiB | 412.6 MiB | 410.58 MiB – 414.61 MiB | 2 |
 | `module_counter@module-report/imports` | module-report / module-report | 128 ± 0 | 128 | 128 – 128 | 2 |
 | `module_counter@module-report/downloads` | module-report / module-report | 128 ± 0 | 128 | 128 – 128 | 2 |
-| `module_counter@module-report/acquire_ms` | module-report / module-report | 93 768 ± 36.8 | 93 768 | 93 742 – 93 794 | 2 |
-| `module_counter@module-report/import_mp3_ms` | module-report / module-report | 221 703.5 ± 3 382.1 | 221 703.5 | 219 312 – 224 095 | 2 |
+| `module_counter@module-report/acquire_ms` | module-report / module-report | 40 394 ± 3 719.4 | 40 394 | 37 764 – 43 024 | 2 |
+| `module_counter@module-report/import_mp3_ms` | module-report / module-report | 18 208.5 ± 488.6 | 18 208.5 | 17 863 – 18 554 | 2 |
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
