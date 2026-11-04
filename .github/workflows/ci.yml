@@ -98,21 +98,26 @@ jobs:
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Self-hosted: `target/` переживает задания, остальное чистит шаг ниже.
+          clean: ${{ runner.environment == 'github-hosted' }}
 
       - &self-hosted-environment
         name: Подготовить постоянное окружение self-hosted раннера
-        # Только self-hosted: сборка Cargo, sccache и проверенные архивы
-        # инструментов живут вне рабочей копии и переживают задания (checkout
-        # по-прежнему очищает исходники до точного SHA). Облачный кэш GitHub
-        # здесь не используется. Размер sccache ограничен LRU; каталоги сборки
-        # чистит отдельная операция обслуживания машины, а не задание.
+        # Только self-hosted: сборка Cargo (`target/` рабочей копии, как в
+        # облаке после rust-cache), sccache и проверенные архивы инструментов
+        # переживают задания. Рабочая копия, кроме `target/`, очищается до
+        # точного SHA, как это делает checkout по умолчанию. Облачный кэш GitHub
+        # здесь не используется. Размер sccache ограничен LRU; `target/` чистит
+        # отдельная операция обслуживания машины, а не задание.
         if: runner.environment == 'self-hosted'
         shell: bash
         run: |
+          git clean -ffdx -e /target/
+          git diff --quiet HEAD
           cache="$HOME/.cache/anki-ci"
-          mkdir -p "$cache/target/$GITHUB_JOB" "$cache/sccache" "$cache/tools"
+          mkdir -p "$cache/sccache" "$cache/tools"
           {
-            echo "CARGO_TARGET_DIR=$cache/target/$GITHUB_JOB"
             echo "SCCACHE_DIR=$cache/sccache"
             echo "SCCACHE_CACHE_SIZE=10G"
             echo "SCCACHE_GHA_ENABLED=false"
@@ -203,6 +208,9 @@ jobs:
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Self-hosted: `target/` переживает задания, остальное чистит шаг ниже.
+          clean: ${{ runner.environment == 'github-hosted' }}
 
       - *self-hosted-environment
 
@@ -341,6 +349,11 @@ jobs:
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Self-hosted: `target/` переживает задания, остальное чистит шаг ниже.
+          clean: ${{ runner.environment == 'github-hosted' }}
+
+      - *self-hosted-environment
 
       - name: Установить Rust из rust-toolchain.toml
         run: |
@@ -388,6 +401,9 @@ jobs:
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Self-hosted: `target/` переживает задания, остальное чистит шаг ниже.
+          clean: ${{ runner.environment == 'github-hosted' }}
 
       - *self-hosted-environment
 
@@ -483,6 +499,9 @@ jobs:
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Self-hosted: `target/` переживает задания, остальное чистит шаг ниже.
+          clean: ${{ runner.environment == 'github-hosted' }}
 
       - *self-hosted-environment
 
