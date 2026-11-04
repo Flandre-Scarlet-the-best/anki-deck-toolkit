@@ -47,11 +47,31 @@ pub(super) fn prerequisite() -> Option<String> {
     None
 }
 
-struct DebuggerGroup(rustix::process::Pid);
+struct DebuggerGroup {
+    leader: rustix::process::Pid,
+    armed: bool,
+}
+impl DebuggerGroup {
+    fn new(leader: rustix::process::Pid) -> Self {
+        Self {
+            leader,
+            armed: true,
+        }
+    }
+
+    /// Лидер уже дождан: его PID, а с ним и PGID, мог освободиться и достаться
+    /// чужой группе, поэтому сигнал группе больше посылать нельзя.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
 impl Drop for DebuggerGroup {
     fn drop(&mut self) {
-        // Только явно созданная этим тестом группа GDB и его inferior.
-        let _ = rustix::process::kill_process_group(self.0, rustix::process::Signal::KILL);
+        if self.armed {
+            // Только явно созданная этим тестом группа GDB и его inferior,
+            // пока лидер ещё не дождан и PGID занят.
+            let _ = rustix::process::kill_process_group(self.leader, rustix::process::Signal::KILL);
+        }
     }
 }
 
@@ -131,12 +151,18 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| e.to_string())?;
-        let group = DebuggerGroup(
+        let mut group = DebuggerGroup::new(
             rustix::process::Pid::from_raw(child.id().ok_or("нет PID GDB")? as i32)
                 .ok_or("PID GDB вне диапазона")?,
         );
-        let output = tokio::time::timeout(Duration::from_secs(100), child.wait_with_output()).await;
-        drop(group);
+        let mut wait = std::pin::pin!(child.wait_with_output());
+        let output = tokio::time::timeout(Duration::from_secs(100), &mut wait).await;
+        if output.is_ok() {
+            group.disarm();
+        } else {
+            // Лидер ещё не дождан (`wait` жив): PGID занят, группу можно убить.
+            drop(group);
+        }
         let output = output
             .map_err(|_| {
                 format!("{window}: GDB/CLI не завершился за 100 с; собственная группа остановлена")

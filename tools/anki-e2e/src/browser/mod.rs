@@ -29,6 +29,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+/// Пределы `--batch-items` и `--batch-count`; их произведение ограничено корпусом fixture.
+const MAX_BATCH_ITEMS: u16 = 128;
+const MAX_BATCH_COUNT: u16 = 8;
+
 pub const SCENARIOS: &[&str] = &[
     "extension_bridge_tab",
     "auth_and_candidates",
@@ -65,10 +69,10 @@ pub struct BrowserArgs {
     #[arg(long)]
     pub fault_volume: Option<PathBuf>,
     /// Размер каждого пакета cli_batch_load (разные синтетические японские пары).
-    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=128))]
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(1..=MAX_BATCH_ITEMS as i64))]
     pub batch_items: u16,
     /// Последовательные самостоятельные пакеты в одном браузерном профиле.
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=8))]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=MAX_BATCH_COUNT as i64))]
     pub batch_count: u16,
     /// Сценарии через запятую; по умолчанию — весь набор.
     #[arg(long, value_delimiter = ',')]
@@ -667,7 +671,7 @@ async fn execute(
 }
 
 // Предел `--batch-items` × `--batch-count` обязан помещаться в корпус fixture.
-const _: () = assert!(128 * 8 <= fixture::LOAD_WORDS);
+const _: () = assert!(MAX_BATCH_ITEMS as usize * MAX_BATCH_COUNT as usize <= fixture::LOAD_WORDS);
 
 #[cfg(test)]
 mod tests {
