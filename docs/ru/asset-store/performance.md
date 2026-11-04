@@ -10,6 +10,15 @@
 
 ## Что измеряется
 
+Полный браузерный путь Forvo через MV3 и production CLI измеряется
+сценарием `anki-e2e.forvo-batch` (10/50/128 разных пар и несколько
+последовательных пакетов). Его граница, состояние кэша, запуск и отчёт —
+в [каталоге](../performance/benchmarks.md) и
+[контракте длительного browser E2E](../anki-e2e/README.md#длительные-изолированные-пакеты).
+Файловые сценарии ниже не доказывают скорость получения MP3 и устойчивость
+браузерной сессии; синтетический локальный fixture также не измеряет
+скорость настоящего Forvo.
+
 Сценарии `asset-store.*` исполняет `asset-store-bench` — постоянный исполнитель
 настоящих операций `AssetStore` и `SafeBatchRuntime`. Каждый сценарий измеряет
 один класс операций, чтобы будущая гипотеза об I/O, блокировках, повторной
@@ -106,10 +115,10 @@ cargo run -p benchmark-history -- baseline <ID>
 остальных объёмов доступны в локальной истории командой
 `cargo run -p benchmark-history -- list --module asset-store`.
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.verify-integrity","profile":"warm","recorded_at":"2026-10-30T09:11:45Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.verify-integrity","profile":"warm","recorded_at":"2026-11-04T11:51:13Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}}} -->
 ### `asset-store.verify-integrity` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-10-30 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 20 из 20, прогревов 2.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 2.
 
 | Факт окружения | Значение |
 |---|---|
@@ -118,7 +127,7 @@ cargo run -p benchmark-history -- baseline <ID>
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730976256 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -131,24 +140,24 @@ cargo run -p benchmark-history -- baseline <ID>
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 130.08 ms ± 5.18 ms | 127.78 ms | 124.5 ms – 141.49 ms | 20 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 46.63 ms ± 10.64 ms | 47 ms | 31.37 ms – 74.43 ms | 20 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 78.66 ms ± 12.05 ms | 77.27 ms | 50.92 ms – 103.29 ms | 20 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 13.08 MiB ± 44.21 KiB | 13.08 MiB | 13 MiB – 13.16 MiB | 20 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 450 637 253.4 ± 33 378.5 | 450 618 622.5 | 450 617 837 – 450 693 945 | 20 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 127.23 ms ± 4.42 ms | 125.64 ms | 122.78 ms – 137.06 ms | 20 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 10.09 MiB ± 171.73 KiB | 10.17 MiB | 9.92 MiB – 10.43 MiB | 20 |
-| `cpu_utilization_peak@host` | host / procfs | 1.42 ядра ± 0.3 ядра | 1.37 ядра | 0.98 ядра – 2.16 ядра | 20 |
+| `time_wall_clock@command` | command / hyperfine | 120.37 ms ± 1.04 ms | 120.32 ms | 118.62 ms – 121.7 ms | 10 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 45.9 ms ± 9.39 ms | 44.14 ms | 35.37 ms – 59.55 ms | 10 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 71.99 ms ± 9.68 ms | 73.78 ms | 58.37 ms – 83.16 ms | 10 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 13.14 MiB ± 35.67 KiB | 13.15 MiB | 13.07 MiB – 13.18 MiB | 10 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 448 770 495.5 ± 31 810.6 | 448 755 487.5 | 448 754 826 – 448 830 936 | 10 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 119.27 ms ± 836.3 µs | 119.15 ms | 118.07 ms – 120.4 ms | 10 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 10.18 MiB ± 4.62 KiB | 10.18 MiB | 10.17 MiB – 10.18 MiB | 10 |
+| `cpu_utilization_peak@host` | host / procfs | 1.32 ядра ± 0.23 ядра | 1.37 ядра | 0.98 ядра – 1.77 ядра | 10 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.read-batch","profile":"warm","recorded_at":"2026-10-30T09:11:55Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"read_bytes":{"value":1213680.0,"unit":"byte"},"reads":{"value":1250.0,"unit":"count"},"records":{"value":1250.0,"unit":"count"}}}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.read-batch","profile":"warm","recorded_at":"2026-11-04T11:51:16Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"read_bytes":{"value":1213680.0,"unit":"byte"},"reads":{"value":1250.0,"unit":"count"},"records":{"value":1250.0,"unit":"count"}}}} -->
 ### `asset-store.read-batch` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-10-30 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 20 из 20, прогревов 2.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 2.
 
 | Факт окружения | Значение |
 |---|---|
@@ -157,7 +166,7 @@ cargo run -p benchmark-history -- baseline <ID>
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730976256 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -171,23 +180,23 @@ cargo run -p benchmark-history -- baseline <ID>
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 61.69 ms ± 6.11 ms | 60.09 ms | 57.47 ms – 84.47 ms | 20 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 15.09 ms ± 6.81 ms | 14.13 ms | 3.91 ms – 28.13 ms | 20 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 46.11 ms ± 8.1 ms | 45.7 ms | 32.15 ms – 66.92 ms | 20 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 8.02 MiB ± 53.68 KiB | 8.03 MiB | 7.91 MiB – 8.08 MiB | 20 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 152 367 392.6 ± 7 577.4 | 152 367 272 | 152 359 850 – 152 375 530 | 20 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 63.4 ms ± 6.28 ms | 61.77 ms | 58.94 ms – 86.48 ms | 20 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 5.06 MiB ± 57.59 KiB | 5.05 MiB | 5.05 MiB – 5.3 MiB | 20 |
+| `time_wall_clock@command` | command / hyperfine | 57.18 ms ± 1.61 ms | 56.49 ms | 55.02 ms – 60.05 ms | 10 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 17.39 ms ± 6.55 ms | 16.02 ms | 11.77 ms – 32.22 ms | 10 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 39.69 ms ± 6.96 ms | 41.73 ms | 24.17 ms – 45.91 ms | 10 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 8.19 MiB ± 73.4 KiB | 8.21 MiB | 8.03 MiB – 8.32 MiB | 10 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 149 192 383.6 ± 8 038.9 | 149 192 529.5 | 149 184 238 – 149 200 121 | 10 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 58.5 ms ± 1.62 ms | 57.83 ms | 56.39 ms – 61.31 ms | 10 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 5.05 MiB ± 4.32 KiB | 5.05 MiB | 5.05 MiB – 5.06 MiB | 10 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.read-single","profile":"warm","recorded_at":"2026-10-30T09:16:16Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"read_bytes":{"value":1213680.0,"unit":"byte"},"reads":{"value":1250.0,"unit":"count"},"records":{"value":1250.0,"unit":"count"}}}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.read-single","profile":"warm","recorded_at":"2026-11-04T11:55:21Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"read_bytes":{"value":1213680.0,"unit":"byte"},"reads":{"value":1250.0,"unit":"count"},"records":{"value":1250.0,"unit":"count"}}}} -->
 ### `asset-store.read-single` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-10-30 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 1.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 1.
 
 | Факт окружения | Значение |
 |---|---|
@@ -196,7 +205,7 @@ cargo run -p benchmark-history -- baseline <ID>
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730976256 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -210,23 +219,23 @@ cargo run -p benchmark-history -- baseline <ID>
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 42.51 s ± 163.7 ms | 42.466 s | 42.362 s – 42.778 s | 5 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 14.292 s ± 173.88 ms | 14.361 s | 14.057 s – 14.45 s | 5 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 28.209 s ± 192.69 ms | 28.237 s | 27.904 s – 28.398 s | 5 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 8.59 MiB ± 54.96 KiB | 8.58 MiB | 8.53 MiB – 8.67 MiB | 5 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 131 418 249 466.6 ± 8 381 519.9 | 131 414 502 426 | 131 414 496 797 – 131 433 242 784 | 5 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 42.504 s ± 163.77 ms | 42.459 s | 42.356 s – 42.772 s | 5 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 5.77 MiB ± 153.66 KiB | 5.7 MiB | 5.67 MiB – 6.03 MiB | 5 |
+| `time_wall_clock@command` | command / hyperfine | 40.753 s ± 193.59 ms | 40.75 s | 40.548 s – 41.065 s | 5 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 13.369 s ± 258.14 ms | 13.333 s | 13.096 s – 13.677 s | 5 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 27.373 s ± 176.51 ms | 27.436 s | 27.063 s – 27.491 s | 5 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 8.71 MiB ± 63.54 KiB | 8.7 MiB | 8.65 MiB – 8.79 MiB | 5 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 126 928 363 376.4 ± 10 270 752 | 126 935 859 767 | 126 917 109 576 – 126 935 868 133 | 5 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 40.743 s ± 196.04 ms | 40.741 s | 40.534 s – 41.059 s | 5 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 5.5 MiB ± 171.73 KiB | 5.43 MiB | 5.43 MiB – 5.8 MiB | 5 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.ingest","profile":"warm","recorded_at":"2026-10-30T09:18:53Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"ingest":{"value":50.0,"unit":"count"},"ingest_bytes":{"value":53887.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.ingest","profile":"warm","recorded_at":"2026-11-04T11:55:59Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"ingest":{"value":50.0,"unit":"count"},"ingest_bytes":{"value":53887.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}}} -->
 ### `asset-store.ingest` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-10-30 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 1.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 1.
 
 | Факт окружения | Значение |
 |---|---|
@@ -235,7 +244,7 @@ cargo run -p benchmark-history -- baseline <ID>
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730976256 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -250,24 +259,24 @@ cargo run -p benchmark-history -- baseline <ID>
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 6.511 s ± 501.56 ms | 6.713 s | 5.577 s – 6.882 s | 10 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 1.141 s ± 36.3 ms | 1.142 s | 1.096 s – 1.215 s | 10 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 1.589 s ± 42.13 ms | 1.582 s | 1.535 s – 1.646 s | 10 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 13.88 MiB ± 120.24 KiB | 13.91 MiB | 13.68 MiB – 14 MiB | 10 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 12 115 724 980.5 ± 1 125 063.5 | 12 115 554 476 | 12 114 231 093 – 12 118 333 731 | 10 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 2.733 s ± 41.52 ms | 2.727 s | 2.674 s – 2.792 s | 10 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 13.7 MiB ± 222.63 KiB | 13.64 MiB | 13.47 MiB – 14.23 MiB | 10 |
-| `disk_usage@path/store` | path / filesystem | 5.3 MiB ± 0 B | 5.3 MiB | 5.3 MiB – 5.3 MiB | 10 |
+| `time_wall_clock@command` | command / hyperfine | 3.468 s ± 50.58 ms | 3.483 s | 3.398 s – 3.532 s | 5 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 1.123 s ± 23.43 ms | 1.127 s | 1.095 s – 1.147 s | 5 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 1.531 s ± 51.79 ms | 1.529 s | 1.462 s – 1.603 s | 5 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 14.09 MiB ± 145.04 KiB | 14.15 MiB | 13.89 MiB – 14.25 MiB | 5 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 12 098 853 576.6 ± 666 360.9 | 12 098 888 596 | 12 098 111 478 – 12 099 876 790 | 5 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 2.656 s ± 36.1 ms | 2.654 s | 2.607 s – 2.701 s | 5 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 13.85 MiB ± 413.72 KiB | 13.71 MiB | 13.55 MiB – 14.55 MiB | 5 |
+| `disk_usage@path/store` | path / filesystem | 5.3 MiB ± 0 B | 5.3 MiB | 5.3 MiB – 5.3 MiB | 5 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.ingest-contention","profile":"warm","recorded_at":"2026-10-30T09:20:26Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"ingest":{"value":50.0,"unit":"count"},"ingest_bytes":{"value":53887.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}},"parameters":{"writers":"4"}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.ingest-contention","profile":"warm","recorded_at":"2026-11-04T11:56:40Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"corpus_bytes":{"value":1213680.0,"unit":"byte"},"ingest":{"value":50.0,"unit":"count"},"ingest_bytes":{"value":53887.0,"unit":"byte"},"records":{"value":1250.0,"unit":"count"}}},"parameters":{"writers":"4"}} -->
 ### `asset-store.ingest-contention` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-10-30 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 1.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 1.
 
 | Факт окружения | Значение |
 |---|---|
@@ -276,7 +285,7 @@ cargo run -p benchmark-history -- baseline <ID>
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730976256 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -292,25 +301,25 @@ cargo run -p benchmark-history -- baseline <ID>
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 7.243 s ± 672.88 ms | 7.49 s | 6.362 s – 7.833 s | 5 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 1.553 s ± 70.45 ms | 1.551 s | 1.453 s – 1.652 s | 5 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 1.909 s ± 71.54 ms | 1.932 s | 1.827 s – 1.981 s | 5 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 57.96 MiB ± 1.31 MiB | 57.8 MiB | 56.43 MiB – 59.65 MiB | 5 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 16 318 162 906.2 ± 3 528 893.4 | 16 320 050 082 | 16 313 859 768 – 16 321 129 316 | 5 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 3.47 s ± 110.69 ms | 3.396 s | 3.394 s – 3.641 s | 5 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 59.19 MiB ± 1.57 MiB | 60.02 MiB | 57.07 MiB – 60.51 MiB | 5 |
+| `time_wall_clock@command` | command / hyperfine | 4.057 s ± 37.13 ms | 4.068 s | 4 s – 4.101 s | 5 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 1.457 s ± 57.71 ms | 1.484 s | 1.393 s – 1.524 s | 5 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 1.748 s ± 58.68 ms | 1.754 s | 1.657 s – 1.82 s | 5 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 58.64 MiB ± 573.19 KiB | 58.57 MiB | 58.23 MiB – 59.59 MiB | 5 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 16 294 236 125.6 ± 1 948 157.7 | 16 294 423 896 | 16 291 948 643 – 16 297 145 643 | 5 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 3.211 s ± 40.07 ms | 3.227 s | 3.155 s – 3.251 s | 5 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 59.09 MiB ± 528.73 KiB | 58.97 MiB | 58.49 MiB – 59.91 MiB | 5 |
 | `disk_usage@path/store` | path / filesystem | 5.3 MiB ± 0 B | 5.3 MiB | 5.3 MiB – 5.3 MiB | 5 |
-| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.48 ядра ± 0.05 ядра | 0.45 ядра | 0.43 ядра – 0.54 ядра | 5 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.79 ядра ± 0 ядер | 0.79 ядра | 0.78 ядра – 0.79 ядра | 5 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.batch-reopen","profile":"warm","recorded_at":"2026-10-30T09:20:35Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"batch_blob_bytes":{"value":1024000.0,"unit":"byte"},"batch_blobs":{"value":250.0,"unit":"count"},"batch_entries":{"value":1000.0,"unit":"count"}}}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.batch-reopen","profile":"warm","recorded_at":"2026-11-04T11:56:42Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"batch_blob_bytes":{"value":1024000.0,"unit":"byte"},"batch_blobs":{"value":250.0,"unit":"count"},"batch_entries":{"value":1000.0,"unit":"count"}}}} -->
 ### `asset-store.batch-reopen` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-10-30 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 20 из 20, прогревов 2.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 2.
 
 | Факт окружения | Значение |
 |---|---|
@@ -319,7 +328,7 @@ cargo run -p benchmark-history -- baseline <ID>
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730976256 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -333,23 +342,23 @@ cargo run -p benchmark-history -- baseline <ID>
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 7.02 ms ± 276.4 µs | 6.97 ms | 6.69 ms – 8.01 ms | 20 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 4.1 ms ± 2.66 ms | 3.46 ms | 0 s – 7.23 ms | 20 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 2.6 ms ± 2.76 ms | 3.35 ms | 0 s – 7.85 ms | 20 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 5.92 MiB ± 86.98 KiB | 5.95 MiB | 5.79 MiB – 6.08 MiB | 20 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 28 973 335 ± 312 | 28 973 367 | 28 972 603 – 28 973 906 | 20 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 8.5 ms ± 382.5 µs | 8.41 ms | 8.15 ms – 9.84 ms | 20 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 3.05 MiB ± 3.78 KiB | 3.05 MiB | 3.05 MiB – 3.06 MiB | 20 |
+| `time_wall_clock@command` | command / hyperfine | 6.78 ms ± 153.5 µs | 6.76 ms | 6.52 ms – 7.02 ms | 10 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 4.27 ms ± 3.17 ms | 6.51 ms | 0 s – 6.79 ms | 10 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 2.03 ms ± 3.27 ms | 0 s | 0 s – 6.87 ms | 10 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 6.27 MiB ± 113.34 KiB | 6.28 MiB | 6.04 MiB – 6.43 MiB | 10 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 29 222 644.1 ± 799.3 | 29 222 983.5 | 29 220 565 – 29 223 251 | 10 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 8.1 ms ± 164.7 µs | 8.07 ms | 7.85 ms – 8.37 ms | 10 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 3.08 MiB ± 80.46 KiB | 3.05 MiB | 3.05 MiB – 3.3 MiB | 10 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.batch-checkpoint","profile":"warm","recorded_at":"2026-10-30T09:22:17Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730976256","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"batch_blob_bytes":{"value":1024000.0,"unit":"byte"},"batch_blobs":{"value":250.0,"unit":"count"},"batch_entries":{"value":1000.0,"unit":"count"}}},"parameters":{"change":"modified"}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.batch-checkpoint","profile":"warm","recorded_at":"2026-11-04T11:57:12Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"workload":{"batch_blob_bytes":{"value":1024000.0,"unit":"byte"},"batch_blobs":{"value":250.0,"unit":"count"},"batch_entries":{"value":1000.0,"unit":"count"}}},"parameters":{"change":"modified"}} -->
 ### `asset-store.batch-checkpoint` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-10-30 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 2.
+Последнее подтверждённое измерение: 2026-11-04 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r2 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 2.
 
 | Факт окружения | Значение |
 |---|---|
@@ -358,7 +367,7 @@ cargo run -p benchmark-history -- baseline <ID>
 | `hyperfine_version` | 2.0.0 |
 | `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
 | `logical_cpus` ★ | 16 |
-| `memory_total_bytes` ★ | 16730976256 |
+| `memory_total_bytes` ★ | 16730968064 |
 | `module_version` | 0.1.0 |
 | `os` ★ | linux |
 | `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
@@ -373,13 +382,13 @@ cargo run -p benchmark-history -- baseline <ID>
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 904.93 ms ± 966.88 ms | 1.149 s | 23.5 ms – 3.145 s | 10 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 2.81 ms ± 2.59 ms | 3.38 ms | 0 s – 6.08 ms | 10 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 8.83 ms ± 6.72 ms | 7.91 ms | 3.04 ms – 26.65 ms | 10 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 5.91 MiB ± 74.61 KiB | 5.92 MiB | 5.79 MiB – 6.02 MiB | 10 |
-| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 33 898 460.2 ± 328.2 | 33 898 486.5 | 33 898 020 – 33 899 002 | 10 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 13.86 ms ± 5.75 ms | 11.49 ms | 10.75 ms – 29.16 ms | 10 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 3.3 MiB ± 2.53 KiB | 3.3 MiB | 3.29 MiB – 3.3 MiB | 10 |
+| `time_wall_clock@command` | command / hyperfine | 16.11 ms ± 4.05 ms | 14.78 ms | 14.05 ms – 27.49 ms | 10 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 1.65 ms ± 3.48 ms | 0 s | 0 s – 8.38 ms | 10 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 6.91 ms ± 3.67 ms | 8.4 ms | 0 s – 9.28 ms | 10 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 6.17 MiB ± 133.15 KiB | 6.12 MiB | 6.04 MiB – 6.35 MiB | 10 |
+| `instructions@process-tree-waited` | process-tree-waited / hyperfine | 34 152 710.7 ± 251 | 34 152 761 | 34 152 118 – 34 153 049 | 10 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 10.41 ms ± 323.4 µs | 10.45 ms | 10.01 ms – 11 ms | 10 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 3.3 MiB ± 0 B | 3.3 MiB | 3.3 MiB – 3.3 MiB | 10 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
 
@@ -396,6 +405,23 @@ cargo run -p benchmark-history -- baseline <ID>
 измерение: сравнивать не с чем, и выводов «быстрее/медленнее» здесь нет.
 Числа — средние `time_wall_clock` серий; полные результаты и их ID доступны
 в локальной истории: `cargo run -p benchmark-history -- list --module asset-store`.
+
+Эти наблюдения относятся к прежнему, более медленному диску, на котором лежал
+виртуальный диск WSL2. Снимки выше перемерены на `kanji-medium` после переноса
+`ext4.vhdx` на NVMe-накопитель Samsung SSD 980 1TB. Тип и модель накопителя
+`benchmark-runner` в факты окружения не записывает, поэтому они указаны здесь.
+Операции, ограниченные `fsync`, на NVMe заметно дешевле. Прежние значения
+взяты из заменённых снимков тех же сценариев и нагрузок от 2026-10-30
+(локальная история). Они не совпадают с таблицей и гипотезами ниже: те описывают
+самый первый замер. Сравнение по сценариям:
+
+- `batch-checkpoint` `modified`: 16 мс в среднем (14–27 мс) вместо 0,9 с, хвосты
+  до 3,1 с исчезли;
+- `ingest`, 50 ресурсов: 3,5 с вместо 6,5 с;
+- `ingest-contention`, четыре писателя: 4,1 с вместо 7,2 с.
+
+Операции чтения и проверки изменились мало (в пределах 10 %). Таблица и гипотезы ниже остаются записью первого замера и
+с числами снимков напрямую не сравниваются.
 
 | Операция | `kanji-small` (250) | `kanji-medium` (1250) | `kanji-large` (3000) | `generic-medium` (1000) |
 |---|---|---|---|---|

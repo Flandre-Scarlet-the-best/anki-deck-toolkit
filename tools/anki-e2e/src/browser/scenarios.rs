@@ -63,6 +63,23 @@ async fn wait_true(rx: &mut tokio::sync::watch::Receiver<bool>) {
 }
 
 pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
+    if name == "cli_batch_crash_windows"
+        && let Some(reason) = super::crash_windows::prerequisite()
+    {
+        return (Status::Blocked, Some(reason), Outcome::default());
+    }
+    if name == "cli_batch_faults"
+        && let Some(reason) = super::faults::prerequisite(ctx)
+    {
+        return (Status::Blocked, Some(reason), Outcome::default());
+    }
+    if name == "cli_batch_enospc" && ctx.fault_volume.is_none() {
+        return (
+            Status::Blocked,
+            Some("нужен --fault-volume: отдельный пустой tmpfs <=64 MiB".into()),
+            Outcome::default(),
+        );
+    }
     if name.starts_with("cli_") && ctx.cli.is_none() {
         return (
             Status::Blocked,
@@ -102,8 +119,13 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
         out: Outcome::default(),
     };
     let mut interrupt = ctx.interrupt.clone();
+    let limit = if name == "cli_batch_load" {
+        Duration::from_secs(7200)
+    } else {
+        SCENARIO_LIMIT
+    };
     let result = tokio::select! {
-        result = tokio::time::timeout(SCENARIO_LIMIT, body(name, &mut env)) => match result {
+        result = tokio::time::timeout(limit, body(name, &mut env)) => match result {
             Ok(Ok(())) => Ok(()),
             // В Vivaldi вкладка, к которой подключён CDP-клиент стенда, не завершает
             // навигацию: это ограничение стенда, а не проверяемого адаптера.
@@ -112,7 +134,7 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
                 format!("{e} (Vivaldi не открывает вкладку пользователя через CDP стенда; сценарий не проверен)"),
             )),
             Ok(Err(e)) => Err((Status::Fail, e)),
-            Err(_) => Err((Status::Fail, format!("сценарий не завершился за {} с", SCENARIO_LIMIT.as_secs()))),
+            Err(_) => Err((Status::Fail, format!("сценарий не завершился за {} с", limit.as_secs()))),
         },
         _ = wait_true(&mut interrupt) => Err((Status::Interrupted, "прервано пользователем".to_owned())),
     };
@@ -158,6 +180,10 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "browser_restart" => browser_restart(env).await,
         "cli_fetch" => super::cli_scenarios::cli_fetch(env).await,
         "cli_batch" => super::cli_scenarios::cli_batch(env).await,
+        "cli_batch_load" => super::load::run(env).await,
+        "cli_batch_faults" => super::faults::run(env).await,
+        "cli_batch_enospc" => super::faults::enospc(env).await,
+        "cli_batch_crash_windows" => super::crash_windows::run(env).await,
         "cli_batch_recovery" => super::cli_scenarios::cli_batch_recovery(env).await,
         "cli_foreign_downloads" => super::cli_scenarios::cli_foreign_downloads(env).await,
         "adapter_doctor" => super::target_scenarios::adapter_doctor(env).await,

@@ -18,6 +18,9 @@ reviews:
     публикуются, поэтому в diff PR их быть не должно.
   high_level_summary_in_walkthrough: true
   review_details: true
+  # Ревью идёт через CLI, поэтому служебные статусы бота («Review skipped»)
+  # в PR не публикуются.
+  review_status: false
   fail_commit_status: false
   suggested_labels: false
   suggested_reviewers: false

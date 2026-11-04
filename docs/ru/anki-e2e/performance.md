@@ -63,6 +63,49 @@ docker image ls --filter label=io.github.anki-deck-toolkit.e2e=1
 docker system df -v
 ```
 
+## Длительные пакеты Forvo
+
+Сценарии `anki-e2e.forvo-batch` (параметры `batch_items` и `batch_count`) и
+`anki-e2e.forvo-enospc` проходят полный путь production CLI → MV3-расширение
+→ локальный HTTPS fixture → проверка MP3 → checkpoint → `AssetStore`. Ни
+настоящего forvo.com, ни профилей и данных пользователя они не касаются.
+Снимок ниже записан для одного пакета из 128 пар. Пакеты на 10 и 50 пар и сессия
+из трёх последовательных пакетов по 50 пар тоже измерены, но снимок
+хранит одну пару «сценарий · профиль», поэтому их числа приводятся только в
+локальной истории пользователя и здесь не подтверждаются.
+
+- Эталонное окружение снимка: WSL2, виртуальный диск дистрибутива (`ext4.vhdx`)
+  лежит на NVMe-накопителе Samsung SSD 980 1TB. Снимок ниже записан ревизией 1
+  сценария, в которой фактов накопителя ещё не было, поэтому накопитель указан
+  здесь, а не в таблице фактов. Начиная с ревизии 2 `anki-e2e.forvo-batch`
+  записывает и сравнивает `storage` и `guest_storage`
+  ([правила](../performance/benchmarks.md#полный-браузерный-путь-forvo)): на
+  другом накопителе серии не сопоставляются, а в WSL2 накопитель описывает
+  оператор (`provenance=operator_declared`). Результаты ревизии 1 с
+  результатами ревизии 2 не сравниваются.
+- Время растёт почти линейно: ≈0,55–0,7 с на пару при пакетах до 128 пар и сессии из 150 пар (3×50) плюс
+  ≈8–12 с постоянных расходов на запуск браузера, расширения и fixture. Пиковая
+  память cgroup держится на 355–415 МиБ, и в неё входит учтённый cgroup файловый
+  кэш записи.
+- От пакета к пакету в одной сессии дорожает только импорт, потому что store
+  накапливает записи. Получение через браузер остаётся постоянным. В одиночном
+  неподтверждённом наблюдении 3×128 (release-сборка CLI, под `perf record`,
+  снимка нет) пакеты шли 75,8 →
+  77,6 → 84,2 с, а средний `import_mp3` вырос со ≈150 до ≈235 мс по мере роста
+  store до 384 записей. CPU процесса CLI при этом мал, а `ffprobe`/`ffmpeg`
+  на элемент стоят постоянно. Это та же зависимость «публикация дорожает с
+  размером манифеста», что описана в
+  [наблюдениях `AssetStore`](../asset-store/performance.md#исходные-наблюдения).
+  Это свойство протокола хранилища, а не утечка: собственные вкладки, операции,
+  download records и временные файлы между пакетами не растут.
+- На NVMe основная часть измеренных фаз приходится на получение через браузер
+  (≈0,32 с на пару), `import_mp3` занимает ≈0,14 с на пару. Импорт определяется
+  протоколом надёжности записи `AssetStore` (≈24 вызова `fsync`/`fdatasync` на
+  импорт), поэтому его стоимость сильно зависит от накопителя: тот же код на
+  прежнем, более медленном диске хранилища WSL тратил на импорт ≈1,7 с на пару, и
+  пакет из 128 пар шёл ≈417 с вместо ≈77 с. Ослаблять этот протокол ради скорости
+  нельзя: он общий для всех инструментов хранилища.
+
 ## Снимки
 
 Блоки ниже генерирует `benchmark-history snapshot` из проверенных результатов
@@ -150,6 +193,47 @@ docker system df -v
 | `disk_usage@path/work-cache` | path / filesystem | 182.44 MiB ± 0 B | 182.44 MiB | 182.44 MiB – 182.44 MiB | 2 |
 
 Не измерено: `phase_duration@phase/release` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/anki-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/run-image` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста; `phase_duration@phase/scenarios` — `unsupported`: модуль не объявляет машинного формата меток фаз в журнале: длительность не выводится из человекочитаемого текста.
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
+<!-- benchmark-snapshot: {"scenario":"anki-e2e.forvo-batch","profile":"warm","recorded_at":"2026-11-04T11:41:17Z","environment":{"arch":"x86_64","browser_version":"Google Chrome for Testing 153.0.8010.12","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730968064","os":"linux","virtualization":"wsl2"},"workload":{"fixture":{"generator_bytes":{"value":23533.0,"unit":"byte"}},"fixture-audio":{"pairs":{"value":128.0,"unit":"count"}}},"parameters":{"batch_count":"1","batch_items":"128"}} -->
+### `anki-e2e.forvo-batch` · профиль `warm`
+
+Последнее подтверждённое измерение: 2026-11-04 UTC · `anki-e2e` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 2 из 2, прогревов 1.
+
+| Факт окружения | Значение |
+|---|---|
+| `arch` ★ | x86_64 |
+| `browser_version` ★ | Google Chrome for Testing 153.0.8010.12 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730968064 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| Нагрузка | Значение |
+|---|---|
+| параметр `batch_count` | `1` |
+| параметр `batch_items` | `128` |
+| `fixture` · `generator_bytes` | 22.98 KiB |
+| `fixture-audio` · `pairs` | 128 |
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 76.688 s ± 3.154 s | 76.688 s | 74.458 s – 78.918 s | 2 |
+| `time_cpu@process-tree-waited` | process-tree-waited / hyperfine | 53.093 s ± 882.38 ms | 53.093 s | 52.469 s – 53.717 s | 2 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 241.41 MiB ± 164.05 KiB | 241.41 MiB | 241.29 MiB – 241.52 MiB | 2 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 66.358 s ± 1.117 s | 66.358 s | 65.568 s – 67.147 s | 2 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 412.6 MiB ± 2.85 MiB | 412.6 MiB | 410.58 MiB – 414.61 MiB | 2 |
+| `module_counter@module-report/imports` | module-report / module-report | 128 ± 0 | 128 | 128 – 128 | 2 |
+| `module_counter@module-report/downloads` | module-report / module-report | 128 ± 0 | 128 | 128 – 128 | 2 |
+| `module_counter@module-report/acquire_ms` | module-report / module-report | 40 394 ± 3 719.4 | 40 394 | 37 764 – 43 024 | 2 |
+| `module_counter@module-report/import_mp3_ms` | module-report / module-report | 18 208.5 ± 488.6 | 18 208.5 | 17 863 – 18 554 | 2 |
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->

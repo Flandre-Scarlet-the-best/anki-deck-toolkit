@@ -36,6 +36,8 @@ JSON, в котором исполнитель записывает измере
 |---|---|---|
 | `anki-e2e.full` | `long-e2e` | `cold`, `warm` |
 | `anki-e2e.smoke` | `long-e2e` | `warm`, `offline-warm` |
+| `anki-e2e.forvo-batch` | `long-e2e` | `warm` (ОС/бинарники; новый store и профиль в каждом вызове) |
+| `anki-e2e.forvo-enospc` | `long-e2e` | `warm` (новый store на выделенной ограниченной tmpfs) |
 | `anki-repo.validate` | `short-cli` | `warm`, `offline-warm` |
 | `anki-repo.stats` | `short-cli` | `warm` |
 | `asset-store.verify-integrity` | `short-cli` | `warm` |
@@ -52,6 +54,60 @@ JSON, в котором исполнитель записывает измере
 | `benchmark-runner.calibration-parallel` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-memory` | `short-cli` | `warm` |
 | `benchmark-runner.calibration-io` | `short-cli` | `warm` |
+
+## Полный браузерный путь Forvo
+
+Полный локальный Forvo → MV3 → MP3 → checkpoint → AssetStore измеряется
+отдельно от файловых `asset-store.batch-*`:
+
+```bash
+cargo run -p benchmark-runner -- check anki-e2e.forvo-batch --profile warm --param chrome="$CHROME_BIN" --param batch_items=10 --runs 2
+cargo run -p benchmark-runner -- run anki-e2e.forvo-batch --profile warm --param chrome="$CHROME_BIN" --param batch_items=10 --runs 2
+cargo run -p benchmark-runner -- run anki-e2e.forvo-batch --profile warm --param chrome="$CHROME_BIN" --param batch_items=50 --runs 2
+cargo run -p benchmark-runner -- run anki-e2e.forvo-batch --profile warm --param chrome="$CHROME_BIN" --param batch_items=128 --runs 2
+cargo run -p benchmark-runner -- run anki-e2e.forvo-batch --profile warm --param chrome="$CHROME_BIN" --param batch_items=128 --param batch_count=3 --runs 2
+```
+
+Исполнитель собирает оба release-бинарника; `pronunciation-assets` берётся
+рядом с `anki-e2e`. Один прогрев и новые store/профили во всех вызовах:
+`warm` означает прогретую ОС, а не повторное использование полученных MP3.
+Граница Hyperfine включает подготовку fixture/браузера, постусловия и
+очистку; чистое время каждого пакета и раздельные наблюдения Rust/браузера
+остаются в штатном browser module-report. `batch_items` и `batch_count`
+влияют на сопоставимость; версия Chromium — обязательный сравниваемый факт.
+Сравниваются и факты накопителя из раздела `storage` отчёта
+([стенд](../anki-e2e/README.md#длительные-изолированные-пакеты)):
+`guest_storage` — наблюдаемые стендом ФС и устройства, `storage` — физический
+накопитель вместе с происхождением, `provenance=observed,physical=…` или
+`provenance=operator_declared,physical=…`. В виртуальной машине, в том числе
+WSL2, накопитель стенду не виден: его описывает оператор параметром
+`declared_storage`, иначе факт `storage` неизвестен, и `compare` и снимок
+отказывают. Заявленное и наблюдаемое описания — разные значения, поэтому
+результаты разного происхождения не сопоставляются, даже если названия
+накопителя совпадают; заявленное значение в снимке остаётся помеченным
+`operator_declared`.
+
+```bash
+cargo run -p benchmark-runner -- run anki-e2e.forvo-batch --profile warm --param chrome="$CHROME_BIN" --param batch_items=128 --param "declared_storage=Samsung SSD 980 1TB (NVMe)" --runs 2
+```
+Генератор fixture и манифест разных оригинальных MP3 — входы нагрузки по
+SHA-256. Локальные результаты не
+характеризуют скорость внешнего Forvo. Историю и сравнение ведёт
+[`benchmark-history`](../benchmark-history/README.md); детали охвата фаз и
+доступности метрик — [браузерный стенд](../anki-e2e/README.md#длительные-изолированные-пакеты).
+
+Для отдельного сравнения завершения отказа при заполнении диска существует
+`anki-e2e.forvo-enospc`. После выделения пустой ограниченной tmpfs по
+инструкции стенда:
+
+```bash
+cargo run -p benchmark-runner -- run anki-e2e.forvo-enospc --profile warm --param chrome="$CHROME_BIN" --param fault_volume="$volume" --runs 2
+```
+
+Ёмкость тома и версия браузера участвуют в сопоставимости. Каждый успешный
+вызов копирует свидетельства в свой `store-evidence` и оставляет том пустым.
+В измерение входит весь отказ и последующее восстановление, включая
+завершение диагностического журнала CLI; это не скорость штатного пакета.
 
 ## Как зарегистрировать сценарий нового модуля
 

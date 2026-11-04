@@ -179,6 +179,9 @@ async fn pipe_call(
 pub const USER_TAB_ERROR: &str = "вкладка пользователя";
 
 impl TestBrowser {
+    pub(super) fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
     pub async fn launch(options: LaunchOptions<'_>) -> Result<TestBrowser, String> {
         let profile = options.dir.join("profile");
         let downloads = options.dir.join("downloads");

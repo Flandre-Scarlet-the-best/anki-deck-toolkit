@@ -64,7 +64,7 @@ impl Cli {
         })
     }
 
-    fn command(&self, brave: bool, args: &[&str]) -> tokio::process::Command {
+    pub(super) fn command(&self, brave: bool, args: &[&str]) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.bin);
         command
             .arg("--repository-root")
@@ -110,9 +110,21 @@ impl Cli {
     }
 
     pub async fn finish(child: tokio::process::Child) -> Result<Run> {
-        let output = tokio::time::timeout(Duration::from_secs(150), child.wait_with_output())
+        Self::finish_with_limit(child, Duration::from_secs(150)).await
+    }
+
+    pub(super) async fn finish_with_limit(
+        child: tokio::process::Child,
+        limit: Duration,
+    ) -> Result<Run> {
+        let output = tokio::time::timeout(limit, child.wait_with_output())
             .await
-            .map_err(|_| "pronunciation-assets не завершился за 150 с".to_owned())?
+            .map_err(|_| {
+                format!(
+                    "pronunciation-assets не завершился за {} с",
+                    limit.as_secs()
+                )
+            })?
             .map_err(|e| e.to_string())?;
         let out = serde_json::from_slice(&output.stdout).map_err(|_| {
             format!(
@@ -130,7 +142,7 @@ impl Cli {
         Self::finish(self.spawn(brave, args)?).await
     }
 
-    fn open_store(&self) -> Result<AssetStore> {
+    pub(super) fn open_store(&self) -> Result<AssetStore> {
         AssetStore::open_existing_with_policy(
             StoreOptions::new(&self.store),
             PronunciationDomainPolicy,
@@ -152,7 +164,7 @@ impl Cli {
             .map(|r| (r.sha256, r.lifecycle.as_str().to_owned())))
     }
 
-    fn plan(&self, dir: &Path, name: &str, words: &[(&str, &str)]) -> Result<PathBuf> {
+    pub(super) fn plan(&self, dir: &Path, name: &str, words: &[(&str, &str)]) -> Result<PathBuf> {
         let path = dir.join(format!("{name}.json"));
         let items: Vec<_> = words
             .iter()
@@ -167,7 +179,7 @@ impl Cli {
     }
 }
 
-fn signal(child: &tokio::process::Child, signal: rustix::process::Signal) -> Result<()> {
+pub(super) fn signal(child: &tokio::process::Child, signal: rustix::process::Signal) -> Result<()> {
     let pid = child
         .id()
         .and_then(|id| rustix::process::Pid::from_raw(id as i32))
@@ -209,7 +221,7 @@ fn codes(run: &Run) -> Vec<Value> {
 }
 
 /// Журнал NDJSON запуска (путь из `diagnostic_log` результата или ошибки).
-fn run_log(run: &Run) -> String {
+pub(super) fn run_log(run: &Run) -> String {
     run.out["result"]["diagnostic_log"]
         .as_str()
         .or_else(|| run.out["error"]["details"]["diagnostic_log"].as_str())

@@ -921,3 +921,47 @@ fn large_state_is_compared_completely_and_reopens_after_no_op() {
     let mut reopened = SafeBatchRuntime::open(temporary.path(), "large").unwrap();
     assert_eq!(reopened.load::<PlainTextBatch>().unwrap().unwrap(), state);
 }
+
+#[test]
+fn opening_removes_only_orphan_atomic_temporaries_under_exclusive_lock() {
+    let temporary = TemporaryDirectory::new();
+    let bytes = b"checkpointed bytes";
+    let state = {
+        let mut runtime = SafeBatchRuntime::open(temporary.path(), "orphans").unwrap();
+        let blob = runtime.persist_blob(bytes, "bin").unwrap();
+        let state = PlainTextBatch {
+            blob: Some(blob),
+            ..PlainTextBatch::new("orphans", 1, "подтверждённое состояние")
+        };
+        runtime.save(&state).unwrap();
+        state
+    };
+    let batch = temporary.path().join(".runtime/batches/orphans");
+    let candidates = batch.join("candidates");
+    // Остатки процесса, убитого между fsync и rename атомарной записи.
+    fs::write(batch.join(".tmp-4242-7"), b"{\"partial\":").unwrap();
+    fs::write(candidates.join(".tmp-4242-8"), b"partial blob").unwrap();
+    // Посторонние имена и ссылки не принадлежат протоколу атомарной записи.
+    let outside = temporary.path().join("outside.bin");
+    fs::write(&outside, b"user").unwrap();
+    std::os::unix::fs::symlink(&outside, batch.join(".tmp-1-1")).unwrap();
+    fs::write(batch.join(".tmp-note"), b"keep").unwrap();
+    fs::write(candidates.join(".tmp-12-x"), b"keep").unwrap();
+    fs::create_dir(batch.join(".tmp-5-5")).unwrap();
+
+    let mut runtime = SafeBatchRuntime::open(temporary.path(), "orphans").unwrap();
+    assert!(!batch.join(".tmp-4242-7").exists());
+    assert!(!candidates.join(".tmp-4242-8").exists());
+    assert!(batch.join(".tmp-1-1").symlink_metadata().is_ok());
+    assert_eq!(fs::read(&outside).unwrap(), b"user");
+    assert!(batch.join(".tmp-note").exists());
+    assert!(candidates.join(".tmp-12-x").exists());
+    assert!(batch.join(".tmp-5-5").is_dir());
+    // Подтверждённое состояние и blob не затронуты.
+    let resumed = runtime.load::<PlainTextBatch>().unwrap().unwrap();
+    assert_eq!(resumed, state);
+    assert_eq!(
+        runtime.read_blob(resumed.blob.as_ref().unwrap()).unwrap(),
+        bytes
+    );
+}
