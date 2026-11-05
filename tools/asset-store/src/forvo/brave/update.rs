@@ -33,6 +33,12 @@ const MAX_LISTING_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_PAGES: u32 = 3;
 const RELOAD_WAIT: Duration = Duration::from_secs(60);
 const AUTO_CHECK_ERROR_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+/// Сколько автоматическая проверка ждёт освобождения блокировки. Блокировку
+/// `flock` держит открытое описание файла, и процесс, порождённый в этот момент
+/// другим потоком, наследует его до `exec`: уже снятая блокировка ещё мгновение
+/// выглядит занятой. Запущенную явную проверку такое ожидание не дожидается.
+const AUTO_CHECK_LOCK_GRACE: Duration = Duration::from_millis(100);
+const AUTO_CHECK_LOCK_RETRY: Duration = Duration::from_millis(5);
 
 /// Откуда берётся выпуск.
 #[derive(Debug, Clone)]
@@ -563,6 +569,19 @@ pub async fn auto_check(
     .await
 }
 
+async fn auto_check_lock(state_dir: &Path) -> Option<std::fs::File> {
+    let deadline = tokio::time::Instant::now() + AUTO_CHECK_LOCK_GRACE;
+    loop {
+        match check_lock(state_dir, false).await {
+            Ok(Some(lock)) => return Some(lock),
+            Ok(None) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(AUTO_CHECK_LOCK_RETRY).await;
+            }
+            _ => return None,
+        }
+    }
+}
+
 async fn auto_check_with_channel(
     state_dir: &Path,
     state: Option<&AdapterState>,
@@ -574,7 +593,7 @@ async fn auto_check_with_channel(
     // Обычный fetch не ждёт уже запущенную явную проверку и не создаёт второй
     // сетевой запрос. Проверка кэша и его обновление выполняются под одной
     // блокировкой, включая запись отрицательного результата по тайм-ауту.
-    let _lock = check_lock(state_dir, false).await.ok().flatten()?;
+    let _lock = auto_check_lock(state_dir).await?;
     let installed = state.and_then(|s| peek_version(&s.install_dir));
     let cache = if let Some(cache) = cached_check(state_dir).filter(|c| {
         let cache_ttl = if c.error.is_some() {
