@@ -4573,7 +4573,16 @@ fn scan_asset_directory(
                 format!("незарегистрированный файл в каноническом хранилище ресурсов: {path}"),
             ));
         }
-        if path.matches('/').count() != 1 {
+        // Плоская раскладка `assets/<sha>.<ext>` либо вложенная раскладка слота
+        // `assets/<sha256(identity)>/<sha>.<ext>`: после CAS-замены прежние байты
+        // слота остаются рядом с текущими. Имя файла ниже всё равно сверяется
+        // с фактическим SHA-256, а каталог слота без текущей записи отвергнут выше.
+        let nested_slot = path.matches('/').count() == 2
+            && path
+                .split('/')
+                .nth(1)
+                .is_some_and(|slot| validate_hash(slot).is_ok());
+        if path.matches('/').count() != 1 && !nested_slot {
             return Err(AssetError::new(
                 ErrorCode::UnexpectedPath,
                 format!(
@@ -4581,7 +4590,15 @@ fn scan_asset_directory(
                 ),
             ));
         }
-        let Some(hash) = embedded_content_hash(&component) else {
+        let embedded = if nested_slot {
+            component
+                .rsplit_once('.')
+                .map(|(stem, _)| stem)
+                .filter(|stem| stem.len() == 64)
+        } else {
+            embedded_content_hash(&component)
+        };
+        let Some(hash) = embedded else {
             return Err(AssetError::new(
                 ErrorCode::UnexpectedPath,
                 format!("неизвестный файл в каноническом хранилище ресурсов: {path}"),

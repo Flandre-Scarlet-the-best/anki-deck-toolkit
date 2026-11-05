@@ -61,6 +61,33 @@ enum Command {
     Run(OperationArgs),
     /// Постусловия операции вне измеряемого интервала.
     Verify(OperationArgs),
+    /// Синтетический корпус MP3 для `asset-store.audio-normalizer-batch` (новый каталог).
+    AudioCorpus {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        count: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Привести помеченный рабочий каталог нормализатора к исходному состоянию.
+    AudioReset {
+        #[arg(long)]
+        workdir: PathBuf,
+        /// Сохранить кэш результатов (тёплый повторный запуск).
+        #[arg(long)]
+        keep_cache: bool,
+        /// Удалить рабочий каталог целиком.
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Постусловие: пакет нормализатора завершён, вход не изменён.
+    AudioVerify {
+        #[arg(long)]
+        workdir: PathBuf,
+        #[arg(long)]
+        batch_id: String,
+    },
     /// Удалить помеченный рабочий каталог.
     Clean {
         #[arg(long)]
@@ -75,8 +102,28 @@ fn operation(args: &OperationArgs) -> Result<Operation, BenchError> {
     Operation::parse(&args.operation, args.writers, args.change.as_deref())
 }
 
+fn audio(command: &Command) -> Option<Result<serde_json::Value, String>> {
+    use asset_store::bench_audio;
+    let result = match command {
+        Command::AudioCorpus { out, count, seed } => {
+            bench_audio::generate_corpus(out, *count, *seed)
+        }
+        Command::AudioReset {
+            workdir,
+            keep_cache,
+            remove,
+        } => bench_audio::reset_workspace(workdir, *keep_cache, *remove),
+        Command::AudioVerify { workdir, batch_id } => bench_audio::verify(workdir, batch_id),
+        _ => return None,
+    };
+    Some(result.map_err(|error| error.to_string()))
+}
+
 fn execute(command: Command) -> Result<String, BenchError> {
     let summary = match command {
+        Command::AudioCorpus { .. } | Command::AudioReset { .. } | Command::AudioVerify { .. } => {
+            unreachable!("аудио-подкоманды обработаны отдельно")
+        }
         Command::Describe { spec } => {
             let spec = WorkloadSpec::load(&spec)?;
             return Ok(serde_json::to_string(&bench_workload::describe(&spec))
@@ -102,6 +149,16 @@ fn execute(command: Command) -> Result<String, BenchError> {
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(result) = audio(&cli.command) {
+        match result {
+            Ok(value) => println!("{value}"),
+            Err(error) => {
+                eprintln!("asset-store-bench: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     match execute(cli.command) {
         Ok(line) => println!("{line}"),
         Err(error) => {

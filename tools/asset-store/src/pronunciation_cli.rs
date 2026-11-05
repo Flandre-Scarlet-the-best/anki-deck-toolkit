@@ -46,6 +46,12 @@ enum Action {
         #[command(subcommand)]
         action: ForvoAction,
     },
+    /// Balanced Normalizer и технический QualityGate: только локальные файлы,
+    /// без Forvo и сети. Исходники не изменяются.
+    Normalizer {
+        #[command(subcommand)]
+        action: crate::pronunciation_normalizer_cli::NormalizerAction,
+    },
     Init,
     Inspect,
     Verify,
@@ -457,7 +463,7 @@ fn adapter_command(
 
 /// Все компоненты источника открываются с NOFOLLOW. Проверяется как
 /// лексическая граница, так и фактический объект по открытому дескриптору.
-fn read_local(
+pub(crate) fn read_local(
     path: &Path,
     protected: &BTreeSet<PathBuf>,
     maximum: u64,
@@ -646,6 +652,9 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
         }
         return execute_forvo(&root, &profile, generic, action, &protected, cli.output);
     }
+    if let Action::Normalizer { action } = &cli.command {
+        return crate::pronunciation_normalizer_cli::execute(action, &root, &protected);
+    }
     if let Action::Probe { file } = &cli.command {
         return Ok(
             serde_json::json!({"schema_version":1,"outcome":"ok","result":audio::probe_mp3(&read_local(file,&protected,audio::MAX_AUDIO_BYTES)?)?}),
@@ -667,6 +676,7 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     let read_audio = |path: &Path| read_local(path, &protected, audio::MAX_AUDIO_BYTES);
     let result = match &cli.command {
         Action::Forvo { .. } => unreachable!("Forvo обработан до открытия хранилища"),
+        Action::Normalizer { .. } => unreachable!("нормализатор обработан до открытия хранилища"),
         Action::Init => {
             serde_json::json!({"store_id":store.store_id(),"initialized":store.initialized_on_open()})
         }

@@ -120,8 +120,9 @@ fn frames(bytes: &[u8]) -> Result<(u32, u32, u32, u64), AssetError> {
 /// stdout/stderr читаются одновременно с жёсткими пределами. При превышении времени
 /// дочерний процесс завершается принудительно с ожиданием его остановки,
 /// в том числе при заполненных каналах.
-fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
+pub(super) fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
     for required in ["prlimit", tool] {
         let available = std::env::var_os("PATH").is_some_and(|paths| {
             std::env::split_paths(&paths).any(|path| {
@@ -199,6 +200,14 @@ fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
             format!("не удалось выполнить {tool} через prlimit"),
         ));
     }
+    // Завершение сигналом (Ctrl+C группы процессов, SIGKILL по пределу CPU)
+    // не говорит о содержимом файла: это сбой среды, а не отказ декодирования.
+    if let Some(signal) = status.signal() {
+        return Err(infrastructure_failure(
+            "audio_tool_runtime_failed",
+            format!("{tool} завершён сигналом {signal}"),
+        ));
+    }
     if !status.success() || !errors.is_empty() || output.len() as u64 > limit {
         // Не сохраняем stderr внешнего процесса: он может содержать пути/теги.
         return Err(failure(format!(
@@ -216,13 +225,41 @@ std::thread_local! {
 pub fn probe_mp3(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
     #[cfg(test)]
     FULL_PROBES.with(|count| count.set(count.get() + 1));
-    probe_inner(bytes).map_err(|mut error| {
+    probe_inner(bytes, false).map_err(|mut error| {
         error.details["schema_version"] = serde_json::json!(1);
         error.details["sha256"] = serde_json::json!(sha256_hex(bytes));
         error.details["byte_length"] = serde_json::json!(bytes.len());
         error.details["technical_only"] = serde_json::json!(true);
         error
     })
+}
+
+/// Диагностическая проверка для нормализатора: та же, что `probe_mp3`, но
+/// расхождение кадровой и декодированной длительности допускается, если его
+/// **точно до отсчёта** объясняют задержка и дополнение из тега LAME. Это не
+/// техническое свидетельство хранилища и не даёт права на импорт.
+pub(super) fn probe_mp3_lame_gapless(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+    probe_inner(bytes, true)
+}
+
+/// Задержка и дополнение кодировщика из тега LAME в кадре Xing/Info.
+fn lame_gapless(bytes: &[u8]) -> Option<(u64, u64)> {
+    let start = if bytes.starts_with(b"ID3") && bytes.len() >= 10 {
+        10 + bytes[6..10]
+            .iter()
+            .fold(0usize, |n, b| (n << 7) | (*b & 0x7f) as usize)
+    } else {
+        0
+    };
+    let window = bytes.get(start..start.checked_add(2048)?.min(bytes.len()))?;
+    let xing = window
+        .windows(4)
+        .position(|w| w == b"Xing" || w == b"Info")?;
+    let tag = window[xing..].windows(4).position(|w| w == b"LAME")? + xing;
+    let raw = window.get(tag + 21..tag + 24)?;
+    let delay = (u64::from(raw[0]) << 4) | (u64::from(raw[1]) >> 4);
+    let padding = ((u64::from(raw[1]) & 0x0f) << 8) | u64::from(raw[2]);
+    Some((delay, padding))
 }
 
 pub(super) fn inspect_frames(bytes: &[u8]) -> Result<(u32, u32, u32, u64), AssetError> {
@@ -232,7 +269,7 @@ pub(super) fn inspect_frames(bytes: &[u8]) -> Result<(u32, u32, u32, u64), Asset
     frames(bytes)
 }
 
-fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
+fn probe_inner(bytes: &[u8], allow_lame_gapless: bool) -> Result<AudioProbe, AssetError> {
     let (sample_rate, channels, frame_count, encoded_samples) = inspect_frames(bytes)?;
     let workspace = TempWorkspace::create("pronunciation-probe")
         .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
@@ -322,12 +359,20 @@ fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
     // Кадр Xing/Info и задержка/дополнение кодировщика могут убрать до трёх кадров.
     // Допуск абсолютный, а не процентный: длинная усечённая запись не проходит.
     let tolerance = 3.0 * 1152.0 / sample_rate as f64 + 0.002;
+    let gapless_explained = allow_lame_gapless
+        && lame_gapless(bytes).is_some_and(|(delay, padding)| {
+            let per_frame = encoded_samples / u64::from(frame_count);
+            encoded_samples.checked_sub(per_frame + delay + padding) == Some(samples)
+        });
     if decoded > MAX_DURATION_SECONDS
         || (declared - decoded).abs() > tolerance
-        || (encoded_samples as f64 / sample_rate as f64 - decoded).abs() > tolerance
+        || ((encoded_samples as f64 / sample_rate as f64 - decoded).abs() > tolerance
+            && !gapless_explained)
     {
-        return Err(failure(
+        return Err(AssetError::with_details(
+            ErrorCode::ValidatorFailure,
             "заявленная/кадровая и декодированная длительности расходятся",
+            serde_json::json!({"check":"duration_consistency"}),
         ));
     }
     Ok(AudioProbe {
@@ -342,4 +387,180 @@ fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
         decoded_duration_seconds: decoded,
         decoded_samples: samples,
     })
+}
+
+/// Повторно декодирует уже проверенный `probe_mp3` поток в interleaved `f32`
+/// той же частоты и раскладки. `f32` сохраняет выбросы декодера выше полной
+/// шкалы, которые `s16` скрыл бы насыщением.
+pub(super) fn decode_f32(bytes: &[u8], probe: &AudioProbe) -> Result<Vec<f32>, AssetError> {
+    let workspace = TempWorkspace::create("pronunciation-decode")
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
+    let path = workspace.path().join("input.mp3");
+    std::fs::write(&path, bytes)
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
+    let name = path
+        .to_str()
+        .ok_or_else(|| failure("временный путь должен быть UTF-8"))?;
+    let pcm = run(
+        "ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-nostdin",
+            "-filter_threads",
+            "1",
+            "-xerror",
+            "-err_detect",
+            "explode",
+            "-threads",
+            "1",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+            name,
+            "-map",
+            "0:a:0",
+            "-threads",
+            "1",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ],
+        MAX_F32_PCM_BYTES,
+    )?;
+    let stride = probe.channels as usize * 4;
+    if pcm.is_empty() || pcm.len() % stride != 0 {
+        return Err(failure("декодер не выдал полный поток PCM f32"));
+    }
+    let samples: Vec<f32> = pcm
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
+        .collect();
+    if samples.iter().any(|s| !s.is_finite()) {
+        return Err(failure("декодер выдал неконечные отсчёты"));
+    }
+    if (samples.len() / probe.channels as usize) as u64 != probe.decoded_samples {
+        return Err(failure(
+            "повторное декодирование расходится с технической проверкой",
+        ));
+    }
+    Ok(samples)
+}
+
+/// Предел PCM f32: 30 с, 48 kHz, стерео, с запасом на дополнение кодировщика.
+pub(super) const MAX_F32_PCM_BYTES: u64 = 12 * 1024 * 1024;
+
+/// Один контролируемый проход libmp3lame без тегов и метаданных источника.
+/// `-bitexact` убирает версию сборки из потока, поэтому одинаковые входы
+/// той же сборки FFmpeg дают одинаковые байты.
+pub(super) fn encode_mp3(
+    samples: &[f32],
+    input_rate: u32,
+    channels: u32,
+    output_rate: u32,
+    encoder: &[String],
+) -> Result<Vec<u8>, AssetError> {
+    let workspace = TempWorkspace::create("pronunciation-encode")
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
+    let input = workspace.path().join("input.f32");
+    let output = workspace.path().join("output.mp3");
+    let raw: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    std::fs::write(&input, raw)
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
+    let (Some(input_name), Some(output_name)) = (input.to_str(), output.to_str()) else {
+        return Err(failure("временный путь должен быть UTF-8"));
+    };
+    let (input_rate, channels, output_rate) = (
+        input_rate.to_string(),
+        channels.to_string(),
+        output_rate.to_string(),
+    );
+    let mut args: Vec<&str> = vec![
+        "-v",
+        "error",
+        "-nostdin",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
+        "-protocol_whitelist",
+        "file",
+        "-f",
+        "f32le",
+        "-ar",
+        &input_rate,
+        "-ac",
+        &channels,
+        "-i",
+        input_name,
+        "-map_metadata",
+        "-1",
+        "-ar",
+        &output_rate,
+        "-c:a",
+        "libmp3lame",
+    ];
+    args.extend(encoder.iter().map(String::as_str));
+    args.extend([
+        "-id3v2_version",
+        "0",
+        "-write_id3v1",
+        "0",
+        "-write_xing",
+        "1",
+        "-fflags",
+        "+bitexact",
+        "-flags:a",
+        "+bitexact",
+        "-f",
+        "mp3",
+        output_name,
+    ]);
+    let stdout = run("ffmpeg", &args, 1024)?;
+    if !stdout.is_empty() {
+        return Err(failure("кодировщик неожиданно писал в stdout"));
+    }
+    let bytes = std::fs::read(&output)
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_AUDIO_BYTES {
+        return Err(failure("кодировщик выдал пустой или слишком большой MP3"));
+    }
+    Ok(bytes)
+}
+
+/// Версии FFmpeg и libavcodec из `ffmpeg -version`: входят в отпечаток
+/// конфигурации, потому что другой сборки достаточно для иных байтов.
+pub(super) fn ffmpeg_identity() -> Result<String, AssetError> {
+    let output = run("ffmpeg", &["-hide_banner", "-version"], 64 * 1024)?;
+    let text = String::from_utf8_lossy(&output);
+    let mut parts = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("ffmpeg version ") {
+            parts.push(format!(
+                "ffmpeg {}",
+                rest.split_whitespace().next().unwrap_or("unknown")
+            ));
+        } else if line.starts_with("libavcodec") || line.starts_with("libswresample") {
+            parts.push(
+                line.split('/')
+                    .next()
+                    .unwrap_or(line)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+    }
+    if parts.is_empty() || parts.iter().any(|p| p.chars().any(char::is_control)) {
+        return Err(infrastructure_failure(
+            "audio_tool_runtime_failed",
+            "не удалось определить версию FFmpeg",
+        ));
+    }
+    Ok(parts.join("; "))
 }
