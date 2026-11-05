@@ -35,10 +35,14 @@ enum Decision {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Forvo в собственном постоянном профиле Chromium; окно требуется для входа.
+    /// Forvo: общий путь выбирает транспорт по `--mode`/конфигурации
+    /// (`chromium_first` — собственный профиль Chromium, затем адаптер браузера;
+    /// `extension_only` — только адаптер браузера).
     Forvo {
         #[arg(long)]
         profile: Option<PathBuf>,
+        #[command(flatten)]
+        generic: GenericForvo,
         #[command(subcommand)]
         action: ForvoAction,
     },
@@ -110,8 +114,40 @@ enum Action {
     },
 }
 
+/// Параметры общего пользовательского пути Forvo (`fetch`, `batch-*`, `config`).
+/// Явные команды `forvo brave` и `forvo browser` их не используют.
+#[derive(clap::Args, Clone, Default)]
+struct GenericForvo {
+    /// Стратегия транспорта: chromium_first (по умолчанию) или extension_only;
+    /// перекрывает forvo.mode конфигурации.
+    #[arg(long, value_enum)]
+    mode: Option<crate::user_config::ForvoMode>,
+    /// Цель адаптера браузера (перекрывает forvo.browser_target конфигурации).
+    #[arg(long)]
+    browser_target: Option<String>,
+    /// Каталог состояния адаптера браузера (как --state-dir у forvo browser).
+    #[arg(long)]
+    adapter_state_dir: Option<PathBuf>,
+    /// Файл общей пользовательской конфигурации (иначе ANKI_DECK_TOOLKIT_CONFIG
+    /// или $XDG_CONFIG_HOME/anki-deck-toolkit/config.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+impl GenericForvo {
+    fn settings(&self) -> Result<crate::user_config::ForvoSettings, AssetError> {
+        crate::user_config::forvo(&crate::user_config::ForvoOverrides {
+            config: self.config.clone(),
+            mode: self.mode,
+            browser_target: self.browser_target.clone(),
+        })
+    }
+}
+
 #[derive(Subcommand)]
 enum ForvoAction {
+    /// Показать итоговую стратегию транспорта, её источники и настроенные цели адаптера.
+    Config,
     /// Обычный Brave пользователя через собственное расширение и loopback bridge
     /// (цель `brave`; прежний интерфейс, не зависит от цели по умолчанию).
     Brave {
@@ -303,6 +339,33 @@ enum RunAction {
     },
     /// Закрыть собственную вкладку адаптера.
     Close {
+        #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
+        wait_seconds: u64,
+    },
+    /// Проверить доступную версию адаптера в канале выпусков (без установки).
+    UpdateCheck {
+        /// Каталог скачанного выпуска вместо GitHub Releases.
+        #[arg(long)]
+        from_dir: Option<PathBuf>,
+        /// Файл с открытым ключом Ed25519 (hex) вместо встроенного корня доверия.
+        #[arg(long)]
+        trusted_public_key: Option<PathBuf>,
+    },
+    /// Проверить подписанный выпуск и установить его в прежний каталог цели с
+    /// перезагрузкой расширения; сопряжение и идентичность сохраняются.
+    Update {
+        /// Каталог скачанного выпуска вместо GitHub Releases (офлайн).
+        #[arg(long)]
+        from_dir: Option<PathBuf>,
+        /// Версия выпуска; по умолчанию — наибольшая опубликованная.
+        #[arg(long)]
+        version: Option<String>,
+        /// Файл с открытым ключом Ed25519 (hex) вместо встроенного корня доверия.
+        #[arg(long)]
+        trusted_public_key: Option<PathBuf>,
+        /// Переустановить ту же версию, если файлы на диске отличаются от выпуска.
+        #[arg(long)]
+        reinstall: bool,
         #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
         wait_seconds: u64,
     },
@@ -547,7 +610,12 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
             protected.insert(parent.join("decks"));
         }
     }
-    if let Action::Forvo { profile, action } = &cli.command {
+    if let Action::Forvo {
+        profile,
+        generic,
+        action,
+    } = &cli.command
+    {
         let profile = std::path::absolute(
             profile
                 .clone()
@@ -574,7 +642,7 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
                 ));
             }
         }
-        return execute_forvo(&root, &profile, action, &protected, cli.output);
+        return execute_forvo(&root, &profile, generic, action, &protected, cli.output);
     }
     if let Action::Probe { file } = &cli.command {
         return Ok(
@@ -773,6 +841,7 @@ pub fn main() -> u8 {
 fn execute_forvo(
     root: &Path,
     profile: &Path,
+    generic: &GenericForvo,
     action: &ForvoAction,
     protected: &BTreeSet<PathBuf>,
     output: Output,
@@ -788,6 +857,7 @@ fn execute_forvo(
             AssetStore::open_existing_with_policy(options, PronunciationDomainPolicy)
         }
     };
+    let adapter_dir = || brave_state_dir(generic.adapter_state_dir.as_deref());
     let runtime = tokio::runtime::Runtime::new().map_err(|e| AssetError::io("runtime", e))?;
     let result=runtime.block_on(async {
         match action {
@@ -804,28 +874,77 @@ fn execute_forvo(
                         options.target=Some(resolved_target.clone());
                         let store=open_store(true)?;
                         forvo::batch::start_with_browser_target(&store,batch_id,plan,resolved_target)?;
-                        run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output).await
+                        let value=run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await?;
+                        Ok(with_update_notice(value,&state_dir,options.target.as_deref(),None).await)
                     }
                     AdapterCommand::Run(RunAction::BatchResume{batch_id,max_items,wait_seconds,close_tab})=>{
                         let options=brave_options(&state_dir,target,*wait_seconds,*close_tab);
-                        run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output).await
+                        run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await
                     }
-                    command=>run_brave(&state_dir,target,command,output,&open_store).await,
+                    command=>{
+                        let fetch=matches!(command,AdapterCommand::Run(RunAction::Fetch{..}));
+                        let value=run_brave(&state_dir,target.clone(),command,output,&open_store).await?;
+                        Ok(if fetch {with_update_notice(value,&state_dir,target.as_deref(),None).await} else {value})
+                    }
                 }
+            }
+            ForvoAction::Config=>{
+                let settings=generic.settings()?;
+                let dir=adapter_dir()?;
+                let adapter=match forvo::brave::targets::describe(&dir) {
+                    Ok(value)=>value,
+                    Err(e)=>serde_json::json!({"error":forvo::provider_code(&e),"message":e.message}),
+                };
+                Ok(serde_json::json!({"forvo":settings.describe(),"adapter_state_dir":dir,"adapter":adapter,
+                    "update_check":forvo::brave::update::cached_check(&dir)}))
             }
             ForvoAction::BatchStatus{batch_id}=>Ok(batch_json(forvo::batch::status(&open_store(false)?,batch_id)?)),
             ForvoAction::BatchCancel{batch_id}=>Ok(batch_json(forvo::batch::cancel(&open_store(false)?,batch_id)?)),
             ForvoAction::BatchStart{batch_id,plan,max_items}=>{
+                let settings=generic.settings()?;
                 let plan=read_plan(plan,protected)?;
                 let store=open_store(true)?;
-                forvo::batch::start(&store,batch_id,plan,forvo::batch::Transport::CdpChromium)?;
-                run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Cdp{profile},*max_items,output).await
+                if forvo::batch::status(&store,batch_id).is_ok() {
+                    return Err(AssetError::new(ErrorCode::IdentityConflict,"пакет существует; используйте batch-resume"));
+                }
+                routed_batch_start(&store,batch_id,plan,*max_items,profile,&adapter_dir()?,&settings,output).await
             }
-            ForvoAction::BatchResume{batch_id,max_items}=>run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Cdp{profile},*max_items,output).await,
+            ForvoAction::BatchResume{batch_id,max_items}=>{
+                let store=open_store(false)?;
+                let batch=forvo::batch::status(&store,batch_id)?;
+                // Пакет продолжается сохранённым транспортом и привязкой, а не текущим режимом.
+                let transport=batch.transport();
+                let decision=serde_json::json!({"selected":transport,"source":"batch_binding"});
+                let value=match transport {
+                    forvo::batch::Transport::CdpChromium=>{
+                        if generic.settings()?.mode==crate::user_config::ForvoMode::ExtensionOnly {
+                            let mut e=forvo::route::cdp_disabled("batch-resume");
+                            e.details["code"]=serde_json::json!("transport_disabled_by_mode");
+                            e.details["batch_transport"]=serde_json::json!(transport);
+                            e.details["next_action"]=serde_json::json!(format!("pronunciation-assets forvo --mode chromium_first batch-resume --batch-id {batch_id}"));
+                            return Err(e);
+                        }
+                        run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Cdp{profile},*max_items,output,None).await
+                    }
+                    forvo::batch::Transport::BraveExtension=>{
+                        let dir=adapter_dir()?;
+                        let options=brave_options(&dir,generic.browser_target.clone(),45,false);
+                        run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await
+                    }
+                };
+                match value {Ok(mut v)=>{v["transport_decision"]=decision;Ok(v)},Err(mut e)=>{e.details["transport_decision"]=decision;Err(e)}}
+            }
+            ForvoAction::Fetch{surface,reading,replace_expected_sha256}=>{
+                let settings=generic.settings()?;
+                let request=Pronunciation::new(surface,reading)?;
+                routed_fetch(profile,&adapter_dir()?,&settings,request,replace_expected_sha256.clone(),output,&open_store).await
+            }
             _=>{
+                if generic.settings()?.mode==crate::user_config::ForvoMode::ExtensionOnly {
+                    return Err(forvo::route::cdp_disabled(match action {ForvoAction::Login{..}=>"login",ForvoAction::Check=>"check",_=>"candidates"}));
+                }
                 // Проверяем входные пары до запуска браузера.
-                let request=match action {ForvoAction::Candidates{surface,reading}|ForvoAction::Fetch{surface,reading,..}=>Some(Pronunciation::new(surface,reading)?),_=>None};
-                let store=if matches!(action,ForvoAction::Fetch{..}) {Some(open_store(true)?)} else {None};
+                let request=match action {ForvoAction::Candidates{surface,reading}=>Some(Pronunciation::new(surface,reading)?),_=>None};
                 let mut session=if matches!(action,ForvoAction::Login{..}) { ForvoSession::launch_interactive(profile).await? } else { ForvoSession::launch(profile).await? };
                 let result=tokio::select! {
                     result=async {
@@ -845,16 +964,10 @@ fn execute_forvo(
                                 Ok(serde_json::json!({"auth_state":state}))
                             }
                             ForvoAction::Candidates{..}=>Ok(serde_json::json!({"ranking_policy":forvo::RANKING,"candidates":session.candidates(request.as_ref().expect("request")).await?})),
-                            ForvoAction::Fetch{replace_expected_sha256,..}=>{
-                                let request=request.as_ref().expect("request");
-                                let acquisition=forvo::acquire(&mut session,request).await?;
-                                let asset=forvo::import_acquisition(store.as_ref().expect("store"),request,&acquisition,replace_expected_sha256.clone())?;
-                                Ok(serde_json::json!({"asset":asset,"acquisition":acquisition.evidence}))
-                            }
                             _=>unreachable!(),
                         }}.await;
                         match attempt {
-                            Err(error) if !retried && !matches!(action, ForvoAction::Login{..} | ForvoAction::Fetch{..}) && forvo::requires_interaction(&error) => {
+                            Err(error) if !retried && !matches!(action, ForvoAction::Login{..}) && forvo::requires_interaction(&error) => {
                                 if !session.recover_interactively(request.as_ref().map(|r|r.surface.as_str())).await? { break Err(error); }
                                 retried = true;
                             }
@@ -895,6 +1008,341 @@ fn execute_forvo(
     Ok(
         serde_json::json!({"schema_version":1,"outcome":if cancelled {"cancelled"} else if paused {"paused"} else {"ok"},"result":result}),
     )
+}
+
+/// Отказ CDP-попытки одиночного fetch: ошибка, этап и завершена ли уборка Chromium.
+struct CdpFailure {
+    error: AssetError,
+    stage: crate::forvo::route::Stage,
+    cleanup_ok: bool,
+}
+
+/// Одиночный fetch через собственный Chromium: тот же порядок попыток,
+/// `ForvoEvidence` и импорт, что и прежде; дополнительно сообщается этап отказа.
+async fn cdp_fetch(
+    profile: &Path,
+    store: &AssetStore,
+    request: &Pronunciation,
+    replace: Option<String>,
+) -> Result<serde_json::Value, CdpFailure> {
+    use crate::forvo::{self, ForvoSession, route::Stage};
+    let mut session = ForvoSession::launch(profile)
+        .await
+        .map_err(|error| CdpFailure {
+            cleanup_ok: forvo::provider_code(&error) != "browser_cleanup_failed",
+            error,
+            stage: Stage::Launch,
+        })?;
+    let result = tokio::select! {
+        result = async {
+            let acquisition = forvo::acquire(&mut session, request).await?;
+            let asset = forvo::import_acquisition(store, request, &acquisition, replace)?;
+            Ok(serde_json::json!({"asset":asset,"acquisition":acquisition.evidence}))
+        } => result,
+        _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Forvo прерван пользователем")),
+    };
+    let stage = if session.download_started() {
+        Stage::AfterDownload
+    } else {
+        Stage::BeforeDownload
+    };
+    let stopped = session.close().await;
+    match (result, stopped) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(mut error), Err(cleanup)) => {
+            error.details["browser_cleanup"] = serde_json::json!({"code":forvo::provider_code(&cleanup),"message":cleanup.message});
+            Err(CdpFailure {
+                error,
+                stage,
+                cleanup_ok: false,
+            })
+        }
+        (Err(error), Ok(())) => Err(CdpFailure {
+            error,
+            stage,
+            cleanup_ok: true,
+        }),
+        (Ok(_), Err(cleanup)) => Err(CdpFailure {
+            error: cleanup,
+            stage: Stage::AfterDownload,
+            cleanup_ok: false,
+        }),
+    }
+}
+
+/// Одиночный fetch общего пути: транспорт по стратегии, переход только при
+/// доказанном backend failure CDP и настроенном адаптере.
+async fn routed_fetch(
+    profile: &Path,
+    adapter_dir: &Path,
+    settings: &crate::user_config::ForvoSettings,
+    request: Pronunciation,
+    replace: Option<String>,
+    output: Output,
+    open_store: &dyn Fn(bool) -> Result<AssetStore, AssetError>,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::forvo::route::{Decision, backend_failure};
+    use crate::forvo::{brave, provider_code};
+    use crate::user_config::ForvoMode;
+    let mut decision = Decision::new(settings);
+    let target = settings.browser_target.clone();
+    if settings.mode == ForvoMode::ExtensionOnly {
+        decision.selected = Some("brave_extension");
+        return extension_fetch(
+            adapter_dir,
+            target,
+            &request,
+            replace,
+            output,
+            open_store,
+            decision,
+        )
+        .await;
+    }
+    let store = open_store(true)?;
+    let failure = match cdp_fetch(profile, &store, &request, replace.clone()).await {
+        Ok(mut value) => {
+            decision.attempt("cdp_chromium", None, None);
+            decision.selected = Some("cdp_chromium");
+            value["transport_decision"] = decision.to_value();
+            return Ok(value);
+        }
+        Err(failure) => failure,
+    };
+    let CdpFailure {
+        mut error,
+        stage,
+        cleanup_ok,
+    } = failure;
+    decision.attempt("cdp_chromium", Some(stage), Some(&error));
+    let reason = backend_failure(stage, &error, cleanup_ok);
+    let adapter = brave::targets::load_target(adapter_dir, target.as_deref());
+    match (reason, adapter) {
+        (Ok(reason), Ok(state)) => {
+            tracing::warn!(event = "forvo_transport_fallback", stage = "route", reason, code = provider_code(&error),
+                target = %state.target, "CDP недоступен до побочных эффектов; используется адаптер браузера");
+            decision.fallback = serde_json::json!({"used":true,"reason":reason,"failure_kind":"backend",
+                "from":"cdp_chromium","failure_code":provider_code(&error)});
+            decision.selected = Some("brave_extension");
+            extension_fetch(
+                adapter_dir,
+                Some(state.target),
+                &request,
+                replace,
+                output,
+                open_store,
+                decision,
+            )
+            .await
+        }
+        (Ok(reason), Err(unavailable)) => {
+            decision.fallback = serde_json::json!({"used":false,"allowed":true,"reason":reason,"failure_kind":"backend",
+                "adapter_unavailable":provider_code(&unavailable),"next_action":unavailable.details["next_action"]});
+            error.details["transport_decision"] = decision.to_value();
+            Err(error)
+        }
+        (Err(refused), _) => {
+            decision.fallback = serde_json::json!({"used":false,"allowed":false,"failure_kind":"domain_or_unsafe",
+                "refused_because":refused});
+            error.details["transport_decision"] = decision.to_value();
+            Err(error)
+        }
+    }
+}
+
+/// Одиночный fetch адаптером браузера тем же production-путём, что `forvo browser fetch`.
+async fn extension_fetch(
+    adapter_dir: &Path,
+    target: Option<String>,
+    request: &Pronunciation,
+    replace: Option<String>,
+    output: Output,
+    open_store: &dyn Fn(bool) -> Result<AssetStore, AssetError>,
+    decision: crate::forvo::route::Decision,
+) -> Result<serde_json::Value, AssetError> {
+    let run = RunAction::Fetch {
+        surface: request.surface.clone(),
+        reading: request.reading.clone(),
+        replace_expected_sha256: replace,
+        wait_seconds: 45,
+        close_tab: false,
+    };
+    let mut decision = decision;
+    decision.attempt("brave_extension", None, None);
+    let result = run_brave(
+        adapter_dir,
+        target.clone(),
+        AdapterCommand::Run(&run),
+        output,
+        open_store,
+    )
+    .await;
+    match result {
+        Ok(mut value) => {
+            value["transport_decision"] = decision.to_value();
+            Ok(with_update_notice(value, adapter_dir, target.as_deref(), None).await)
+        }
+        Err(mut error) => {
+            if let Some(last) = decision.attempts.last_mut() {
+                last["outcome"] = serde_json::json!("failed");
+                last["code"] = serde_json::json!(crate::forvo::provider_code(&error));
+            }
+            error.details["transport_decision"] = decision.to_value();
+            Err(error)
+        }
+    }
+}
+
+/// Новый пакет общего пути: транспорт и цель выбираются до создания пакета.
+/// `chromium_first` запускает собственный Chromium до записи состояния; если
+/// он не запустился (backend failure) и адаптер настроен, создаётся пакет
+/// адаптера с целью, сохранённой до первого подключения. Иначе — прежнее
+/// поведение: пакет CDP, который при отказе приостанавливается.
+#[allow(clippy::too_many_arguments)]
+async fn routed_batch_start(
+    store: &AssetStore,
+    id: &str,
+    plan: crate::forvo::batch::FetchPlan,
+    max_items: usize,
+    profile: &Path,
+    adapter_dir: &Path,
+    settings: &crate::user_config::ForvoSettings,
+    output: Output,
+) -> Result<serde_json::Value, AssetError> {
+    use crate::forvo::route::{Decision, Stage, backend_failure};
+    use crate::forvo::{ForvoSession, batch, brave, provider_code};
+    use crate::user_config::ForvoMode;
+    let mut decision = Decision::new(settings);
+    let target = settings.browser_target.clone();
+    let with_decision =
+        |result: Result<serde_json::Value, AssetError>, decision: &Decision| match result {
+            Ok(mut value) => {
+                value["transport_decision"] = decision.to_value();
+                Ok(value)
+            }
+            Err(mut error) => {
+                error.details["transport_decision"] = decision.to_value();
+                Err(error)
+            }
+        };
+    let start_extension = async |target: String, mut decision: Decision, plan: batch::FetchPlan| {
+        decision.selected = Some("brave_extension");
+        decision.attempt("brave_extension", None, None);
+        let options = brave_options(adapter_dir, Some(target.clone()), 45, false);
+        batch::start_with_browser_target(store, id, plan, target.clone())?;
+        let result = run_forvo_batch_logged(
+            store,
+            id,
+            batch::Backend::Brave(&options),
+            max_items,
+            output,
+            None,
+        )
+        .await;
+        let result = match result {
+            Ok(value) => Ok(with_update_notice(value, adapter_dir, Some(&target), None).await),
+            Err(e) => Err(e),
+        };
+        with_decision(result, &decision)
+    };
+    if settings.mode == ForvoMode::ExtensionOnly {
+        let state =
+            brave::targets::load_target(adapter_dir, target.as_deref()).map_err(|mut e| {
+                e.details["transport_decision"] = decision.to_value();
+                e
+            })?;
+        return start_extension(state.target, decision, plan).await;
+    }
+    match ForvoSession::launch(profile).await {
+        Ok(session) => {
+            decision.attempt("cdp_chromium", None, None);
+            decision.selected = Some("cdp_chromium");
+            if let Err(e) = batch::start(store, id, plan, batch::Transport::CdpChromium) {
+                let _ = session.close().await;
+                return Err(e);
+            }
+            let result = run_forvo_batch_logged(
+                store,
+                id,
+                batch::Backend::Cdp { profile },
+                max_items,
+                output,
+                Some(session),
+            )
+            .await;
+            with_decision(result, &decision)
+        }
+        Err(error) => {
+            decision.attempt("cdp_chromium", Some(Stage::Launch), Some(&error));
+            let cleanup_ok = provider_code(&error) != "browser_cleanup_failed";
+            if !cleanup_ok || error.code == ErrorCode::Interrupted {
+                decision.fallback = serde_json::json!({"used":false,"allowed":false,
+                    "refused_because":if cleanup_ok {"interrupted"} else {"cleanup_incomplete"}});
+                return with_decision(Err(error), &decision);
+            }
+            let reason = backend_failure(Stage::Launch, &error, cleanup_ok);
+            match (
+                reason,
+                brave::targets::load_target(adapter_dir, target.as_deref()),
+            ) {
+                (Ok(reason), Ok(state)) => {
+                    tracing::warn!(event = "forvo_transport_fallback", stage = "route", reason, code = provider_code(&error),
+                        target = %state.target, "CDP не запустился до создания пакета; пакет создаётся для адаптера браузера");
+                    decision.fallback = serde_json::json!({"used":true,"reason":reason,"failure_kind":"backend",
+                        "from":"cdp_chromium","failure_code":provider_code(&error)});
+                    start_extension(state.target, decision, plan).await
+                }
+                (reason, adapter) => {
+                    decision.fallback = serde_json::json!({"used":false,"allowed":reason.is_ok(),
+                        "refused_because":reason.err(),"adapter_unavailable":adapter.err().map(|e| provider_code(&e).to_owned())});
+                    decision.selected = Some("cdp_chromium");
+                    batch::start(store, id, plan, batch::Transport::CdpChromium)?;
+                    let result = run_forvo_batch_logged(
+                        store,
+                        id,
+                        batch::Backend::Cdp { profile },
+                        max_items,
+                        output,
+                        None,
+                    )
+                    .await;
+                    with_decision(result, &decision)
+                }
+            }
+        }
+    }
+}
+
+/// Сведения о более новой версии адаптера по редкой кэшированной проверке.
+/// Проверка не задерживает получение MP3 (выполняется после него), ограничена
+/// по времени, не устанавливает обновление и отключается `forvo.update_check = "off"`.
+async fn with_update_notice(
+    mut value: serde_json::Value,
+    state_dir: &Path,
+    target: Option<&str>,
+    settings: Option<&crate::user_config::ForvoSettings>,
+) -> serde_json::Value {
+    use crate::user_config::UpdateCheck;
+    let enabled = match settings {
+        Some(settings) => settings.update_check == UpdateCheck::Weekly,
+        None => crate::user_config::forvo(&Default::default())
+            .is_ok_and(|s| s.update_check == UpdateCheck::Weekly),
+    };
+    if !enabled {
+        return value;
+    }
+    let state = crate::forvo::brave::targets::load_target(state_dir, target).ok();
+    if let Some(notice) = crate::forvo::brave::update::auto_check(
+        state_dir,
+        state.as_ref(),
+        std::time::Duration::from_secs(7 * 24 * 3600),
+        std::time::Duration::from_secs(3),
+    )
+    .await
+    {
+        value["adapter_update"] = notice;
+    }
+    value
 }
 
 fn read_plan(
@@ -948,6 +1396,7 @@ async fn run_forvo_batch_logged(
     backend: crate::forvo::batch::Backend<'_>,
     max_items: usize,
     output: Output,
+    prepared: Option<crate::forvo::ForvoSession>,
 ) -> Result<serde_json::Value, AssetError> {
     use crate::batch_runtime::SafeBatchRuntime;
     use crate::diagnostics::{OutputMode, RunLogGuard};
@@ -969,7 +1418,8 @@ async fn run_forvo_batch_logged(
             code = "forvo_batch_started",
             "Начата обработка пакета Forvo"
         );
-        let result = crate::forvo::batch::resume(store, id, backend, max_items).await;
+        let result =
+            crate::forvo::batch::resume_prepared(store, id, backend, max_items, prepared).await;
         match &result {
             Ok(batch) => tracing::info!(
                 event = "run_finished",
@@ -1121,6 +1571,40 @@ async fn run_brave(
                 )
                 .await
             }
+            AdapterCommand::Run(RunAction::UpdateCheck {
+                from_dir,
+                trusted_public_key,
+            }) => {
+                let trust = trust_root(trusted_public_key.as_deref())?;
+                let state = brave::targets::load_target(&state_dir, target.as_deref()).ok();
+                brave::update::check(
+                    &state_dir,
+                    state.as_ref(),
+                    &update_source(from_dir.as_deref())?,
+                    &trust,
+                    &brave::update::Channel::default(),
+                )
+                .await
+            }
+            AdapterCommand::Run(RunAction::Update {
+                from_dir,
+                version,
+                trusted_public_key,
+                reinstall,
+                wait_seconds,
+            }) => {
+                brave::update::update(&brave::update::UpdateOptions {
+                    state_dir: state_dir.clone(),
+                    target: target.clone(),
+                    source: update_source(from_dir.as_deref())?,
+                    version: version.clone(),
+                    trust: trust_root(trusted_public_key.as_deref())?,
+                    wait: Duration::from_secs(*wait_seconds),
+                    reinstall: *reinstall,
+                    channel: brave::update::Channel::default(),
+                })
+                .await
+            }
             AdapterCommand::Run(RunAction::BatchStart { .. } | RunAction::BatchResume { .. }) => {
                 unreachable!("пакет расширения исполняется общим forvo::batch")
             }
@@ -1146,6 +1630,39 @@ async fn run_brave(
         }
     };
     finish_brave_run(result, guard.finish(), &path)
+}
+
+/// Корень доверия выпусков: встроенный или явный ключ пользователя.
+fn trust_root(path: Option<&Path>) -> Result<crate::forvo::brave::release::TrustRoot, AssetError> {
+    use crate::forvo::brave::release::{TrustRoot, TrustedKey};
+    let Some(path) = path else {
+        return Ok(TrustRoot::embedded());
+    };
+    let text = std::fs::read_to_string(path)
+        .ok()
+        .filter(|t| t.len() <= 1024)
+        .ok_or_else(|| {
+            crate::forvo::brave::bridge_error(
+                "trusted_key_invalid",
+                "Файл открытого ключа не читается",
+            )
+        })?;
+    Ok(TrustRoot::Explicit(TrustedKey::from_public_key_hex(
+        &text,
+        Some(format!("--trusted-public-key {}", path.display())),
+    )?))
+}
+
+fn update_source(
+    from_dir: Option<&Path>,
+) -> Result<crate::forvo::brave::update::Source, AssetError> {
+    use crate::forvo::brave::update::Source;
+    Ok(match from_dir {
+        Some(dir) => Source::Directory(
+            std::path::absolute(dir).map_err(|e| AssetError::io("каталог выпуска", e))?,
+        ),
+        None => Source::GitHub,
+    })
 }
 
 /// Прерывание команды адаптера: общая ветка `forvo browser` обслуживает любой

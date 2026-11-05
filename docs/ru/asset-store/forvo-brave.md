@@ -89,13 +89,17 @@ pronunciation-assets forvo browser --target chrome doctor      # подключ�
    используются. Обычный Google Chrome 137+ игнорирует `--load-extension`, поэтому этот
    флаг пользовательским способом не является. «Установлено» не сообщается, пока
    расширение не подключилось и не прошло проверку ID и секрета.
-2. **Обновление.** Повторный `setup` идемпотентен: секрет, ID, каталог, порт и
-   закрепления сохраняются, отличающиеся файлы заменяются атомарно (manifest — последним).
+2. **Обновление встроенной версией.** Повторный `setup` идемпотентен: секрет, ID,
+   каталог, порт и закрепления сохраняются, отличающиеся файлы заменяются одной
+   транзакцией (см. [обновление из выпусков](#обновление-из-выпусков)). Если в каталоге
+   уже стоит более новая версия из проверенного выпуска, `setup` и автоматическая
+   синхронизация её не откатывают: меняется только `pairing.json` при ротации секрета.
    Повреждённый `state.json` даёт отказ `state_corrupt`, а не новую «чистую» настройку.
    Если порт цели занят — идёт `fetch` или пакет этой цели, — `setup` отказывает
    `adapter_busy` и файлов не трогает. Ручная перезагрузка не нужна. Любая команда цели
    (`doctor`, `smoke`, `fetch`, пакет), заняв порт bridge, приводит файлы установленного
-   расширения к версии CLI. Если подключилось расширение другой версии, она штатно
+   расширения к версии CLI, если установленная версия старее встроенной. Если подключилось
+   расширение не той версии, что лежит в каталоге цели, она штатно
    перезагружает **своё** расширение (`chrome.runtime.reload`) и проверяет новую версию.
    При незавершённой собственной загрузке перезагрузка откладывается
    (`deferred_operation_pending`): операция освобождается обычным восстановлением, а
@@ -126,7 +130,9 @@ pronunciation-assets forvo browser --target chrome doctor      # подключ�
   `declarativeNetRequest` нет. Права: `https://forvo.com/*` и `http://127.0.0.1/*`;
   `webRequest` используется только для неблокирующего наблюдения (см. ниже).
 - Разметку страницы читают те же `forvo/dom.js` и `forvo/auth.js`, что и CDP-провайдер.
-  `setup` собирает из них `forvo_page.js`; второй реализации DOM-логики нет.
+  Пакет адаптера (`forvo/brave/package.rs`) собирает из них `forvo_page.js`; тот же
+  набор файлов разворачивает `setup` и упаковывает релизный ZIP, второй реализации
+  DOM-логики нет.
 - Rust принимает все решения: навигацию, проверку входа, рейтинг и выбор кандидата
   (`Candidate::validate`, `rank`), проверку адреса загрузки (`matches_download`),
   SHA-256 и `probe_mp3`.
@@ -392,6 +398,82 @@ Resume другим транспортом отвергается до запу�
 и вкладки пользователя не закрываются. Собственная вкладка закрывается только по
 `--close-tab`.
 
+## Обновление из выпусков
+
+Кроме встроенной в CLI версии адаптер обновляется из канала выпусков проекта:
+GitHub Releases с тегами `forvo-extension-v<версия>` (не общий `/releases/latest`
+репозитория). Устройство канала, подписи и процедура сопровождающего —
+[forvo-extension-release.md](forvo-extension-release.md).
+
+```bash
+pronunciation-assets forvo browser [--target <имя>] update-check            # доступная версия, без установки
+pronunciation-assets forvo browser [--target <имя>] update                  # наибольшая опубликованная версия
+pronunciation-assets forvo browser [--target <имя>] update --version 0.4.0  # конкретная версия
+pronunciation-assets forvo browser [--target <имя>] update --from-dir <каталог> # офлайн: скачанный выпуск
+```
+
+Порядок `update`:
+
+1. **Проверка до записи.** Метаданные, подпись и ZIP скачиваются в память (пределы
+   размера) или читаются из `--from-dir` и проверяются целиком: подпись Ed25519
+   закреплённым ключом, канал, тег запрошенной версии, репозиторий, протокол bridge,
+   SHA-256 и размер архива, безопасное извлечение (без `..`, абсолютных путей,
+   повторов, ссылок, каталогов, исполняемых прав, сжатия и шифрования, не больше
+   32 файлов и 4 МиБ), точный состав и SHA каждого файла, наличие `forvo_page.js`,
+   допустимый manifest (имя, только разрешения этого CLI, без `key` и `update_url`).
+   Скачанный код не исполняется.
+2. **Блокировка цели.** Порт bridge — общий замок команд цели: при идущем `fetch`,
+   пакете, `setup`, `doctor` или втором `update` — отказ `adapter_busy` без изменений.
+3. **Сравнение версий.** Та же версия — `up_to_date` (no-op; `--reinstall` повторяет
+   установку, если файлы отличаются от выпуска). Старшая установленная — отказ
+   `downgrade_refused`. Первичная установка этим путём невозможна
+   (`extension_files_missing`): её выполняют `setup` и ручная «Загрузить распакованное».
+4. **Свободное расширение.** Расширение должно подключиться и пройти ту же проверку
+   ID, экземпляра и секрета. Незавершённая собственная загрузка — отказ
+   `update_deferred_operation_pending`: файлы не меняются, `reload` не вызывается.
+5. **Транзакция в прежнем каталоге.** Каталог установки не переименовывается: от строки
+   его пути зависит ID. Журнал `.toolkit-install-journal.json`, полные копии новых
+   (`*.update-new`) и прежних (`*.update-old`) файлов создаются до первой замены, поэтому
+   нехватка места проявляется до изменения рабочих файлов. Затем атомарные `rename`
+   (`manifest.json` последним) и сверка SHA каждого файла. `pairing.json` пишется из
+   прежних порта и секрета, `state.json` не меняется.
+6. **Перезагрузка и подтверждение.** `chrome.runtime.reload()` собственного расширения,
+   затем подключение того же ID и экземпляра с новой версией — `status=updated`. Если
+   браузер перезагрузил прежнюю версию — `extension_reload_ineffective`, если
+   подключение не подтвердилось — `extension_reload_unconfirmed`; в обоих случаях
+   `files_installed=true` и действие «Обновить» на странице расширений. Полное
+   обновление без подтверждения не сообщается.
+
+**Сбой и откат.** Любая команда цели, заняв порт, сначала восстанавливает прерванную
+установку по журналу: подготовка отбрасывается, начатая замена откатывается из
+`*.update-old` со сверкой прежних SHA, зафиксированная — дочищается. Повтор после
+обрыва сети, ошибки записи, нехватки места, `SIGKILL` или сбоя питания безопасен.
+Если прежние копии подменены и откат не доказуем — `install_recovery_failed` без
+изменений; восстановите каталог `setup` или `update --from-dir`. Файлы каталога,
+которых нет в пакете, не трогаются.
+
+**Встроенная версия и выпуск.** CLI несёт встроенную версию адаптера: она нужна для
+первичной установки и офлайн-восстановления. Установленный выпуск новее встроенной
+`setup`, `doctor --reload` и автоматическая синхронизация не откатывают; `doctor`
+сверяет подключённое расширение с версией в каталоге цели (`installed_version`).
+Понижение возможно только ручной переустановкой.
+
+**Офлайн.** Без сети `update` отказывает `update_source_unavailable` с действием
+`--from-dir`; получение MP3 от сети GitHub не зависит. Каталог `--from-dir` содержит
+файлы выпуска как в GitHub Release: `forvo-extension-release.json`,
+`forvo-extension-release.json.sig` и `forvo-extension-<версия>.zip`.
+
+**Автоматическая проверка.** После успешного `fetch` и пакета адаптера CLI не чаще раза
+в неделю проверяет доступную версию (не дольше 3 с, после получения MP3) и сообщает
+`adapter_update` с действием; установку сам не выполняет. Результат кэшируется в
+`updates/check.json` каталога состояния; `forvo.update_check = "off"` выключает проверку.
+
+**Корень доверия.** Пока в CLI не закреплён ни один ключ подписи, `update` и
+`update-check` отказывают `release_trust_root_missing` (`BLOCKED`) — это внешний шаг
+сопровождающего, а не неисправность. `--trusted-public-key <файл>` (hex открытого
+ключа Ed25519) заменяет встроенный корень для собственной сборки или изолированной
+проверки; источник и канал при этом прежние.
+
 ## Диагностика
 
 Все этапы пишутся в журнал NDJSON общего `RunLogGuard` (подкаталог `logs/` каталога состояния)
@@ -419,10 +501,12 @@ pronunciation-assets forvo browser [--target <имя>] fetch --surface 元気 --
 pronunciation-assets forvo browser [--target <имя>] batch-start --batch-id jp-audio --plan plan.json [--max-items N] [--wait-seconds N] [--close-tab]
 pronunciation-assets forvo browser [--target <имя>] batch-resume --batch-id jp-audio [--max-items N] [--wait-seconds N] [--close-tab]
 pronunciation-assets forvo browser [--target <имя>] close
+pronunciation-assets forvo browser [--target <имя>] update-check [--from-dir <каталог>] [--trusted-public-key <файл>]
+pronunciation-assets forvo browser [--target <имя>] update [--from-dir <каталог>] [--version V] [--reinstall] [--trusted-public-key <файл>] [--wait-seconds N]
 
 # Прежний интерфейс: всегда цель brave
 pronunciation-assets forvo brave setup [--executable <путь>] [--repin] [--rotate-secret]
-pronunciation-assets forvo brave doctor|smoke|fetch|batch-start|batch-resume|close …
+pronunciation-assets forvo brave doctor|smoke|fetch|batch-start|batch-resume|close|update-check|update …
 
 pronunciation-assets forvo batch-status --batch-id jp-audio     # без браузера, любой транспорт
 pronunciation-assets forvo batch-cancel --batch-id jp-audio     # без браузера, любой транспорт
@@ -457,7 +541,7 @@ pronunciation-assets forvo batch-cancel --batch-id jp-audio     # без бра�
 | `extension_files` | файлы каталога цели и их отличие от версии CLI до подключения |
 | `wsl_networking` | режим сети WSL2 (`wslinfo`) и факт подключения браузера Windows к bridge в WSL |
 | `extension_connected` | ID из каталога цели, закреплённый экземпляр, число отклонённых подключений по причинам |
-| `extension_version` | версия расширения совпадает с CLI после автоматического обновления |
+| `extension_version` | версия подключённого расширения совпадает с установленной в каталоге цели (встроенной в CLI или более новой из выпуска) после автоматического обновления |
 | `browser_identity` | бренды `navigator.userAgentData`, сообщённые самим расширением, против браузера цели. Vivaldi представляется брендом «Google Chrome» и по нему неотличим — `NOT_TESTED`, а не `PASS` |
 | `browser_capabilities` | MV3 service worker, `chrome.downloads` (с `search`), неблокирующий `webRequest`, `tabs`, `tabGroups`, `scripting`, `storage.local/session`, `alarms`, WebSocket + WebCrypto HMAC и версия Chromium ≥ `minimum_chrome_version`. Недостаток — `BLOCKED browser_capability_missing`/`browser_version_unsupported` |
 | `download_settings` | всегда `NOT_TESTED`: настройку «Спрашивать, куда сохранять» расширение не читает; фактическое поведение показывает `smoke` (`save_as_required` со страницей настроек браузера) |

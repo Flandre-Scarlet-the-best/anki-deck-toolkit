@@ -15,6 +15,7 @@ mod faults;
 mod fixture;
 mod load;
 mod observation;
+mod release_scenarios;
 mod scenarios;
 mod storage;
 mod target_scenarios;
@@ -60,6 +61,8 @@ pub const SCENARIOS: &[&str] = &[
     "adapter_doctor",
     "extension_update",
     "target_isolation",
+    "cli_release_update",
+    "cli_transport_routing",
 ];
 
 // Долгие проверки никогда не входят в неявный короткий набор.

@@ -118,6 +118,7 @@ async fn cancelled_shutdown_future_is_awaited_by_session_close() {
         pending_launch: None,
         was_authenticated: false,
         download_used: true,
+        downloads_started: 0,
         profile: "/unused".into(),
         visible: false,
     };

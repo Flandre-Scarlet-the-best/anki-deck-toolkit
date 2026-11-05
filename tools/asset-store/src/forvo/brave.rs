@@ -29,7 +29,11 @@ pub mod acceptance;
 pub mod browsers;
 pub mod download;
 pub mod fetch;
+pub mod install;
+pub mod package;
+pub mod release;
 pub mod targets;
+pub mod update;
 
 pub const PROTOCOL: &str = "forvo-adapter/v1";
 pub const WS_PATH: &str = "/forvo-adapter/v1";
@@ -39,24 +43,15 @@ pub const DEFAULT_PORT: u16 = 47613;
 const MAX_INBOUND_MESSAGE: usize = 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const MANIFEST: &str = include_str!("brave/extension/manifest.json");
-pub(crate) const BACKGROUND: &str = include_str!("brave/extension/background.js");
+#[cfg(test)]
+pub(crate) use package::BACKGROUND;
+pub use package::page_module;
 
 pub fn bridge_error(code: &str, action: &str) -> AssetError {
     AssetError::with_details(
         ErrorCode::InvalidTransition,
         action,
         serde_json::json!({"provider":"forvo_brave","code":code,"next_action":action}),
-    )
-}
-
-/// Модуль страницы собирается из тех же `dom.js` и `auth.js`, что исполняет
-/// CDP-провайдер: второй реализации разметки Forvo нет.
-pub fn page_module() -> String {
-    format!(
-        "// Сгенерировано pronunciation-assets из forvo/dom.js и forvo/auth.js; не редактировать.\n\
-         export const forvoDom = {};\nexport const forvoAuth = () => {};\n",
-        include_str!("dom.js").trim_end(),
-        include_str!("auth.js").trim_end()
     )
 }
 

@@ -9,6 +9,7 @@ pub mod brave;
 mod candidates;
 mod download;
 mod evidence;
+pub mod route;
 use crate::browser_runtime::{BrowserRuntimeConfig, BrowserSession};
 pub use candidates::{Candidate, Gender, RANKING, rank, word_url};
 pub use evidence::{Acquisition, Attempt, ForvoEvidence, acquire, import_acquisition};
@@ -38,6 +39,8 @@ pub struct ForvoSession {
     pending_launch: Option<tokio::task::JoinHandle<Result<BrowserSession, AssetError>>>,
     was_authenticated: bool,
     download_used: bool,
+    /// Сколько загрузок записей начато за жизнь сессии (для решения о переходе).
+    downloads_started: u32,
     profile: PathBuf,
     visible: bool,
 }
@@ -73,6 +76,7 @@ impl ForvoSession {
             was_authenticated: std::fs::symlink_metadata(profile.join(".forvo-authenticated"))
                 .is_ok_and(|m| m.is_file()),
             download_used: false,
+            downloads_started: 0,
             profile: profile.to_path_buf(),
             visible,
         })
@@ -113,6 +117,10 @@ impl ForvoSession {
                 "Проверьте GUI, Chromium и свободный собственный профиль; повторите forvo login",
             )
         })
+    }
+    /// Начиналась ли загрузка записи в этой сессии.
+    pub fn download_started(&self) -> bool {
+        self.downloads_started > 0
     }
     fn browser(&self) -> &BrowserSession {
         self.browser.as_ref().expect("открытый сеанс Forvo")

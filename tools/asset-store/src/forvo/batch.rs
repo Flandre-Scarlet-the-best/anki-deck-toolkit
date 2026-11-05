@@ -632,12 +632,42 @@ pub async fn resume(
     backend: Backend<'_>,
     max_items: usize,
 ) -> Result<ForvoBatch, AssetError> {
-    let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
-    let _lease = runtime.execution_lease()?;
-    let mut batch = load(&mut runtime)?;
-    if batch.transport() != backend.transport() {
-        return Err(transport_mismatch(id, &batch, backend.transport()));
+    resume_prepared(store, id, backend, max_items, None).await
+}
+
+/// Как [`resume`], но с уже запущенной собственной CDP-сессией: её открыл
+/// preflight общего пути до создания пакета, повторный запуск Chromium не нужен.
+/// Сессия закрывается при любом исходе.
+pub async fn resume_prepared(
+    store: &AssetStore,
+    id: &str,
+    backend: Backend<'_>,
+    max_items: usize,
+    prepared: Option<ForvoSession>,
+) -> Result<ForvoBatch, AssetError> {
+    let mut prepared = prepared;
+    let early = async {
+        if prepared.is_some() && backend.transport() != Transport::CdpChromium {
+            return Err(invalid());
+        }
+        let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
+        let lease = runtime.execution_lease()?;
+        let batch = load(&mut runtime)?;
+        if batch.transport() != backend.transport() {
+            return Err(transport_mismatch(id, &batch, backend.transport()));
+        }
+        Ok((runtime, lease, batch))
     }
+    .await;
+    let (mut runtime, _lease, mut batch) = match early {
+        Ok(parts) => parts,
+        Err(error) => {
+            if let Some(session) = prepared.take() {
+                let _ = session.close().await;
+            }
+            return Err(error);
+        }
+    };
     let adjusted;
     let backend = match backend {
         Backend::Brave(options) => {
@@ -646,7 +676,11 @@ pub async fn resume(
         }
         other => other,
     };
+    let mut session: Option<Session> = prepared.take().map(|s| Session::Cdp(Box::new(s)));
     if batch.cancelled {
+        if let Some(session) = session.take() {
+            let _ = session.close().await;
+        }
         return Err(AssetError::new(
             ErrorCode::InvalidTransition,
             "пакет отменён",
@@ -659,7 +693,6 @@ pub async fn resume(
         batch.revision += 1;
         runtime.save(&batch)?;
     }
-    let mut session: Option<Session> = None;
     let result = async {
         // Сохранённые байты не требуют скачивания, но отложенное освобождение
         // всё равно требует сопряжения до импорта.

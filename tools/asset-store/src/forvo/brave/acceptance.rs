@@ -198,8 +198,11 @@ pub(super) async fn connect_with_binding(
         }
     }
     let mut state = pin(state_dir, &state, &mut bridge, &peer)?;
-    let bundled = bundled_version();
-    let mut update = json!({"files_changed":files,"extension_version":peer.version,"bundled_version":bundled,"reload":"not_needed"});
+    // Ожидаемая версия — фактически установленная в каталоге цели: встроенная
+    // в CLI или более новая из проверенного релиза (её setup не откатывает).
+    let bundled = targets::installed_version(&state.install_dir)?.unwrap_or_else(bundled_version);
+    let mut update = json!({"files_changed":files,"extension_version":peer.version,"bundled_version":bundled_version(),
+        "installed_version":bundled,"reload":"not_needed"});
     let mut peer = peer;
     if peer.version != bundled {
         if files.is_none() {
@@ -750,7 +753,12 @@ pub async fn doctor(options: &DoctorOptions) -> Result<Report, AssetError> {
     );
     report.push(
         "extension_version",
-        if peer.version == bundled_version() {
+        if Some(peer.version.as_str())
+            == targets::installed_version(&connection.state.install_dir)
+                .ok()
+                .flatten()
+                .as_deref()
+        {
             Status::Pass
         } else {
             Status::Fail

@@ -14,7 +14,8 @@ Cargo.lock
 .github/
 └── workflows/
     ├── ci.yml               # CI: код/тесты, заявленная MSRV, actionlint, cargo-deny, Chromium
-    └── reference-catalogs.yml  # воспроизводимость встроенных эталонов кандзи
+    ├── reference-catalogs.yml  # воспроизводимость встроенных эталонов кандзи
+    └── forvo-extension-release.yml  # пакет, план и подписанный выпуск MV3-адаптера Forvo
 .agents/
 └── skills/
 .codex/

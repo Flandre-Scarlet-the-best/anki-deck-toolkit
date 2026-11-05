@@ -15,6 +15,8 @@ mod cli_contract;
 mod domain_semantics_regression;
 #[path = "fake_llama.rs"]
 mod fake_llama;
+#[path = "forvo_transport_contract.rs"]
+mod forvo_transport_contract;
 #[path = "journal_contract.rs"]
 mod journal_contract;
 #[path = "kanji_ocr_contract.rs"]
