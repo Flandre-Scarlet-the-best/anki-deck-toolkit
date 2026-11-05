@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Сообщить об уязвимости
+    url: https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/security/advisories/new
+    about: Уязвимости сообщайте приватно через GitHub Security Advisories, а не в публичном Issue.

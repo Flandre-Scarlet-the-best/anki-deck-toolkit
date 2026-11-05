@@ -1,0 +1,42 @@
+name: Документация
+description: Ошибка, пробел или устаревшая информация в документации; расхождение документации с поведением.
+title: "[Документация]: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Каноническая документация — русская; английский и китайский переводы могут
+        отставать. Расхождение перевода с русским оригиналом — тоже повод для Issue.
+  - type: input
+    id: location
+    attributes:
+      label: Документ
+      description: Путь в репозитории или ссылка, по возможности с разделом.
+      placeholder: "docs/ru/anki-repo/README.md#qa"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Тип проблемы
+      options:
+        - Ошибка или неточность
+        - Устарело — расходится с фактическим поведением
+        - Не хватает информации
+        - Перевод отстаёт от русского оригинала или неверен
+        - Другое
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Описание
+      description: Что написано сейчас и что не так. Для расхождения с поведением приложите команду и фактический вывод.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое исправление
+      description: Как должно быть написано или чего не хватает.

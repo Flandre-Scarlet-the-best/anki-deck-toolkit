@@ -1,0 +1,91 @@
+name: Отчёт о проверке
+description: Ложное срабатывание, пропущенная ошибка или неверная диагностика проверок колод.
+title: "[Проверка]: "
+labels: ["validation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Форма для случаев, когда проверка набора инструментов (`validate`, `qa`,
+        `review-check`, проверки ресурсов) неверно оценивает карточку или экспорт.
+        Ошибку в содержимом самой карточки (перевод, чтение, ударение) правят в
+        колоде, а не здесь.
+
+        Если команда неправильно обрабатывает, изменяет или создаёт карточку или
+        экспорт (например, `edit` меняет не то поле), используйте форму «Ошибка».
+
+        Issue публичный, а колоды — локальные данные пользователя. Не прикладывайте
+        `deck.json` целиком и не вставляйте необезличенные фрагменты реальных колод:
+        диагностика `qa --json` содержит `guid`, `related_guids`, путь колоды, UUID
+        и образцы значений полей (`evidence.sample`). Лучше всего — минимальный
+        синтетический пример. Если нужен реальный вывод, перед вставкой замените
+        личные пути, идентификаторы заметок, колод и моделей и значения полей на
+        заглушки (`guid-1`, `<экспорт>`, `<значение>`), сохраняя структуру вывода и
+        согласованность: одинаковые значения — одинаковой заглушкой.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Тип проблемы
+      options:
+        - Ложное срабатывание (false positive) — проверка сообщает о проблеме, которой нет
+        - Пропущенная ошибка (false negative) — проверка не находит существующую проблему
+        - Неверная диагностика — проблема найдена, но сообщение, уровень или место неверны
+    validations:
+      required: true
+  - type: input
+    id: check
+    attributes:
+      label: Проверка
+      description: Команда и, если есть, код правила.
+      placeholder: "anki-repo qa --code trailing_whitespace"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия или коммит
+      placeholder: "например, 912c8d5d"
+    validations:
+      required: true
+  - type: input
+    id: deck
+    attributes:
+      label: Колода
+      description: Имя экспорта или колоды без локального пути. Если имя приватное, замените его заглушкой.
+      placeholder: "Words__N3"
+  - type: input
+    id: note_type
+    attributes:
+      label: Тип заметки
+      description: Имя модели; настоящий `note_model_uuid` замените заглушкой.
+  - type: input
+    id: note_id
+    attributes:
+      label: Идентификатор заметки или карточки
+      description: Имя поля и заглушка вместо настоящего `guid` (например, `guid-1`); та же заглушка — в выводе и примере.
+  - type: textarea
+    id: output
+    attributes:
+      label: Диагностический вывод
+      description: |
+        Желательно `--json`. Реальный вывод — только обезличенным: `guid`, `related_guids`,
+        `export_dir` и пути, UUID, `evidence.sample`, цитаты в `message` — заглушки; структура
+        и коды правил сохранены.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемый результат
+      description: Что должна была сообщить проверка и почему.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Минимальный пример
+      description: |
+        Синтетический фрагмент заметки или экспорт, воспроизводящий проблему. Не копируйте
+        настоящие значения полей: подберите искусственное с тем же свойством (например, пробел в конце).
+      render: json
