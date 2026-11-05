@@ -1,0 +1,51 @@
+name: Предложение функции
+description: Новая функциональность или изменение существующего поведения.
+title: "[Функция]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите проблему и желаемый результат. Конкретная архитектура не обязательна:
+        её выбирают при проработке задачи.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему решает
+      description: Что сейчас неудобно, невозможно или ненадёжно.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Сценарий использования
+      description: Кто и в какой ситуации будет этим пользоваться. Пример команды или процесса приветствуется.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+      description: Как должно выглядеть решение снаружи — вывод, коды возврата, взаимодействие.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Ограничения
+      description: |
+        Совместимость, производительность, офлайн-работа, инварианты CrowdAnki
+        (`guid`, `crowdanki_uuid`, порядок полей), запись только по `--apply` и т. п.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Критерии готовности
+      description: Проверяемые условия, по которым задачу можно считать выполненной.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Рассмотренные альтернативы
+      description: Обходные пути и другие варианты, если они есть.

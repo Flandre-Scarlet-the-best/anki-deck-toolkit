@@ -1,0 +1,90 @@
+name: Ошибка
+description: Ошибка CLI, проверок, обработки медиа, интеграций или другого компонента набора инструментов.
+title: "[Ошибка]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Форма для воспроизводимых ошибок кода репозитория, в том числе когда команда
+        неправильно обрабатывает, изменяет или создаёт карточку, медиассылку или
+        экспорт (например, `edit` меняет не то поле).
+
+        Если проверка (`validate`, `qa`, `review-check`, проверки ресурсов) сообщает
+        о несуществующей проблеме, пропускает существующую или неверно её описывает,
+        используйте форму «Отчёт о проверке». Неверный перевод, чтение или ударение,
+        записанные в самой карточке, — не ошибка набора инструментов: их правят в колоде.
+
+        Не прикладывайте целиком `deck.json`, медиа, корпус ресурсов или приватный
+        журнал: это локальные данные пользователя. Достаточно минимального
+        синтетического примера. Уязвимости сообщайте приватно, а не через Issue.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Компонент
+      description: "`anki-repo` — команды работы с локальным экспортом; `anki-repo anki` — только группа интеграции с Anki Desktop."
+      options:
+        - anki-repo — команды работы с экспортом
+        - anki-repo anki — интеграция с Anki Desktop (AnkiConnect, CrowdAnki)
+        - asset-store — kanji-assets, pitch-assets, pronunciation-assets, проверки корпуса
+        - Браузерная инфраструктура (Chromium/Brave, jpdb, yarxi, Forvo)
+        - anki-e2e — E2E-стенд
+        - benchmark-contract / benchmark-runner / benchmark-history
+        - anki-repository-maintenance
+        - CI и скрипты .github
+        - Agent Skills (.agents/skills)
+        - Другое или не знаю
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия или коммит
+      description: Вывод `git rev-parse --short HEAD` или версия бинарника.
+      placeholder: "например, 912c8d5d"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Окружение
+      description: ОС (Linux, WSL), версия Rust, при необходимости версия Anki или браузера.
+      placeholder: "WSL2 Ubuntu 24.04, rustc 1.xx, Anki 25.x"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: Точные команды и входные данные. Пути к пользовательским колодам можно обобщить.
+      placeholder: |
+        1. cargo run -p anki-repo -- validate decks/output/<экспорт>
+        2. ...
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактическое поведение
+      description: Что произошло, включая код возврата.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+      description: Что должно было произойти и на каком основании (документация, контракт, прежнее поведение).
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Диагностика
+      description: |
+        Вывод команды, `--json`, трассировка стека (`RUST_BACKTRACE=1`), журналы. Issue публичный:
+        замените личные пути, `guid`, UUID и значения полей реальных карточек заглушками.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Дополнительно
+      description: Регрессия ли это, как часто воспроизводится, известные обходы.
