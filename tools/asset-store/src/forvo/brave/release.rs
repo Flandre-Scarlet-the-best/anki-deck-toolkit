@@ -23,8 +23,8 @@ pub const TAG_PREFIX: &str = "forvo-extension-v";
 pub const METADATA_ASSET: &str = "forvo-extension-release.json";
 pub const SIGNATURE_ASSET: &str = "forvo-extension-release.json.sig";
 pub const METADATA_SCHEMA: u32 = 1;
-const MAX_METADATA_BYTES: usize = 64 * 1024;
-const MAX_SIGNATURE_BYTES: usize = 4 * 1024;
+pub const MAX_METADATA_BYTES: usize = 64 * 1024;
+pub const MAX_SIGNATURE_BYTES: usize = 4 * 1024;
 const TRUST_FILE: &str = include_str!("release_keys.json");
 
 pub fn tag(version: &str) -> String {
@@ -363,7 +363,64 @@ pub fn verify(
     expected_tag: Option<&str>,
 ) -> Result<VerifiedRelease, AssetError> {
     let (metadata, key_id) = verify_metadata(metadata_bytes, signature, trust, expected_tag)?;
-    verify_archive(metadata, key_id, zip)
+    let files = validate_archive(&metadata, zip)?;
+    Ok(VerifiedRelease {
+        metadata,
+        files,
+        key_id,
+    })
+}
+
+/// Проверяет структуру и допустимые значения метаданных до использования
+/// версии для выбора локального имени ZIP. Эта проверка не удостоверяет
+/// происхождение: для опубликованного выпуска дополнительно обязательна
+/// подпись через [`verify_metadata`].
+pub fn validate_metadata_bytes(
+    metadata_bytes: &[u8],
+    expected_tag: Option<&str>,
+) -> Result<ReleaseMetadata, AssetError> {
+    if metadata_bytes.len() > MAX_METADATA_BYTES {
+        return Err(release_error(
+            "release_metadata_invalid",
+            "Метаданные релиза слишком велики",
+        ));
+    }
+    let mismatch = |field: &str| {
+        let mut e = release_error(
+            "release_metadata_mismatch",
+            "Подписанные метаданные не соответствуют каналу адаптера, источнику или архиву; пакет не установлен",
+        );
+        e.details["field"] = json!(field);
+        e
+    };
+    let metadata: ReleaseMetadata =
+        serde_json::from_slice(metadata_bytes).map_err(|_| mismatch("schema"))?;
+    let version = Version::parse(&metadata.version).ok_or_else(|| mismatch("version"))?;
+    if version.to_string() != metadata.version
+        || metadata.schema_version != METADATA_SCHEMA
+        || metadata.channel != CHANNEL
+        || metadata.tag != tag(&metadata.version)
+        || expected_tag.is_some_and(|t| t != metadata.tag)
+        || metadata.repository != REPOSITORY
+        || !valid_commit(&metadata.commit)
+        || metadata.archive.path != archive_name(&metadata.version)
+        || metadata.archive.size == 0
+        || metadata.archive.size > package::MAX_ARCHIVE_BYTES
+        || !valid_sha256(&metadata.archive.sha256)
+    {
+        return Err(mismatch("contract"));
+    }
+    if metadata.compatibility.protocol != PROTOCOL || metadata.compatibility.ws_path != WS_PATH {
+        let mut e = release_error(
+            "release_incompatible",
+            "Пакет использует другой протокол bridge; обновите CLI",
+        );
+        e.details["protocol"] = json!(metadata.compatibility.protocol);
+        e.details["supported_protocol"] = json!(PROTOCOL);
+        return Err(e);
+    }
+    validate_file_entries(&metadata.files).map_err(mismatch)?;
+    Ok(metadata)
 }
 
 /// Подпись и содержание метаданных без архива (проверка доступной версии).
@@ -380,55 +437,61 @@ pub fn verify_metadata(
         ));
     }
     let key_id = verify_signature(metadata_bytes, signature, trust)?;
-    let mismatch = |field: &str| {
-        let mut e = release_error(
-            "release_metadata_mismatch",
-            "Подписанные метаданные не соответствуют каналу адаптера, источнику или архиву; пакет не установлен",
-        );
-        e.details["field"] = json!(field);
-        e
-    };
-    let metadata: ReleaseMetadata =
-        serde_json::from_slice(metadata_bytes).map_err(|_| mismatch("schema"))?;
-    if metadata.schema_version != METADATA_SCHEMA {
-        return Err(mismatch("schema_version"));
-    }
-    if metadata.channel != CHANNEL {
-        return Err(mismatch("channel"));
-    }
-    if Version::parse(&metadata.version).is_none() || metadata.tag != tag(&metadata.version) {
-        return Err(mismatch("tag"));
-    }
-    if expected_tag.is_some_and(|t| t != metadata.tag) {
-        return Err(mismatch("requested_tag"));
-    }
-    // Источник фиксирован и для явного ключа: тот же канал, другая подпись.
-    if metadata.repository != REPOSITORY {
-        return Err(mismatch("repository"));
-    }
-    if !valid_commit(&metadata.commit) {
-        return Err(mismatch("commit"));
-    }
-    if metadata.compatibility.protocol != PROTOCOL || metadata.compatibility.ws_path != WS_PATH {
-        let mut e = release_error(
-            "release_incompatible",
-            "Пакет использует другой протокол bridge; обновите CLI",
-        );
-        e.details["protocol"] = json!(metadata.compatibility.protocol);
-        e.details["supported_protocol"] = json!(PROTOCOL);
-        return Err(e);
-    }
-    if metadata.archive.path != archive_name(&metadata.version) {
-        return Err(mismatch("archive_name"));
-    }
+    let metadata = validate_metadata_bytes(metadata_bytes, expected_tag)?;
     Ok((metadata, key_id))
 }
 
-fn verify_archive(
-    metadata: ReleaseMetadata,
-    key_id: String,
+/// Проверяет локально собранный пакет, для которого подпись не ожидается.
+/// Вызывать только для своей сборки; опубликованный архив должен проходить
+/// [`verify`] с закреплённым корнем доверия.
+pub fn validate_built_release(
+    metadata_bytes: &[u8],
     zip: &[u8],
-) -> Result<VerifiedRelease, AssetError> {
+    expected_tag: Option<&str>,
+) -> Result<(ReleaseMetadata, Vec<PackageFile>), AssetError> {
+    let metadata = validate_metadata_bytes(metadata_bytes, expected_tag)?;
+    let files = validate_archive(&metadata, zip)?;
+    Ok((metadata, files))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn validate_file_entries(entries: &[FileEntry]) -> Result<(), &'static str> {
+    if entries.is_empty() || entries.len() > package::MAX_FILES {
+        return Err("files_count");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total = 0_u64;
+    for entry in entries {
+        if !package::valid_package_path(&entry.path) || !seen.insert(entry.path.as_str()) {
+            return Err("files_path");
+        }
+        if entry.size > package::MAX_FILE_BYTES || !valid_sha256(&entry.sha256) {
+            return Err("files_size_or_sha256");
+        }
+        total = total.saturating_add(entry.size);
+        if total > package::MAX_TOTAL_BYTES {
+            return Err("files_total_size");
+        }
+    }
+    if package::REQUIRED_FILES
+        .iter()
+        .any(|required| !seen.contains(required))
+    {
+        return Err("files_incomplete");
+    }
+    Ok(())
+}
+
+fn validate_archive(
+    metadata: &ReleaseMetadata,
+    zip: &[u8],
+) -> Result<Vec<PackageFile>, AssetError> {
     let mismatch = |field: &str| {
         let mut e = release_error(
             "release_metadata_mismatch",
@@ -458,11 +521,7 @@ fn verify_archive(
     if compatibility(&facts) != metadata.compatibility {
         return Err(mismatch("compatibility"));
     }
-    Ok(VerifiedRelease {
-        metadata,
-        files,
-        key_id,
-    })
+    Ok(files)
 }
 
 #[cfg(test)]

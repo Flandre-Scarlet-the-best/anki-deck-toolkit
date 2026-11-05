@@ -135,6 +135,36 @@ fn tampering_and_wrong_provenance_are_rejected_before_install() {
     );
 }
 
+#[test]
+fn metadata_preflight_rejects_untrusted_paths_and_sizes_before_archive_access() {
+    let s = signed(None);
+    let original: serde_json::Value = serde_json::from_slice(&s.metadata).unwrap();
+    type MetadataMutation = Box<dyn FnOnce(&mut serde_json::Value)>;
+    let cases: Vec<(&str, MetadataMutation)> = vec![
+        (
+            "version traversal",
+            Box::new(|v| {
+                v["version"] = json!("../../outside");
+                v["tag"] = json!("forvo-extension-v../../outside");
+                v["archive"]["path"] = json!("../../outside.zip");
+            }),
+        ),
+        (
+            "path mismatch",
+            Box::new(|v| v["archive"]["path"] = json!("../../outside.zip")),
+        ),
+        (
+            "oversized archive",
+            Box::new(|v| v["archive"]["size"] = json!(package::MAX_ARCHIVE_BYTES + 1)),
+        ),
+    ];
+    for (name, edit) in cases {
+        let (metadata, _) = resign(original.clone(), &s, edit);
+        let error = validate_metadata_bytes(&metadata, None).unwrap_err();
+        assert_eq!(code(&error), "release_metadata_mismatch", "{name}");
+    }
+}
+
 type Mutation = Box<dyn FnOnce(&mut serde_json::Value)>;
 
 #[test]

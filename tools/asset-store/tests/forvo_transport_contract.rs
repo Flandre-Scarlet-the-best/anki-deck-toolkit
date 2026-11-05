@@ -96,11 +96,18 @@ fn config_defaults_to_chromium_first_and_names_sources() {
     assert_eq!(value["result"]["forvo"]["config_file_loaded"], false);
     assert_eq!(value["result"]["adapter"]["configured"], false);
 
-    let file = env.config("[forvo]\nmode = \"extension_only\"\nbrowser_target = \"chrome\"\n");
+    let file = env.config(
+        "[forvo]\nmode = \"extension_only\"\nbrowser_target = \"chrome\"\nupdate_check = \"off\"\n",
+    );
     let from_file = json(&env.forvo(&["--config", file.to_str().unwrap()], &["config"]));
     assert_eq!(from_file["result"]["forvo"]["mode"], "extension_only");
     assert_eq!(from_file["result"]["forvo"]["sources"]["mode"], "file");
     assert_eq!(from_file["result"]["forvo"]["browser_target"], "chrome");
+    assert_eq!(from_file["result"]["forvo"]["update_check"], "off");
+    assert_eq!(
+        from_file["result"]["forvo"]["sources"]["update_check"],
+        "file"
+    );
     let cli = json(&env.forvo(
         &[
             "--config",
@@ -112,6 +119,8 @@ fn config_defaults_to_chromium_first_and_names_sources() {
     ));
     assert_eq!(cli["result"]["forvo"]["mode"], "chromium_first");
     assert_eq!(cli["result"]["forvo"]["sources"]["mode"], "cli");
+    assert_eq!(cli["result"]["forvo"]["update_check"], "off");
+    assert_eq!(cli["result"]["forvo"]["sources"]["update_check"], "file");
 
     let bad = env.config("[forvo]\nmode = \"slow\"\n");
     let output = env.forvo(&["--config", bad.to_str().unwrap()], &["config"]);
@@ -235,12 +244,13 @@ fn generic_resume_follows_stored_extension_binding_and_keeps_mismatch_checks() {
         &["batch-resume", "--batch-id", "ext"],
     ));
     assert_eq!(code(&mismatch), "browser_mismatch", "{mismatch}");
-    assert_eq!(
-        mismatch["error"]["details"]["transport_decision"]["source"],
-        "batch_binding"
-    );
-    // Без явной цели — сохранённая цель пакета: адаптер не настроен, CDP не запускается.
-    let resumed = json(&env.forvo(&[], &["batch-resume", "--batch-id", "ext"]));
+    // Даже browser_target из файла конфигурации не заменяет сохранённую цель;
+    // только явный CLI target выше неё может запросить несовпадающий браузер.
+    let config = env.config("[forvo]\nbrowser_target = \"chrome\"\nupdate_check = \"off\"\n");
+    let resumed = json(&env.forvo(
+        &["--config", config.to_str().unwrap()],
+        &["batch-resume", "--batch-id", "ext"],
+    ));
     assert_eq!(resumed["outcome"], "paused", "{resumed}");
     assert_eq!(
         resumed["result"]["paused"]["code"],
@@ -267,6 +277,66 @@ fn generic_resume_follows_stored_extension_binding_and_keeps_mismatch_checks() {
         json(&explicit)["result"]["effective_transport"],
         "brave_extension"
     );
+}
+
+#[test]
+fn explicit_brave_batch_resume_rejects_cdp_binding_before_browser_side_effects() {
+    let env = Env::new("forvo-resume-transport-mismatch");
+    let options = asset_store::StoreOptions::new(env.path().join("store"));
+    let store = asset_store::AssetStore::open_with_policy(
+        options,
+        asset_store::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let plan: web::FetchPlan = serde_json::from_slice(&std::fs::read(plan(&env)).unwrap()).unwrap();
+    web::start(&store, "cdp", plan, web::Transport::CdpChromium).unwrap();
+    let before = web::status(&store, "cdp").unwrap();
+    let before_json = serde_json::to_value(&before).unwrap();
+    drop(store);
+
+    let state_dir = env.adapter();
+    let state_dir_arg = state_dir.to_str().unwrap();
+    let output = env.forvo(
+        &[],
+        &[
+            "brave",
+            "--state-dir",
+            state_dir_arg,
+            "batch-resume",
+            "--batch-id",
+            "cdp",
+        ],
+    );
+    let refusal = json(&output);
+    assert_eq!(output.status.code(), Some(3), "{refusal}");
+    assert_eq!(code(&refusal), "transport_mismatch", "{refusal}");
+    assert_eq!(
+        refusal["error"]["details"]["batch_transport"], "cdp_chromium",
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal["error"]["details"]["requested_transport"], "brave_extension",
+        "{refusal}"
+    );
+    assert!(
+        refusal["error"]["details"]["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("pronunciation-assets forvo batch-resume")
+    );
+
+    let store = asset_store::AssetStore::open_existing_with_policy(
+        asset_store::StoreOptions::new(env.path().join("store")),
+        asset_store::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let after = web::status(&store, "cdp").unwrap();
+    assert_eq!(serde_json::to_value(&after).unwrap(), before_json);
+    assert_eq!(after.transport(), web::Transport::CdpChromium);
+    // CLI записывает штатный диагностический журнал, но несовпадение отклоняется
+    // до запуска любого браузерного транспорта и создания состояния адаптера.
+    assert!(!env.profile().exists());
+    assert!(!state_dir.exists());
 }
 
 // --- Релизный конвейер ---------------------------------------------------------
@@ -372,6 +442,23 @@ fn release_build_is_reproducible_complete_and_verifiable() {
         "{}",
         String::from_utf8_lossy(&signed.stdout)
     );
+    let signed_b = Command::new(env!("CARGO_BIN_EXE_forvo-extension-release"))
+        .args([
+            "sign",
+            "--dir",
+            b.to_str().unwrap(),
+            "--key-env",
+            "FORVO_TEST_KEY",
+            "--allow-untrusted-key",
+        ])
+        .env("FORVO_TEST_KEY", &secret)
+        .output()
+        .unwrap();
+    assert!(
+        signed_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed_b.stdout)
+    );
     let (ok, verified) = release_tool(&[
         "verify",
         "--dir",
@@ -413,7 +500,9 @@ fn release_build_is_reproducible_complete_and_verifiable() {
         .unwrap();
     assert_eq!(code(&json(&update)), "adapter_not_configured");
 
-    // Сверка с «опубликованным» выпуском той же версии: совпадает побайтово.
+    // Для сравнения локальная сборка не содержит подпись, а опубликованная
+    // должна быть подписана; без встроенного корня доверия CLI блокирует путь.
+    std::fs::remove_file(a.join(release::SIGNATURE_ASSET)).unwrap();
     let (ok, same) = release_tool(&[
         "compare",
         "--dir",
@@ -421,8 +510,11 @@ fn release_build_is_reproducible_complete_and_verifiable() {
         "--published",
         b.to_str().unwrap(),
     ]);
-    assert!(ok, "{same}");
-    // Изменённое содержимое под той же версией — отказ публикации.
+    if release::TrustRoot::embedded().keys().is_empty() {
+        assert!(!ok, "{same}");
+        assert_eq!(same["code"], "release_trust_root_missing");
+    }
+    // Подмена подписанных метаданных также не может дать успешную сверку.
     let mut forged: Value =
         serde_json::from_slice(&std::fs::read(b.join(release::METADATA_ASSET)).unwrap()).unwrap();
     forged["archive"]["sha256"] = json!("0".repeat(64));
@@ -439,5 +531,16 @@ fn release_build_is_reproducible_complete_and_verifiable() {
         b.to_str().unwrap(),
     ]);
     assert!(!ok);
-    assert_eq!(differs["code"], "published_release_differs");
+    assert!(
+        matches!(
+            differs["code"].as_str(),
+            Some(
+                "release_trust_root_missing"
+                    | "release_key_untrusted"
+                    | "release_signature_invalid"
+                    | "release_metadata_mismatch"
+            )
+        ),
+        "{differs}"
+    );
 }

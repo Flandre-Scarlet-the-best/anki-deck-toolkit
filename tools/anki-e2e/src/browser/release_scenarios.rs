@@ -371,6 +371,32 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
     let chromium_first = config("chromium-first.toml", "chromium_first")?;
     // Отказ запуска собственного Chromium до любых побочных эффектов.
     let broken_cdp = [("CHROME_BIN", "/bin/false")];
+    // Для доменного отказа запускаем production CDP против того же HTTPS fixture,
+    // что использует тестовый браузер. Остальной трафик браузера остаётся закрыт.
+    let fixture_chrome = env.dir.join("fixture-chromium.sh");
+    let chrome = env.ctx.chrome.to_string_lossy().replace('\'', "'\\''");
+    let resolver = format!(
+        "--host-resolver-rules=MAP forvo.com 127.0.0.1:{}, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        env.ctx.fixture.port
+    );
+    let resolver = resolver.replace('\'', "'\\''");
+    std::fs::write(
+        &fixture_chrome,
+        format!(
+            "#!/bin/sh\nexec '{chrome}' --no-proxy-server --ignore-certificate-errors '{resolver}' \"$@\"\n"
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&fixture_chrome)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&fixture_chrome, permissions).map_err(|e| e.to_string())?;
+    }
+    let fixture_chrome = fixture_chrome.to_string_lossy().into_owned();
+    let fixture_cdp = [("CHROME_BIN", fixture_chrome.as_str())];
 
     // 1. extension_only: CDP не запускается даже для проверки.
     cli.profile = env.dir.join("cdp-profile-extension-only");
@@ -398,7 +424,7 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
             && !cli.profile.exists(),
         json!({"run":only.summary(),"decision":decision}),
     );
-    // 2. chromium_first: backend failure CDP → переход к адаптеру.
+    // 2. chromium_first: отказ запуска CDP → переход к адаптеру.
     cli.profile = env.dir.join("cdp-profile-broken");
     let fallback = cli
         .generic(
@@ -415,9 +441,10 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
         .await?;
     let decision = &fallback.out["result"]["transport_decision"];
     env.out.check(
-        "chromium_first: отказ запуска CDP (backend failure) до побочных эффектов → тот же MP3 через адаптер",
+        "chromium_first: отказ запуска CDP до побочных эффектов → тот же MP3 через адаптер",
         fallback.code == 0
-            && fallback.out["result"]["acquisition"]["downloaded_sha256"] == sha256_hex(&env.ctx.fixture.bytes_for(fixture::RECORD_3))
+            && fallback.out["result"]["acquisition"]["downloaded_sha256"]
+                == sha256_hex(&env.ctx.fixture.bytes_for(fixture::RECORD_3))
             && decision["fallback"]["used"] == true
             && decision["fallback"]["reason"] == "cdp_launch_failed"
             && decision["fallback"]["failure_kind"] == "backend"
@@ -425,10 +452,19 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
             && decision["selected"] == "brave_extension",
         json!({"run":fallback.summary(),"decision":decision}),
     );
-    // 3. Domain failure адаптера не переводится ни на какой другой транспорт.
+    // 3. Предметная ошибка CDP не запускает переход к адаптеру, хотя он допустим
+    // после отказа запуска. Chromium открывает синтетическую изменённую страницу.
+    let mp3_requests_before = env
+        .ctx
+        .fixture
+        .log()
+        .into_iter()
+        .filter(|path| path.starts_with("/download/mp3/"))
+        .count();
+    cli.profile = env.dir.join("cdp-profile-domain");
     let domain = cli
         .generic(
-            &["--config", &extension_only],
+            &["--config", &chromium_first],
             &[
                 "fetch",
                 "--surface",
@@ -436,18 +472,39 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
                 "--reading",
                 "べつご",
             ],
-            &[],
+            &fixture_cdp,
         )
         .await?;
     let decision = &domain.out["error"]["details"]["transport_decision"];
+    let attempts = decision["attempts"].as_array();
+    let mp3_requests_after = env
+        .ctx
+        .fixture
+        .log()
+        .into_iter()
+        .filter(|path| path.starts_with("/download/mp3/"))
+        .count();
     env.out.check(
-        "domain failure (изменившаяся разметка) — ошибка без повторной попытки другим транспортом",
+        "chromium_first при dom_changed не переходит с CDP на адаптер и не загружает MP3",
         domain.code != 0
-            && decision["attempts"]
-                .as_array()
-                .is_some_and(|a| a.len() == 1)
-            && decision["cdp_attempted"] == false,
-        json!({"run":domain.summary(),"decision":decision}),
+            && domain.error_code() == "dom_changed"
+            && decision["mode"] == "chromium_first"
+            && decision["cdp_attempted"] == true
+            && decision["selected"].is_null()
+            && decision["fallback"]["used"] == false
+            && decision["fallback"]["allowed"] == false
+            && decision["fallback"]["failure_kind"] == "domain_or_unsafe"
+            && decision["fallback"]["refused_because"] == "dom_changed"
+            && attempts.is_some_and(|a| {
+                a.len() == 1
+                    && a[0]["transport"] == "cdp_chromium"
+                    && a[0]["stage"] == "before_download"
+                    && a[0]["outcome"] == "failed"
+                    && a[0]["code"] == "dom_changed"
+            })
+            && mp3_requests_after == mp3_requests_before,
+        json!({"run":domain.summary(),"decision":decision,
+            "mp3_requests_before":mp3_requests_before,"mp3_requests_after":mp3_requests_after}),
     );
     // 4. Новый пакет: транспорт выбирается до создания; preflight CDP не удался → пакет адаптера.
     cli.profile = env.dir.join("cdp-profile-batch");

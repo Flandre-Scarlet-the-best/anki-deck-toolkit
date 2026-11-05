@@ -42,6 +42,7 @@ fn file_values_apply_and_cli_overrides_them() {
     assert_eq!(settings.browser_target.as_deref(), Some("brave"));
     assert_eq!(settings.update_check, UpdateCheck::Off);
     assert_eq!(settings.sources[0], ("mode", "file"));
+    assert_eq!(settings.sources[2], ("update_check", "file"));
     let cli = forvo(&ForvoOverrides {
         config: Some(path),
         mode: Some(ForvoMode::ChromiumFirst),
@@ -52,6 +53,8 @@ fn file_values_apply_and_cli_overrides_them() {
     assert_eq!(cli.browser_target.as_deref(), Some("chrome"));
     assert_eq!(cli.sources[0], ("mode", "cli"));
     assert_eq!(cli.sources[1], ("browser_target", "cli"));
+    assert_eq!(cli.update_check, UpdateCheck::Off);
+    assert_eq!(cli.sources[2], ("update_check", "file"));
 }
 
 #[test]

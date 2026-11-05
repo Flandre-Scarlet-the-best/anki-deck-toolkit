@@ -393,7 +393,17 @@ pub fn build_zip(files: &[PackageFile]) -> Result<Vec<u8>, AssetError> {
             .map_err(|e| failed(&e))?;
         writer.write_all(&file.bytes).map_err(|e| failed(&e))?;
     }
-    Ok(writer.finish().map_err(|e| failed(&e))?.into_inner())
+    let bytes = writer.finish().map_err(|e| failed(&e))?.into_inner();
+    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
+        let mut error = package_error(
+            "package_limits_exceeded",
+            "Собранный ZIP превышает допустимый размер архива",
+        );
+        error.details["archive_bytes"] = json!(bytes.len());
+        error.details["maximum_bytes"] = json!(MAX_ARCHIVE_BYTES);
+        return Err(error);
+    }
+    Ok(bytes)
 }
 
 /// Число записей центрального каталога по записи EOCD — независимо от

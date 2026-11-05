@@ -6,13 +6,13 @@ name: Выпуск адаптера Forvo
 # tools/asset-store/src/forvo/brave/extension/manifest.json.
 #
 # - `pull_request` — сухой прогон без секретов: тот же ZIP, что у `setup`,
-#   проверка повышения версии при изменении исходников адаптера и сверка с уже
-#   опубликованным выпуском той же версии. Ничего не публикует.
+#   сверка его байтов со сборкой base и уже опубликованным стабильным выпуском.
+#   Если упаковщика ещё нет в base, bootstrap требует повышения версии.
 # - `push` в основную ветку (после принятого PR) и `workflow_dispatch` на ней —
-#   публикация, если версия новая; если выпуск этой версии уже есть, только
-#   побайтовая сверка (повторный запуск ничего не перетирает). Всё делается в
-#   одном запуске: события, созданные `GITHUB_TOKEN`, другие workflow не
-#   запускают, и последовательность выпуска на них не полагается.
+#   публикация новой стабильной версии; уже опубликованный стабильный выпуск
+#   проходит полную доверенную проверку без перезаписи. Черновик, prerelease или
+#   занятый Git-тег блокирует публикацию. Всё делается в одном запуске: события,
+#   созданные `GITHUB_TOKEN`, другие workflow не запускают.
 #
 # Подлинность для установщика — подпись Ed25519 метаданных ключом из секрета
 # окружения `forvo-extension-release`; открытый ключ закреплён в
@@ -23,12 +23,16 @@ on:
   pull_request:
     paths: &inputs
       - 'tools/asset-store/src/forvo/brave/extension/**'
+      - 'tools/asset-store/src/forvo/brave.rs'
       - 'tools/asset-store/src/forvo/dom.js'
       - 'tools/asset-store/src/forvo/auth.js'
       - 'tools/asset-store/src/forvo/brave/package.rs'
       - 'tools/asset-store/src/forvo/brave/release.rs'
       - 'tools/asset-store/src/forvo/brave/release_keys.json'
       - 'tools/asset-store/src/bin/forvo_extension_release.rs'
+      - 'tools/asset-store/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/forvo-extension-release.yml'
   push:
     paths: *inputs
@@ -84,11 +88,30 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          mapfile -t sources < <("$TOOL" sources | jq -r '.result.paths[]')
-          if git diff --quiet "$BASE" HEAD -- "${sources[@]}"; then
-            echo "Исходники адаптера не изменены; повышение версии не требуется." | tee -a "$GITHUB_STEP_SUMMARY"
+          base_version="$(git show "$BASE:tools/asset-store/src/forvo/brave/extension/manifest.json" | jq -r .version)"
+          if git cat-file -e "$BASE:tools/asset-store/src/bin/forvo_extension_release.rs" \
+            && git cat-file -e "$BASE:tools/asset-store/src/forvo/brave/package.rs"; then
+            base_dir="$RUNNER_TEMP/forvo-base"
+            base_dist="$RUNNER_TEMP/forvo-base-dist"
+            git worktree add --detach "$base_dir" "$BASE"
+            trap 'git worktree remove --force "$base_dir" >/dev/null 2>&1 || true' EXIT
+            (
+              cd "$base_dir"
+              cargo build --locked --profile ci -p asset-store --bin forvo-extension-release
+              target/ci/forvo-extension-release build --out "$base_dist" \
+                --repository "$GITHUB_REPOSITORY" --commit "$BASE" \
+                | tee "$RUNNER_TEMP/base-build.json"
+            )
+            base_sha="$(jq -r '.result.archive.sha256' "$RUNNER_TEMP/base-build.json")"
+            head_sha="$(jq -r '.result.archive.sha256' "$RUNNER_TEMP/build.json")"
+            if [ "$base_sha" = "$head_sha" ]; then
+              echo "Байты ZIP совпадают со сборкой base; повышение версии не требуется." | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              "$TOOL" check-bump --base-version "$base_version" | tee "$RUNNER_TEMP/bump.json"
+              jq -e '.outcome == "ok"' "$RUNNER_TEMP/bump.json"
+            fi
           else
-            base_version="$(git show "$BASE:tools/asset-store/src/forvo/brave/extension/manifest.json" | jq -r .version)"
+            echo "В base ещё нет упаковщика релизного ZIP; его первый выпуск требует повышения версии." | tee -a "$GITHUB_STEP_SUMMARY"
             "$TOOL" check-bump --base-version "$base_version" | tee "$RUNNER_TEMP/bump.json"
             jq -e '.outcome == "ok"' "$RUNNER_TEMP/bump.json"
           fi
@@ -100,13 +123,32 @@ jobs:
 
       - name: Составить план
         id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           "$TOOL" plan --releases "$RUNNER_TEMP/releases.json" | tee "$RUNNER_TEMP/plan.json"
           jq -e '.outcome == "ok"' "$RUNNER_TEMP/plan.json"
+          action="$(jq -r .result.action "$RUNNER_TEMP/plan.json")"
+          tag="$(jq -r .result.tag "$RUNNER_TEMP/plan.json")"
+          if [ "$action" = verify_existing ]; then
+            refs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag")"
+            if ! jq -e --arg ref "refs/tags/$tag" '[.[][]? | select(.ref == $ref)] | length == 1' <<<"$refs" >/dev/null; then
+              echo "Опубликованный стабильный выпуск не имеет ровно одной соответствующей Git-метки." >&2
+              exit 1
+            fi
+            tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
+            echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+          elif [ "$action" = publish ]; then
+            refs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag")"
+            if jq -e --arg ref "refs/tags/$tag" '[.[][]? | select(.ref == $ref)] | length > 0' <<<"$refs" >/dev/null; then
+              echo "Тег $tag уже занят; новый релиз под ним создавать нельзя." >&2
+              exit 1
+            fi
+          fi
           {
-            echo "action=$(jq -r .result.action "$RUNNER_TEMP/plan.json")"
+            echo "action=$action"
             echo "version=$(jq -r .result.version "$RUNNER_TEMP/plan.json")"
-            echo "tag=$(jq -r .result.tag "$RUNNER_TEMP/plan.json")"
+            echo "tag=$tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Сверить с уже опубликованным выпуском той же версии
@@ -114,11 +156,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.plan.outputs.tag }}
+          TAG_COMMIT: ${{ steps.plan.outputs.tag_commit }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/published" \
-            --pattern 'forvo-extension-*'
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/published"
           "$TOOL" compare --dir "$RUNNER_TEMP/dist" --published "$RUNNER_TEMP/published" | tee "$RUNNER_TEMP/compare.json"
-          jq -e '.outcome == "ok"' "$RUNNER_TEMP/compare.json"
+          jq -e --arg commit "$TAG_COMMIT" \
+            '.outcome == "ok" and .result.published_commit == $commit' \
+            "$RUNNER_TEMP/compare.json"
 
       - name: Итог
         env:
@@ -129,9 +173,9 @@ jobs:
           if [ "$ACTION" = publish ] && [ "$EVENT" = pull_request ]; then
             echo "После слияния в основную ветку будет опубликован $TAG." | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ "$ACTION" = publish ]; then
-            echo "Публикуется $TAG." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$TAG свободен и будет опубликован заданием публикации." | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "$TAG уже опубликован и совпадает с собранным пакетом; публикация не нужна." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$TAG проверен: подпись, метаданные, тег и полный ZIP совпадают; публикация не нужна." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
   publish:
@@ -163,18 +207,6 @@ jobs:
           "$TOOL" build --out "$RUNNER_TEMP/dist" --repository "$GITHUB_REPOSITORY" \
             --commit "$GITHUB_SHA" --notes-out "$RUNNER_TEMP/notes.md"
 
-      - name: Подписать метаданные
-        env:
-          FORVO_EXTENSION_SIGNING_KEY: ${{ secrets.FORVO_EXTENSION_SIGNING_KEY }}
-        run: |
-          "$TOOL" sign --dir "$RUNNER_TEMP/dist" | tee "$RUNNER_TEMP/sign.json"
-          jq -e '.outcome == "ok" and .result.trusted == true' "$RUNNER_TEMP/sign.json"
-
-      - name: Проверить выпуск как установщик (встроенный корень доверия)
-        run: |
-          "$TOOL" verify --dir "$RUNNER_TEMP/dist" | tee "$RUNNER_TEMP/verify.json"
-          jq -e '.outcome == "ok"' "$RUNNER_TEMP/verify.json"
-
       - name: Повторить план с правом видеть черновики
         id: plan
         env:
@@ -183,11 +215,42 @@ jobs:
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases" > "$RUNNER_TEMP/releases.json"
           "$TOOL" plan --releases "$RUNNER_TEMP/releases.json" | tee "$RUNNER_TEMP/plan.json"
           jq -e '.outcome == "ok"' "$RUNNER_TEMP/plan.json"
-          echo "action=$(jq -r .result.action "$RUNNER_TEMP/plan.json")" >> "$GITHUB_OUTPUT"
-          # Неопубликованные черновики прежних прерванных запусков удаляются: тег у них ещё не создан.
-          for id in $(jq -r '.result.drafts_to_replace[]?' "$RUNNER_TEMP/plan.json"); do
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
-          done
+          action="$(jq -r .result.action "$RUNNER_TEMP/plan.json")"
+          tag="$(jq -r .result.tag "$RUNNER_TEMP/plan.json")"
+          if [ "$action" = verify_existing ]; then
+            refs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag")"
+            if ! jq -e --arg ref "refs/tags/$tag" '[.[][]? | select(.ref == $ref)] | length == 1' <<<"$refs" >/dev/null; then
+              echo "Опубликованный стабильный выпуск не имеет ровно одной соответствующей Git-метки." >&2
+              exit 1
+            fi
+            tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
+            echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+          elif [ "$action" = publish ]; then
+            refs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag")"
+            if jq -e --arg ref "refs/tags/$tag" '[.[][]? | select(.ref == $ref)] | length > 0' <<<"$refs" >/dev/null; then
+              echo "Тег $tag уже занят; новый релиз под ним создавать нельзя." >&2
+              exit 1
+            fi
+          fi
+          {
+            echo "action=$action"
+            echo "version=$(jq -r .result.version "$RUNNER_TEMP/plan.json")"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Подписать метаданные
+        if: steps.plan.outputs.action == 'publish'
+        env:
+          FORVO_EXTENSION_SIGNING_KEY: ${{ secrets.FORVO_EXTENSION_SIGNING_KEY }}
+        run: |
+          "$TOOL" sign --dir "$RUNNER_TEMP/dist" | tee "$RUNNER_TEMP/sign.json"
+          jq -e '.outcome == "ok" and .result.trusted == true' "$RUNNER_TEMP/sign.json"
+
+      - name: Проверить выпуск как установщик (встроенный корень доверия)
+        if: steps.plan.outputs.action == 'publish'
+        run: |
+          "$TOOL" verify --dir "$RUNNER_TEMP/dist" | tee "$RUNNER_TEMP/verify.json"
+          jq -e '.outcome == "ok"' "$RUNNER_TEMP/verify.json"
 
       - name: Опубликовать
         if: steps.plan.outputs.action == 'publish'
@@ -204,11 +267,19 @@ jobs:
       - name: Проверить опубликованный выпуск
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.check.outputs.tag }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          ACTION: ${{ steps.plan.outputs.action }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/published" \
-            --pattern 'forvo-extension-*'
-          "$TOOL" verify --dir "$RUNNER_TEMP/published" | tee "$RUNNER_TEMP/published-verify.json"
-          jq -e '.outcome == "ok"' "$RUNNER_TEMP/published-verify.json"
-          "$TOOL" compare --dir "$RUNNER_TEMP/dist" --published "$RUNNER_TEMP/published"
-          echo "Опубликован $TAG." | tee -a "$GITHUB_STEP_SUMMARY"
+          release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+          jq -e --arg tag "$TAG" '.tag_name == $tag and .draft == false and .prerelease == false' <<<"$release" >/dev/null
+          tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/published"
+          "$TOOL" compare --dir "$RUNNER_TEMP/dist" --published "$RUNNER_TEMP/published" | tee "$RUNNER_TEMP/compare.json"
+          jq -e --arg commit "$tag_commit" \
+            '.outcome == "ok" and .result.published_commit == $commit' \
+            "$RUNNER_TEMP/compare.json"
+          if [ "$ACTION" = publish ]; then
+            echo "Опубликован $TAG; подпись, стабильный канал, Git-тег и архив проверены." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$TAG уже был опубликован; подпись, стабильный канал, Git-тег и архив проверены без перезаписи." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

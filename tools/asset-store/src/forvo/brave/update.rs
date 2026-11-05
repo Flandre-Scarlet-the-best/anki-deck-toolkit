@@ -28,6 +28,7 @@ const USER_AGENT: &str = "anki-deck-toolkit-forvo-updater";
 const API_BASE: &str = "https://api.github.com";
 const DOWNLOAD_BASE: &str = "https://github.com";
 const CHECK_FILE: &str = "check.json";
+const CHECK_LOCK_FILE: &str = "check.lock";
 const MAX_LISTING_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_PAGES: u32 = 3;
 const RELOAD_WAIT: Duration = Duration::from_secs(60);
@@ -136,7 +137,10 @@ pub async fn latest_published(channel: &Channel) -> Result<Option<(Version, Stri
             let Some(tag) = item["tag_name"].as_str() else {
                 continue;
             };
-            if item["draft"] == true || item["prerelease"] == true {
+            // Отсутствующие или неверно типизированные флаги не доказывают,
+            // что выпуск относится к стабильному каналу.
+            if item["draft"].as_bool() != Some(false) || item["prerelease"].as_bool() != Some(false)
+            {
                 continue;
             }
             let Some(version) = tag
@@ -356,6 +360,66 @@ pub fn cached_check(state_dir: &Path) -> Option<CheckCache> {
         .filter(|c| c.schema_version == 1)
 }
 
+/// Общая межпроцессная блокировка чтения, проверки и записи кэша. Проверки
+/// выполняются последовательно: медленный ответ старого запроса не может
+/// перезаписать более новый результат. Файл блокировки остаётся в приватном
+/// каталоге состояния, а flock автоматически освобождается при завершении
+/// процесса или отмене задачи.
+async fn check_lock(state_dir: &Path, wait: bool) -> Result<Option<std::fs::File>, AssetError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let state_dir = state_dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let dir = state_dir.join("updates");
+        private_dir(&dir)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            .open(dir.join(CHECK_LOCK_FILE))
+            .map_err(|e| AssetError::io("блокировка проверки выпусков адаптера", e))?;
+        if !file
+            .metadata()
+            .map_err(|e| AssetError::io("проверка блокировки выпусков адаптера", e))?
+            .is_file()
+        {
+            return Err(bridge_error(
+                "update_check_lock_invalid",
+                "Файл блокировки проверки выпусков адаптера не является обычным файлом",
+            ));
+        }
+        let operation = if wait {
+            rustix::fs::FlockOperation::LockExclusive
+        } else {
+            rustix::fs::FlockOperation::NonBlockingLockExclusive
+        };
+        match rustix::fs::flock(&file, operation) {
+            Ok(()) => Ok(Some(file)),
+            Err(error) => {
+                let error: std::io::Error = error.into();
+                if !wait && error.kind() == std::io::ErrorKind::WouldBlock {
+                    Ok(None)
+                } else {
+                    Err(AssetError::io(
+                        "блокировка проверки выпусков адаптера",
+                        error,
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        bridge_error(
+            "update_check_lock_failed",
+            "Не удалось получить блокировку проверки выпусков адаптера",
+        )
+    })?
+}
+
 fn save_check(state_dir: &Path, cache: &CheckCache) {
     let dir = state_dir.join("updates");
     if private_dir(&dir).is_ok() {
@@ -379,15 +443,21 @@ fn compare(available: Option<&str>, installed: Option<&str>) -> Value {
         "update_available":newer})
 }
 
-/// Сетевая проверка доступной версии: наибольший тег канала и подпись его
-/// метаданных. Архив не скачивается. Результат кэшируется в каталоге состояния.
-pub async fn check(
-    state_dir: &Path,
+/// Сетевая проверка доступной версии без управления кэшем. Архив не скачивается;
+/// неподтверждённая подпись или отсутствие корня доверия — ошибка, а не успешный
+/// результат с видом проверенного выпуска.
+async fn check_uncached(
     state: Option<&AdapterState>,
     source: &Source,
     trust: &TrustRoot,
     channel: &Channel,
 ) -> Result<Value, AssetError> {
+    // Отсутствие корня доверия блокирует явную проверку до запроса списка:
+    // пустой канал не должен выглядеть как успешно подтверждённое отсутствие
+    // обновлений.
+    if trust.keys().is_empty() {
+        return Err(release::no_trusted_keys());
+    }
     let installed = state.and_then(|s| peek_version(&s.install_dir));
     let result = async {
         let (fetched, tag) = match fetch(source, None, channel, false).await {
@@ -398,41 +468,62 @@ pub async fn check(
             }
             Err(e) => return Err(e),
         };
-        let verified = release::verify_metadata(&fetched.metadata, &fetched.signature, trust, tag.as_deref());
-        Ok(match verified {
-            Ok((metadata, key_id)) => json!({"status":"verified","origin":fetched.origin,"key_id":key_id,
-                "version":metadata.version,"tag":metadata.tag,"commit":metadata.commit,"compatibility":metadata.compatibility,
-                "comparison":compare(Some(&metadata.version), installed.as_deref())}),
-            Err(e) => json!({"status":"unverified","origin":fetched.origin,"code":crate::forvo::provider_code(&e),
-                "message":e.message,"next_action":e.details["next_action"],
-                "comparison":compare(None, installed.as_deref())}),
-        })
+        let (metadata, key_id) =
+            release::verify_metadata(&fetched.metadata, &fetched.signature, trust, tag.as_deref())?;
+        Ok(json!({"status":"verified","origin":fetched.origin,"key_id":key_id,
+            "version":metadata.version,"tag":metadata.tag,"commit":metadata.commit,"compatibility":metadata.compatibility,
+            "comparison":compare(Some(&metadata.version), installed.as_deref())}))
     }
     .await;
-    if matches!(source, Source::GitHub) {
-        save_check(
-            state_dir,
-            &CheckCache {
-                schema_version: 1,
-                checked_at: now(),
-                latest_version: result
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v["version"].as_str().map(str::to_owned)),
-                latest_tag: result
-                    .as_ref()
-                    .ok()
-                    .and_then(|v| v["tag"].as_str().map(str::to_owned)),
-                error: result
-                    .as_ref()
-                    .err()
-                    .map(|e| crate::forvo::provider_code(e).to_owned()),
-            },
-        );
-    }
     let mut value = result?;
     value["trust_root"] = trust.describe();
     Ok(value)
+}
+
+fn cache_for_result(result: &Result<Value, AssetError>) -> CheckCache {
+    CheckCache {
+        schema_version: 1,
+        checked_at: now(),
+        latest_version: result
+            .as_ref()
+            .ok()
+            .and_then(|v| v["version"].as_str().map(str::to_owned)),
+        latest_tag: result
+            .as_ref()
+            .ok()
+            .and_then(|v| v["tag"].as_str().map(str::to_owned)),
+        error: result
+            .as_ref()
+            .err()
+            .map(|e| crate::forvo::provider_code(e).to_owned()),
+    }
+}
+
+/// Сетевая проверка доступной версии: наибольший стабильный тег канала и
+/// подпись его метаданных. Архив не скачивается. Запрос и запись кэша
+/// сериализованы между процессами.
+pub async fn check(
+    state_dir: &Path,
+    state: Option<&AdapterState>,
+    source: &Source,
+    trust: &TrustRoot,
+    channel: &Channel,
+) -> Result<Value, AssetError> {
+    let _lock = if matches!(source, Source::GitHub) {
+        Some(check_lock(state_dir, true).await?.ok_or_else(|| {
+            bridge_error(
+                "update_check_lock_failed",
+                "Не удалось получить блокировку проверки выпусков адаптера",
+            )
+        })?)
+    } else {
+        None
+    };
+    let result = check_uncached(state, source, trust, channel).await;
+    if matches!(source, Source::GitHub) {
+        save_check(state_dir, &cache_for_result(&result));
+    }
+    result
 }
 
 /// Версия на диске без восстановления журнала (чтение вне блокировки цели).
@@ -452,30 +543,55 @@ pub async fn auto_check(
     max_age: Duration,
     timeout: Duration,
 ) -> Option<Value> {
+    auto_check_with_channel(
+        state_dir,
+        state,
+        max_age,
+        timeout,
+        Channel::default(),
+        TrustRoot::embedded(),
+    )
+    .await
+}
+
+async fn auto_check_with_channel(
+    state_dir: &Path,
+    state: Option<&AdapterState>,
+    max_age: Duration,
+    timeout: Duration,
+    mut channel: Channel,
+    trust: TrustRoot,
+) -> Option<Value> {
+    // Обычный fetch не ждёт уже запущенную явную проверку и не создаёт второй
+    // сетевой запрос. Проверка кэша и его обновление выполняются под одной
+    // блокировкой, включая запись отрицательного результата по тайм-ауту.
+    let _lock = check_lock(state_dir, false).await.ok().flatten()?;
     let installed = state.and_then(|s| peek_version(&s.install_dir));
-    let fresh =
-        cached_check(state_dir).filter(|c| now().saturating_sub(c.checked_at) < max_age.as_secs());
-    let cache = match fresh {
-        Some(cache) => cache,
-        None => {
-            let channel = Channel {
-                timeout,
-                ..Channel::default()
-            };
-            let trust = TrustRoot::embedded();
-            let _ = tokio::time::timeout(
-                timeout,
-                check(state_dir, state, &Source::GitHub, &trust, &channel),
-            )
-            .await;
-            cached_check(state_dir).unwrap_or(CheckCache {
+    let cache = if let Some(cache) =
+        cached_check(state_dir).filter(|c| now().saturating_sub(c.checked_at) < max_age.as_secs())
+    {
+        cache
+    } else {
+        // Внешний предел остаётся точным: запас не даёт reqwest успеть
+        // сохранить собственную ошибку вместо записи timeout при отмене.
+        channel.timeout = timeout.saturating_add(Duration::from_millis(250));
+        let result = tokio::time::timeout(
+            timeout,
+            check_uncached(state, &Source::GitHub, &trust, &channel),
+        )
+        .await;
+        let cache = match result {
+            Ok(result) => cache_for_result(&result),
+            Err(_) => CheckCache {
                 schema_version: 1,
                 checked_at: now(),
                 latest_version: None,
                 latest_tag: None,
                 error: Some("timeout".into()),
-            })
-        }
+            },
+        };
+        save_check(state_dir, &cache);
+        cache
     };
     let comparison = compare(cache.latest_version.as_deref(), installed.as_deref());
     (comparison["update_available"] == true).then(|| {
@@ -517,9 +633,37 @@ fn release_files(verified: &VerifiedRelease, state: &AdapterState) -> Vec<Packag
     files
 }
 
+fn identity_changed(cause: AssetError, command_prefix: &str) -> AssetError {
+    let mut error = bridge_error(
+        "extension_identity_changed",
+        "После перезагрузки подключился другой ID или экземпляр расширения; обновление не подтверждено. Проверьте профиль браузера и выполните doctor",
+    );
+    error.details["cause"] = json!(crate::forvo::provider_code(&cause));
+    error.details["user_action"] = json!(format!(
+        "Проверьте профиль браузера и выполните {command_prefix} doctor"
+    ));
+    error
+}
+
+fn installation_mismatch(differs: &[String]) -> AssetError {
+    let mut error = bridge_error(
+        "installed_files_differ",
+        "Файлы установленного выпуска отличаются от подписанного архива той же версии; безопасное обновление не выполнено. Для восстановления явно укажите --reinstall",
+    );
+    error.details["status"] = json!("REPAIR_REQUIRED");
+    error.details["files_match_release"] = json!(false);
+    error.details["differs"] = json!(differs);
+    error.details["next_action"] =
+        json!("Повторите update с --reinstall для восстановления файлов подписанного выпуска");
+    error
+}
+
 /// Проверяет выпуск, затем под блокировкой цели устанавливает его в прежний
 /// каталог и штатно перезагружает подключённое расширение.
 pub async fn update(options: &UpdateOptions) -> Result<Value, AssetError> {
+    if options.trust.keys().is_empty() {
+        return Err(release::no_trusted_keys());
+    }
     let state = targets::load_target(&options.state_dir, options.target.as_deref())?;
     // 1. Скачивание и полная проверка — до блокировки и до любой записи.
     let (fetched, tag) = fetch(
@@ -584,30 +728,13 @@ pub async fn update(options: &UpdateOptions) -> Result<Value, AssetError> {
             e.details["release_version"] = json!(verified.metadata.version);
             return Err(e);
         }
-        std::cmp::Ordering::Equal if differs.is_empty() || !options.reinstall => {
-            let mut value = base;
-            value["status"] = json!("up_to_date");
-            value["installed_version"] = json!(installed);
-            value["files_match_release"] = json!(differs.is_empty());
-            if !differs.is_empty() {
-                value["differs"] = json!(differs);
-                value["next_action"] = json!(
-                    "Файлы отличаются от выпуска той же версии; восстановить: update --reinstall"
-                );
-            }
-            return Ok(value);
+        std::cmp::Ordering::Equal if !differs.is_empty() && !options.reinstall => {
+            return Err(installation_mismatch(&differs));
         }
         _ => {}
     }
-    if state.extension_id.is_none() {
-        let mut e = bridge_error(
-            "extension_not_paired",
-            "Расширение цели ещё ни разу не подключалось: идентичность после перезагрузки нечем подтвердить. Загрузите его вручную и выполните doctor",
-        );
-        e.details["user_action"] = json!(state.user_action());
-        return Err(e);
-    }
-    // 3. Подключение: перезагрузка допустима только у свободного расширения.
+    // 3. Подключение обязательно и для совпадающих файлов: версия на диске
+    // сама по себе не доказывает, что браузер уже перечитал manifest.
     let peer = bridge
         .accept(Instant::now() + options.wait)
         .await
@@ -619,9 +746,63 @@ pub async fn update(options: &UpdateOptions) -> Result<Value, AssetError> {
             ));
             e
         })?;
+    let files_match = differs.is_empty();
+    let disk_matches = to == from && files_match;
+    let runtime_matches = peer.version == verified.metadata.version;
+    if disk_matches && runtime_matches {
+        let mut value = base;
+        value["status"] = json!("up_to_date");
+        value["installed_version"] = json!(installed);
+        value["disk_version"] = json!(installed);
+        value["runtime_version"] = json!(peer.version);
+        value["files_match_release"] = json!(true);
+        value["runtime_confirmed"] = json!(true);
+        value["extension"] = json!({"extension_id":peer.extension_id,
+            "same_extension_id":state.extension_id.as_deref().map(|id| id == peer.extension_id),
+            "same_instance":state.instance_id.as_deref().zip(peer.instance.as_deref()).map(|(a,b)| a == b),
+            "instance_available":peer.instance.is_some(),"version":peer.version});
+        return Ok(value);
+    }
+
+    let needs_install = to > from || (to == from && !files_match && options.reinstall);
+    let needs_reload = needs_install || !runtime_matches;
+    if !needs_reload {
+        // Это ветка лишь для исчерпывающего перечисления будущих вариантов;
+        // на текущем контракте все оставшиеся состояния требуют обновления.
+        return Err(installation_mismatch(&differs));
+    }
+    if state.extension_id.is_none() {
+        let mut e = bridge_error(
+            "extension_not_paired",
+            "Расширение цели не закреплено; автоматическое обновление не может подтвердить его ID после перезагрузки. Выполните setup и doctor",
+        );
+        e.details["files_changed"] = json!(false);
+        e.details["user_action"] = json!(state.user_action());
+        return Err(e);
+    }
+    let Some(instance) = peer.instance.as_deref() else {
+        bridge.disconnect().await;
+        let mut e = bridge_error(
+            "extension_identity_unverifiable",
+            "Подключённая версия адаптера не сообщает устойчивый ID экземпляра; обновление отложено до ручной проверки. Файлы не изменены",
+        );
+        e.details["files_changed"] = json!(false);
+        e.details["runtime_version"] = json!(peer.version);
+        e.details["user_action"] = json!(format!(
+            "Обновите расширение вручную на странице {} и выполните {} doctor",
+            state.browser.extensions_uri(),
+            state.command_prefix()
+        ));
+        return Err(e);
+    };
+    // Для legacy state без сохранённого instance_id закрепляем экземпляр,
+    // подтверждённый первым соединением, и требуем тот же при reload.
+    bridge.pin(&peer.extension_id, Some(instance));
+
     let ping = bridge
         .call("ping", json!({}), Duration::from_secs(5))
         .await?;
+
     if !ping["operation"].is_null() {
         bridge.disconnect().await;
         let mut e = bridge_error(
@@ -631,46 +812,92 @@ pub async fn update(options: &UpdateOptions) -> Result<Value, AssetError> {
         e.details["files_changed"] = json!(false);
         return Err(e);
     }
-    // 4. Транзакционная замена файлов в прежнем каталоге.
-    let changed = install::install(
-        &state.install_dir,
-        &files,
-        (
-            Some(installed.clone()),
-            Some(verified.metadata.version.clone()),
-        ),
-    )?;
-    tracing::info!(event = "extension_release_installed", stage = "update", target = %state.target,
-        from = %installed, to = %verified.metadata.version, files = changed.len(), "Выпуск адаптера установлен");
-    // 5. Штатная перезагрузка и подтверждение той же идентичности и новой версии.
+
+    // 4. При прерванной прошлой операции файлы могут быть уже зафиксированы,
+    // но runtime — старым. В таком случае повтор выполняет только reload.
+    let changed = if needs_install {
+        install::install(
+            &state.install_dir,
+            &files,
+            (
+                Some(installed.clone()),
+                Some(verified.metadata.version.clone()),
+            ),
+        )?
+    } else {
+        Vec::new()
+    };
+    if needs_install {
+        tracing::info!(event = "extension_release_installed", stage = "update", target = %state.target,
+            from = %installed, to = %verified.metadata.version, files = changed.len(), "Выпуск адаптера установлен");
+    }
+    // 5. Перезагрузка и обязательная проверка версии, ID и того же instance.
     let started = Instant::now();
+    let command_prefix = state.command_prefix();
     let reloaded = async {
         bridge
             .call("reload", json!({}), Duration::from_secs(5))
             .await?;
-        bridge.accept(Instant::now() + RELOAD_WAIT).await
+        bridge
+            .accept(Instant::now() + options.wait.min(RELOAD_WAIT))
+            .await
+            .map_err(|e| {
+                if matches!(
+                    crate::forvo::provider_code(&e),
+                    "instance_mismatch" | "extension_id_mismatch"
+                ) {
+                    identity_changed(e, &command_prefix)
+                } else {
+                    e
+                }
+            })
     }
     .await;
     bridge.disconnect().await;
     let mut value = base;
     value["from_version"] = json!(installed);
     value["to_version"] = json!(verified.metadata.version);
-    value["files_changed"] = json!(changed);
+    value["disk_version"] = json!(verified.metadata.version);
+    value["runtime_version_before"] = json!(peer.version);
+    value["files_match_release"] = json!(true);
+    value["files_changed"] = json!(changed.clone());
     value["pairing"] = json!("kept");
     match reloaded {
-        Ok(after) if after.version == verified.metadata.version => {
+        Ok(after)
+            if after.version == verified.metadata.version
+                && after.extension_id == peer.extension_id
+                && after.instance == peer.instance =>
+        {
             value["status"] = json!("updated");
+            value["runtime_confirmed"] = json!(true);
             value["reload_ms"] = json!(started.elapsed().as_millis() as u64);
             value["extension"] = json!({"extension_id":after.extension_id,"same_extension_id":after.extension_id == peer.extension_id,
                 "same_instance":after.instance == peer.instance,"version":after.version});
             Ok(value)
         }
+        Ok(after) if after.extension_id != peer.extension_id || after.instance != peer.instance => {
+            let mut e = identity_changed(
+                bridge_error(
+                    "instance_mismatch",
+                    "После перезагрузки изменился ID или экземпляр расширения",
+                ),
+                &command_prefix,
+            );
+            e.details["files_installed"] = json!(true);
+            e.details["files_changed_this_attempt"] = json!(changed);
+            e.details["extension_id"] = json!(after.extension_id);
+            e.details["extension_instance"] = json!(after.instance);
+            e.details["update"] = value;
+            Err(e)
+        }
         Ok(after) => {
             let mut e = bridge_error(
                 "extension_reload_ineffective",
-                "Файлы нового выпуска установлены, но браузер перезагрузил расширение прежней версии; нажмите «Обновить» у расширения вручную",
+                "В браузере не подтверждена версия подписанного выпуска; нажмите «Обновить» у расширения вручную",
             );
             e.details["files_installed"] = json!(true);
+            e.details["files_changed_this_attempt"] = json!(changed);
+            e.details["disk_version"] = json!(verified.metadata.version);
             e.details["extension_version"] = json!(after.version);
             e.details["update"] = value;
             e.details["user_action"] = json!(format!(
@@ -680,11 +907,21 @@ pub async fn update(options: &UpdateOptions) -> Result<Value, AssetError> {
             Err(e)
         }
         Err(reload) => {
+            if crate::forvo::provider_code(&reload) == "extension_identity_changed" {
+                let mut reload = reload;
+                reload.details["files_installed"] = json!(true);
+                reload.details["files_changed_this_attempt"] = json!(changed);
+                reload.details["disk_version"] = json!(verified.metadata.version);
+                reload.details["update"] = value;
+                return Err(reload);
+            }
             let mut e = bridge_error(
                 "extension_reload_unconfirmed",
-                "Файлы нового выпуска установлены, но перезагрузка расширения не подтверждена; нажмите «Обновить» у расширения вручную или выполните doctor",
+                "Перезагрузка расширения не подтверждена; выполните update ещё раз после проверки страницы расширений браузера",
             );
             e.details["files_installed"] = json!(true);
+            e.details["files_changed_this_attempt"] = json!(changed);
+            e.details["disk_version"] = json!(verified.metadata.version);
             e.details["reload_error"] = json!(crate::forvo::provider_code(&reload));
             e.details["update"] = value;
             e.details["user_action"] = json!(format!(

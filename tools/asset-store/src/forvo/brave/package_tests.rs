@@ -81,6 +81,30 @@ fn zip_is_deterministic_and_round_trips() {
 }
 
 #[test]
+fn builder_rejects_zip_overhead_that_pushes_archive_past_limit() {
+    let mut files = bundled_files();
+    let total = files
+        .iter()
+        .map(|file| file.bytes.len() as u64)
+        .sum::<u64>();
+    let mut remaining = MAX_TOTAL_BYTES - total;
+    let mut index = 0;
+    while remaining > 0 {
+        let size = remaining.min(MAX_FILE_BYTES) as usize;
+        files.push(PackageFile {
+            path: format!("large{index}.js"),
+            bytes: vec![b'x'; size],
+        });
+        remaining -= size as u64;
+        index += 1;
+    }
+    validate_files(&files).unwrap();
+    let error = build_zip(&files).unwrap_err();
+    assert_eq!(code(&error), "package_limits_exceeded");
+    assert!(error.details["archive_bytes"].as_u64().unwrap() > MAX_ARCHIVE_BYTES);
+}
+
+#[test]
 fn chromium_versions_parse_and_order_numerically() {
     let v = |t: &str| Version::parse(t).unwrap();
     assert!(v("0.3.10") > v("0.3.4"));

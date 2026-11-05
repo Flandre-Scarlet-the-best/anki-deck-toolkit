@@ -863,6 +863,14 @@ fn execute_forvo(
         match action {
             ForvoAction::Brave{..}|ForvoAction::Browser{..}=>{
                 let (state_dir,target,command)=adapter_command(action)?.expect("команда адаптера");
+                let update_settings = match &command {
+                    AdapterCommand::Run(
+                        RunAction::BatchStart { .. }
+                        | RunAction::BatchResume { .. }
+                        | RunAction::Fetch { .. },
+                    ) => Some(generic.settings()?),
+                    _ => None,
+                };
                 match command {
                     AdapterCommand::Run(RunAction::BatchStart{batch_id,plan,max_items,wait_seconds,close_tab})=>{
                         let mut options=brave_options(&state_dir,target,*wait_seconds,*close_tab);
@@ -875,16 +883,17 @@ fn execute_forvo(
                         let store=open_store(true)?;
                         forvo::batch::start_with_browser_target(&store,batch_id,plan,resolved_target)?;
                         let value=run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await?;
-                        Ok(with_update_notice(value,&state_dir,options.target.as_deref(),None).await)
+                        Ok(with_update_notice(value,&state_dir,options.target.as_deref(),update_settings.as_ref().expect("настройки проверки обновления")).await)
                     }
                     AdapterCommand::Run(RunAction::BatchResume{batch_id,max_items,wait_seconds,close_tab})=>{
                         let options=brave_options(&state_dir,target,*wait_seconds,*close_tab);
-                        run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await
+                        let value=run_forvo_batch_logged(&open_store(false)?,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await?;
+                        Ok(with_update_notice(value,&state_dir,options.target.as_deref(),update_settings.as_ref().expect("настройки проверки обновления")).await)
                     }
                     command=>{
                         let fetch=matches!(command,AdapterCommand::Run(RunAction::Fetch{..}));
                         let value=run_brave(&state_dir,target.clone(),command,output,&open_store).await?;
-                        Ok(if fetch {with_update_notice(value,&state_dir,target.as_deref(),None).await} else {value})
+                        Ok(if fetch {with_update_notice(value,&state_dir,target.as_deref(),update_settings.as_ref().expect("настройки проверки обновления")).await} else {value})
                     }
                 }
             }
@@ -912,12 +921,13 @@ fn execute_forvo(
             ForvoAction::BatchResume{batch_id,max_items}=>{
                 let store=open_store(false)?;
                 let batch=forvo::batch::status(&store,batch_id)?;
+                let settings=generic.settings()?;
                 // Пакет продолжается сохранённым транспортом и привязкой, а не текущим режимом.
                 let transport=batch.transport();
                 let decision=serde_json::json!({"selected":transport,"source":"batch_binding"});
                 let value=match transport {
                     forvo::batch::Transport::CdpChromium=>{
-                        if generic.settings()?.mode==crate::user_config::ForvoMode::ExtensionOnly {
+                        if settings.mode==crate::user_config::ForvoMode::ExtensionOnly {
                             let mut e=forvo::route::cdp_disabled("batch-resume");
                             e.details["code"]=serde_json::json!("transport_disabled_by_mode");
                             e.details["batch_transport"]=serde_json::json!(transport);
@@ -928,8 +938,14 @@ fn execute_forvo(
                     }
                     forvo::batch::Transport::BraveExtension=>{
                         let dir=adapter_dir()?;
+                        let bound_target=batch.browser.as_ref().map(|binding| binding.target.as_str())
+                            .or(batch.target.as_deref());
+                        // Конфиг задаёт цель для новых действий. Возобновление
+                        // пакета сохраняет его собственную привязку; только
+                        // явный CLI `--browser-target` может запросить другую.
                         let options=brave_options(&dir,generic.browser_target.clone(),45,false);
-                        run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await
+                        let value=run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await?;
+                        Ok(with_update_notice(value,&dir,bound_target,&settings).await)
                     }
                 };
                 match value {Ok(mut v)=>{v["transport_decision"]=decision;Ok(v)},Err(mut e)=>{e.details["transport_decision"]=decision;Err(e)}}
@@ -1095,6 +1111,7 @@ async fn routed_fetch(
             replace,
             output,
             open_store,
+            settings,
             decision,
         )
         .await;
@@ -1131,6 +1148,7 @@ async fn routed_fetch(
                 replace,
                 output,
                 open_store,
+                settings,
                 decision,
             )
             .await
@@ -1151,6 +1169,8 @@ async fn routed_fetch(
 }
 
 /// Одиночный fetch адаптером браузера тем же production-путём, что `forvo browser fetch`.
+// Сохранение общего CLI-пути требует request, выбранных настроек и накопленного решения маршрута.
+#[allow(clippy::too_many_arguments)]
 async fn extension_fetch(
     adapter_dir: &Path,
     target: Option<String>,
@@ -1158,6 +1178,7 @@ async fn extension_fetch(
     replace: Option<String>,
     output: Output,
     open_store: &dyn Fn(bool) -> Result<AssetStore, AssetError>,
+    settings: &crate::user_config::ForvoSettings,
     decision: crate::forvo::route::Decision,
 ) -> Result<serde_json::Value, AssetError> {
     let run = RunAction::Fetch {
@@ -1180,7 +1201,7 @@ async fn extension_fetch(
     match result {
         Ok(mut value) => {
             value["transport_decision"] = decision.to_value();
-            Ok(with_update_notice(value, adapter_dir, target.as_deref(), None).await)
+            Ok(with_update_notice(value, adapter_dir, target.as_deref(), settings).await)
         }
         Err(mut error) => {
             if let Some(last) = decision.attempts.last_mut() {
@@ -1240,7 +1261,7 @@ async fn routed_batch_start(
         )
         .await;
         let result = match result {
-            Ok(value) => Ok(with_update_notice(value, adapter_dir, Some(&target), None).await),
+            Ok(value) => Ok(with_update_notice(value, adapter_dir, Some(&target), settings).await),
             Err(e) => Err(e),
         };
         with_decision(result, &decision)
@@ -1320,15 +1341,10 @@ async fn with_update_notice(
     mut value: serde_json::Value,
     state_dir: &Path,
     target: Option<&str>,
-    settings: Option<&crate::user_config::ForvoSettings>,
+    settings: &crate::user_config::ForvoSettings,
 ) -> serde_json::Value {
     use crate::user_config::UpdateCheck;
-    let enabled = match settings {
-        Some(settings) => settings.update_check == UpdateCheck::Weekly,
-        None => crate::user_config::forvo(&Default::default())
-            .is_ok_and(|s| s.update_check == UpdateCheck::Weekly),
-    };
-    if !enabled {
+    if settings.update_check != UpdateCheck::Weekly {
         return value;
     }
     let state = crate::forvo::brave::targets::load_target(state_dir, target).ok();
@@ -1721,8 +1737,9 @@ fn finish_brave_run(
 mod tests {
     use super::{
         AdapterCommand, RunAction, adapter_interrupted, finish_brave_run,
-        waits_for_brave_download_cleanup,
+        waits_for_brave_download_cleanup, with_update_notice,
     };
+    use crate::temp_workspace::TempWorkspace;
     use crate::{AssetError, ErrorCode};
     use serde_json::json;
 
@@ -1814,5 +1831,28 @@ mod tests {
         )));
         assert!(!waits_for_brave_download_cleanup(&AdapterCommand::Discover));
         assert!(!waits_for_brave_download_cleanup(&AdapterCommand::Targets));
+    }
+
+    #[tokio::test]
+    async fn update_notice_off_skips_network_and_adapter_state_access() {
+        let workspace = TempWorkspace::create("forvo-update-notice-off").unwrap();
+        let config = workspace.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "schema_version = 1\n[forvo]\nupdate_check = \"off\"\n",
+        )
+        .unwrap();
+        let settings = crate::user_config::forvo(&crate::user_config::ForvoOverrides {
+            config: Some(config),
+            ..crate::user_config::ForvoOverrides::default()
+        })
+        .unwrap();
+        let adapter_state = workspace.path().join("adapter-state");
+        let result = json!({"status":"completed"});
+
+        let output = with_update_notice(result.clone(), &adapter_state, None, &settings).await;
+
+        assert_eq!(output, result);
+        assert!(!adapter_state.exists());
     }
 }
