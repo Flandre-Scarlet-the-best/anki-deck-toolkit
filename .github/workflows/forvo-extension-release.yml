@@ -51,7 +51,19 @@ permissions:
 
 concurrency:
   # Публикации основной ветки идут по одной; ожидающий запуск заменяется новым.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+  # Завершение CI, которое `gate` всё равно отклонит (неуспех, другое событие,
+  # чужой репозиторий, устаревший коммит), получает собственную группу и не
+  # вытесняет ожидающий выпуск проверенной вершины основной ветки.
+  group: >-
+    ${{ github.workflow }}-${{
+    github.event_name == 'pull_request' && github.ref
+    || github.event_name == 'workflow_run'
+    && (github.event.workflow_run.conclusion != 'success'
+    || github.event.workflow_run.head_sha != github.sha
+    || github.event.workflow_run.head_repository.full_name != github.repository
+    || !contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event.workflow_run.event))
+    && format('rejected-{0}', github.run_id)
+    || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -113,11 +125,20 @@ jobs:
                 echo "Ручной выпуск запускается только из основной ветки." >&2
                 exit 1
               fi
-              # Решает последний запуск CI этого коммита в основной ветке:
-              # повторный успешный прогон снимает прежний отказ.
+              # Решает последняя попытка CI этого коммита в основной ветке этого
+              # репозитория — те же события, что принимает `workflow_run`:
+              # PR с веткой `main` (например, из форка) основную ветку не
+              # проверяет. Порядок — по началу попытки (`run_started_at`
+              # обновляется при перезапуске), при равенстве — по id, поэтому
+              # успешный перезапуск снимает прежний отказ.
               latest="$(gh api --paginate --slurp \
                 "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=$DEFAULT_BRANCH&per_page=100" \
-                | jq -c '[.[].workflow_runs[]] | sort_by(.created_at) | last // {}')"
+                | jq -c --arg sha "$GITHUB_SHA" --arg branch "$DEFAULT_BRANCH" --arg repo "$GITHUB_REPOSITORY" '
+                    [.[].workflow_runs[]
+                      | select(.head_sha == $sha and .head_branch == $branch
+                          and .head_repository.full_name == $repo
+                          and (.event | IN("push", "schedule", "workflow_dispatch")))]
+                    | sort_by(.run_started_at // .created_at, .id) | last // {}')"
               status="$(jq -r '.status // "missing"' <<<"$latest")"
               conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
               if [ "$status" != completed ] || [ "$conclusion" != success ]; then
