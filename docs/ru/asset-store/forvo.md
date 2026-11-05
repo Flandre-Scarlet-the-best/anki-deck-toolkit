@@ -1,10 +1,99 @@
 # Forvo Web: японские произношения
 
-`pronunciation-assets forvo` получает оригинальные MP3 через обычные кнопки сайта
-в Chromium/CDP. Прототип работы через обычный Brave пользователя описан в
-[forvo-brave.md](forvo-brave.md). Forvo API, скрытые аудио endpoints, ASR, DSP и автоматическое
-подтверждение чтения не используются. Нужны Linux/WSLg, Chromium и зависимости
+`pronunciation-assets forvo` получает оригинальные MP3 через обычные кнопки сайта.
+Транспортов два: собственный постоянный профиль Chromium через CDP (этот документ) и
+MV3-адаптер в обычном браузере пользователя ([forvo-brave.md](forvo-brave.md)).
+Предметная логика у них одна: кандидаты и ранжирование, переход к следующей записи,
+проверка MP3, `ForvoEvidence`, staging, импорт, checkpoint и resume. Forvo API,
+скрытые аудио endpoints, ASR, DSP и автоматическое подтверждение чтения не
+используются. Для CDP нужны Linux/WSLg, Chromium и зависимости
 [технической проверки MP3](pronunciation.md).
+
+## Общий путь: выбор транспорта
+
+Общий пользовательский путь — `forvo fetch`, `forvo batch-start|batch-resume` —
+выбирает транспорт по стратегии; явные `forvo brave …` и `forvo browser …` всегда
+используют адаптер и стратегию не читают.
+
+| Стратегия | Поведение |
+|---|---|
+| `chromium_first` (по умолчанию) | сначала собственный Chromium/CDP; переход к уже настроенному адаптеру — только при доказанном отказе транспорта CDP до опасных побочных эффектов |
+| `extension_only` | только установленное и сопряжённое расширение выбранной цели; собственный Chromium не запускается даже для проверки (`login`, `check`, `candidates` отказывают `cdp_disabled_by_mode`) |
+
+Стратегия и цель задаются в личном файле
+`$XDG_CONFIG_HOME/anki-deck-toolkit/config.toml` (иначе `~/.config/…`); путь
+заменяют `ANKI_DECK_TOOLKIT_CONFIG` и явный `forvo --config <файл>`. Это общая
+пользовательская конфигурация инструментов, не входящая в репозиторий: путей
+профилей и секретов в ней нет, сопряжение хранит каталог состояния адаптера.
+Конфигурация inference — отдельно ([README](README.md#локальный-inference-llamacpp-и-ollama)).
+
+```toml
+schema_version = 1          # необязательно
+
+[forvo]
+mode = "chromium_first"     # или "extension_only"
+browser_target = "brave"    # имя настроенной цели адаптера; без него — цель по умолчанию
+update_check = "weekly"     # редкая проверка новой версии адаптера; "off" — выключить
+```
+
+`update_check` берётся из итоговой конфигурации, в том числе при явном
+`forvo --config <файл>`. Автоматическая проверка выполняется только после
+успешного `fetch`, `batch-start` или `batch-resume` через адаптер; после ошибки
+или работы только через CDP сетевого запроса нет. Значение `off` отключает её на
+всех этих путях.
+
+Разбор строгий: неизвестный раздел, ключ или значение — ошибка `config_invalid` с
+названием ключа; отсутствующий явно названный файл — `config_unreadable`.
+Отсутствие файла по умолчанию — обычное состояние. Явные флаги общего пути важнее
+файла: `forvo --mode extension_only`, `--browser-target <цель>`,
+`--adapter-state-dir <каталог>` (как `--state-dir` у `forvo browser`).
+`forvo config` показывает итог, источник каждого значения (`cli`, `file`,
+`default`) и настроенные цели. Без `browser_target` действует прежняя модель
+`default_target`/единственной цели; неоднозначность — `target_ambiguous`, а не угадывание.
+
+**Когда допустим переход `chromium_first` → адаптер.** Только при backend failure CDP:
+
+- собственный Chromium не запустился (`browser_recovery_required`, `gui_unavailable`)
+  или его профиль занят другим процессом (`browser_profile_busy`) — в браузере и на
+  сайте ещё ничего не сделано;
+- для одиночного `fetch` также: профиль CDP не авторизован (`login_required`,
+  `session_expired`), а загрузка записи ещё не начиналась;
+- уборка собственного Chromium завершена, команда не прервана, адаптер настроен.
+
+Предметная ошибка не даёт права на переход: `rate_limited`, `access_denied`,
+`challenge_required`, `word_not_found`, `candidates_exhausted`, ошибки аудио,
+импорта и диска, чужая загрузка, `browser_profile_not_owned`,
+`browser_cleanup_failed`, прерывание. Такая ошибка возвращается как есть.
+Решение и причина всегда в `transport_decision` результата или ошибки: `mode`,
+`mode_source`, `attempts` (транспорт, этап, код), `fallback` (`used`, `reason`,
+`failure_kind=backend|domain_or_unsafe`, `refused_because`, `adapter_unavailable`),
+`cdp_attempted`. Искусственных задержек нет: стратегии различаются порядком и
+допустимостью транспорта, а не скоростью.
+
+**Новый пакет** выбирает транспорт до первой долговечной записи. `chromium_first`
+сначала запускает собственный Chromium; при успехе создаётся пакет `cdp_chromium`, и
+он исполняется уже запущенной сессией. Если запуск не удался (backend failure) и
+адаптер настроен, создаётся пакет `brave_extension` с целью, сохранённой до первого
+подключения (`schema_version=4`). Иначе — прежнее поведение: пакет CDP,
+приостановленный отказом. `extension_only` сразу создаёт пакет адаптера; без
+настроенной цели пакет не создаётся. Переход внутри уже созданного пакета невозможен.
+
+**`forvo batch-resume`** продолжает пакет сохранённым транспортом и привязкой, а не
+текущей стратегией (`transport_decision.source=batch_binding`): пакет адаптера —
+своей целью и экземпляром расширения, пакет CDP — собственным Chromium. Смена
+конфигурации пакет не мигрирует. В режиме `extension_only` пакет CDP не
+продолжается и Chromium не запускается (`transport_disabled_by_mode`, действие —
+`forvo --mode chromium_first batch-resume …`). Явный `--browser-target`, не
+совпадающий с целью пакета, — `browser_mismatch`. Явные `forvo brave|browser
+batch-resume` для пакета CDP по-прежнему отказывают `transport_mismatch`.
+
+Совместимость: без файла конфигурации общий путь начинает с CDP. Если настроен
+адаптер, новый переход к нему возможен при отказе запуска Chromium, а для одиночного
+`fetch` — также при отсутствии авторизации до начала загрузки; выбор виден в
+`transport_decision`. После успешной операции через адаптер по умолчанию возможна
+редкая сетевая проверка обновления расширения (`forvo.update_check = "off"` её
+отключает). Общий `batch-resume` пакета адаптера раньше отказывал
+`transport_mismatch`, теперь продолжает его сохранённой привязкой.
 
 ## Вход и профиль
 
@@ -158,11 +247,11 @@ lease сохраняет единственного исполнителя. `sta
 Формат прежних команд `batch-*` локального импорта сохранён. Один batch ID нельзя
 использовать для разных форматов.
 
-Транспорт пакета закреплён в его состоянии: `forvo batch-start` создаёт пакет
-`cdp_chromium`, а `forvo brave batch-start` — пакет `brave_extension` (обычный Brave,
-см. [адаптер Brave](forvo-brave.md#получение-и-пакеты)). Состояние
-`schema_version=1` без поля `transport` остаётся читаемым и означает CDP. Resume другим
-транспортом отвергается до запуска браузера (`transport_mismatch`). `batch-status` и
+Транспорт пакета закреплён в его состоянии: общий `forvo batch-start` выбирает его
+по стратегии (см. [выбор транспорта](#общий-путь-выбор-транспорта)), `forvo brave|browser
+batch-start` создаёт пакет `brave_extension` (см. [адаптер](forvo-brave.md#получение-и-пакеты)).
+Состояние `schema_version=1` без поля `transport` остаётся читаемым и означает CDP.
+Явный resume другим транспортом отвергается до запуска браузера (`transport_mismatch`). `batch-status` и
 `batch-cancel` показывают `effective_transport`. Происхождение аудио (`forvo_web`,
 `ForvoEvidence`) от транспорта не зависит.
 
@@ -193,7 +282,8 @@ cookies, токенов, HTML и содержимого профиля.
 `download_listener_failed`, `download_not_supported`, `download_file_missing`,
 `download_read_failed`, `candidate_changed`, `candidate_disappeared`, `invalid_mp3`,
 `technical_validation_failed`,
-`rate_limited`, `browser_recovery_required`, `candidates_exhausted`, `transport_mismatch`.
+`rate_limited`, `browser_recovery_required`, `candidates_exhausted`, `transport_mismatch`,
+`transport_disabled_by_mode`, `cdp_disabled_by_mode`, `config_invalid`, `config_unreadable`.
 
 Offline-тесты адаптера требуют Chromium, но не обращаются к Forvo:
 

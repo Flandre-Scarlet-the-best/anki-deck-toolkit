@@ -9,6 +9,7 @@ pub mod brave;
 mod candidates;
 mod download;
 mod evidence;
+pub mod route;
 use crate::browser_runtime::{BrowserRuntimeConfig, BrowserSession};
 pub use candidates::{Candidate, Gender, RANKING, rank, word_url};
 pub use evidence::{Acquisition, Attempt, ForvoEvidence, acquire, import_acquisition};
@@ -38,11 +39,29 @@ pub struct ForvoSession {
     pending_launch: Option<tokio::task::JoinHandle<Result<BrowserSession, AssetError>>>,
     was_authenticated: bool,
     download_used: bool,
+    /// Сколько загрузок записей начато за жизнь сессии (для решения о переходе).
+    downloads_started: u32,
     profile: PathBuf,
     visible: bool,
 }
 
 impl ForvoSession {
+    #[cfg(test)]
+    pub(crate) fn with_pending_stop_for_test(
+        pending_stop: tokio::task::JoinHandle<Result<(), String>>,
+    ) -> Self {
+        Self {
+            browser: None,
+            pending_stop: Some(pending_stop),
+            pending_launch: None,
+            was_authenticated: false,
+            download_used: false,
+            downloads_started: 0,
+            profile: PathBuf::from("/unused"),
+            visible: false,
+        }
+    }
+
     pub async fn launch(profile: &Path) -> Result<Self, AssetError> {
         Self::launch_mode(profile, false).await
     }
@@ -73,6 +92,7 @@ impl ForvoSession {
             was_authenticated: std::fs::symlink_metadata(profile.join(".forvo-authenticated"))
                 .is_ok_and(|m| m.is_file()),
             download_used: false,
+            downloads_started: 0,
             profile: profile.to_path_buf(),
             visible,
         })
@@ -113,6 +133,10 @@ impl ForvoSession {
                 "Проверьте GUI, Chromium и свободный собственный профиль; повторите forvo login",
             )
         })
+    }
+    /// Начиналась ли загрузка записи в этой сессии.
+    pub fn download_started(&self) -> bool {
+        self.downloads_started > 0
     }
     fn browser(&self) -> &BrowserSession {
         self.browser.as_ref().expect("открытый сеанс Forvo")

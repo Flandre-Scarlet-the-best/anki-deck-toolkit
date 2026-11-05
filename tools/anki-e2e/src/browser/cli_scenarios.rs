@@ -28,6 +28,9 @@ pub struct Cli {
     pub profile: PathBuf,
     log: PathBuf,
     path_override: Option<PathBuf>,
+    /// Пользовательская конфигурация прогона: автоматическая проверка обновлений
+    /// адаптера выключена — стенд не обращается к внешней сети.
+    config: PathBuf,
 }
 
 pub struct Run {
@@ -36,15 +39,15 @@ pub struct Run {
 }
 
 impl Run {
-    fn outcome(&self) -> &str {
+    pub(super) fn outcome(&self) -> &str {
         self.out["outcome"].as_str().unwrap_or("?")
     }
-    fn error_code(&self) -> &str {
+    pub(super) fn error_code(&self) -> &str {
         self.out["error"]["details"]["code"]
             .as_str()
             .unwrap_or_default()
     }
-    fn summary(&self) -> Value {
+    pub(super) fn summary(&self) -> Value {
         json!({"exit":self.code,"outcome":self.out["outcome"],"error_code":self.out["error"]["details"]["code"],
             "paused":self.out["result"]["paused"]["code"]})
     }
@@ -52,6 +55,9 @@ impl Run {
 
 impl Cli {
     pub fn new(env: &Env) -> Option<Cli> {
+        let config = env.dir.join("toolkit-config.toml");
+        std::fs::create_dir_all(&env.dir).ok()?;
+        std::fs::write(&config, "[forvo]\nupdate_check = \"off\"\n").ok()?;
         Some(Cli {
             bin: env.ctx.cli.clone()?,
             target: env.ctx.target.clone(),
@@ -61,11 +67,13 @@ impl Cli {
             profile: env.dir.join("cdp-profile-never-created"),
             log: env.dir.join("cli.log"),
             path_override: None,
+            config,
         })
     }
 
     pub(super) fn command(&self, brave: bool, args: &[&str]) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.bin);
+        command.env(asset_store::user_config::ENV_PATH, &self.config);
         command
             .arg("--repository-root")
             .arg(&self.repo)
@@ -101,6 +109,50 @@ impl Cli {
             .stderr(log)
             .kill_on_drop(true);
         command
+    }
+
+    /// Общий путь `forvo …` с параметрами маршрутизации и окружением сценария.
+    /// Каталог адаптера — каталог сопряжения прогона; профиль CDP — `profile`.
+    pub(super) async fn generic(
+        &self,
+        generic: &[&str],
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<Run> {
+        let mut command = tokio::process::Command::new(&self.bin);
+        command
+            .env(asset_store::user_config::ENV_PATH, &self.config)
+            .arg("--repository-root")
+            .arg(&self.repo)
+            .arg("--store")
+            .arg(&self.store)
+            .arg("forvo")
+            .arg("--profile")
+            .arg(&self.profile)
+            .arg("--adapter-state-dir")
+            .arg(&self.state)
+            .args(generic)
+            .args(args);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log)
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(log)
+            .kill_on_drop(true);
+        Self::finish(
+            command
+                .spawn()
+                .map_err(|e| format!("запуск pronunciation-assets: {e}"))?,
+        )
+        .await
     }
 
     pub fn spawn(&self, brave: bool, args: &[&str]) -> Result<tokio::process::Child> {
@@ -197,7 +249,7 @@ fn sha(env: &Env, record: &str) -> String {
     sha256_hex(&env.ctx.fixture.bytes_for(record))
 }
 
-fn requests(env: &Env, records: &[&str]) -> Value {
+pub(super) fn requests(env: &Env, records: &[&str]) -> Value {
     json!(
         records
             .iter()
@@ -206,14 +258,14 @@ fn requests(env: &Env, records: &[&str]) -> Value {
     )
 }
 
-fn item<'a>(run: &'a Run, surface: &str) -> &'a Value {
+pub(super) fn item<'a>(run: &'a Run, surface: &str) -> &'a Value {
     run.out["result"]["items"]
         .as_array()
         .and_then(|items| items.iter().find(|i| i["request"]["surface"] == surface))
         .unwrap_or(&Value::Null)
 }
 
-fn codes(run: &Run) -> Vec<Value> {
+pub(super) fn codes(run: &Run) -> Vec<Value> {
     run.out["result"]["items"]
         .as_array()
         .map(|items| items.iter().map(|i| i["outcome"]["code"].clone()).collect())
@@ -413,20 +465,25 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
             && resumed.out["result"]["revision"] == run.out["result"]["revision"],
         json!({"run":resumed.summary(),"requests":requests(env,&records)}),
     );
-    let cdp = cli
-        .run(false, &["batch-resume", "--batch-id", "words"])
+    // Общий `forvo batch-resume` продолжает пакет сохранённым транспортом и
+    // привязкой: для завершённого пакета расширения — без загрузок и без Chromium.
+    let generic = cli
+        .generic(&[], &["batch-resume", "--batch-id", "words"], &[])
         .await?;
     let status = cli
         .run(false, &["batch-status", "--batch-id", "words"])
         .await?;
     env.out.check(
-        "CDP batch-resume пакета Brave → transport_mismatch без запуска Chromium; batch-status без браузера",
-        cdp.code == 3
-            && cdp.error_code() == "transport_mismatch"
+        "общий batch-resume пакета расширения идёт по сохранённой привязке без запуска Chromium; batch-status без браузера",
+        generic.code == 0
+            && generic.out["result"]["transport_decision"]["source"] == "batch_binding"
+            && generic.out["result"]["transport_decision"]["selected"] == "brave_extension"
+            && generic.out["result"]["revision"] == run.out["result"]["revision"]
+            && requests(env, &records) == before
             && !cli.profile.exists()
             && status.code == 0
             && status.out["result"]["effective_transport"] == "brave_extension",
-        json!({"cdp":cdp.summary(),"next_action":cdp.out["error"]["details"]["next_action"],
+        json!({"generic":generic.summary(),"decision":generic.out["result"]["transport_decision"],
             "status_transport":status.out["result"]["effective_transport"]}),
     );
     // max-items: обрабатывается ровно один элемент, остальные ждут.

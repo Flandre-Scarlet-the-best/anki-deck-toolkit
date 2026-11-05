@@ -49,6 +49,7 @@ mod review_snapshot;
 pub mod selection;
 pub mod store;
 pub mod temp_workspace;
+pub mod user_config;
 pub mod validation;
 pub mod yarxi;
 

@@ -7,10 +7,11 @@
 //! секрета, ID, каталога и порта и переписывается в версию 2 только при
 //! первой записи; исходный файл сохраняется рядом как `state.v1.json`.
 use super::browsers::{self, BrowserKind, DiscoveryRoots, Installation};
+use super::package::{self, PackageFile, Version};
 use super::{
-    BACKGROUND, DEFAULT_PORT, MANIFEST, Platform, WS_PATH, bridge_error, decode_hex,
-    detect_platform, encode_lower_hex, linux_to_windows, page_module, private_dir, random_bytes,
-    valid_extension_id, write_atomic,
+    DEFAULT_PORT, MANIFEST, Platform, WS_PATH, bridge_error, decode_hex, detect_platform,
+    encode_lower_hex, install, linux_to_windows, private_dir, random_bytes, valid_extension_id,
+    write_atomic,
 };
 use crate::AssetError;
 use serde::{Deserialize, Serialize};
@@ -549,26 +550,21 @@ pub fn select(state_dir: &Path, target: &str) -> Result<Value, AssetError> {
 
 // --- Файлы расширения ------------------------------------------------------
 
-/// Версия расширения, которую разворачивает этот CLI.
-pub fn bundled_version() -> String {
-    serde_json::from_str::<Value>(MANIFEST).expect("manifest")["version"]
-        .as_str()
-        .expect("version")
-        .to_owned()
+pub use super::package::bundled_version;
+
+pub(crate) fn pairing_file(port: u16, secret: &str) -> PackageFile {
+    let pairing = json!({"schema_version":1,"port":port,"secret":secret});
+    PackageFile {
+        path: package::PAIRING_FILE.into(),
+        bytes: serde_json::to_vec(&pairing).expect("JSON"),
+    }
 }
 
-fn desired_files(port: u16, secret: &str) -> [(&'static str, String); 4] {
-    let pairing = json!({"schema_version":1,"port":port,"secret":secret});
-    // manifest.json пишется последним: каталог с новым manifest уже содержит новый код.
-    [
-        ("forvo_page.js", page_module()),
-        ("background.js", BACKGROUND.to_owned()),
-        (
-            "pairing.json",
-            serde_json::to_string(&pairing).expect("JSON"),
-        ),
-        ("manifest.json", MANIFEST.to_owned()),
-    ]
+/// Файлы установки встроенной версии: общий пакет и индивидуальный `pairing.json`.
+fn desired_files(port: u16, secret: &str) -> Vec<PackageFile> {
+    let mut files = package::bundled_files();
+    files.push(pairing_file(port, secret));
+    files
 }
 
 /// Наш ли это каталог расширения: manifest есть и называется как наш.
@@ -590,42 +586,64 @@ fn manifest_on_disk(dir: &Path) -> Result<Option<Value>, AssetError> {
     }
 }
 
-/// Приводит каталог к файлам этого CLI. Меняются только отличающиеся файлы,
-/// каждый — атомарной заменой; повторный вызов ничего не пишет.
+/// Версия расширения в каталоге установки (после восстановления прерванной установки).
+pub fn installed_version(dir: &Path) -> Result<Option<String>, AssetError> {
+    manifest_on_disk(dir)?;
+    install::recover(dir)?;
+    Ok(manifest_on_disk(dir)?.and_then(|m| m["version"].as_str().map(str::to_owned)))
+}
+
+/// Установлена ли версия новее встроенной (её поставил updater из релиза).
+fn newer_than_bundled(version: Option<&str>) -> bool {
+    let bundled = Version::parse(&bundled_version()).expect("версия встроенного manifest");
+    version
+        .and_then(Version::parse)
+        .is_some_and(|v| v > bundled)
+}
+
+/// Приводит каталог к файлам этого CLI одной транзакцией ([`install`]). Если
+/// там уже установлена более новая версия из проверенного релиза, встроенный
+/// код её не откатывает: обновляется только `pairing.json`. Повторный вызов
+/// ничего не пишет.
 pub fn write_extension_files(
     dir: &Path,
     port: u16,
     secret: &str,
-) -> Result<Vec<&'static str>, AssetError> {
-    manifest_on_disk(dir)?;
-    std::fs::create_dir_all(dir).map_err(|e| AssetError::io("каталог расширения", e))?;
-    let mut changed = Vec::new();
-    for (name, content) in desired_files(port, secret) {
-        let path = dir.join(name);
-        if std::fs::read(&path).is_ok_and(|b| b == content.as_bytes()) {
-            continue;
-        }
-        write_atomic(&path, content.as_bytes(), 0o600)?;
-        changed.push(name);
-    }
-    Ok(changed)
+) -> Result<Vec<String>, AssetError> {
+    let version = installed_version(dir)?;
+    let files = if newer_than_bundled(version.as_deref()) {
+        vec![pairing_file(port, secret)]
+    } else {
+        desired_files(port, secret)
+    };
+    let target = if files.len() == 1 {
+        version.clone()
+    } else {
+        Some(bundled_version())
+    };
+    install::install(dir, &files, (version, target))
 }
 
-/// Состояние файлов цели без записи: версия на диске и отличия от этого CLI.
+/// Состояние файлов цели без записи: версия на диске, её источник и отличия.
 pub fn files_status(state: &AdapterState) -> Value {
     let manifest = manifest_on_disk(&state.install_dir);
-    let differs: Vec<&str> = desired_files(state.port, &state.secret)
-        .iter()
-        .filter(|(name, content)| {
-            std::fs::read(state.install_dir.join(name)).map_or(true, |b| b != content.as_bytes())
-        })
-        .map(|(name, _)| *name)
-        .collect();
+    let journal = state.install_dir.join(install::JOURNAL).exists();
     match manifest {
         Ok(Some(m)) => {
-            json!({"present":true,"version_on_disk":m["version"],"bundled_version":bundled_version(),"differs":differs})
+            let version = m["version"].as_str();
+            let newer = newer_than_bundled(version);
+            let expected = if newer {
+                vec![pairing_file(state.port, &state.secret)]
+            } else {
+                desired_files(state.port, &state.secret)
+            };
+            json!({"present":true,"version_on_disk":m["version"],"bundled_version":bundled_version(),
+                "source":if newer {"release_newer_than_bundled"} else if version == Some(bundled_version().as_str()) {"bundled"} else {"older_than_bundled"},
+                "differs":install::differing(&state.install_dir, &expected),"install_interrupted":journal})
         }
-        Ok(None) => json!({"present":false,"bundled_version":bundled_version()}),
+        Ok(None) => {
+            json!({"present":false,"bundled_version":bundled_version(),"install_interrupted":journal})
+        }
         Err(e) => json!({"present":true,"error":crate::forvo::provider_code(&e)}),
     }
 }
@@ -633,8 +651,8 @@ pub fn files_status(state: &AdapterState) -> Value {
 /// Обновляет файлы установленного расширения цели, если каталог уже содержит
 /// наше расширение. Вызывается только под занятым портом bridge цели, то есть
 /// когда другой процесс этой цели не выполняет загрузку.
-pub fn sync_installed_files(state: &AdapterState) -> Result<Option<Vec<&'static str>>, AssetError> {
-    if manifest_on_disk(&state.install_dir)?.is_none() {
+pub fn sync_installed_files(state: &AdapterState) -> Result<Option<Vec<String>>, AssetError> {
+    if installed_version(&state.install_dir)?.is_none() {
         return Ok(None);
     }
     write_extension_files(&state.install_dir, state.port, &state.secret).map(Some)
@@ -1039,7 +1057,7 @@ pub fn setup(options: &SetupOptions) -> Result<Value, AssetError> {
         "pairing": if keep.is_some() {"kept"} else {"created"},
         "pinned_extension_id": state.extension_id,
         "instance_pinned": state.instance_id.is_some(),
-        "extension_files": {"version": bundled_version(), "changed": changed},
+        "extension_files": {"version": installed_version(&install_dir)?, "bundled_version": bundled_version(), "changed": changed},
         "default_target": file.default_target,
         "targets": file.targets.keys().collect::<Vec<_>>(),
         "command": state.command_prefix(),

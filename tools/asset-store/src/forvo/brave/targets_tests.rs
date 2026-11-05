@@ -200,7 +200,7 @@ fn repeated_setup_is_idempotent_and_repin_keeps_secret() {
     assert_eq!(files_status(&pinned)["differs"], json!(["background.js"]));
     assert_eq!(
         sync_installed_files(&pinned).unwrap(),
-        Some(vec!["background.js"])
+        Some(vec!["background.js".to_owned()])
     );
     let repinned = setup(&SetupOptions {
         repin: true,

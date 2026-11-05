@@ -128,6 +128,7 @@ name = "asset-store"
 version = "0.1.0"
 dependencies = [
  "async-tungstenite 0.35.0",
+ "aws-lc-rs",
  "base64 0.23.1",
  "chromiumoxide",
  "clap",

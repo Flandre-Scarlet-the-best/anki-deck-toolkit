@@ -88,6 +88,13 @@ pub async fn run(ctx: &Ctx, name: &str) -> (Status, Option<String>, Outcome) {
         );
     }
     let dir = ctx.run_dir.join("scenarios").join(name);
+    // Каталог расширения общий для сценариев: выпуск, установленный прошлым
+    // сценарием, setup не откатывает, поэтому стенд возвращает встроенную версию.
+    if let Err(e) = super::release_scenarios::restore_bundled(&ctx.state_dir, &ctx.target)
+        && !e.starts_with("adapter_not_configured")
+    {
+        return (Status::Error, Some(e), Outcome::default());
+    }
     // Новый профиль сценария — новый экземпляр расширения: закрепление прошлого
     // сценария снимается явно (как `setup --repin` у пользователя).
     if let Err(e) = asset_store::forvo::brave::setup(&asset_store::forvo::brave::SetupOptions {
@@ -189,6 +196,8 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "adapter_doctor" => super::target_scenarios::adapter_doctor(env).await,
         "extension_update" => super::target_scenarios::extension_update(env).await,
         "target_isolation" => super::target_scenarios::target_isolation(env).await,
+        "cli_release_update" => super::release_scenarios::extension_release_update(env).await,
+        "cli_transport_routing" => super::release_scenarios::cli_transport_routing(env).await,
         _ => Err(format!("нет сценария {name}")),
     }
 }

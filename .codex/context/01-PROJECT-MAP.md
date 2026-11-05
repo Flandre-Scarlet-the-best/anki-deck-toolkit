@@ -14,7 +14,8 @@ Cargo.lock
 .github/
 └── workflows/
     ├── ci.yml               # CI: код/тесты, заявленная MSRV, actionlint, cargo-deny, Chromium
-    └── reference-catalogs.yml  # воспроизводимость встроенных эталонов кандзи
+    ├── reference-catalogs.yml  # воспроизводимость встроенных эталонов кандзи
+    └── forvo-extension-release.yml  # пакет, план и подписанный выпуск MV3-адаптера Forvo
 .agents/
 └── skills/
 .codex/
@@ -37,7 +38,8 @@ tools/
 ├── benchmark-contract/      # загрузка и проверка каталога бенчмарков и результатов измерений
 ├── benchmark-runner/        # исполнитель серий бенчмарков: Hyperfine 2.0 и системные метрики Linux
 ├── benchmark-history/       # локальная история бенчмарков: архив, индекс SQLite, сравнение и отчёты
-└── asset-store/             # библиотека ресурсов, CLI kanji-assets и pitch-assets
+└── asset-store/             # библиотека и CLI kanji-assets, pitch-assets,
+                             # forvo-extension-release
 ```
 
 ## Владельцы
@@ -89,8 +91,11 @@ tools/
   рабочее пространство: `cargo` запускается из корня репозитория.
 - `tools/asset-store/` — пакет Rust общей библиотеки жизненного цикла ресурсов,
   которыми управляет программа, и
-  бинарников `kanji-assets` и `pitch-assets`; его единственный публичный контракт —
-  `docs/ru/asset-store/README.md`. Пакет входит в корневое рабочее пространство и наследует
+  бинарников `kanji-assets`, `pitch-assets` и `forvo-extension-release`. Закреплённые
+  открытые ключи подписанных выпусков лежат в
+  `src/forvo/brave/release_keys.json`.
+  Публичные контракты описаны в `docs/ru/asset-store/README.md` и
+  `docs/ru/asset-store/forvo-extension-release.md`. Пакет входит в корневое рабочее пространство и наследует
   его `edition` и MSRV. Он не зависит от Anki/Yarxi и не читает `decks/**/media/`.
 - `Cargo.toml` в корне — единственный владелец `[workspace.package]`: заявленной
   MSRV (`rust-version`) и `edition` для всех Rust-участников. `Cargo.lock` тоже
@@ -98,9 +103,14 @@ tools/
 - `.github/workflows/ci.yml` — независимый CI репозитория: форматирование,
   Clippy, тесты, заявленная MSRV, проверки контрактов скриптов и Agent Skills,
   `actionlint`, а также дополнительные тесты возможностей Cargo и браузерные тесты, cargo-deny
-  (`deny.toml`).
-  Читает репозиторий, не публикует артефакты и не использует секреты.
+  (`deny.toml`). Этот workflow читает репозиторий, не публикует артефакты и не
+  использует секреты.
   Подробности — в `03-VERIFICATION.md`.
+- `.github/workflows/forvo-extension-release.yml` — PR без секретов проверяет
+  сборку, а основная ветка публикует подписанный выпуск с `contents: write` и
+  секретом `FORVO_EXTENSION_SIGNING_KEY` в окружении `forvo-extension-release`.
+  Контракт — `docs/ru/asset-store/forvo-extension-release.md`; код упаковки и
+  доверенные открытые ключи (`release_keys.json`) принадлежат `tools/asset-store/`.
 - `AGENTS.md` — короткий обязательный контракт для любого агента.
 
 `decks/` и `.asset-store/` — пользовательские данные, игнорируемые Git.

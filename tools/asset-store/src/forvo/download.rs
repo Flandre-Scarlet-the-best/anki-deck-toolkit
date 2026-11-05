@@ -137,6 +137,7 @@ impl ForvoSession {
         self.require_authenticated().await?;
         tracing::info!(event = "forvo_download_started", record_id = %candidate.record_id, "Начата загрузка записи Forvo");
         self.download_used = true;
+        self.downloads_started += 1;
         let download_path = self.browser().download_staging().map_err(|_| {
             error(
                 "download_staging_failed",

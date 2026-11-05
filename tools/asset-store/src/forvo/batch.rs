@@ -632,35 +632,71 @@ pub async fn resume(
     backend: Backend<'_>,
     max_items: usize,
 ) -> Result<ForvoBatch, AssetError> {
-    let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
-    let _lease = runtime.execution_lease()?;
-    let mut batch = load(&mut runtime)?;
-    if batch.transport() != backend.transport() {
-        return Err(transport_mismatch(id, &batch, backend.transport()));
-    }
-    let adjusted;
-    let backend = match backend {
-        Backend::Brave(options) => {
-            adjusted = bound_options(id, &batch, options)?;
-            Backend::Brave(&adjusted)
+    resume_prepared(store, id, backend, max_items, None).await
+}
+
+/// Как [`resume`], но с уже запущенной собственной CDP-сессией: её открыл
+/// preflight общего пути до создания пакета, повторный запуск Chromium не нужен.
+/// Сессия закрывается при любом исходе.
+pub async fn resume_prepared(
+    store: &AssetStore,
+    id: &str,
+    backend: Backend<'_>,
+    max_items: usize,
+    prepared: Option<ForvoSession>,
+) -> Result<ForvoBatch, AssetError> {
+    let mut prepared = prepared;
+    let early = async {
+        if prepared.is_some() && backend.transport() != Transport::CdpChromium {
+            return Err(invalid());
         }
-        other => other,
+        let mut runtime = SafeBatchRuntime::open(store.root(), id)?;
+        let lease = runtime.execution_lease()?;
+        let batch = load(&mut runtime)?;
+        if batch.transport() != backend.transport() {
+            return Err(transport_mismatch(id, &batch, backend.transport()));
+        }
+        Ok((runtime, lease, batch))
+    }
+    .await;
+    let (mut runtime, _lease, mut batch) = match early {
+        Ok(parts) => parts,
+        Err(mut error) => {
+            if let Some(session) = prepared.take()
+                && let Err(cleanup) = session.close().await
+            {
+                error.details["browser_cleanup"] = serde_json::json!({
+                    "code": provider_code(&cleanup),
+                    "message": cleanup.message,
+                    "details": cleanup.details,
+                });
+            }
+            return Err(error);
+        }
     };
-    if batch.cancelled {
-        return Err(AssetError::new(
-            ErrorCode::InvalidTransition,
-            "пакет отменён",
-        ));
-    }
-    if batch.paused.as_ref().is_some_and(|p| !p.recovery_required)
-        && batch.items.iter().all(|item| item.outcome.is_some())
-    {
-        batch.paused = None;
-        batch.revision += 1;
-        runtime.save(&batch)?;
-    }
-    let mut session: Option<Session> = None;
+    let mut session: Option<Session> = prepared.take().map(|s| Session::Cdp(Box::new(s)));
     let result = async {
+        let adjusted;
+        let backend = match backend {
+            Backend::Brave(options) => {
+                adjusted = bound_options(id, &batch, options)?;
+                Backend::Brave(&adjusted)
+            }
+            other => other,
+        };
+        if batch.cancelled {
+            return Err(AssetError::new(
+                ErrorCode::InvalidTransition,
+                "пакет отменён",
+            ));
+        }
+        if batch.paused.as_ref().is_some_and(|p| !p.recovery_required)
+            && batch.items.iter().all(|item| item.outcome.is_some())
+        {
+            batch.paused = None;
+            batch.revision += 1;
+            runtime.save(&batch)?;
+        }
         // Сохранённые байты не требуют скачивания, но отложенное освобождение
         // всё равно требует сопряжения до импорта.
         if batch.paused.as_ref().is_some_and(|p| p.recovery_required) {
