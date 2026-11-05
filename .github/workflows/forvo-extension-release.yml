@@ -72,10 +72,9 @@ jobs:
       actions: read
       contents: read
     outputs:
-      sha: ${{ steps.gate.outputs.sha }}
       proceed: ${{ steps.gate.outputs.proceed }}
     steps:
-      - name: Определить проверенный коммит
+      - name: Проверить коммит выпуска
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -90,7 +89,6 @@ jobs:
           case "$EVENT" in
             pull_request)
               # Сухой прогон без секретов: барьер не нужен.
-              sha="$GITHUB_SHA"
               ;;
             workflow_run)
               if [ "$RUN_REPO" != "$GITHUB_REPOSITORY" ] || [ "$RUN_BRANCH" != "$DEFAULT_BRANCH" ]; then
@@ -101,12 +99,12 @@ jobs:
                 push|schedule|workflow_dispatch) ;;
                 *) echo "Событие CI $RUN_EVENT не проверяет основную ветку." >&2; exit 1 ;;
               esac
-              sha="$RUN_SHA"
-              tip="$(gh api "repos/$GITHUB_REPOSITORY/commits/$DEFAULT_BRANCH" --jq .sha)"
-              if [ "$tip" != "$sha" ]; then
-                echo "CI завершился для $sha, но основная ветка уже на $tip: выпуск сделает запуск после CI последнего коммита." | tee -a "$GITHUB_STEP_SUMMARY"
+              # У `workflow_run` GITHUB_SHA — вершина основной ветки в момент
+              # события, и checkout без `ref` берёт именно его. Публикуем,
+              # только если это и есть коммит, прошедший CI.
+              if [ "$RUN_SHA" != "$GITHUB_SHA" ]; then
+                echo "CI завершился для $RUN_SHA, но основная ветка уже на $GITHUB_SHA: выпуск сделает запуск после CI последнего коммита." | tee -a "$GITHUB_STEP_SUMMARY"
                 echo "proceed=false" >> "$GITHUB_OUTPUT"
-                echo "sha=$sha" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
               ;;
@@ -115,16 +113,15 @@ jobs:
                 echo "Ручной выпуск запускается только из основной ветки." >&2
                 exit 1
               fi
-              sha="$GITHUB_SHA"
               # Решает последний запуск CI этого коммита в основной ветке:
               # повторный успешный прогон снимает прежний отказ.
               latest="$(gh api --paginate --slurp \
-                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&branch=$DEFAULT_BRANCH&per_page=100" \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=$DEFAULT_BRANCH&per_page=100" \
                 | jq -c '[.[].workflow_runs[]] | sort_by(.created_at) | last // {}')"
               status="$(jq -r '.status // "missing"' <<<"$latest")"
               conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
               if [ "$status" != completed ] || [ "$conclusion" != success ]; then
-                echo "Общий CI для $sha не завершился успешно (status=$status, conclusion=$conclusion); выпуск не выполняется." >&2
+                echo "Общий CI для $GITHUB_SHA не завершился успешно (status=$status, conclusion=$conclusion); выпуск не выполняется." >&2
                 exit 1
               fi
               ;;
@@ -133,11 +130,8 @@ jobs:
               exit 1
               ;;
           esac
-          {
-            echo "sha=$sha"
-            echo "proceed=true"
-          } >> "$GITHUB_OUTPUT"
-          echo "Проверенный коммит выпуска: $sha" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "Проверенный коммит выпуска: $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
 
   check:
     name: Пакет и план выпуска адаптера Forvo
@@ -148,8 +142,6 @@ jobs:
         || github.ref_name == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      RELEASE_SHA: ${{ needs.gate.outputs.sha }}
     outputs:
       action: ${{ steps.plan.outputs.action }}
       version: ${{ steps.plan.outputs.version }}
@@ -158,7 +150,6 @@ jobs:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.gate.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -173,7 +164,7 @@ jobs:
       - name: Собрать пакет (тот же набор файлов, что у setup)
         run: |
           "$TOOL" build --out "$RUNNER_TEMP/dist" --repository "$GITHUB_REPOSITORY" \
-            --commit "$RELEASE_SHA" --notes-out "$RUNNER_TEMP/notes.md" | tee "$RUNNER_TEMP/build.json"
+            --commit "$GITHUB_SHA" --notes-out "$RUNNER_TEMP/notes.md" | tee "$RUNNER_TEMP/build.json"
           jq -e '.outcome == "ok" and .result.pairing_included == false' "$RUNNER_TEMP/build.json"
 
       - name: Проверить повышение версии при изменении исходников адаптера
@@ -280,8 +271,6 @@ jobs:
       && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      RELEASE_SHA: ${{ needs.gate.outputs.sha }}
     # Секрет подписи доступен только этому окружению; правила защиты окружения
     # (ветка main, при желании — ручное одобрение) настраивает сопровождающий.
     environment: forvo-extension-release
@@ -291,7 +280,6 @@ jobs:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.gate.outputs.sha }}
           persist-credentials: false
 
       - name: Установить Rust из rust-toolchain.toml
@@ -303,7 +291,7 @@ jobs:
         run: |
           cargo build --locked --profile ci -p asset-store --bin forvo-extension-release
           "$TOOL" build --out "$RUNNER_TEMP/dist" --repository "$GITHUB_REPOSITORY" \
-            --commit "$RELEASE_SHA" --notes-out "$RUNNER_TEMP/notes.md"
+            --commit "$GITHUB_SHA" --notes-out "$RUNNER_TEMP/notes.md"
 
       - name: Сохранить неподписанную сборку для сравнения
         run: cp -a "$RUNNER_TEMP/dist" "$RUNNER_TEMP/dist-unsigned"
@@ -361,7 +349,7 @@ jobs:
           VERSION: ${{ needs.check.outputs.version }}
         run: |
           # Черновик → файлы → публикация: тег создаётся только у полного выпуска.
-          gh release create "$TAG" "$RUNNER_TEMP"/dist/* --draft --target "$RELEASE_SHA" \
+          gh release create "$TAG" "$RUNNER_TEMP"/dist/* --draft --target "$GITHUB_SHA" \
             --title "Адаптер Forvo $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --latest=false
           gh release edit "$TAG" --draft=false --latest=false
 
