@@ -6,10 +6,14 @@ body:
   - type: markdown
     attributes:
       value: |
-        Форма для воспроизводимых ошибок кода репозитория. Неверный перевод, чтение
-        или ударение в самой карточке — не ошибка набора инструментов. Если инструмент
-        неправильно обрабатывает карточку или проверка выдаёт неверный результат,
-        используйте форму «Отчёт о проверке».
+        Форма для воспроизводимых ошибок кода репозитория, в том числе когда команда
+        неправильно обрабатывает, изменяет или создаёт карточку, медиассылку или
+        экспорт (например, `edit` меняет не то поле).
+
+        Если проверка (`validate`, `qa`, `review-check`, проверки ресурсов) сообщает
+        о несуществующей проблеме, пропускает существующую или неверно её описывает,
+        используйте форму «Отчёт о проверке». Неверный перевод, чтение или ударение,
+        записанные в самой карточке, — не ошибка набора инструментов: их правят в колоде.
 
         Не прикладывайте целиком `deck.json`, медиа, корпус ресурсов или приватный
         журнал: это локальные данные пользователя. Достаточно минимального
@@ -18,10 +22,11 @@ body:
     id: component
     attributes:
       label: Компонент
+      description: "`anki-repo` — команды работы с локальным экспортом; `anki-repo anki` — только группа интеграции с Anki Desktop."
       options:
-        - anki-repo — команды экспорта (inspect, validate, qa, review, edit, create, retire, migrate-*, visual-report и др.)
+        - anki-repo — команды работы с экспортом
         - anki-repo anki — интеграция с Anki Desktop (AnkiConnect, CrowdAnki)
-        - asset-store — kanji-assets, pitch-assets, pronunciation-assets, corpus gates
+        - asset-store — kanji-assets, pitch-assets, pronunciation-assets, проверки корпуса
         - Браузерная инфраструктура (Chromium/Brave, jpdb, yarxi, Forvo)
         - anki-e2e — E2E-стенд
         - benchmark-contract / benchmark-runner / benchmark-history
@@ -34,7 +39,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: Версия или commit
+      label: Версия или коммит
       description: Вывод `git rev-parse --short HEAD` или версия бинарника.
       placeholder: "например, 912c8d5d"
     validations:
@@ -74,7 +79,10 @@ body:
     id: diagnostics
     attributes:
       label: Диагностика
-      description: Вывод команды, `--json`, backtrace (`RUST_BACKTRACE=1`), журналы. Уберите приватные данные.
+      description: |
+        Вывод команды, `--json`, трассировка стека (`RUST_BACKTRACE=1`), журналы. Issue публичный:
+        перед вставкой замените личные пути, `guid`, UUID колод и моделей и значения полей
+        реальных карточек на согласованные заглушки.
       render: text
   - type: textarea
     id: notes
