@@ -552,7 +552,7 @@ pub fn select(state_dir: &Path, target: &str) -> Result<Value, AssetError> {
 
 pub use super::package::bundled_version;
 
-fn pairing_file(port: u16, secret: &str) -> PackageFile {
+pub(crate) fn pairing_file(port: u16, secret: &str) -> PackageFile {
     let pairing = json!({"schema_version":1,"port":port,"secret":secret});
     PackageFile {
         path: package::PAIRING_FILE.into(),

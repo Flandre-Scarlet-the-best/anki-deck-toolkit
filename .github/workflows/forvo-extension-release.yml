@@ -35,6 +35,7 @@ on:
       - 'Cargo.lock'
       - '.github/workflows/forvo-extension-release.yml'
   push:
+    branches: [main]
     paths: *inputs
   workflow_dispatch:
 
@@ -43,7 +44,7 @@ permissions:
 
 concurrency:
   # Публикации основной ветки идут по одной; ожидающий запуск заменяется новым.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

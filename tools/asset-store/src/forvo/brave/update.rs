@@ -634,13 +634,7 @@ fn busy() -> AssetError {
 
 fn release_files(verified: &VerifiedRelease, state: &AdapterState) -> Vec<PackageFile> {
     let mut files = verified.files.clone();
-    files.push(PackageFile {
-        path: package::PAIRING_FILE.into(),
-        bytes: serde_json::to_vec(
-            &json!({"schema_version":1,"port":state.port,"secret":state.secret}),
-        )
-        .expect("JSON"),
-    });
+    files.push(targets::pairing_file(state.port, &state.secret));
     files
 }
 

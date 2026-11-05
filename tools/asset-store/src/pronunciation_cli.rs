@@ -114,8 +114,10 @@ enum Action {
     },
 }
 
-/// Параметры общего пользовательского пути Forvo (`fetch`, `batch-*`, `config`).
-/// Явные команды `forvo brave` и `forvo browser` их не используют.
+/// Настройки общего пользовательского пути Forvo (`fetch`, `batch-*`, `config`).
+/// Явные `forvo brave|browser` выбирают маршрут собственными аргументами, но
+/// читают и строго проверяют общий конфиг для `update_check`; ошибка конфигурации
+/// поэтому блокирует получение MP3 до запуска операции.
 #[derive(clap::Args, Clone, Default)]
 struct GenericForvo {
     /// Стратегия транспорта: chromium_first (по умолчанию) или extension_only;
