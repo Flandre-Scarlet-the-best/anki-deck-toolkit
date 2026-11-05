@@ -22,13 +22,16 @@ cp -r docs/assets/readme/demo-export "$DEMO/before"
 cp -r "$DEMO/before" "$DEMO/after"
 
 $AR edit "$DEMO/after" --guid demo01 --field Meaning \
-  --expect 'chance; coincidance' --set 'chance; coincidence' --apply
-$AR create "$DEMO/after" --request docs/assets/readme/demo-create.json --apply
-$AR retire "$DEMO/after" --guid demo03 --tag archived::demo --apply
-
+  --expect 'chance; coincidance' --set 'chance; coincidence' --apply &&
+$AR create "$DEMO/after" --request docs/assets/readme/demo-create.json --apply &&
+$AR retire "$DEMO/after" --guid demo03 --tag archived::demo --apply &&
 $AR visual-report --before "$DEMO/before" --after "$DEMO/after" \
   --out "$DEMO/report" --retire-tag archived::demo
 ```
+
+Команды связаны `&&`: если любая правка откажет, отчёт не строится, и неполный
+скриншот не получится. `set -e` здесь не используется, потому что при вставке
+блока в интерактивную оболочку он закрыл бы саму оболочку.
 
 Страница `"$DEMO/report/index.html"` снята в Chromium при ширине окна 1100 CSS px
 и масштабе 1,25. В кадр попадают сводка отчёта и раздел «Изменённые заметки»:

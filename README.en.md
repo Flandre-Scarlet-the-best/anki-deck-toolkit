@@ -40,7 +40,7 @@ Anki Deck Toolkit is a set of Rust CLI tools for **local CrowdAnki exports**: it
 
 ### Change exactly what you mean
 
-There are four mutating commands, each with a narrow scope: `edit` changes the value of an existing field and requires the expected old value, `create` adds notes to an existing deck and note type, `retire` takes a note out of rotation with a tag instead of deleting it, and `migrate-media` moves only proven media references to the canonical file name. Without `--apply`, each one shows the plan and its checks without writing anything. → [command contracts](docs/en/anki-repo/README.md#commands)
+There are four mutating commands, each with a narrow scope: `edit` changes the value of an existing field and requires the expected old value, `create` adds notes to an existing deck and note type, `retire` marks a note with a retirement tag instead of deleting it (it does not change Anki scheduling: suspending or deleting the cards is a separate step in Anki), and `migrate-media` moves only proven media references to the canonical file name. Without `--apply`, each one shows the plan and its checks without writing anything. → [command contracts](docs/en/anki-repo/README.md#commands)
 
 ### See the changes
 
