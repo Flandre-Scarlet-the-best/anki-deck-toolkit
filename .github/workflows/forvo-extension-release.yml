@@ -8,11 +8,13 @@ name: Выпуск адаптера Forvo
 # - `pull_request` — сухой прогон без секретов: тот же ZIP, что у `setup`,
 #   сверка его байтов со сборкой base и уже опубликованным стабильным выпуском.
 #   Если упаковщика ещё нет в base, bootstrap требует повышения версии.
-# - `push` в основную ветку (после принятого PR) и `workflow_dispatch` на ней —
-#   публикация новой стабильной версии; уже опубликованный стабильный выпуск
-#   проходит полную доверенную проверку без перезаписи. Черновик, prerelease или
-#   занятый Git-тег блокирует публикацию. Всё делается в одном запуске: события,
-#   созданные `GITHUB_TOKEN`, другие workflow не запускают.
+# - `workflow_run` после успешного завершения «Проверки репозитория» на основной
+#   ветке и `workflow_dispatch` на ней — публикация новой стабильной версии
+#   ровно того коммита, который прошёл общий CI (барьер `gate`); уже
+#   опубликованный стабильный выпуск проходит полную доверенную проверку без
+#   перезаписи. Черновик, prerelease или занятый Git-тег блокирует публикацию.
+#   Сама публикация делается в одном запуске: события, созданные `GITHUB_TOKEN`,
+#   другие workflow не запускают.
 #
 # Подлинность для установщика — подпись Ed25519 метаданных ключом из секрета
 # окружения `forvo-extension-release`; открытый ключ закреплён в
@@ -21,7 +23,7 @@ name: Выпуск адаптера Forvo
 # нет. Процедура — docs/ru/asset-store/forvo-extension-release.md.
 on:
   pull_request:
-    paths: &inputs
+    paths:
       - 'tools/asset-store/src/forvo/brave/extension/**'
       - 'tools/asset-store/src/forvo/brave.rs'
       - 'tools/asset-store/src/forvo/dom.js'
@@ -34,9 +36,14 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/forvo-extension-release.yml'
-  push:
+  # Публикация основной ветки ждёт общий CI: `push` здесь нет, иначе выпуск
+  # выходил бы раньше, чем тесты того же коммита найдут регрессию. ci.yml от
+  # этого workflow не зависит, цикла нет. Фильтра путей у `workflow_run` нет:
+  # план для коммита без новой версии только сверяет опубликованный выпуск.
+  workflow_run:
+    workflows: [Проверки репозитория]
+    types: [completed]
     branches: [main]
-    paths: *inputs
   workflow_dispatch:
 
 permissions:
@@ -44,7 +51,19 @@ permissions:
 
 concurrency:
   # Публикации основной ветки идут по одной; ожидающий запуск заменяется новым.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.ref_name }}
+  # Завершение CI, которое `gate` всё равно отклонит (неуспех, другое событие,
+  # чужой репозиторий, устаревший коммит), получает собственную группу и не
+  # вытесняет ожидающий выпуск проверенной вершины основной ветки.
+  group: >-
+    ${{ github.workflow }}-${{
+    github.event_name == 'pull_request' && github.ref
+    || github.event_name == 'workflow_run'
+    && (github.event.workflow_run.conclusion != 'success'
+    || github.event.workflow_run.head_sha != github.sha
+    || github.event.workflow_run.head_repository.full_name != github.repository
+    || !contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event.workflow_run.event))
+    && format('rejected-{0}', github.run_id)
+    || github.ref_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -53,11 +72,95 @@ env:
   TOOL: target/ci/forvo-extension-release
 
 jobs:
+  gate:
+    name: Барьер проверок репозитория
+    # Неуспешный общий CI не запускает ни план, ни публикацию.
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Проверить коммит выпуска
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request)
+              # Сухой прогон без секретов: барьер не нужен.
+              ;;
+            workflow_run)
+              if [ "$RUN_REPO" != "$GITHUB_REPOSITORY" ] || [ "$RUN_BRANCH" != "$DEFAULT_BRANCH" ]; then
+                echo "Запуск CI не относится к основной ветке этого репозитория." >&2
+                exit 1
+              fi
+              case "$RUN_EVENT" in
+                push|schedule|workflow_dispatch) ;;
+                *) echo "Событие CI $RUN_EVENT не проверяет основную ветку." >&2; exit 1 ;;
+              esac
+              # У `workflow_run` GITHUB_SHA — вершина основной ветки в момент
+              # события, и checkout без `ref` берёт именно его. Публикуем,
+              # только если это и есть коммит, прошедший CI.
+              if [ "$RUN_SHA" != "$GITHUB_SHA" ]; then
+                echo "CI завершился для $RUN_SHA, но основная ветка уже на $GITHUB_SHA: выпуск сделает запуск после CI последнего коммита." | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            workflow_dispatch)
+              if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+                echo "Ручной выпуск запускается только из основной ветки." >&2
+                exit 1
+              fi
+              # Решает последняя попытка CI этого коммита в основной ветке этого
+              # репозитория — те же события, что принимает `workflow_run`:
+              # PR с веткой `main` (например, из форка) основную ветку не
+              # проверяет. Порядок — по началу попытки (`run_started_at`
+              # обновляется при перезапуске), при равенстве — по id, поэтому
+              # успешный перезапуск снимает прежний отказ.
+              latest="$(gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=$DEFAULT_BRANCH&per_page=100" \
+                | jq -c --arg sha "$GITHUB_SHA" --arg branch "$DEFAULT_BRANCH" --arg repo "$GITHUB_REPOSITORY" '
+                    [.[].workflow_runs[]
+                      | select(.head_sha == $sha and .head_branch == $branch
+                          and .head_repository.full_name == $repo
+                          and (.event | IN("push", "schedule", "workflow_dispatch")))]
+                    | sort_by(.run_started_at // .created_at, .id) | last // {}')"
+              status="$(jq -r '.status // "missing"' <<<"$latest")"
+              conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+              if [ "$status" != completed ] || [ "$conclusion" != success ]; then
+                echo "Общий CI для $GITHUB_SHA не завершился успешно (status=$status, conclusion=$conclusion); выпуск не выполняется." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Неожиданное событие $EVENT." >&2
+              exit 1
+              ;;
+          esac
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "Проверенный коммит выпуска: $GITHUB_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+
   check:
     name: Пакет и план выпуска адаптера Forvo
+    needs: gate
     if: >-
-      github.event_name == 'pull_request'
-      || github.ref_name == github.event.repository.default_branch
+      needs.gate.outputs.proceed == 'true'
+      && (github.event_name == 'pull_request'
+        || github.ref_name == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -182,7 +285,7 @@ jobs:
 
   publish:
     name: Публикация выпуска адаптера Forvo
-    needs: check
+    needs: [gate, check]
     if: >-
       needs.check.outputs.action == 'publish'
       && github.event_name != 'pull_request'

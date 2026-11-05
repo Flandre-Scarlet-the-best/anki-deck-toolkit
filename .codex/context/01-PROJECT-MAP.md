@@ -107,7 +107,8 @@ tools/
   использует секреты.
   Подробности — в `03-VERIFICATION.md`.
 - `.github/workflows/forvo-extension-release.yml` — PR без секретов проверяет
-  сборку, а основная ветка публикует подписанный выпуск с `contents: write` и
+  сборку, а основная ветка после успешного общего CI того же коммита публикует
+  подписанный выпуск с `contents: write` и
   секретом `FORVO_EXTENSION_SIGNING_KEY` в окружении `forvo-extension-release`.
   Контракт — `docs/ru/asset-store/forvo-extension-release.md`; код упаковки и
   доверенные открытые ключи (`release_keys.json`) принадлежат `tools/asset-store/`.
