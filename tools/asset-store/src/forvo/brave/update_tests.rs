@@ -654,11 +654,7 @@ impl Drop for Harness {
 
 fn harness(name: &str, installed: &str) -> Harness {
     let workspace = TempWorkspace::create(name).unwrap();
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = super::super::test_ports::free_port();
     let state_dir = workspace.path().join("state");
     let install_dir = workspace.path().join("extension");
     let state = AdapterState {

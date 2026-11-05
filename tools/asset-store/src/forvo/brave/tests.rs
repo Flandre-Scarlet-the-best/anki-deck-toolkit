@@ -94,11 +94,8 @@ fn extension_manifest_is_minimal() {
 #[test]
 fn setup_writes_private_pairing_and_keeps_secret() {
     let temp = TempWorkspace::create("brave-setup").expect("temp");
-    // Фиксированный порт мог совпасть с эфемерным портом параллельного теста.
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .and_then(|l| l.local_addr())
-        .expect("port")
-        .port();
+    // Фиксированный порт мог совпасть с портом параллельного теста.
+    let port = super::test_ports::free_port();
     let options = SetupOptions {
         browser: Some(BrowserKind::Brave),
         install_dir: Some(temp.path().join("extension")),

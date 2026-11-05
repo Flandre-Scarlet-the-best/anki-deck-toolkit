@@ -71,12 +71,15 @@ fn unavailable(reason: &str) -> AssetError {
 }
 
 fn client(channel: &Channel) -> Result<reqwest::Client, AssetError> {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(5).min(channel.timeout))
-        .timeout(channel.timeout)
-        .build()
-        .map_err(|_| unavailable("client"))
+        .timeout(channel.timeout);
+    // Тестовые каналы — локальные серверы на 127.0.0.1: системный прокси из
+    // окружения разработчика не должен в них вмешиваться.
+    #[cfg(test)]
+    let builder = builder.no_proxy();
+    builder.build().map_err(|_| unavailable("client"))
 }
 
 async fn get_limited(
