@@ -593,6 +593,7 @@ async fn auto_check_with_channel(
     // Обычный fetch не ждёт уже запущенную явную проверку и не создаёт второй
     // сетевой запрос. Проверка кэша и его обновление выполняются под одной
     // блокировкой, включая запись отрицательного результата по тайм-ауту.
+    let started = tokio::time::Instant::now();
     let _lock = auto_check_lock(state_dir).await?;
     let installed = state.and_then(|s| peek_version(&s.install_dir));
     let cache = if let Some(cache) = cached_check(state_dir).filter(|c| {
@@ -605,11 +606,13 @@ async fn auto_check_with_channel(
     }) {
         cache
     } else {
-        // Внешний предел остаётся точным: запас не даёт reqwest успеть
-        // сохранить собственную ошибку вместо записи timeout при отмене.
-        channel.timeout = timeout.saturating_add(Duration::from_millis(250));
+        // Ожидание блокировки входит в общий предел. Внешний предел остаётся
+        // точным: запас не даёт reqwest успеть сохранить собственную ошибку
+        // вместо записи timeout при отмене.
+        let remaining = timeout.saturating_sub(started.elapsed());
+        channel.timeout = remaining.saturating_add(Duration::from_millis(250));
         let result = tokio::time::timeout(
-            timeout,
+            remaining,
             check_uncached(state, &Source::GitHub, &trust, &channel),
         )
         .await;
