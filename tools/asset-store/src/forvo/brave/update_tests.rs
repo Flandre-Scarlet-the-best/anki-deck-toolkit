@@ -295,7 +295,7 @@ async fn concurrent_checks_cannot_overwrite_a_newer_result_with_an_older_respons
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn auto_check_caches_timeout_and_does_not_repeat_it_on_the_next_success() {
+async fn auto_check_retries_timeout_after_short_error_cache_ttl() {
     let workspace = TempWorkspace::create("forvo-update-check-timeout").unwrap();
     let pkcs8 = release::generate_key().unwrap();
     let fixture = make_release(workspace.path(), "99.11", &pkcs8);
@@ -307,7 +307,7 @@ async fn auto_check_caches_timeout_and_does_not_repeat_it_on_the_next_success() 
     let notice = auto_check_with_channel(
         &state_dir,
         None,
-        Duration::from_secs(3600),
+        Duration::from_secs(7 * 24 * 60 * 60),
         timeout,
         channel(&base),
         fixture.trust.clone(),
@@ -325,15 +325,34 @@ async fn auto_check_caches_timeout_and_does_not_repeat_it_on_the_next_success() 
     let notice = auto_check_with_channel(
         &state_dir,
         None,
-        Duration::from_secs(3600),
+        Duration::from_secs(7 * 24 * 60 * 60),
+        timeout,
+        channel(&base),
+        fixture.trust.clone(),
+    )
+    .await;
+    assert!(notice.is_none());
+    assert!(started.elapsed() < Duration::from_millis(100));
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+    let mut cache = cached_check(&state_dir).unwrap();
+    cache.checked_at = now().saturating_sub(AUTO_CHECK_ERROR_CACHE_TTL.as_secs() + 1);
+    save_check(&state_dir, &cache);
+    let notice = auto_check_with_channel(
+        &state_dir,
+        None,
+        Duration::from_secs(7 * 24 * 60 * 60),
         timeout,
         channel(&base),
         fixture.trust,
     )
     .await;
     assert!(notice.is_none());
-    assert!(started.elapsed() < Duration::from_millis(100));
-    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        cached_check(&state_dir).unwrap().error.as_deref(),
+        Some("timeout")
+    );
 }
 
 #[tokio::test]

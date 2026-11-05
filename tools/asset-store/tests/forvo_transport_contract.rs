@@ -244,6 +244,14 @@ fn generic_resume_follows_stored_extension_binding_and_keeps_mismatch_checks() {
         &["batch-resume", "--batch-id", "ext"],
     ));
     assert_eq!(code(&mismatch), "browser_mismatch", "{mismatch}");
+    assert_eq!(
+        mismatch["error"]["details"]["transport_decision"]["source"], "batch_binding",
+        "{mismatch}"
+    );
+    assert_eq!(
+        mismatch["error"]["details"]["transport_decision"]["selected"], "brave_extension",
+        "{mismatch}"
+    );
     // Даже browser_target из файла конфигурации не заменяет сохранённую цель;
     // только явный CLI target выше неё может запросить несовпадающий браузер.
     let config = env.config("[forvo]\nbrowser_target = \"chrome\"\nupdate_check = \"off\"\n");

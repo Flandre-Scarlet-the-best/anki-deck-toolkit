@@ -32,6 +32,7 @@ const CHECK_LOCK_FILE: &str = "check.lock";
 const MAX_LISTING_BYTES: usize = 2 * 1024 * 1024;
 const LISTING_PAGES: u32 = 3;
 const RELOAD_WAIT: Duration = Duration::from_secs(60);
+const AUTO_CHECK_ERROR_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Откуда берётся выпуск.
 #[derive(Debug, Clone)]
@@ -567,9 +568,14 @@ async fn auto_check_with_channel(
     // блокировкой, включая запись отрицательного результата по тайм-ауту.
     let _lock = check_lock(state_dir, false).await.ok().flatten()?;
     let installed = state.and_then(|s| peek_version(&s.install_dir));
-    let cache = if let Some(cache) =
-        cached_check(state_dir).filter(|c| now().saturating_sub(c.checked_at) < max_age.as_secs())
-    {
+    let cache = if let Some(cache) = cached_check(state_dir).filter(|c| {
+        let cache_ttl = if c.error.is_some() {
+            max_age.min(AUTO_CHECK_ERROR_CACHE_TTL)
+        } else {
+            max_age
+        };
+        now().saturating_sub(c.checked_at) < cache_ttl.as_secs()
+    }) {
         cache
     } else {
         // Внешний предел остаётся точным: запас не даёт reqwest успеть

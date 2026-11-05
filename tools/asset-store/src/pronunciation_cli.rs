@@ -925,7 +925,7 @@ fn execute_forvo(
                 // Пакет продолжается сохранённым транспортом и привязкой, а не текущим режимом.
                 let transport=batch.transport();
                 let decision=serde_json::json!({"selected":transport,"source":"batch_binding"});
-                let value=match transport {
+                let value=async { match transport {
                     forvo::batch::Transport::CdpChromium=>{
                         if settings.mode==crate::user_config::ForvoMode::ExtensionOnly {
                             let mut e=forvo::route::cdp_disabled("batch-resume");
@@ -947,7 +947,7 @@ fn execute_forvo(
                         let value=run_forvo_batch_logged(&store,batch_id,forvo::batch::Backend::Brave(&options),*max_items,output,None).await?;
                         Ok(with_update_notice(value,&dir,bound_target,&settings).await)
                     }
-                };
+                }}.await;
                 match value {Ok(mut v)=>{v["transport_decision"]=decision;Ok(v)},Err(mut e)=>{e.details["transport_decision"]=decision;Err(e)}}
             }
             ForvoAction::Fetch{surface,reading,replace_expected_sha256}=>{
