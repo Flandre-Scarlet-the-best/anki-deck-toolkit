@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "notes": [
+    {
+      "note_id": "demo-new-1",
+      "guid": "demo04",
+      "deck": {"crowdanki_uuid": "demo-deck-0001"},
+      "model": {"mode": "auto"},
+      "fields": {"Word": "当然", "Reading": "とうぜん", "Meaning": "naturally; of course", "Example": "当然の権利"},
+      "tags": ["demo"]
+    }
+  ]
+}
