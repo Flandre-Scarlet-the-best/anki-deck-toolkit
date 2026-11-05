@@ -13,8 +13,7 @@ autotests = false
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-toml = "1.0"
-
+toml.workspace = true
 [lib]
 name = "benchmark_contract"
 path = "src/lib.rs"
