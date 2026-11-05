@@ -964,3 +964,44 @@ async fn update_rejects_changed_extension_id_after_reload() {
     assert_eq!(disk_version(&h.install_dir), "99.10");
     assert_eq!(h.ext.lock().unwrap().reloads, 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_check_waits_out_briefly_held_lock_but_not_a_running_check() {
+    let workspace = TempWorkspace::create("forvo-update-check-lock").unwrap();
+    let state_dir = workspace.path().join("state");
+    save_check(
+        &state_dir,
+        &CheckCache {
+            schema_version: 1,
+            checked_at: now(),
+            latest_version: Some("99.2".into()),
+            latest_tag: Some(release::tag("99.2")),
+            error: None,
+        },
+    );
+    let max_age = Duration::from_secs(3600);
+    let timeout = Duration::from_millis(1);
+
+    // Блокировка, которую ещё мгновение держит унаследовавший её процесс,
+    // не отменяет проверку по свежему кэшу.
+    let lock = check_lock(&state_dir, false).await.unwrap().unwrap();
+    let release_lock = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(lock);
+    });
+    let notice = auto_check(&state_dir, None, max_age, timeout)
+        .await
+        .unwrap();
+    assert_eq!(notice["available_version"], "99.2");
+    release_lock.await.unwrap();
+
+    // Идущую явную проверку автоматическая не дожидается.
+    let _held = check_lock(&state_dir, false).await.unwrap().unwrap();
+    let started = std::time::Instant::now();
+    assert!(
+        auto_check(&state_dir, None, max_age, timeout)
+            .await
+            .is_none()
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
