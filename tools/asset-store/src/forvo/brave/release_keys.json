@@ -1,4 +1,10 @@
 {
   "schema_version": 1,
-  "keys": []
+  "keys": [
+    {
+      "key_id": "c78384baa288fba7",
+      "public_key": "722ed9e9681b525b13809d9e591856dee13c12b636118c8fab90077e6161d4e0",
+      "comment": "Ключ подписи выпусков адаптера Forvo, создан 2026-11-05"
+    }
+  ]
 }
