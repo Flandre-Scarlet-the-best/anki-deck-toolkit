@@ -1,0 +1,95 @@
+{
+    "__type__": "Deck",
+    "children": [],
+    "crowdanki_uuid": "demo-deck-0001",
+    "deck_config_uuid": "demo-config-0001",
+    "deck_configurations": [
+        {
+            "__type__": "DeckConfig",
+            "crowdanki_uuid": "demo-config-0001",
+            "name": "Default"
+        }
+    ],
+    "desc": "",
+    "media_files": [],
+    "name": "Demo::Japanese",
+    "note_models": [
+        {
+            "__type__": "NoteModel",
+            "crowdanki_uuid": "demo-model-0001",
+            "css": ".card { font-family: system-ui, sans-serif; font-size: 22px; text-align: center; color: #1f2328; background: #ffffff; }\n.word { font-size: 44px; margin: 12px 0; }\n.reading { color: #57606a; font-size: 18px; }\n.meaning { font-size: 22px; margin-top: 10px; }\n.example { color: #57606a; font-size: 17px; margin-top: 14px; }\nhr { border: 0; border-top: 1px solid #d0d7de; }\n.card.nightMode { color: #e6edf3; background: #1f2329; }\n.nightMode .reading, .nightMode .example { color: #9da7b3; }\n.nightMode hr { border-top-color: #3d444d; }",
+            "flds": [
+                {
+                    "name": "Word",
+                    "ord": 0
+                },
+                {
+                    "name": "Reading",
+                    "ord": 1
+                },
+                {
+                    "name": "Meaning",
+                    "ord": 2
+                },
+                {
+                    "name": "Example",
+                    "ord": 3
+                }
+            ],
+            "name": "Demo vocabulary",
+            "tmpls": [
+                {
+                    "__type__": "CardTemplate",
+                    "afmt": "{{FrontSide}}<hr id=answer><div class=reading>{{Reading}}</div><div class=meaning>{{Meaning}}</div>{{#Example}}<div class=example>{{Example}}</div>{{/Example}}",
+                    "name": "Recognition",
+                    "ord": 0,
+                    "qfmt": "<div class=word>{{Word}}</div>"
+                }
+            ]
+        }
+    ],
+    "notes": [
+        {
+            "__type__": "Note",
+            "fields": [
+                "偶然",
+                "ぐうぜん",
+                "chance; coincidance",
+                "偶然の一致"
+            ],
+            "guid": "demo01",
+            "note_model_uuid": "demo-model-0001",
+            "tags": [
+                "demo"
+            ]
+        },
+        {
+            "__type__": "Note",
+            "fields": [
+                "必然",
+                "ひつぜん",
+                "inevitability",
+                "必然の結果"
+            ],
+            "guid": "demo02",
+            "note_model_uuid": "demo-model-0001",
+            "tags": [
+                "demo"
+            ]
+        },
+        {
+            "__type__": "Note",
+            "fields": [
+                "旧字",
+                "きゅうじ",
+                "old form of a character",
+                ""
+            ],
+            "guid": "demo03",
+            "note_model_uuid": "demo-model-0001",
+            "tags": [
+                "demo"
+            ]
+        }
+    ]
+}
