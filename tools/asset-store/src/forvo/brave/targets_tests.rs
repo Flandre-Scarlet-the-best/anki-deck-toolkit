@@ -1,4 +1,5 @@
 use super::*;
+use crate::forvo::brave::test_ports::free_port;
 use crate::forvo::brave::windows_drive_path;
 use crate::forvo::provider_code;
 use crate::temp_workspace::TempWorkspace;
@@ -11,14 +12,6 @@ fn options(state_dir: &Path, kind: BrowserKind, dir: &Path) -> SetupOptions {
         discovery: Some(DiscoveryRoots::default()),
         ..SetupOptions::new(state_dir.to_owned())
     }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 /// Состояние версии 1 так, как его записал однобраузерный адаптер.

@@ -307,11 +307,7 @@ fn harness(words: Vec<(&str, Vec<Record>)>) -> Harness {
     let root = workspace.path().to_owned();
     let downloads = root.join("downloads");
     std::fs::create_dir_all(&downloads).unwrap();
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = super::super::test_ports::free_port();
     let state_dir = root.join("state");
     super::super::save_state(
         &state_dir,
