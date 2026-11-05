@@ -13,7 +13,7 @@
 ![Linux platform](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Views](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.svg?label=Views&color=blue)](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/)
-[![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/Flandre-Scarlet-the-best/anki-deck-toolkit)
 
 A toolkit for Anki deck maintainers and developers: inspect exports, validate structure and media references, review note quality, perform safe edits with `dry-run`, create notes using existing note models, and generate HTML before/after reports. The tools do not call LLM APIs but support a verifiable workflow with external AI agents.
 
@@ -50,6 +50,11 @@ This repository contains tooling and agent workflows for local decks, not a Git 
 | **Make targeted changes to cards** | `edit` changes existing field values; `create` adds notes to existing models; `retire` marks a note as retired with a tag; `migrate-media` migrates verified media references to the canonical filename for their resource domain. |
 | **See the result** | `visual-report` creates a standalone before/after HTML report with card previews based on the model's actual templates. |
 | **Handle kanji images** | `asset-store` and `kanji-assets` retrieve, verify, and store confirmed kanji PNG/GIF files in a program-managed local corpus. |
+| **Integrate with Anki Desktop** | `anki-repo anki` diagnoses an installation, manages the AnkiConnect/CrowdAnki setup, and uses the original CrowdAnki for export and import. Mutations require explicit `--apply`. |
+| **Manage pitch accent and pronunciation** | `pitch-assets` manages verified JPDB PNGs; `pronunciation-assets forvo` retrieves Japanese MP3 candidates through the Forvo website for local review. |
+| **Compare deck revisions** | The `anki_repo::exchange` library tracks profile/deck identities and semantic A/C/B changes; an automated end-to-end Anki exchange is not yet connected. |
+| **Benchmark performance** | `benchmark-contract` validates scenarios and results, `benchmark-runner` performs measurements, and `benchmark-history` stores local history and comparisons. |
+| **Run real integration tests** | `anki-e2e` provides an opt-in Docker-based Anki Desktop test stand; it does not run automatically in CI. |
 | **Work safely with agents** | The repository provides routing context and skills so agents follow the owners of each contract instead of guessing the deck's structure. |
 
 ## How it works
@@ -79,12 +84,14 @@ flowchart LR
 
 The tools deliberately separate **structural operations** from **content decisions**. `anki-repo` does not call an LLM API or attempt to judge whether a card's translation or example is good. It finds the relevant data, validates contracts, constrains changes, and supplies concise evidence to an external agent or a human.
 
+This diagram describes the **local export workflow**. Desktop operations live under `anki-repo anki`. The `anki_repo::exchange` library is not an automatic `input ↔ output` sync layer. Desktop import/export requires installed Anki, AnkiConnect, and CrowdAnki.
+
 ## Quick start
 
 You need Linux and the Rust toolchain. The minimum supported Rust version is declared in the root `Cargo.toml`; this documentation does not keep a separate copy of the version.
 
 ```bash
-git clone https://github.com/AliceLiddell01/anki-deck-toolkit.git
+git clone https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.git
 cd anki-deck-toolkit
 
 cargo build --release --workspace
@@ -114,6 +121,19 @@ Kanji images can be retrieved and verified with a separate CLI:
 cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 ```
 
+Other entry points (consult the dedicated contracts before state-changing operations):
+
+```bash
+# Diagnose an existing Anki installation
+./target/release/anki-repo --json anki doctor
+
+# List locally verified pitch-accent assets
+cargo run --locked -p asset-store --bin pitch-assets -- corpus list
+
+# List benchmark scenarios without executing them
+cargo run --locked -p benchmark-contract -- list
+```
+
 Detailed commands and machine-readable contracts are documented in the tool-specific READMEs:
 
 - [`anki-repo` — inspection, QA, constrained changes, and visual reports](docs/en/anki-repo/README.md)
@@ -123,6 +143,11 @@ Detailed commands and machine-readable contracts are documented in the tool-spec
 - [`benchmark-contract` — benchmark scenario catalog and measurement result contract](docs/en/benchmark-contract/README.md)
 - [`benchmark-runner` — benchmark series runner: Hyperfine 2.0 and Linux metrics](docs/en/benchmark-runner/README.md)
 - [`benchmark-history` — local benchmark history, comparison and reports for PRs and documentation](docs/en/benchmark-history/README.md)
+- [Anki Desktop integration and CrowdAnki operations (Russian)](docs/ru/anki-repo/desktop.md)
+- [Revision tracking and exchange library (Russian)](docs/ru/anki-repo/exchange.md)
+- [Forvo Web Japanese MP3 acquisition (Russian)](docs/ru/asset-store/forvo.md)
+- [Performance methodology and current measurements](docs/en/performance/README.md)
+
 
 ## Tools
 
@@ -170,6 +195,30 @@ Yarxi
 The verified corpus is trusted local state in the working copy. It contains only confirmed assets and their provenance information; the key files are `manifest.json` and `.owner.json`. Unverified candidates never enter the corpus, and it is not published through Git. Each user has their own corpus, and its absence in a fresh clone is normal. `asset-store` does not scan `decks/**/media/` and does not use user media directories as a data source.
 
 [Full `asset-store` contract →](docs/en/asset-store/README.md)
+
+### `anki-repo anki` — Anki Desktop
+
+The `doctor`, `setup`, `launch`, `export`, `import`, and `job` commands use an existing Anki Desktop installation, AnkiConnect, and the original CrowdAnki. Linux targets Linux Anki; WSL with working interop targets Windows Anki. Exports and imports require an explicit profile, environmental checks, and `--apply`; this is not direct Anki database editing or automatic bidirectional sync.
+
+[Desktop contract (Russian) →](docs/ru/anki-repo/desktop.md)
+
+### `anki_repo::exchange` — revisions, not yet sync
+
+This library API models stable deck/profile identities, semantic snapshots, and A/C/B comparisons. It does **not** access `decks/input/`, transfer exports, or integrate with the regular CLI commands yet. A trusted exporter and complete exchange flow remain separate future work.
+
+[Exchange contract (Russian) →](docs/ru/anki-repo/exchange.md)
+
+### `pitch-assets` / `pronunciation-assets`
+
+Besides kanji images, `asset-store` supports JPDB pitch-accent PNGs and Japanese MP3 recordings. `pitch-assets` manages candidate batches and explicitly approved corpus items. `pronunciation-assets forvo` uses the Forvo website via a browser and a user-authenticated profile; downloading a candidate does not certify its reading. Credentials and corpora remain local.
+
+[Asset lifecycle →](docs/en/asset-store/README.md) · [Forvo Web contract (Russian) →](docs/ru/asset-store/forvo.md)
+
+### Benchmarks and E2E
+
+`benchmark-contract` validates scenario and result contracts, `benchmark-runner` runs Hyperfine 2.0 series and Linux metrics, and `benchmark-history` keeps a local history and comparable reports. Measurements describe a specific environment, not a CI performance threshold. `anki-e2e` runs opt-in Anki Desktop scenarios in an isolated Docker container and is not part of standard CI or Cargo tests.
+
+[Scenario catalog](docs/en/performance/benchmarks.md) · [Runner](docs/en/benchmark-runner/README.md) · [History](docs/en/benchmark-history/README.md) · [E2E stand](docs/en/anki-e2e/README.md)
 
 ## Creating and visually verifying a card
 

@@ -13,7 +13,7 @@
 ![Linux 平台](https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white)
 [![AGPL-3.0 许可证](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![浏览量](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.svg?label=%E6%B5%8F%E8%A7%88%E9%87%8F&color=blue)](https://hits.sh/github.com/Flandre-Scarlet-the-best/anki-deck-toolkit/)
-[![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/AliceLiddell01/anki-deck-toolkit)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-2f81f7?logo=readthedocs&logoColor=white)](https://deepwiki.com/Flandre-Scarlet-the-best/anki-deck-toolkit)
 
 这套工具面向 Anki 牌组维护者和开发者：查看导出数据、验证结构和媒体引用、检查笔记质量、通过 `dry-run` 安全地进行修改、使用现有笔记类型创建笔记，并生成“修改前 / 修改后”的 HTML 对比报告。工具本身不会调用 LLM API，但支持与外部 AI 智能体配合，形成可核查的工作流程。
 
@@ -50,6 +50,11 @@
 | **定向修改卡片** | `edit` 修改现有字段的值；`create` 在现有笔记类型中新增笔记；`retire` 通过标签停用笔记；`migrate-media` 将经过验证的媒体引用从旧文件名迁移到所属资源域的规范文件名。 |
 | **可视化查看结果** | `visual-report` 根据笔记类型的实际模板生成独立的“修改前 / 修改后”HTML 报告和卡片预览。 |
 | **处理日语汉字（kanji）图片** | `asset-store` 和 `kanji-assets` 获取、验证并在程序管理的本地资源库中保存已确认的日语汉字 PNG/GIF 文件。 |
+| **连接 Anki Desktop** | `anki-repo anki` 用于诊断安装、管理 AnkiConnect/CrowdAnki 的准备工作，并通过原版 CrowdAnki 导入或导出；写入操作需要显式 `--apply`。 |
+| **管理声调重音与发音资源** | `pitch-assets` 管理经过验证的 JPDB PNG；`pronunciation-assets forvo` 通过 Forvo 网站取得日语 MP3 候选素材供本地审核。 |
+| **比较牌组版本** | `anki_repo::exchange` 库追踪用户配置/牌组身份及 A/C/B 语义变化；尚未连接完整的 Anki 自动交换流程。 |
+| **测量性能** | `benchmark-contract` 验证场景和结果，`benchmark-runner` 执行测量，`benchmark-history` 保存本地历史并生成比较报告。 |
+| **真实集成测试** | `anki-e2e` 提供需手动启动的 Docker Anki Desktop 测试环境，不会在 CI 中自动运行。 |
 | **安全地使用智能体** | 仓库提供上下文路由和技能定义，让智能体遵循各项契约的权威来源，而不是猜测牌组结构。 |
 
 ## 工作原理
@@ -79,12 +84,14 @@ flowchart LR
 
 这些工具刻意将**结构性操作**与**内容判断**分开。`anki-repo` 不会调用 LLM API，也不会自行判断卡片的翻译或例句是否优秀。它负责定位数据、验证契约、限制修改范围，并为外部智能体或人工审阅者提供简明证据。
 
+上图展示的是**本地导出数据流程**。Anki Desktop 操作由 `anki-repo anki` 单独管理；`anki_repo::exchange` 库并不等于已实现的 `input ↔ output` 自动同步。桌面端导入/导出需要安装 Anki、AnkiConnect 和 CrowdAnki。
+
 ## 快速开始
 
 需要 Linux 和 Rust 工具链。最低支持的 Rust 版本在根目录 `Cargo.toml` 中声明，文档不会再维护一份独立的版本号。
 
 ```bash
-git clone https://github.com/AliceLiddell01/anki-deck-toolkit.git
+git clone https://github.com/Flandre-Scarlet-the-best/anki-deck-toolkit.git
 cd anki-deck-toolkit
 
 cargo build --release --workspace
@@ -114,6 +121,19 @@ EXPORT=decks/output/<导出名称>
 cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 ```
 
+其他入口（执行修改状态的操作之前，请阅读相应契约）：
+
+```bash
+# 诊断已安装的 Anki
+./target/release/anki-repo --json anki doctor
+
+# 列出本地已验证的声调重音资源
+cargo run --locked -p asset-store --bin pitch-assets -- corpus list
+
+# 列出基准测试场景，不运行测量
+cargo run --locked -p benchmark-contract -- list
+```
+
 各工具的专门文档介绍了详细命令和机器可读契约：
 
 - [`anki-repo` — 检查、质量保证、受限修改与可视化报告](docs/zh-CN/anki-repo/README.md)
@@ -123,6 +143,11 @@ cargo run --locked --bin kanji-assets -- --output json ensure 漢 字
 - [`benchmark-contract` — 基准测试场景目录与测量结果契约](docs/zh-CN/benchmark-contract/README.md)
 - [`benchmark-runner` — 基准系列执行器：Hyperfine 2.0 与 Linux 指标](docs/zh-CN/benchmark-runner/README.md)
 - [`benchmark-history` — 本地基准历史、比较以及面向 PR 和文档的报告](docs/zh-CN/benchmark-history/README.md)
+- [Anki Desktop 集成与 CrowdAnki 操作（俄语）](docs/ru/anki-repo/desktop.md)
+- [版本追踪与交换库（俄语）](docs/ru/anki-repo/exchange.md)
+- [Forvo Web 日语 MP3 获取（俄语）](docs/ru/asset-store/forvo.md)
+- [性能测试方法与当前测量](docs/zh-CN/performance/README.md)
+
 
 ## 工具
 
@@ -170,6 +195,30 @@ Yarxi
 已验证资源库是工作副本中的可信本地状态：其中仅保存经过确认的资源及其来源信息，关键文件为 `manifest.json` 和 `.owner.json`。未经确认的候选文件不会进入资源库，资源库也不会通过 Git 发布。每个用户都有自己的本地资源库，新克隆仓库时不存在该资源库属于正常情况。`asset-store` 不会扫描 `decks/**/media/`，也不会将用户的媒体目录作为数据来源。
 
 [查看完整的 `asset-store` 契约 →](docs/zh-CN/asset-store/README.md)
+
+### `anki-repo anki` — Anki Desktop
+
+`doctor`、`setup`、`launch`、`export`、`import` 和 `job` 使用已安装的 Anki Desktop、AnkiConnect 和原版 CrowdAnki。普通 Linux 使用 Linux Anki；具有可用 interop 的 WSL 使用 Windows Anki。导入和导出需要指定配置文件、检查运行环境并显式使用 `--apply`。它不会直接编辑 Anki 数据库，也不是自动双向同步。
+
+[桌面端契约（俄语）→](docs/ru/anki-repo/desktop.md)
+
+### `anki_repo::exchange` — 版本追踪，不是完整同步
+
+该库提供稳定的牌组/用户配置身份、语义快照和 A/C/B 比较，但目前**不会**读取 `decks/input/`、移动导出数据，也未接入普通 CLI 命令。受信任的导出器与完整交换流程属于后续工作。
+
+[交换契约（俄语）→](docs/ru/anki-repo/exchange.md)
+
+### `pitch-assets` / `pronunciation-assets`
+
+除汉字图片外，`asset-store` 还管理 JPDB 声调重音 PNG 和日语 MP3 素材。`pitch-assets` 支持候选批处理与明确审核的资源入库；`pronunciation-assets forvo` 通过浏览器和用户登录的 Forvo 网站取得录音，下载并不等于自动确认读音正确。凭证与资源库保留在本地。
+
+[资源管理 →](docs/zh-CN/asset-store/README.md) · [Forvo Web 契约（俄语）→](docs/ru/asset-store/forvo.md)
+
+### 基准测试与 E2E
+
+`benchmark-contract` 验证场景和测量结果，`benchmark-runner` 使用 Hyperfine 2.0 及 Linux 指标执行测试，`benchmark-history` 保存本地历史和可比较的报告。数据仅说明特定环境下的性能，不是 CI 的速度阈值。`anki-e2e` 通过 Docker 按需运行隔离的真实 Anki Desktop 场景，不属于标准 CI 或 Cargo 测试。
+
+[场景目录](docs/zh-CN/performance/benchmarks.md) · [执行器](docs/zh-CN/benchmark-runner/README.md) · [历史记录](docs/zh-CN/benchmark-history/README.md) · [E2E 测试台](docs/zh-CN/anki-e2e/README.md)
 
 ## 创建卡片并进行可视化验证
 
