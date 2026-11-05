@@ -210,6 +210,9 @@ jobs:
           "$TOOL" build --out "$RUNNER_TEMP/dist" --repository "$GITHUB_REPOSITORY" \
             --commit "$GITHUB_SHA" --notes-out "$RUNNER_TEMP/notes.md"
 
+      - name: Сохранить неподписанную сборку для сравнения
+        run: cp -a "$RUNNER_TEMP/dist" "$RUNNER_TEMP/dist-unsigned"
+
       - name: Повторить план с правом видеть черновики
         id: plan
         env:
@@ -277,7 +280,7 @@ jobs:
           jq -e --arg tag "$TAG" '.tag_name == $tag and .draft == false and .prerelease == false' <<<"$release" >/dev/null
           tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/published"
-          "$TOOL" compare --dir "$RUNNER_TEMP/dist" --published "$RUNNER_TEMP/published" | tee "$RUNNER_TEMP/compare.json"
+          "$TOOL" compare --dir "$RUNNER_TEMP/dist-unsigned" --published "$RUNNER_TEMP/published" | tee "$RUNNER_TEMP/compare.json"
           jq -e --arg commit "$tag_commit" \
             '.outcome == "ok" and .result.published_commit == $commit' \
             "$RUNNER_TEMP/compare.json"
