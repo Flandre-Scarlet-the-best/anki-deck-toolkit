@@ -1279,8 +1279,7 @@ async fn routed_batch_start(
             decision.attempt("cdp_chromium", None, None);
             decision.selected = Some("cdp_chromium");
             if let Err(e) = batch::start(store, id, plan, batch::Transport::CdpChromium) {
-                let _ = session.close().await;
-                return Err(e);
+                return Err(batch_start_failure(e, session, decision.to_value()).await);
             }
             let result = run_forvo_batch_logged(
                 store,
@@ -1332,6 +1331,22 @@ async fn routed_batch_start(
             }
         }
     }
+}
+
+async fn batch_start_failure(
+    mut error: AssetError,
+    session: crate::forvo::ForvoSession,
+    transport_decision: serde_json::Value,
+) -> AssetError {
+    if let Err(cleanup) = session.close().await {
+        error.details["browser_cleanup"] = serde_json::json!({
+            "code": crate::forvo::provider_code(&cleanup),
+            "message": cleanup.message,
+            "details": cleanup.details,
+        });
+    }
+    error.details["transport_decision"] = transport_decision;
+    error
 }
 
 /// Сведения о более новой версии адаптера по редкой кэшированной проверке.
@@ -1753,8 +1768,8 @@ fn finish_brave_run(
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterCommand, RunAction, adapter_interrupted, finish_brave_run, run_forvo_batch_logged,
-        waits_for_brave_download_cleanup, with_update_notice,
+        AdapterCommand, RunAction, adapter_interrupted, batch_start_failure, finish_brave_run,
+        run_forvo_batch_logged, waits_for_brave_download_cleanup, with_update_notice,
     };
     use crate::forvo::{ForvoSession, batch::Backend};
     use crate::temp_workspace::TempWorkspace;
@@ -1834,6 +1849,35 @@ mod tests {
 
         assert!(error.details["browser_cleanup"].is_null());
         assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn batch_start_failure_keeps_cleanup_and_transport_details() {
+        let session = ForvoSession::with_pending_stop_for_test(tokio::spawn(async {
+            Err("stop failed".into())
+        }));
+        let error = batch_start_failure(
+            AssetError::with_details(
+                ErrorCode::IoFailure,
+                "не удалось создать пакет",
+                json!({"source":"batch_start"}),
+            ),
+            session,
+            json!({"selected":"cdp_chromium"}),
+        )
+        .await;
+
+        assert_eq!(error.code, ErrorCode::IoFailure);
+        assert_eq!(error.details["source"], "batch_start");
+        assert_eq!(
+            error.details["transport_decision"]["selected"],
+            "cdp_chromium"
+        );
+        assert_eq!(
+            error.details["browser_cleanup"]["code"],
+            "browser_cleanup_failed"
+        );
+        assert!(error.details["browser_cleanup"]["message"].is_string());
     }
 
     #[test]

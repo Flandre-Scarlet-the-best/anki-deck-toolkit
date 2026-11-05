@@ -42,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  # Публикации основной ветки идут строго по очереди и не отменяются.
+  # Публикации основной ветки идут по одной; ожидающий запуск заменяется новым.
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 

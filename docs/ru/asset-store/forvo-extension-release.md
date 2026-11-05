@@ -77,9 +77,10 @@ GitHub artifact attestation в этой схеме не используется
   стабильную версию, но выпуск/тег с тем же именем нельзя считать свободным:
   такой план блокируется, как и любой уже занятый Git-тег без единственного
   проверяемого стабильного выпуска. Черновики автоматически не удаляются.
-- Очередь публикаций одна и не отменяется (`concurrency`). Повторный запуск после
-  публикации находит стабильный выпуск и выполняет только проверку; опубликованное
-  содержимое не перезаписывается. Несовпадающий ZIP приводит к отказу
+- Одновременно выполняется один запуск публикации; пока он идёт, новый запуск
+  основной ветки заменяет более ранний ожидающий запуск (`concurrency`). Повторный
+  запуск после публикации находит стабильный выпуск и выполняет только проверку;
+  опубликованное содержимое не перезаписывается. Несовпадающий ZIP приводит к отказу
   `published_release_differs`, версия не выше максимальной стабильной — к
   `version_not_increased`. При bootstrap (стабильных выпусков пока нет) версия не
   сравнивается с несуществующей, но занятого целевого тега всё равно быть не должно.
@@ -97,8 +98,11 @@ base-коммита и упаковщиком текущего checkout; пра�
 ли ZIP, принимает workflow сравнением контрольных сумм собранных архивов:
 
 ```bash
+set -euo pipefail
+work_dir="$(mktemp -d)"
+trap 'rm -rf -- "$work_dir"' EXIT
 cargo build --locked -p asset-store --bin forvo-extension-release
-target/debug/forvo-extension-release build --out /tmp/forvo-dist \
+target/debug/forvo-extension-release build --out "$work_dir/forvo-dist" \
   --repository Flandre-Scarlet-the-best/anki-deck-toolkit --commit "$(git rev-parse HEAD)"
 target/debug/forvo-extension-release check-bump --base-version "$(git show origin/main:tools/asset-store/src/forvo/brave/extension/manifest.json | jq -r .version)"
 ```
