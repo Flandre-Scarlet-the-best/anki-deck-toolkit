@@ -239,7 +239,12 @@ fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, AssetError> {
     };
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC)
+                .bits() as i32,
+        )
         .open(path)
         .map_err(|_| failed("open"))?;
     if !file.metadata().map_err(|_| failed("metadata"))?.is_file() {

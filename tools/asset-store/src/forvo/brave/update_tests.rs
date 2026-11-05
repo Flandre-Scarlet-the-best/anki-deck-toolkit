@@ -9,6 +9,7 @@ use async_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use futures::StreamExt;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -70,6 +71,35 @@ fn listing_path(page: u32) -> String {
 
 fn asset_path(tag: &str, name: &str) -> String {
     format!("/{}/releases/download/{tag}/{name}", release::REPOSITORY)
+}
+
+#[test]
+fn read_regular_rejects_fifo_without_blocking() {
+    let workspace = TempWorkspace::create("forvo-update-fifo").unwrap();
+    let fifo = workspace.path().join("metadata.json");
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::Mode::from_bits_truncate(0o600),
+    )
+    .unwrap();
+
+    let (sender, receiver) = mpsc::channel();
+    let reader_path = fifo.clone();
+    let reader = std::thread::spawn(move || {
+        let result = read_regular(&reader_path, 1024)
+            .map(|_| ())
+            .map_err(|error| error.details["reason"].clone());
+        sender.send(result).unwrap();
+    });
+    let received = receiver.recv_timeout(Duration::from_secs(5));
+    if received.is_err() {
+        // Разблокирует регрессию без NONBLOCK, после чего проверка завершится ошибкой.
+        drop(std::fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+    }
+    reader.join().unwrap();
+
+    assert_eq!(received.unwrap().unwrap_err(), json!("not_regular"));
 }
 
 #[tokio::test]

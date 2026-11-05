@@ -46,6 +46,22 @@ pub struct ForvoSession {
 }
 
 impl ForvoSession {
+    #[cfg(test)]
+    pub(crate) fn with_pending_stop_for_test(
+        pending_stop: tokio::task::JoinHandle<Result<(), String>>,
+    ) -> Self {
+        Self {
+            browser: None,
+            pending_stop: Some(pending_stop),
+            pending_launch: None,
+            was_authenticated: false,
+            download_used: false,
+            downloads_started: 0,
+            profile: PathBuf::from("/unused"),
+            visible: false,
+        }
+    }
+
     pub async fn launch(profile: &Path) -> Result<Self, AssetError> {
         Self::launch_mode(profile, false).await
     }

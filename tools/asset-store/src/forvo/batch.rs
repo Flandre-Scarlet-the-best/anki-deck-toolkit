@@ -661,39 +661,42 @@ pub async fn resume_prepared(
     .await;
     let (mut runtime, _lease, mut batch) = match early {
         Ok(parts) => parts,
-        Err(error) => {
-            if let Some(session) = prepared.take() {
-                let _ = session.close().await;
+        Err(mut error) => {
+            if let Some(session) = prepared.take()
+                && let Err(cleanup) = session.close().await
+            {
+                error.details["browser_cleanup"] = serde_json::json!({
+                    "code": provider_code(&cleanup),
+                    "message": cleanup.message,
+                    "details": cleanup.details,
+                });
             }
             return Err(error);
         }
     };
-    let adjusted;
-    let backend = match backend {
-        Backend::Brave(options) => {
-            adjusted = bound_options(id, &batch, options)?;
-            Backend::Brave(&adjusted)
-        }
-        other => other,
-    };
     let mut session: Option<Session> = prepared.take().map(|s| Session::Cdp(Box::new(s)));
-    if batch.cancelled {
-        if let Some(session) = session.take() {
-            let _ = session.close().await;
-        }
-        return Err(AssetError::new(
-            ErrorCode::InvalidTransition,
-            "пакет отменён",
-        ));
-    }
-    if batch.paused.as_ref().is_some_and(|p| !p.recovery_required)
-        && batch.items.iter().all(|item| item.outcome.is_some())
-    {
-        batch.paused = None;
-        batch.revision += 1;
-        runtime.save(&batch)?;
-    }
     let result = async {
+        let adjusted;
+        let backend = match backend {
+            Backend::Brave(options) => {
+                adjusted = bound_options(id, &batch, options)?;
+                Backend::Brave(&adjusted)
+            }
+            other => other,
+        };
+        if batch.cancelled {
+            return Err(AssetError::new(
+                ErrorCode::InvalidTransition,
+                "пакет отменён",
+            ));
+        }
+        if batch.paused.as_ref().is_some_and(|p| !p.recovery_required)
+            && batch.items.iter().all(|item| item.outcome.is_some())
+        {
+            batch.paused = None;
+            batch.revision += 1;
+            runtime.save(&batch)?;
+        }
         // Сохранённые байты не требуют скачивания, но отложенное освобождение
         // всё равно требует сопряжения до импорта.
         if batch.paused.as_ref().is_some_and(|p| p.recovery_required) {

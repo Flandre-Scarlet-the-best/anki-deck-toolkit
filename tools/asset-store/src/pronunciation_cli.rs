@@ -1418,7 +1418,24 @@ async fn run_forvo_batch_logged(
     use crate::diagnostics::{OutputMode, RunLogGuard};
     use tracing::instrument::WithSubscriber;
 
-    let log = SafeBatchRuntime::open(store.root(), id)?.create_run_log()?;
+    let mut prepared = prepared;
+    let log = match SafeBatchRuntime::open(store.root(), id)
+        .and_then(|runtime| runtime.create_run_log())
+    {
+        Ok(log) => log,
+        Err(mut error) => {
+            if let Some(session) = prepared.take()
+                && let Err(cleanup) = session.close().await
+            {
+                error.details["browser_cleanup"] = serde_json::json!({
+                    "code": crate::forvo::provider_code(&cleanup),
+                    "message": cleanup.message,
+                    "details": cleanup.details,
+                });
+            }
+            return Err(error);
+        }
+    };
     let path = log.path.display().to_string();
     let guard = RunLogGuard::new(
         log.file,
@@ -1736,11 +1753,12 @@ fn finish_brave_run(
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterCommand, RunAction, adapter_interrupted, finish_brave_run,
+        AdapterCommand, RunAction, adapter_interrupted, finish_brave_run, run_forvo_batch_logged,
         waits_for_brave_download_cleanup, with_update_notice,
     };
+    use crate::forvo::{ForvoSession, batch::Backend};
     use crate::temp_workspace::TempWorkspace;
-    use crate::{AssetError, ErrorCode};
+    use crate::{AssetError, AssetStore, ErrorCode, StoreOptions};
     use serde_json::json;
 
     #[test]
@@ -1781,6 +1799,41 @@ mod tests {
                 .unwrap()
                 .contains("disk full")
         );
+    }
+
+    #[tokio::test]
+    async fn failed_batch_diagnostic_setup_closes_prepared_session() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let workspace = TempWorkspace::create("forvo-diagnostic-setup").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let marker = stopped.clone();
+        let pending_stop = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            marker.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let profile = workspace.path().join("profile");
+
+        let error = run_forvo_batch_logged(
+            &store,
+            "bad/id",
+            Backend::Cdp { profile: &profile },
+            1,
+            super::Output::Json,
+            Some(ForvoSession::with_pending_stop_for_test(pending_stop)),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.details["browser_cleanup"].is_null());
+        assert!(stopped.load(Ordering::SeqCst));
     }
 
     #[test]
