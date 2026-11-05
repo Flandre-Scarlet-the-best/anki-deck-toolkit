@@ -1,0 +1,54 @@
+name: Инженерная задача
+description: Конкретная техническая задача — рефакторинг, миграция, CI, зависимости, задача для ИИ-агента.
+title: "[Задача]: "
+labels: ["maintenance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Форма описывает одну самостоятельную задачу, а не постоянные правила
+        разработки. Постоянные правила живут в `AGENTS.md`, `.codex/context/` и
+        `.agents/skills/`; задача может ссылаться на них, но не подменять их.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Техническая цель
+      description: Какое наблюдаемое состояние должно получиться после выполнения.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Подтверждённый контекст
+      description: |
+        Факты, на которые опирается задача, со ссылками на файлы, строки, Issues, PR
+        или запуски CI. Отделяйте проверенное от предположений.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Границы задачи
+      description: Что входит и что явно не входит в задачу.
+      placeholder: |
+        Входит:
+        - ...
+        Не входит:
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Зависимости
+      description: Блокирующие Issues и PR, внешние инструменты, нужные доступы.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Критерии приёмки
+      description: Проверяемые условия, включая нужные проверки (`cargo test`, CI, живая приёмка, замер производительности).
+      placeholder: |
+        - [ ] ...
+        - [ ] cargo fmt / clippy / test проходят
+    validations:
+      required: true

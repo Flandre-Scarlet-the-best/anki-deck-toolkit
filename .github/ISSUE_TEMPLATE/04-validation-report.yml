@@ -1,0 +1,78 @@
+name: Отчёт о проверке
+description: Ложное срабатывание, пропущенная ошибка или неверная диагностика проверок колод.
+title: "[Проверка]: "
+labels: ["validation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Форма для случаев, когда проверка набора инструментов (`validate`, `qa`,
+        `review-check`, проверки ресурсов) неверно оценивает карточку или экспорт.
+        Ошибку в содержимом самой карточки (перевод, чтение, ударение) правят в
+        колоде, а не здесь.
+
+        Колоды — локальные данные пользователя: не прикладывайте `deck.json` целиком.
+        Лучше всего — минимальный синтетический пример, на котором воспроизводится
+        проблема.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Тип проблемы
+      options:
+        - False Positive — проверка сообщает о проблеме, которой нет
+        - False Negative — проверка не находит существующую проблему
+        - Incorrect Diagnostic — проблема найдена, но сообщение, уровень или место неверны
+    validations:
+      required: true
+  - type: input
+    id: check
+    attributes:
+      label: Проверка
+      description: Команда и, если есть, код правила.
+      placeholder: "anki-repo qa --code trailing_whitespace"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия или commit
+      placeholder: "например, 912c8d5d"
+    validations:
+      required: true
+  - type: input
+    id: deck
+    attributes:
+      label: Колода
+      description: Имя экспорта или колоды. Можно обобщить, если оно приватное.
+      placeholder: "Words__N3"
+  - type: input
+    id: note_type
+    attributes:
+      label: Тип заметки
+      description: Имя модели и/или `note_model_uuid`.
+  - type: input
+    id: note_id
+    attributes:
+      label: Идентификатор заметки или карточки
+      description: "`guid` заметки, имя поля."
+  - type: textarea
+    id: output
+    attributes:
+      label: Диагностический вывод
+      description: Вывод проверки, желательно `--json`.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемый результат
+      description: Что должна была сообщить проверка и почему.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Минимальный пример
+      description: Фрагмент заметки (поля и значения) или синтетический экспорт, на котором воспроизводится проблема.
+      render: json
