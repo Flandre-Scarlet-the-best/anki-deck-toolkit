@@ -1016,7 +1016,10 @@ impl NormalizationResult {
             return Ok(());
         }
         let qc_passed = self.post_qc.as_ref().is_some_and(|q| q.passed);
+        // Вариант и его пост-QC появляются только вместе (`conclude_post_qc`):
+        // вариант без пост-QC и пост-QC без варианта — подделанный результат.
         let consistent = self.gate.post_qc_verified == self.post_qc.is_some()
+            && self.output.is_some() == self.post_qc.is_some()
             && match self.gate.outcome {
                 GateOutcome::Accept | GateOutcome::AcceptWithLimitations => {
                     self.output.is_some() && qc_passed
@@ -3124,6 +3127,16 @@ mod tests {
             failed.result.validate().unwrap();
             // Байты остаются только диагностикой для отчёта.
             assert!(failed.output_bytes.is_some());
+            // Диагностический вариант без своего пост-QC и пост-QC без
+            // варианта — противоречивый результат, а не исходник с ограничением.
+            let mut unverified = failed.result.clone();
+            unverified.post_qc = None;
+            unverified.gate.post_qc_verified = false;
+            let mut orphan_qc = failed.result.clone();
+            orphan_qc.output = None;
+            for forged in [unverified, orphan_qc] {
+                assert!(forged.validate().is_err(), "{code}");
+            }
         }
         // Нечитаемый результат: все проверки неразрешимы, каждая — ограничение.
         let prepared = prepare(&speech_like(1, false), &policy);
