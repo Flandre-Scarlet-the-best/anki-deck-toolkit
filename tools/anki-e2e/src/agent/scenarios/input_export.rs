@@ -1,5 +1,5 @@
 //! Настоящий CLI → CrowdAnki → доверенный владелец input внутри контейнера.
-//! Harness не читает input: байты проверяет input-status, затем SHA сверяются
+//! Тестовый стенд не читает input: байты проверяет input-status, затем SHA сверяются
 //! с независимым живым spool и заранее известными медиа/заметками.
 use super::*;
 
@@ -145,7 +145,7 @@ pub(super) fn run(c: &mut Ctx, fx: &mut Fixtures) -> Outcome {
         durable.clone(),
     )?;
 
-    c.step("input: закрытая область недоступна обычным CLI и новому пути через alias");
+    c.step("input: закрытая область недоступна обычным CLI и новому пути через псевдоним");
     let input = repo.join(one["input_directory"].as_str().unwrap_or(""));
     let denied = c.anki_repo_raw(
         &["--json", "inspect", &input.to_string_lossy()],

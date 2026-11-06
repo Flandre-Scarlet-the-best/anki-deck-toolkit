@@ -1,4 +1,4 @@
-//! Доверенный владелец input. Перед переключением записывает durable intent;
+//! Доверенный владелец input. Перед переключением надёжно сохраняет намерение публикации;
 //! после сбоя дочитывает его, проверяет поколение и завершает тот же record_input.
 use super::source::{PendingJob, VerifiedExport, read_export};
 use crate::exchange::{
@@ -11,11 +11,20 @@ use std::{collections::BTreeMap, fs::File, path::Path};
 
 const OWNER: &str = "anki-repo-trusted-input-v1";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Control {
     owner: String,
     jobs: BTreeMap<String, PendingJob>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    rejected: BTreeMap<String, RejectedJob>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RejectedJob {
+    job: PendingJob,
+    reason: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -27,6 +36,9 @@ struct Transaction {
     inventory: BTreeMap<String, String>,
     previous: Option<InputRevision>,
     unchanged: bool,
+    // None сохраняет смысл и checksum ранее записанных намерений.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    files_changed: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,7 +76,7 @@ impl Store {
         } else {
             root.child("decks")?.ok_or_else(|| corrupt("нет decks"))?
         };
-        let parent_lock = decks.lock()?;
+        let parent_lock = decks.try_lock()?;
         let input = if initialize {
             decks.ensure_child("input")?.0
         } else {
@@ -72,7 +84,7 @@ impl Store {
         };
         input.require_private()?;
         drop(parent_lock);
-        let lock = input.lock()?;
+        let lock = input.try_lock()?;
         if initialize {
             clean_temporaries(&input, &[".owner.json"])?;
         }
@@ -81,6 +93,7 @@ impl Store {
             let control = Control {
                 owner: OWNER.into(),
                 jobs: BTreeMap::new(),
+                rejected: BTreeMap::new(),
             };
             input.publish(
                 ".owner.json",
@@ -107,6 +120,16 @@ impl Store {
                 return Err(corrupt(
                     "индекс pending job повреждён; повторный export запрещён",
                 ));
+            }
+        }
+        for (id, rejected) in &control.rejected {
+            if id != &rejected.job.id
+                || !valid_key(id)
+                || !valid_key(&rejected.job.profile_id)
+                || !job_ids.insert(id)
+                || rejected.reason.is_empty()
+            {
+                return Err(corrupt("журнал отвергнутых заданий повреждён"));
             }
         }
         let exchange = if initialize {
@@ -139,6 +162,39 @@ impl Store {
 
     pub fn pending(&self, key: &str) -> Option<&PendingJob> {
         self.control.jobs.get(key)
+    }
+
+    pub fn pending_named(&self, profile: &str, name: &str) -> Vec<&PendingJob> {
+        self.control
+            .jobs
+            .values()
+            .filter(|job| job.profile_id == profile && job.deck == name)
+            .collect()
+    }
+
+    pub fn reject_job(&mut self, key: &str, reason: &str) -> Result<()> {
+        self.verify_location()?;
+        let job = self
+            .control
+            .jobs
+            .get(key)
+            .ok_or_else(|| corrupt("нет отвергаемого задания"))?
+            .clone();
+        let mut next = self.control.clone();
+        next.jobs.remove(key);
+        next.rejected.insert(
+            job.id.clone(),
+            RejectedJob {
+                job,
+                reason: reason.into(),
+            },
+        );
+        #[cfg(test)]
+        self.checkpoint("control")?;
+        self.input
+            .publish(".owner.json", &serde_json::to_vec(&next).map_err(corrupt)?)?;
+        self.control = next;
+        Ok(())
     }
 
     pub fn save_job(&mut self, key: &str, job: PendingJob) -> Result<()> {
@@ -181,8 +237,15 @@ impl Store {
                 .child(&name)?
                 .ok_or_else(|| corrupt("исчез поток"))?;
             dir.require_private()?;
-            if dir.names()?.iter().any(|n| n == "transaction.json") {
+            let names = dir.names()?;
+            if names.iter().any(|n| n == "transaction.json") {
                 return Err(ExchangeError::Blocked("recovery_required".into()));
+            }
+            if !state.streams.contains_key(&name) {
+                return Err(corrupt("каталог input не зарегистрирован в exchange"));
+            }
+            if names != ["current", "receipt.json"] {
+                return Err(corrupt("неучтённый объект внутри потока input"));
             }
         }
         for (key, stream) in &state.streams {
@@ -217,7 +280,7 @@ impl Store {
         }
         Ok(
             json!({"state":"succeeded","generation":state.generation,"streams":streams,
-            "pending_jobs":self.control.jobs.len()}),
+            "pending_jobs":self.control.jobs.len(),"rejected_jobs":self.control.rejected.iter().map(|(id, rejected)| json!({"job_id":id,"reason":rejected.reason})).collect::<Vec<_>>()}),
         )
     }
 
@@ -276,6 +339,7 @@ impl Store {
             let receipt = read_transaction(&dir, "receipt.json")?;
             if receipt.snapshot != *snapshot
                 || receipt.evidence != export.evidence()
+                || &receipt.inventory != export.inventory()
                 || previous
                     .as_ref()
                     .is_none_or(|p| p.source_sequence != receipt.sequence)
@@ -291,7 +355,7 @@ impl Store {
             return Ok(
                 json!({"state":"published","name":snapshot.name(),"identity":snapshot.identity(),
                 "revision":snapshot.revision(),"source_sequence":receipt.sequence,"evidence":receipt.evidence,
-                "content_changed":false,"recovered":true,"inventory":receipt.inventory,
+                "content_changed":false,"files_changed":false,"recovered":true,"inventory":receipt.inventory,
                 "input_directory":format!("decks/input/{key}/current")}),
             );
         }
@@ -302,16 +366,24 @@ impl Store {
         let unchanged = previous
             .as_ref()
             .is_some_and(|p| p.snapshot.revision() == snapshot.revision());
-        let inventory = if unchanged {
+        let files_changed = if let Some(prior) = &previous {
+            let receipt = read_transaction(&dir, "receipt.json")?;
             let current = dir
                 .child("current")?
                 .ok_or_else(|| corrupt("нет предыдущего полного экспорта"))?;
-            let (stored, _, inventory) =
-                read_export(&current, snapshot.identity().profile.clone())?;
-            if stored != *snapshot {
-                return Err(corrupt("current отличается от exchange"));
+            if receipt.snapshot != prior.snapshot
+                || receipt.sequence != prior.source_sequence
+                || receipt.evidence != prior.evidence
+            {
+                return Err(corrupt("receipt отличается от exchange"));
             }
-            inventory
+            verify_generation(&current, &receipt)?;
+            &receipt.inventory != export.inventory()
+        } else {
+            true
+        };
+        let inventory = if !files_changed {
+            export.inventory().clone()
         } else {
             dir.remove_tree("stage")?;
             let (stage, _) = dir.ensure_child("stage")?;
@@ -340,6 +412,7 @@ impl Store {
             inventory,
             previous,
             unchanged,
+            files_changed: Some(files_changed),
         };
         // С этого момента любой сбой восстанавливается только из этого intent.
         dir.publish("transaction.json", &encode_transaction(&tx)?)?;
@@ -356,7 +429,7 @@ impl Store {
         }
         // Сначала проверяем CAS-происхождение, ещё до переключения каталогов.
         self.check_exchange(tx)?;
-        if !tx.unchanged && dir.child("stage")?.is_some() {
+        if tx.files_changed.unwrap_or(!tx.unchanged) && dir.child("stage")?.is_some() {
             let stage = dir.child("stage")?.expect("checked stage");
             verify_generation(&stage, tx)?;
             if dir.child("current")?.is_some() {
@@ -414,7 +487,7 @@ impl Store {
         Ok(
             json!({"state":"published", "name":tx.snapshot.name(),"identity":tx.snapshot.identity(),
             "revision":tx.snapshot.revision(),"source_sequence":tx.sequence,"evidence":tx.evidence,
-            "content_changed":!tx.unchanged,"input_directory":format!("decks/input/{key}/current"),
+            "content_changed":!tx.unchanged,"files_changed":tx.files_changed.unwrap_or(!tx.unchanged),"input_directory":format!("decks/input/{key}/current"),
             "inventory":tx.inventory}),
         )
     }
@@ -496,6 +569,22 @@ fn read_transaction(dir: &Directory, name: &str) -> Result<Transaction> {
         serde_json::from_slice(&dir.read(name)?).map_err(corrupt)?;
     if envelope.checksum != transaction_hash(&envelope.transaction)? {
         return Err(corrupt("контрольная сумма intent/receipt"));
+    }
+    let tx = &envelope.transaction;
+    if tx.evidence.starts_with("desktop-export:") {
+        let inventory_hash =
+            asset_store::hashing::sha256_hex(serde_json::to_vec(&tx.inventory).map_err(corrupt)?);
+        let parts: Vec<_> = tx.evidence.split(':').collect();
+        if parts.len() != 5
+            || !valid_key(parts[1])
+            || parts[2] != tx.snapshot.identity().profile.as_str()
+            || parts[3] != tx.snapshot.revision()
+            || parts[4] != inventory_hash
+        {
+            return Err(corrupt(
+                "свидетельство задания не соответствует полному inventory",
+            ));
+        }
     }
     Ok(envelope.transaction)
 }

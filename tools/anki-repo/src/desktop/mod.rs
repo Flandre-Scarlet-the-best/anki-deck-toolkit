@@ -78,7 +78,7 @@ pub enum Action {
         #[arg(long)]
         apply: bool,
     },
-    /// Адресно восстановить два аддона из проверенного backup вне addons21.
+    /// Адресно восстановить два аддона из проверенной резервной копии вне addons21.
     Restore {
         backup: String,
         #[arg(long)]

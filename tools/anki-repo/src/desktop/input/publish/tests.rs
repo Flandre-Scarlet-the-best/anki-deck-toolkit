@@ -95,6 +95,7 @@ fn prepare_intent(store: &Store, export: &VerifiedExport) -> (Directory, Transac
         inventory: export.inventory().clone(),
         previous,
         unchanged: false,
+        files_changed: None,
     };
     dir.publish("transaction.json", &encode_transaction(&tx).unwrap())
         .unwrap();
@@ -369,7 +370,19 @@ fn concurrent_owners_serialize_sequences_across_restart() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let store = Store::open(&root).unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let store = loop {
+                    match Store::open(&root) {
+                        Ok(store) => break store,
+                        Err(ExchangeError::Io(e))
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::yield_now()
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
                 store.recover().unwrap();
                 store
                     .publish(&export("same-content", &format!("live-job-{i}")))
@@ -480,4 +493,254 @@ fn durable_admission_intent_distinguishes_unsent_and_unknown_after_restart() {
     let legacy: PendingJob = serde_json::from_value(legacy).unwrap();
     assert!(legacy.admission_started);
     assert!(legacy.prepared_action("new-process").is_err());
+}
+
+fn physical_export(config: Option<&[u8]>) -> VerifiedExport {
+    let (_tmp, target, job, mut result) = source::tests::live_fixture();
+    let path = target.state().join("spool").join(&job.id).join("export");
+    if let Some(config) = config {
+        fs::write(path.join("import_config.yaml"), config).unwrap();
+    }
+    result["job"]["inventory"] = json!(
+        read_export(
+            &Directory::open(&path).unwrap(),
+            ProfileId::new(&job.profile_id).unwrap()
+        )
+        .unwrap()
+        .2
+    );
+    source::verify(&target, &job, &result).unwrap()
+}
+
+#[test]
+fn physical_config_change_and_removal_keep_semantics_and_recover_new_inventory() {
+    for config in [Some(b"new config".as_slice()), None] {
+        for step in [
+            "staged",
+            "intent",
+            "displaced",
+            "visible",
+            "recorded",
+            "receipt",
+            "none",
+        ] {
+            let tmp = TempDir::new("trusted-physical-generation");
+            let first = physical_export(Some(b"old config"));
+            let next = physical_export(config);
+            assert_eq!(first.snapshot(), next.snapshot());
+            let store = Store::open(tmp.path()).unwrap();
+            store.publish(&first).unwrap();
+            if step != "none" {
+                store.fault.set(Some(step));
+                assert!(matches!(store.publish(&next), Err(ExchangeError::Io(_))));
+            } else {
+                let result = store.publish(&next).unwrap();
+                assert_eq!(result["content_changed"], false);
+                assert_eq!(result["files_changed"], true);
+            }
+            drop(store);
+            let store = Store::open(tmp.path()).unwrap();
+            store.recover().unwrap();
+            let replay = store.publish(&next).unwrap();
+            assert_eq!(replay["source_sequence"], 2);
+            assert_eq!(replay["revision"], json!(first.snapshot().revision()));
+            let dir = key_dir(&store, &next);
+            let (stored, files, inventory) = read_export(
+                &dir.child("current").unwrap().unwrap(),
+                next.snapshot().identity().profile.clone(),
+            )
+            .unwrap();
+            assert_eq!(stored, *next.snapshot());
+            assert_eq!(files.get("import_config.yaml").map(Vec::as_slice), config);
+            assert_eq!(&inventory, next.inventory());
+            assert_eq!(receipt(&dir).inventory, inventory);
+            assert_eq!(
+                store.audit().unwrap()["streams"][0]["inventory"],
+                json!(inventory)
+            );
+            assert_eq!(store.publish(&next).unwrap()["source_sequence"], 2);
+        }
+    }
+}
+
+#[test]
+fn audit_rejects_orphan_missing_stream_and_unaccounted_objects_without_removing_them() {
+    for kind in ["orphan", "missing", "garbage", "root"] {
+        let tmp = TempDir::new("trusted-audit-inventory");
+        let store = Store::open(tmp.path()).unwrap();
+        let export = export("v1", "job");
+        store.publish(&export).unwrap();
+        let key = export.snapshot().identity().key();
+        let input = tmp.path().join("decks/input");
+        let suspicious = match kind {
+            "orphan" => {
+                let (dir, _) = store.input.ensure_child(&"a".repeat(64)).unwrap();
+                dir.publish("unknown", b"keep").unwrap();
+                input.join("a".repeat(64)).join("unknown")
+            }
+            "missing" => {
+                fs::rename(input.join(&key), tmp.path().join("displaced")).unwrap();
+                tmp.path().join("displaced/current/deck.json")
+            }
+            "garbage" => {
+                let dir = key_dir(&store, &export);
+                dir.publish("unknown", b"keep").unwrap();
+                input.join(key).join("unknown")
+            }
+            _ => {
+                store.input.publish("unknown", b"keep").unwrap();
+                input.join("unknown")
+            }
+        };
+        let before = fs::read(&suspicious).unwrap();
+        assert!(
+            matches!(store.audit(), Err(ExchangeError::CorruptState(_))),
+            "{kind}"
+        );
+        drop(store);
+        let public_error = super::super::status(tmp.path()).unwrap_err();
+        assert_eq!(public_error.details["reason"], "input_state_corrupt");
+        assert!(public_error.message.contains("Перечень объектов input"));
+        assert_eq!(fs::read(suspicious).unwrap(), before);
+    }
+}
+
+#[test]
+fn busy_owner_returns_without_waiting_and_releases_exclusive_access() {
+    let tmp = TempDir::new("trusted-busy-owner");
+    let root = tmp.path().to_path_buf();
+    let store = Store::open(&root).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let root2 = root.clone();
+    let other = std::thread::spawn(move || {
+        let result = Store::open(&root2);
+        sender.send(matches!(result, Err(ExchangeError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock)).unwrap();
+    });
+    // Первый владелец продолжает держать замок в ожидании своего экспорта.
+    assert!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+    );
+    store.publish(&export("v1", "first")).unwrap();
+    drop(store);
+    other.join().unwrap();
+    let store = Store::open(&root).unwrap();
+    assert_eq!(
+        store.publish(&export("v1", "second")).unwrap()["source_sequence"],
+        2
+    );
+    assert_eq!(
+        store.audit().unwrap()["streams"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
+fn final_rejection_is_durable_but_write_failure_and_uncertainty_keep_pending() {
+    let tmp = TempDir::new("trusted-rejected-attempt");
+    let mut store = Store::open(tmp.path()).unwrap();
+    let (_spool, target, job, result) = source::tests::live_fixture();
+    let key = job.key();
+    store.save_job(&key, job.clone()).unwrap();
+    for failure in [
+        super::super::super::error("http_unreachable", "нет связи"),
+        super::super::super::io_error(std::io::Error::other("ошибка чтения")),
+    ] {
+        let result = super::super::close_rejected_attempt(&mut store, &key, &job, failure).unwrap();
+        assert_ne!(result.details["attempt_closed"], true);
+        assert!(store.pending(&key).is_some());
+    }
+    fs::write(
+        target
+            .state()
+            .join("spool")
+            .join(&job.id)
+            .join("export/deck.json"),
+        b"{}",
+    )
+    .unwrap();
+    let failure = source::verify(&target, &job, &result).err().unwrap();
+    assert_eq!(failure.details["export_rejection_final"], true);
+    store.fault.set(Some("control"));
+    assert!(
+        super::super::close_rejected_attempt(
+            &mut store,
+            &key,
+            &job,
+            source::verify(&target, &job, &result).err().unwrap()
+        )
+        .is_err()
+    );
+    assert!(store.pending(&key).is_some());
+    drop(store);
+    let mut store = Store::open(tmp.path()).unwrap();
+    assert!(store.pending(&key).is_some());
+    let closed = super::super::close_rejected_attempt(&mut store, &key, &job, failure).unwrap();
+    assert_eq!(closed.details["attempt_closed"], true);
+    drop(store);
+    let mut store = Store::open(tmp.path()).unwrap();
+    assert!(store.pending(&key).is_none());
+    assert_eq!(store.control.rejected[&job.id].job.id, job.id);
+    assert_eq!(
+        store.control.rejected[&job.id].reason,
+        "export_validation_failed"
+    );
+    let mut next = job.clone();
+    next.id = "c".repeat(64);
+    store.save_job(&key, next.clone()).unwrap();
+    assert_eq!(store.pending(&key).unwrap().id, next.id);
+    assert!(
+        target
+            .state()
+            .join("spool")
+            .join(&job.id)
+            .join("export/deck.json")
+            .exists()
+    );
+}
+
+#[test]
+fn legacy_intent_keeps_checksum_but_cannot_confirm_inventory_of_other_bytes() {
+    let tmp = TempDir::new("trusted-legacy-inventory");
+    let store = Store::open(tmp.path()).unwrap();
+    let first = physical_export(Some(b"old config"));
+    store.publish(&first).unwrap();
+    let dir = key_dir(&store, &first);
+    let mut old = receipt(&dir);
+    old.files_changed = None;
+    dir.publish("receipt.json", &encode_transaction(&old).unwrap())
+        .unwrap();
+    store.audit().unwrap();
+    let next = physical_export(Some(b"new config"));
+    let previous = store.exchange.read().unwrap().streams[&first.snapshot().identity().key()]
+        .current
+        .clone();
+    let tx = Transaction {
+        snapshot: next.snapshot().clone(),
+        sequence: 2,
+        evidence: next.evidence().into(),
+        inventory: first.inventory().clone(),
+        previous: Some(previous),
+        unchanged: true,
+        files_changed: None,
+    };
+    dir.publish("transaction.json", &encode_transaction(&tx).unwrap())
+        .unwrap();
+    assert!(store.recover().is_err());
+    assert_eq!(
+        store.exchange.read().unwrap().streams[&first.snapshot().identity().key()]
+            .current
+            .source_sequence,
+        1
+    );
+    assert!(dir.names().unwrap().contains(&"transaction.json".into()));
+    assert_eq!(
+        dir.child("current")
+            .unwrap()
+            .unwrap()
+            .read("import_config.yaml")
+            .unwrap(),
+        b"old config"
+    );
 }

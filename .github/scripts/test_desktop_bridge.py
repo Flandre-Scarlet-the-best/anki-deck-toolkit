@@ -1,6 +1,8 @@
 """Изолированные контракты адаптера; не являются живым подтверждением Anki."""
 import copy
 import json
+import pickle
+import sqlite3
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -81,10 +83,27 @@ class BridgeContract(unittest.TestCase):
 
     def profile_manager(self):
         pm = self.mw.pm
+        database = sqlite3.connect(self.base / 'profile-fixture.db')
+        self.addCleanup(database.close)
+        database.execute('create table profiles (name text primary key, data blob)')
         pm.meta, pm.profile = {}, {}
-        pm.save = lambda: None
-        pm.db = SimpleNamespace(all=lambda sql: [('Synthetic', pm.profile)])
-        pm._unpickle = lambda data: data
+        pm.saves = 0
+        def save():
+            pm.saves += 1
+            for name, data in [('_global', pm.meta), (pm.name, pm.profile)]:
+                database.execute('insert or replace into profiles values (?, ?)', (name, pickle.dumps(data)))
+            database.commit()
+        def reload():
+            rows = dict(database.execute('select name, data from profiles'))
+            pm.meta = pickle.loads(rows.get('_global', pickle.dumps({})))
+            pm.profile = pickle.loads(rows.get(pm.name, pickle.dumps({})))
+        def rename(name):
+            database.execute('update profiles set name=? where name=?', (name, pm.name))
+            database.commit()
+            pm.name = name
+        pm.save, pm.reload, pm.rename = save, reload, rename
+        pm.db = SimpleNamespace(all=lambda sql: database.execute(sql).fetchall())
+        pm._unpickle = lambda data: data if isinstance(data, dict) else pickle.loads(data)
         self.mw.col = SimpleNamespace(decks=SimpleNamespace(all=lambda: [
             {'id': 1, 'name': 'Root'}, {'id': 2, 'name': 'Root::Child'},
             {'id': 3, 'name': 'Filtered', 'dyn': 1}]))
@@ -100,8 +119,11 @@ class BridgeContract(unittest.TestCase):
         self.assertIn('requires_approval', self.call('toolkitBindProfile')['error'])
         first = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
         self.assertEqual(first, self.call('toolkitBindProfile', approved=True)['result']['profile_id'])
-        pm.name = 'Renamed'
-        pm.db.all = lambda sql: [('Renamed', pm.profile)]
+        pm.reload()
+        self.assertEqual(first, self.call('toolkitCatalog')['result']['profile_id'])
+        pm.rename('Renamed')
+        pm.meta, pm.profile = {}, {}
+        pm.reload()
         self.assertEqual(first, self.call('toolkitCatalog', profile='Renamed')['result']['profile_id'])
         moved = self.base / 'copied-base'
         moved.mkdir()
@@ -120,6 +142,111 @@ class BridgeContract(unittest.TestCase):
         self.assertIn('identity_ambiguous', self.call('toolkitCatalog')['error'])
         pm.profile['anki_deck_toolkit_identity'] = 'not-a-uuid'
         self.assertIn('identity_corrupt', self.call('toolkitCatalog')['error'])
+
+    def test_partial_profile_bindings_never_generate_replacement_identity_or_save(self):
+        pm = self.profile_manager()
+        self.call('toolkitBindProfile', approved=True)
+        key = 'anki_deck_toolkit_identity'
+        meta, profile = copy.deepcopy(pm.meta), copy.deepcopy(pm.profile)
+        for owner, field in [('meta', key), ('meta', key + '_base'), ('profile', key)]:
+            for corrupt in ['missing', 'null', 'invalid']:
+                with self.subTest(owner=owner, field=field, corrupt=corrupt):
+                    pm.meta, pm.profile = copy.deepcopy(meta), copy.deepcopy(profile)
+                    target = getattr(pm, owner)
+                    if corrupt == 'missing':
+                        del target[field]
+                    else:
+                        target[field] = None if corrupt == 'null' else 'invalid'
+                    pm.save()
+                    before = copy.deepcopy((pm.meta, pm.profile))
+                    saves = pm.saves
+                    self.assertIsNotNone(self.call('toolkitBindProfile', approved=True)['error'])
+                    self.assertEqual(saves, pm.saves)
+                    self.assertEqual(before, (pm.meta, pm.profile))
+                    pm.reload()
+                    self.assertEqual(before, (pm.meta, pm.profile))
+        pm.meta, pm.profile = copy.deepcopy(meta), copy.deepcopy(profile)
+        pm.db.all = lambda sql: [('Other', pm.profile)]
+        saves = pm.saves
+        self.assertIn('identity_ambiguous', self.call('toolkitBindProfile', approved=True)['error'])
+        self.assertEqual(saves, pm.saves)
+
+    def test_renamed_profile_can_read_submit_and_execute_stable_ticket(self):
+        pm = self.profile_manager()
+        identity = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        identifier, path = self.ticket('import')
+        ticket = json.loads((path / 'request.json').read_text())
+        ticket['profile_id'] = identity
+        (path / 'request.json').write_text(json.dumps(ticket))
+        pm.rename('Renamed')
+        pm.reload()
+        source = path / 'source'
+        source.mkdir()
+        (source / 'deck.json').write_text(json.dumps({'children': [], 'note_models': [], 'media_files': []}))
+        self.mw.col = SimpleNamespace(models=SimpleNamespace(all=lambda: []))
+        self.mw.reset = lambda: None
+        self.assertEqual(self.call('toolkitJob', profile='Renamed', id=identifier)['result']['state'], 'prepared')
+        self.assertEqual(self.call('toolkitImport', profile='Renamed', id=identifier)['result']['state'], 'queued')
+        importer = SimpleNamespace(AnkiJsonImporter=lambda col: SimpleNamespace(load_deck=lambda directory: False))
+        with patch('importlib.import_module', return_value=importer):
+            self.scheduled[0]()
+        self.assertEqual(self.call('toolkitJob', profile='Renamed', id=identifier)['result']['state'], 'cancelled')
+        self.assertEqual(self.g['JOBS'][identifier]['profile'], 'Synthetic')
+
+    def test_renamed_profile_export_resumes_with_original_ticket_identity(self):
+        pm = self.profile_manager()
+        identity = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        identifier, path = self.ticket()
+        ticket = json.loads((path / 'request.json').read_text())
+        ticket.update(profile_id=identity, deck_id='42', deck_uuid=None, process=self.g['PROCESS'])
+        (path / 'request.json').write_text(json.dumps(ticket))
+        pm.rename('Renamed')
+        pm.reload()
+        deck = {'id': 42, 'name': 'Synthetic'}
+        self.mw.col = SimpleNamespace(decks=SimpleNamespace(by_name=lambda name: deck))
+        self.mw.create_backup_now = lambda: None
+        self.mw.reset = lambda: None
+        class Exporter:
+            def __init__(self, col, config):
+                self.last_exported_count = 0
+            def export_to_directory(self, source, output, **kwargs):
+                # Имитируется только внешний CrowdAnki; проверяемый адаптер настоящий.
+                source['crowdanki_uuid'] = 'first-assigned-uuid'
+                (output / 'deck.json').write_text(json.dumps({'crowdanki_uuid': source['crowdanki_uuid']}))
+        modules = {
+            '1788670778.export.anki_exporter': SimpleNamespace(AnkiJsonExporter=Exporter),
+            '1788670778.anki.adapters.anki_deck': SimpleNamespace(AnkiDeck=lambda deck: deck),
+            '1788670778.config.config_settings': SimpleNamespace(ConfigSettings=SimpleNamespace(get_instance=lambda: None)),
+        }
+        self.assertEqual(self.call('toolkitJob', profile='Renamed', id=identifier)['result']['state'], 'prepared')
+        self.assertEqual(self.call('toolkitExport', profile='Renamed', id=identifier)['result']['state'], 'queued')
+        with patch('importlib.import_module', side_effect=lambda name: modules[name]):
+            self.scheduled[0]()
+        value = self.call('toolkitJob', profile='Renamed', id=identifier)['result']
+        self.assertEqual(value['state'], 'succeeded')
+        self.assertEqual(value['profile_id'], identity)
+        self.assertEqual(value['profile'], 'Synthetic')
+        self.assertEqual(value['deck_uuid'], 'first-assigned-uuid')
+        self.assertIn('deck.json', value['inventory'])
+
+    def test_ticket_profile_checks_stable_id_even_with_same_name_and_protects_legacy(self):
+        pm = self.profile_manager()
+        identity = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        identifier, path = self.ticket()
+        original = json.loads((path / 'request.json').read_text())
+        for profile, profile_id in [('Synthetic', 'foreign'), ('Renamed', None), ('Renamed', 'foreign')]:
+            with self.subTest(profile=profile, profile_id=profile_id):
+                ticket = dict(original, profile=profile)
+                if profile_id is not None:
+                    ticket['profile_id'] = profile_id
+                (path / 'request.json').write_text(json.dumps(ticket))
+                self.assertIsNotNone(self.call('toolkitExport', id=identifier)['error'])
+                self.assertIsNotNone(self.call('toolkitJob', id=identifier)['error'])
+                self.g['execute_job'](identifier, self.mw, 'export', path, ticket)
+                self.assertEqual(self.g['JOBS'][identifier]['error'], 'profile_changed')
+                self.g['JOBS'].clear()
+                (path / 'result.json').unlink()
+        self.assertEqual(identity, self.call('toolkitCatalog')['result']['profile_id'])
 
     def test_catalog_respects_busy_and_modal_dialogs(self):
         self.profile_manager()

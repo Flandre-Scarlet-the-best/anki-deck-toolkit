@@ -54,18 +54,18 @@ pub(super) fn run(
         );
     }
     let catalog = transport::patched(&target, o, "toolkitBindProfile", json!({"approved":true}))?;
-    // Повторяем выбор после binding: текущие колоды могли измениться между HTTP-вызовами.
+    // Повторяем выбор после привязки: текущие колоды могли измениться между HTTP-вызовами.
     let selected = select(&catalog, requested, all)?;
     let mut store = publish::Store::open(repository).map_err(publication_error)?;
     let recovered = store.recover().map_err(publication_error)?;
     let mut outcomes = Vec::new();
     for deck in selected {
         if deck["state"] == "missing" {
-            outcomes.push(
-                json!({"name":deck["name"],"state":"failed","reason":"deck_not_found",
-                "input_confirmed":false,"anki_export_may_have_completed":false,
-                "message":"Колода отсутствует; прежний input сохранён"}),
+            let pending = store.pending_named(
+                catalog["profile_id"].as_str().unwrap_or(""),
+                deck["name"].as_str().unwrap_or(""),
             );
+            outcomes.push(missing_outcome(&target, o, &deck, &pending));
             continue;
         }
         let key = asset_store::hashing::sha256_hex(
@@ -76,7 +76,8 @@ pub(super) fn run(
             Ok(value) => outcomes.push(value),
             Err(e) => outcomes.push(json!({"name":deck["name"],"state":"failed",
                 "reason":e.details["reason"],"message":e.message,
-                "job_id":store.pending(&key).map(|p| p.id.clone()),
+                "job_id":e.details.get("job_id").cloned().unwrap_or_else(|| json!(store.pending(&key).map(|p| p.id.clone()))),
+                "attempt_closed":e.details["attempt_closed"],
                 "anki_export_may_have_completed":true,"input_confirmed":false})),
         }
     }
@@ -185,6 +186,21 @@ fn export_one(
     store: &mut publish::Store,
     wait_seconds: u64,
 ) -> Result<Value> {
+    if let Some(old) = store
+        .pending_named(
+            catalog["profile_id"].as_str().unwrap_or(""),
+            deck["name"].as_str().unwrap_or(""),
+        )
+        .into_iter()
+        .find(|job| job.key() != key)
+    {
+        let mut failure = error(
+            "pending_export_identity_mismatch",
+            "Имя принадлежало другому незавершённому источнику; сначала разрешите сохранённое задание",
+        );
+        failure.details["job_id"] = json!(old.id);
+        return Err(failure);
+    }
     let mut job = if let Some(job) = store.pending(key) {
         job.clone()
     } else {
@@ -194,12 +210,7 @@ fn export_one(
             .map_err(publication_error)?;
         job
     };
-    if job.profile_id != catalog["profile_id"] || job.deck_id != deck["id"] {
-        return Err(error(
-            "pending_export_identity_mismatch",
-            "Сохранённое задание принадлежит другому источнику",
-        ));
-    }
+    validate_pending_source(&job, catalog, deck)?;
     let end = Instant::now() + Duration::from_secs(wait_seconds);
     let mut sent = false;
     loop {
@@ -218,19 +229,19 @@ fn export_one(
                     store.finish_job(key).map_err(publication_error)?;
                     return Err(error(
                         "unsubmitted_source_restarted",
-                        "Anki перезапущена до admission; задание не выполнялось, повторите команду",
+                        "Anki перезапущена до принятия задания; задание не выполнялось, повторите команду",
                     ));
                 }
                 if !job.admission_started {
                     job.admission_started = true;
-                    // Намерение отправки durable ДО HTTP, включая неизвестный
-                    // результат admission и падение CLI между этими действиями.
+                    // Намерение отправки надёжно сохраняется ДО HTTP, включая неизвестный
+                    // результат принятия задания и падение CLI между этими действиями.
                     store
                         .save_job(key, job.clone())
                         .map_err(publication_error)?;
                 }
                 sent = true;
-                // При неизвестном admission следующий шаг — только toolkitJob с тем же ID.
+                // При неизвестном результате принятия задания следующий шаг — только toolkitJob с тем же ID.
                 if let Err(e) = source::submit(&current, o, &job)
                     && e.details["submission_state"] != "unknown"
                 {
@@ -238,13 +249,16 @@ fn export_one(
                 }
             }
             Some("succeeded") => {
-                let verified = source::verify(&current, &job, &result)?;
+                let verified = match source::verify(&current, &job, &result) {
+                    Ok(verified) => verified,
+                    Err(e) => return Err(close_rejected_attempt(store, key, &job, e)?),
+                };
                 let mut published = store.publish(&verified).map_err(publication_error)?;
                 published["job_id"] = json!(job.id);
                 published["anki_export_state"] = json!("succeeded");
                 published["input_confirmed"] = json!(true);
                 if store.finish_job(key).is_err() {
-                    // Durable C уже доказан. Ошибка уборки pending не отменяет
+                    // Надёжно сохранённый C уже доказан. Ошибка уборки pending не отменяет
                     // подтверждение; повтор сверит тот же job без новой ревизии.
                     published["pending_cleanup"] = json!("unknown");
                     published["next"] =
@@ -280,6 +294,68 @@ fn export_one(
     }
 }
 
+fn validate_pending_source(job: &source::PendingJob, catalog: &Value, deck: &Value) -> Result<()> {
+    if job.profile_id != catalog["profile_id"]
+        || job.deck_id != deck["id"]
+        || job.deck != deck["name"]
+        || job
+            .deck_uuid
+            .as_ref()
+            .is_some_and(|id| deck["crowdanki_uuid"] != *id)
+    {
+        return Err(error(
+            "pending_export_identity_mismatch",
+            "Сохранённое задание принадлежит изменившемуся источнику; ID сохранён, публикация и новая отправка запрещены",
+        ));
+    }
+    // None → UUID допустим: первый экспорт CrowdAnki сам назначает UUID.
+    Ok(())
+}
+
+fn missing_outcome(
+    t: &Target,
+    o: &Options,
+    deck: &Value,
+    pending: &[&source::PendingJob],
+) -> Value {
+    let jobs: Vec<_> = pending
+        .iter()
+        .map(|job| {
+            let result = source::poll(t, o, job);
+            json!({"job_id":job.id,"state":result.as_ref().ok().map(|v| &v["state"]),
+            "reason":result.as_ref().err().map(|e| &e.details["reason"])})
+        })
+        .collect();
+    json!({"name":deck["name"],"state":"failed",
+        "reason":if jobs.is_empty() {"deck_not_found"} else {"pending_export_source_missing"},
+        "input_confirmed":false,"anki_export_may_have_completed":!jobs.is_empty(),
+        "pending_jobs":jobs,"message":"Колода отсутствует; прежний input и сохранённые задания сохранены"})
+}
+
+fn close_rejected_attempt(
+    store: &mut publish::Store,
+    key: &str,
+    job: &source::PendingJob,
+    mut failure: crate::error::DomainError,
+) -> Result<crate::error::DomainError> {
+    if failure.details["export_rejection_final"] == true {
+        store
+            .reject_job(
+                key,
+                failure.details["reason"]
+                    .as_str()
+                    .unwrap_or("export_validation_failed"),
+            )
+            .map_err(publication_error)?;
+        failure.details["job_id"] = json!(job.id);
+        failure.details["attempt_closed"] = json!(true);
+        failure.message.push_str(
+            "; попытка сохранена как отвергнутая, следующий явный вызов создаст новое задание",
+        );
+    }
+    Ok(failure)
+}
+
 fn publication_error(e: crate::exchange::ExchangeError) -> crate::error::DomainError {
     // Сообщения parse/validate могут содержать приватные значения: наружу только класс.
     let reason = match e {
@@ -287,13 +363,35 @@ fn publication_error(e: crate::exchange::ExchangeError) -> crate::error::DomainE
         crate::exchange::ExchangeError::StaleState => "input_cas_conflict",
         crate::exchange::ExchangeError::CorruptState(_) => "input_state_corrupt",
         crate::exchange::ExchangeError::UnsafePath(_) => "input_unsafe_path",
+        crate::exchange::ExchangeError::Io(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            "input_busy"
+        }
         crate::exchange::ExchangeError::Io(_) => "input_durability_failure",
         _ => "input_verification_failed",
     };
-    external_error(
-        reason,
-        "Публикация input не подтверждена; прежний снимок/intent сохранены. Повторите sync-input для recovery; не сбрасывайте exchange",
-    )
+    if reason == "input_busy" {
+        return external_error(
+            reason,
+            "Владелец input занят; ожидание блокировки отключено. Дождитесь завершения другой команды и повторите вызов",
+        );
+    }
+    let message = match &e {
+        crate::exchange::ExchangeError::CorruptState(detail)
+            if matches!(
+                detail.as_str(),
+                "каталог input не зарегистрирован в exchange"
+                    | "неучтённый объект внутри потока input"
+                    | "нет каталога подтверждённого потока"
+                    | "неизвестный объект input"
+            ) =>
+        {
+            "Перечень объектов input не согласован с revisions.json: обнаружены неучтённые данные или отсутствует подтверждённый поток. Данные сохранены; восстановите согласованное хранилище"
+        }
+        _ => {
+            "Публикация input не подтверждена; прежний снимок/intent сохранены. Повторите sync-input для восстановления; не сбрасывайте exchange"
+        }
+    };
+    external_error(reason, message)
 }
 
 #[cfg(test)]

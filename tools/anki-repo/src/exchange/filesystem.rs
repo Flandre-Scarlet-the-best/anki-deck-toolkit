@@ -91,6 +91,25 @@ impl Directory {
         Ok(file)
     }
 
+    /// Немедленный отказ при занятом владельце; общий lock сохраняет прежний контракт.
+    pub fn try_lock(&self) -> Result<File> {
+        let file: File = openat(
+            &self.0,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?
+        .into();
+        file.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => {
+                std::io::Error::from(std::io::ErrorKind::WouldBlock)
+            }
+            std::fs::TryLockError::Error(e) => e,
+        })?;
+        Ok(file)
+    }
+
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         plain_filename(name)?;
         let mut file: File = openat(

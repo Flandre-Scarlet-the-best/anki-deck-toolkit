@@ -1,6 +1,6 @@
 """Версионированный адаптер, загружаемый проверенным bootstrap AnkiConnect.
 
-HTTP admission принадлежит upstream с дополнительным локальным capability token.
+Принятие задания по HTTP выполняет upstream с дополнительным локальным capability token.
 """
 import hashlib
 import hmac
@@ -135,24 +135,36 @@ def profile_identity(mw, bind=False):
     binding = mw.pm.meta.get(key + "_base")
     if binding is not None and binding != base_path:
         raise ValueError("profile_base_binding_mismatch: используйте исходную базу Anki; перенос или копия prefs21.db требует отдельной явной привязки")
-    if base_id is not None and binding is None:
-        raise ValueError("profile_base_binding_missing: восстановите согласованные prefs21.db из backup")
-    for value in (base_id, profile_id):
-        if value is not None and (not isinstance(value, str) or not re.fullmatch("[0-9a-f]{32}", value)):
-            raise ValueError("profile_identity_corrupt: восстановите prefs21.db из backup")
-    if bind:
-        mw.pm.meta.setdefault(key, uuid.uuid4().hex)
-        mw.pm.meta.setdefault(key + "_base", base_path)
-        mw.pm.profile.setdefault(key, uuid.uuid4().hex)
+    # Создавать всю связку можно только в действительно чистой базе.
+    records = [(name, mw.pm._unpickle(data)) for name, data in
+               mw.pm.db.all("select name, cast(data as blob) from profiles where name != '_global'")]
+    clean = (key not in mw.pm.meta and key + "_base" not in mw.pm.meta
+             and key not in mw.pm.profile and not any(key in data for _, data in records))
+    if not clean:
+        for value in (base_id, profile_id):
+            if not isinstance(value, str) or not re.fullmatch("[0-9a-f]{32}", value):
+                raise ValueError("profile_identity_corrupt: восстановите согласованные prefs21.db из резервной копии")
+        if binding is None:
+            raise ValueError("profile_base_binding_missing: восстановите согласованные prefs21.db из резервной копии")
+        for name, data in records:
+            if name != mw.pm.name and data.get(key) == profile_id:
+                raise ValueError("profile_identity_ambiguous: дублирован UUID профиля в prefs21.db")
+    elif bind:
+        base_id, profile_id = uuid.uuid4().hex, uuid.uuid4().hex
+        mw.pm.meta[key], mw.pm.meta[key + "_base"] = base_id, base_path
+        mw.pm.profile[key] = profile_id
         mw.pm.save()
-        base_id, profile_id = mw.pm.meta[key], mw.pm.profile[key]
-    if not base_id or not profile_id:
+    else:
         return None
-    # Копия записи профиля с прежним UUID не должна присвоить чужой поток.
-    for name, data in mw.pm.db.all("select name, cast(data as blob) from profiles where name != '_global'"):
-        if name != mw.pm.name and mw.pm._unpickle(data).get(key) == profile_id:
-            raise ValueError("profile_identity_ambiguous: дублирован UUID профиля в prefs21.db")
     return hashlib.sha256((base_id + ":" + profile_id).encode("ascii")).hexdigest()
+
+
+def ticket_profile_matches(ticket, mw):
+    # Устойчивый ID всегда проверяется, даже если текстовое имя совпало.
+    # Старый билет без ID сохраняет прежнюю строгую проверку имени.
+    if "profile_id" in ticket:
+        return bool(ticket["profile_id"]) and ticket["profile_id"] == profile_identity(mw)
+    return ticket.get("profile") == mw.pm.name
 
 
 def catalog(mw, bind=False):
@@ -211,7 +223,7 @@ def job_path(identifier, mw):
 def read_ticket(identifier, mw):
     path = job_path(identifier, mw)
     ticket = json.loads(safe_path(path / "request.json").read_text("utf-8"))
-    if ticket.get("profile") != mw.pm.name or ticket.get("approved") is not True:
+    if not ticket_profile_matches(ticket, mw) or ticket.get("approved") is not True:
         raise ValueError("unapproved_or_wrong_profile")
     if time.time() > ticket.get("expires", 0):
         raise ValueError("expired_ticket")
@@ -295,7 +307,7 @@ def execute_job(identifier, mw, action, path, ticket):
     partial_changes_possible = False
     try:
         save_result(path, value)
-        if mw.pm.name != ticket["profile"] or not mw.col or mw.state not in ("deckBrowser", "overview"):
+        if not ticket_profile_matches(ticket, mw) or not mw.col or mw.state not in ("deckBrowser", "overview"):
             raise ValueError("profile_changed")
         if not health(mw)[1]:
             raise ValueError("addons_not_ready")
@@ -348,8 +360,8 @@ def execute_job(identifier, mw, action, path, ticket):
             payload = json.loads(safe_path(source / "deck.json").read_text("utf-8"))
             import_preflight(mw, payload, source)
             importer = importlib.import_module(CROWD + ".importer.anki_importer")
-            # Оригинальный загрузчик с диалогом конфигурации и backup.
-            # Выполняется в потоке GUI после завершения HTTP admission.
+            # Оригинальный загрузчик с диалогом конфигурации и резервным копированием.
+            # Выполняется в потоке GUI после завершения принятия задания по HTTP.
             partial_changes_possible = True
             ok = importer.AnkiJsonImporter(mw.col).load_deck(source)
             value["state"] = "succeeded" if ok else "cancelled"
@@ -389,7 +401,7 @@ def dispatch(request):
         identifier = params.get("id")
         path = job_path(identifier, mw)
         ticket = json.loads((path / "request.json").read_text("utf-8"))
-        if ticket.get("profile") != mw.pm.name and (not ticket.get("profile_id") or ticket["profile_id"] != profile_identity(mw)):
+        if not ticket_profile_matches(ticket, mw):
             raise ValueError("wrong_profile")
         if identifier in JOBS:
             return dict(JOBS[identifier], observer_process=PROCESS)
@@ -426,7 +438,7 @@ def dispatch(request):
     upstream["ac"].runtime.gui.guard_lifecycle()
     if not health(mw)[1]:
         raise ValueError("addons_not_ready")
-    value = dict(id=identifier, state="queued", process=PROCESS, profile=mw.pm.name, action=kind)
+    value = dict(id=identifier, state="queued", process=PROCESS, profile=ticket["profile"], action=kind)
     save_result(path, value)
     JOBS[identifier] = value
     BUSY = True

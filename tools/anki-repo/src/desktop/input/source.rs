@@ -17,7 +17,7 @@ pub(super) struct PendingJob {
     pub deck: String,
     pub deck_uuid: Option<String>,
     pub process: String,
-    // Старый журнал без этого поля НЕ доказывает отсутствие HTTP admission.
+    // Старый журнал без этого поля НЕ доказывает отсутствие принятия задания по HTTP.
     #[serde(default = "uncertain_admission")]
     pub admission_started: bool,
 }
@@ -43,7 +43,7 @@ impl PendingJob {
         }
         Err(super::super::external_error(
             "export_completion_unknown_after_restart",
-            "Anki перезапущена, а durable result отсутствует после начала отправки. ID сохранён; prepared не доказывает отсутствие прежнего экспорта. Проверьте anki job и восстановите свидетельство; новый export автоматически не отправляется",
+            "Anki перезапущена, а надёжно сохранённый результат отсутствует после начала отправки. ID сохранён; prepared не доказывает отсутствие прежнего экспорта. Проверьте anki job и восстановите свидетельство; новый export автоматически не отправляется",
         ))
     }
 }
@@ -54,7 +54,7 @@ pub(super) enum PreparedAction {
     RenewSource,
 }
 
-/// Поля закрыты: production-путь создаёт его только по живому toolkitJob.
+/// Поля закрыты: рабочий путь создаёт его только по живому toolkitJob.
 pub(super) struct VerifiedExport {
     snapshot: Snapshot,
     files: BTreeMap<String, Vec<u8>>,
@@ -204,7 +204,7 @@ pub(super) fn verify(t: &Target, job: &PendingJob, result: &Value) -> Result<Ver
     }
     let expected: BTreeMap<String, String> = serde_json::from_value(value["inventory"].clone())
         .map_err(|_| {
-            error(
+            final_rejection(
                 "export_evidence_missing",
                 "Нет полного свидетельства байтов живого экспорта",
             )
@@ -214,17 +214,18 @@ pub(super) fn verify(t: &Target, job: &PendingJob, result: &Value) -> Result<Ver
         &directory,
         ProfileId::new(&job.profile_id).map_err(io_error)?,
     )
-    .map_err(|_| {
-        error(
+    .map_err(|e| match e {
+        crate::exchange::ExchangeError::Io(e) => io_error(e),
+        _ => final_rejection(
             "export_validation_failed",
             "Экспорт не прошёл структурную проверку или проверку физических файлов",
-        )
+        ),
     })?;
     if inventory != expected
         || snapshot.identity().crowdanki_uuid != value["deck_uuid"]
         || snapshot.name() != job.deck
     {
-        return Err(error(
+        return Err(final_rejection(
             "export_bytes_mismatch",
             "Байты или идентичность spool не совпадают с живым результатом",
         ));
@@ -254,6 +255,12 @@ pub(super) fn verify(t: &Target, job: &PendingJob, result: &Value) -> Result<Ver
     })
 }
 
+fn final_rejection(reason: &str, message: &str) -> super::super::DomainError {
+    let mut failure = error(reason, message);
+    failure.details["export_rejection_final"] = json!(true);
+    failure
+}
+
 pub(super) type ExportBytes = (
     Snapshot,
     BTreeMap<String, Vec<u8>>,
@@ -263,6 +270,14 @@ pub(super) type ExportBytes = (
 pub(super) fn read_export(
     directory: &Directory,
     profile: ProfileId,
+) -> crate::exchange::Result<ExportBytes> {
+    read_export_with_limit(directory, profile, 1024 * 1024 * 1024)
+}
+
+fn read_export_with_limit(
+    directory: &Directory,
+    profile: ProfileId,
+    limit: usize,
 ) -> crate::exchange::Result<ExportBytes> {
     use crate::exchange::ExchangeError;
     let names = directory.names()?;
@@ -277,7 +292,8 @@ pub(super) fn read_export(
     let json = directory.read("deck.json")?;
     let mut files = BTreeMap::from([("deck.json".into(), json.clone())]);
     let mut media_bytes = BTreeMap::new();
-    let mut total = json.len();
+    let mut total = 0;
+    count_bytes(&mut total, json.len(), limit)?;
     if let Some(media) = directory.child("media")? {
         let media_names = media.names()?;
         let mut normalized = std::collections::BTreeSet::new();
@@ -288,10 +304,7 @@ pub(super) fn read_export(
                 return Err(ExchangeError::UnsafePath("коллизия имён media".into()));
             }
             let bytes = media.read(name)?;
-            total += bytes.len();
-            if total > 1024 * 1024 * 1024 {
-                return Err(ExchangeError::UnsafePath("экспорт превышает 1 GiB".into()));
-            }
+            count_bytes(&mut total, bytes.len(), limit)?;
             files.insert(format!("media/{name}"), bytes.clone());
             media_bytes.insert(name.clone(), bytes);
         }
@@ -302,10 +315,9 @@ pub(super) fn read_export(
         }
     }
     if names.iter().any(|n| n == "import_config.yaml") {
-        files.insert(
-            "import_config.yaml".into(),
-            directory.read("import_config.yaml")?,
-        );
+        let bytes = directory.read("import_config.yaml")?;
+        count_bytes(&mut total, bytes.len(), limit)?;
+        files.insert("import_config.yaml".into(), bytes);
     }
     let snapshot = Snapshot::from_bytes(profile, &json, &media_bytes)?;
     if snapshot
@@ -327,6 +339,16 @@ pub(super) fn read_export(
         .map(|(n, b)| (n.clone(), asset_store::hashing::sha256_hex(b)))
         .collect();
     Ok((snapshot, files, inventory))
+}
+
+fn count_bytes(total: &mut usize, size: usize, limit: usize) -> crate::exchange::Result<()> {
+    *total = total
+        .checked_add(size)
+        .filter(|n| *n <= limit)
+        .ok_or_else(|| {
+            crate::exchange::ExchangeError::UnsafePath("экспорт превышает 1 GiB".into())
+        })?;
+    Ok(())
 }
 
 fn required(value: &Value, key: &str) -> Result<String> {
@@ -360,11 +382,11 @@ pub(super) fn synthetic(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::test_support::{MINIMAL_EXPORT, TempDir};
 
-    fn live_fixture() -> (TempDir, Target, PendingJob, Value) {
+    pub(in crate::desktop::input) fn live_fixture() -> (TempDir, Target, PendingJob, Value) {
         let temp = TempDir::new("trusted-live-evidence");
         let target = Target {
             executable: temp.path().join("anki"),
@@ -377,7 +399,7 @@ mod tests {
             process_probe: || Ok(json!({})),
         };
         let job = PendingJob {
-            id: "a".repeat(64),
+            id: patch::random_id().unwrap(),
             profile_id: "b".repeat(64),
             profile: "Synthetic".into(),
             deck_id: "42".into(),
@@ -436,6 +458,211 @@ mod tests {
             changed["state"] = json!(state);
             assert!(verify(&target, &job, &changed).is_err(), "{state}");
         }
+    }
+
+    fn options(target: &Target, port: u16) -> Options {
+        Options {
+            action: crate::desktop::Action::Doctor,
+            executable: Some(target.executable.clone()),
+            data_dir: Some(target.data.clone()),
+            profile: Some("Synthetic".into()),
+            endpoint: Some(format!("http://127.0.0.1:{port}")),
+            api_key_env: "ANKI_TEST_UNUSED_API_KEY".into(),
+        }
+    }
+
+    #[test]
+    fn poll_rejects_persisted_fallback_and_live_http_without_extra_flag_can_publish() {
+        use std::io::{BufRead, Read, Write};
+        let (tmp, mut target, job, result) = live_fixture();
+        target.executable = std::env::current_exe().unwrap();
+        target.discovery = json!({"platform":"linux","processes":[{
+            "pid":std::process::id().to_string(),"command_line":[target.executable]}]});
+        std::fs::create_dir_all(target.bridge()).unwrap();
+        std::fs::write(
+            target.bridge().join("settings.json"),
+            b"{\"token\":\"synthetic\"}",
+        )
+        .unwrap();
+        let path = target
+            .state()
+            .join("spool")
+            .join(&job.id)
+            .join("result.json");
+        std::fs::write(&path, serde_json::to_vec(&result["job"]).unwrap()).unwrap();
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        let o = options(&target, port);
+        let fallback = jobs::status(&target, &o, &job.id).unwrap();
+        assert_eq!(fallback["live_verified"], false);
+        assert_eq!(fallback["state"], "succeeded");
+        assert_eq!(
+            poll(&target, &o, &job).unwrap_err().details["reason"],
+            "export_not_live_verified"
+        );
+        let repository = tmp.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        let store = super::super::publish::Store::open(&repository).unwrap();
+        assert!(
+            store.audit().unwrap()["streams"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let o = options(&target, listener.local_addr().unwrap().port());
+        let response = result["job"].clone();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&connection);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(n) = line.to_lowercase().strip_prefix("content-length:") {
+                    length = n.trim().parse().unwrap();
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["action"], "toolkitJob");
+            let body = serde_json::to_string(&json!({"result":response,"error":null})).unwrap();
+            write!(
+                connection,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let live = poll(&target, &o, &job).unwrap();
+        assert!(live.get("live_verified").is_none());
+        let verified = verify(&target, &job, &live).unwrap();
+        assert_eq!(store.publish(&verified).unwrap()["source_sequence"], 1);
+        server.join().unwrap();
+        store.audit().unwrap();
+    }
+
+    #[test]
+    fn pending_selection_checks_name_known_uuid_and_accepts_first_assigned_uuid() {
+        let (tmp, target, mut job, result) = live_fixture();
+        let repository = tmp.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        let mut store = super::super::publish::Store::open(&repository).unwrap();
+        store.save_job(&job.key(), job.clone()).unwrap();
+        let o = options(&target, 1);
+        let catalog = json!({"profile_id":job.profile_id});
+        let deck = json!({"id":job.deck_id,"name":job.deck,"crowdanki_uuid":job.deck_uuid});
+        super::super::validate_pending_source(&job, &catalog, &deck).unwrap();
+        for (field, value) in [
+            ("name", "Renamed"),
+            ("crowdanki_uuid", "other-uuid"),
+            ("id", "other-id"),
+        ] {
+            let mut changed = deck.clone();
+            changed[field] = json!(value);
+            let key = asset_store::hashing::sha256_hex(
+                serde_json::to_vec(&json!([catalog["profile_id"], changed["id"]])).unwrap(),
+            );
+            assert_eq!(
+                super::super::export_one(&target, &o, &catalog, &changed, &key, &mut store, 1)
+                    .unwrap_err()
+                    .details["reason"],
+                "pending_export_identity_mismatch"
+            );
+            assert_eq!(store.pending(&job.key()).unwrap().id, job.id);
+            assert!(
+                store.audit().unwrap()["streams"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        job.deck_uuid = None;
+        super::super::validate_pending_source(&job, &catalog, &deck).unwrap();
+        verify(&target, &job, &result).unwrap();
+    }
+
+    #[test]
+    fn missing_selection_keeps_uncertain_attempt_after_rename_or_removal() {
+        let (tmp, mut target, job, _) = live_fixture();
+        target.discovery = json!({"platform":"linux"});
+        std::fs::create_dir_all(target.bridge()).unwrap();
+        std::fs::write(
+            target.bridge().join("settings.json"),
+            b"{\"token\":\"synthetic\"}",
+        )
+        .unwrap();
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let o = options(&target, socket.local_addr().unwrap().port());
+        drop(socket);
+        let repository = tmp.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        let mut store = super::super::publish::Store::open(&repository).unwrap();
+        store.save_job(&job.key(), job.clone()).unwrap();
+        for decks in [json!([]), json!([{"id":job.deck_id,"name":"Renamed"}])] {
+            let selected = super::super::select(
+                &json!({"decks":decks}),
+                std::slice::from_ref(&job.deck),
+                false,
+            )
+            .unwrap();
+            let pending = store.pending_named(&job.profile_id, &job.deck);
+            let outcome = super::super::missing_outcome(&target, &o, &selected[0], &pending);
+            assert_eq!(outcome["reason"], "pending_export_source_missing");
+            assert_eq!(outcome["anki_export_may_have_completed"], true);
+            assert_eq!(outcome["pending_jobs"][0]["job_id"], job.id);
+            assert_eq!(outcome["pending_jobs"][0]["reason"], "http_unreachable");
+        }
+        drop(store);
+        let store = super::super::publish::Store::open(&repository).unwrap();
+        assert_eq!(store.pending(&job.key()).unwrap().id, job.id);
+        assert_eq!(store.audit().unwrap()["pending_jobs"], 1);
+    }
+
+    #[test]
+    fn total_budget_counts_configuration_and_rejects_overflow() {
+        let limit = 1024 * 1024 * 1024;
+        let mut total = 0;
+        count_bytes(&mut total, limit - 4, limit).unwrap();
+        count_bytes(&mut total, 4, limit).unwrap();
+        assert!(count_bytes(&mut total, 1, limit).is_err());
+        let mut total = usize::MAX;
+        assert!(count_bytes(&mut total, 1, limit).is_err());
+        let (_tmp, target, job, mut result) = live_fixture();
+        let export = target.state().join("spool").join(&job.id).join("export");
+        std::fs::write(export.join("import_config.yaml"), b"config").unwrap();
+        let directory = Directory::open(&export).unwrap();
+        let profile = ProfileId::new(&job.profile_id).unwrap();
+        let (_, files, _) = read_export(&directory, profile.clone()).unwrap();
+        let actual: usize = files.values().map(Vec::len).sum();
+        // Та же проверка чтения, но малый бюджет: без учёта YAML этот отказ исчезнет.
+        assert!(read_export_with_limit(&directory, profile.clone(), actual - 1).is_err());
+        assert!(read_export_with_limit(&directory, profile, actual).is_ok());
+        assert_eq!(
+            verify(&target, &job, &result).err().unwrap().details["reason"],
+            "export_bytes_mismatch"
+        );
+        result["job"]["inventory"] = json!(
+            read_export(
+                &Directory::open(&export).unwrap(),
+                ProfileId::new(&job.profile_id).unwrap()
+            )
+            .unwrap()
+            .2
+        );
+        assert_eq!(
+            verify(&target, &job, &result).unwrap().files()["import_config.yaml"],
+            b"config"
+        );
     }
 
     #[test]
