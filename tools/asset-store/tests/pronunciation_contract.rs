@@ -570,7 +570,10 @@ fn replacing_a_quarantined_candidate_keeps_the_store_readable() {
         .unwrap()
         .to_path_buf();
     fs::write(slot.join(format!("{}.mp3", "a".repeat(64))), audio()).unwrap();
-    assert!(store.verify_integrity().is_err());
+    assert_eq!(
+        store.verify_integrity().unwrap_err().code,
+        ErrorCode::IntegrityMismatch
+    );
 }
 #[test]
 fn unvalidated_and_corrupt_candidates_cannot_be_human_approved() {

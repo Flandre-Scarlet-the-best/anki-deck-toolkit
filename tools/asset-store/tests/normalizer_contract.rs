@@ -646,7 +646,8 @@ fn batch_limits_cancellation_interruption_and_boundaries() {
     );
     assert_eq!(json(&after_cancel)["error"]["code"], "invalid_transition");
 
-    // Прерывание до начала работы ничего не помечает завершённым.
+    // Прерывание до начала работы учитывает только готовый результат общего
+    // кэша (вход, обработанный пакетом partial).
     let stop = AtomicBool::new(true);
     nbatch::start(nbatch::StartRequest {
         batch_id: "interrupted",
@@ -663,12 +664,15 @@ fn batch_limits_cancellation_interruption_and_boundaries() {
     .unwrap();
     let interrupted = nbatch::resume(&workspace, "interrupted", None, None, &stop).unwrap();
     assert_eq!(interrupted.outcome, "interrupted");
-    // Один вход уже обработан пакетом partial: кэш общий.
     assert_eq!(interrupted.processed_now, 0);
+    assert_eq!(interrupted.reused, 1);
+    let state = nbatch::status(&workspace, "interrupted").unwrap();
+    assert_eq!(state.progress.completed, interrupted.reused);
     let stop = AtomicBool::new(false);
     let finished = nbatch::resume(&workspace, "interrupted", None, None, &stop).unwrap();
     assert_eq!(finished.outcome, "completed");
     assert_eq!(finished.processed_now + finished.reused, 5);
+    assert!(finished.reused >= 1);
 
     // Вход и рабочий каталог не могут быть вложены друг в друга или в decks/.
     let nested = cli(
@@ -794,7 +798,6 @@ fn missing_ffmpeg_fails_before_any_state_and_names_the_tool() {
 /// Недоступный для записи рабочий каталог — отдельное условие.
 #[test]
 fn unwritable_workspace_fails_without_state() {
-    use std::os::unix::fs::PermissionsExt;
     if running_as_root() {
         return;
     }
@@ -802,7 +805,7 @@ fn unwritable_workspace_fails_without_state() {
     let input = corpus(ws.path());
     let locked = ws.path().join("locked");
     fs::create_dir(&locked).unwrap();
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+    let restore = ClosedDirectory::close(&locked);
     let denied = cli(
         ws.path(),
         &[
@@ -815,7 +818,7 @@ fn unwritable_workspace_fails_without_state() {
             locked.to_str().unwrap(),
         ],
     );
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    drop(restore);
     assert!(!denied.status.success());
     assert!(matches!(
         json(&denied)["error"]["code"].as_str(),
@@ -1265,7 +1268,6 @@ fn outputs_never_reach_protected_trees_and_report_is_atomic() {
 /// явно сообщает о совершённой публикации, а повтор идемпотентен.
 #[test]
 fn publication_record_failure_after_store_commit_is_repairable() {
-    use std::os::unix::fs::PermissionsExt;
     if running_as_root() {
         return;
     }
@@ -1295,7 +1297,7 @@ fn publication_record_failure_after_store_commit_is_repairable() {
     }
     let publications = workspace.join(".runtime/batches/normalizer-cache/publications");
     fs::create_dir_all(&publications).unwrap();
-    fs::set_permissions(&publications, fs::Permissions::from_mode(0o500)).unwrap();
+    let restore = ClosedDirectory::close(&publications);
     let publish = || {
         cli(
             ws.path(),
@@ -1316,8 +1318,9 @@ fn publication_record_failure_after_store_commit_is_repairable() {
             ],
         )
     };
-    let failed = json(&publish());
-    fs::set_permissions(&publications, fs::Permissions::from_mode(0o700)).unwrap();
+    let failed_output = publish();
+    drop(restore);
+    let failed = json(&failed_output);
     let details = &failed["error"]["details"];
     assert_eq!(details["store_committed"], true, "{failed}");
     let published = details["published_sha256"].as_str().unwrap().to_owned();
@@ -1341,6 +1344,25 @@ fn publication_record_failure_after_store_commit_is_repairable() {
         .unwrap();
     assert_eq!(after.sha256, current.sha256);
     assert_eq!(after.lifecycle, current.lifecycle);
+}
+
+/// Каталог без права записи на время проверки; права возвращаются и при
+/// панике, иначе `TempWorkspace` не смог бы убрать содержимое.
+struct ClosedDirectory<'a>(&'a Path);
+
+impl<'a> ClosedDirectory<'a> {
+    fn close(path: &'a Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for ClosedDirectory<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o700));
+    }
 }
 
 fn store(path: &Path) -> AssetStore {

@@ -104,7 +104,8 @@ pub struct Progress {
     /// Входы с сохранённым результатом (по последней контрольной точке).
     pub completed: u64,
     pub by_outcome: BTreeMap<String, u64>,
-    /// Повторяемые сбои среды по SHA; после предела вход получает REVIEW_REQUIRED.
+    /// Сбои среды по SHA входа: вход остаётся незавершённым и повторяется
+    /// следующим запуском; в исход входа и кэш сбой не превращается.
     pub infrastructure_failures: BTreeMap<String, u32>,
     /// Входы, байты которых больше не совпадают с инвентаризацией.
     pub source_errors: BTreeMap<String, String>,
