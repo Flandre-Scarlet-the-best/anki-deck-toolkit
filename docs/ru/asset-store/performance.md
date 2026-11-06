@@ -427,10 +427,10 @@ cargo run -p benchmark-runner -- run asset-store.audio-normalizer-batch --profil
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"cold","recorded_at":"2026-11-05T23:50:31Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":3203312.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"cold","recorded_at":"2026-11-06T09:18:17Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":2915273.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
 ### `asset-store.audio-normalizer-batch` · профиль `cold`
 
-Последнее подтверждённое измерение: 2026-11-05 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · cold · online · итог `success`: успешных прогонов 5 из 5, прогревов 0.
+Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · cold · online · итог `success`: успешных прогонов 3 из 3, прогревов 0.
 
 | Факт окружения | Значение |
 |---|---|
@@ -449,27 +449,27 @@ cargo run -p benchmark-runner -- run asset-store.audio-normalizer-batch --profil
 |---|---|
 | параметр `jobs` | `4` |
 | параметр `mode` | `normalize` |
-| `corpus` · `bytes` | 3.05 MiB |
+| `corpus` · `bytes` | 2.78 MiB |
 | `corpus` · `files` | 301 |
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 32.775 s ± 761.52 ms | 32.86 s | 31.759 s – 33.608 s | 5 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 73.944 s ± 2.039 s | 74.467 s | 71.33 s – 75.877 s | 5 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 46.574 s ± 1.437 s | 46.376 s | 44.703 s – 48.523 s | 5 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 51.34 MiB ± 28.9 KiB | 51.34 MiB | 51.31 MiB – 51.39 MiB | 5 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 121.808 s ± 3.445 s | 122.135 s | 117.286 s – 125.717 s | 5 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 163.19 MiB ± 2.54 MiB | 163.23 MiB | 159.25 MiB – 166.21 MiB | 5 |
-| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 3.72 ядра ± 0.02 ядра | 3.72 ядра | 3.69 ядра – 3.74 ядра | 5 |
-| `disk_usage@path/workspace` | path / filesystem | 4.2 MiB ± 0 B | 4.2 MiB | 4.2 MiB – 4.2 MiB | 5 |
+| `time_wall_clock@command` | command / hyperfine | 36.811 s ± 55.15 ms | 36.792 s | 36.768 s – 36.873 s | 3 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 90.92 s ± 217.22 ms | 91.031 s | 90.669 s – 91.059 s | 3 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 45.209 s ± 86.68 ms | 45.198 s | 45.128 s – 45.3 s | 3 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 51.4 MiB ± 61.1 KiB | 51.39 MiB | 51.35 MiB – 51.46 MiB | 3 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 137.342 s ± 303.48 ms | 137.443 s | 137.001 s – 137.582 s | 3 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 157.63 MiB ± 3.33 MiB | 156.66 MiB | 154.88 MiB – 161.33 MiB | 3 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 3.73 ядра ± 0 ядер | 3.73 ядра | 3.73 ядра – 3.74 ядра | 3 |
+| `disk_usage@path/workspace` | path / filesystem | 4.39 MiB ± 0 B | 4.39 MiB | 4.39 MiB – 4.39 MiB | 3 |
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"warm","recorded_at":"2026-11-06T00:14:56Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":3203312.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"warm","recorded_at":"2026-11-06T09:18:56Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":2915273.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
 ### `asset-store.audio-normalizer-batch` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 0.
+Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 3 из 3, прогревов 0.
 
 | Факт окружения | Значение |
 |---|---|
@@ -488,19 +488,19 @@ cargo run -p benchmark-runner -- run asset-store.audio-normalizer-batch --profil
 |---|---|
 | параметр `jobs` | `4` |
 | параметр `mode` | `normalize` |
-| `corpus` · `bytes` | 3.05 MiB |
+| `corpus` · `bytes` | 2.78 MiB |
 | `corpus` · `files` | 301 |
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 120.1 ms ± 14.94 ms | 111.31 ms | 110.69 ms – 145.38 ms | 5 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 60.04 ms ± 11.41 ms | 65.32 ms | 42.64 ms – 69.88 ms | 5 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 44.54 ms ± 12.04 ms | 46.33 ms | 28.08 ms – 58.77 ms | 5 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 43 MiB ± 203.4 KiB | 43 MiB | 42.8 MiB – 43.29 MiB | 5 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 107.28 ms ± 9.22 ms | 103.47 ms | 100.57 ms – 123.47 ms | 5 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 17.21 MiB ± 227.71 KiB | 17.16 MiB | 16.91 MiB – 17.46 MiB | 5 |
-| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.81 ядра ± 0.08 ядра | 0.84 ядра | 0.68 ядра – 0.85 ядра | 5 |
-| `disk_usage@path/workspace` | path / filesystem | 4.2 MiB ± 0 B | 4.2 MiB | 4.2 MiB – 4.2 MiB | 5 |
+| `time_wall_clock@command` | command / hyperfine | 318.58 ms ± 11.19 ms | 320.54 ms | 306.54 ms – 328.67 ms | 3 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 145.11 ms ± 19.16 ms | 137.55 ms | 130.88 ms – 166.89 ms | 3 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 134.61 ms ± 14.89 ms | 136.93 ms | 118.69 ms – 148.21 ms | 3 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 47.91 MiB ± 208.19 KiB | 47.81 MiB | 47.79 MiB – 48.15 MiB | 3 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 284.33 ms ± 5.87 ms | 283.7 ms | 278.8 ms – 290.5 ms | 3 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 18.43 MiB ± 122.57 KiB | 18.48 MiB | 18.29 MiB – 18.52 MiB | 3 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.85 ядра ± 0.05 ядра | 0.86 ядра | 0.8 ядра – 0.89 ядра | 3 |
+| `disk_usage@path/workspace` | path / filesystem | 4.39 MiB ± 0 B | 4.39 MiB | 4.39 MiB – 4.39 MiB | 3 |
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
