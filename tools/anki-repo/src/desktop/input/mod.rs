@@ -185,7 +185,7 @@ fn export_one(
     store: &mut publish::Store,
     wait_seconds: u64,
 ) -> Result<Value> {
-    let job = if let Some(job) = store.pending(key) {
+    let mut job = if let Some(job) = store.pending(key) {
         job.clone()
     } else {
         let job = source::prepare(t, o, catalog, deck)?;
@@ -208,12 +208,26 @@ fn export_one(
         let result = source::poll(&current, o, &job)?;
         match result["state"].as_str() {
             Some("prepared") if !sent => {
-                if job.process != catalog["process"] {
+                let observer = result["job"]["observer_process"].as_str().ok_or_else(|| {
+                    error(
+                        "export_observer_unverified",
+                        "Не подтверждён процесс, ответивший на toolkitJob",
+                    )
+                })?;
+                if job.prepared_action(observer)? == source::PreparedAction::RenewSource {
                     store.finish_job(key).map_err(publication_error)?;
                     return Err(error(
                         "unsubmitted_source_restarted",
                         "Anki перезапущена до admission; задание не выполнялось, повторите команду",
                     ));
+                }
+                if !job.admission_started {
+                    job.admission_started = true;
+                    // Намерение отправки durable ДО HTTP, включая неизвестный
+                    // результат admission и падение CLI между этими действиями.
+                    store
+                        .save_job(key, job.clone())
+                        .map_err(publication_error)?;
                 }
                 sent = true;
                 // При неизвестном admission следующий шаг — только toolkitJob с тем же ID.

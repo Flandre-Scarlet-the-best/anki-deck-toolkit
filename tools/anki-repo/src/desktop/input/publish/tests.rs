@@ -420,6 +420,7 @@ fn corrupted_pending_index_cannot_trigger_a_second_export() {
         deck: "Deck".into(),
         deck_uuid: None,
         process: "process".into(),
+        admission_started: false,
     };
     let key = job.key();
     store.save_job(&key, job).unwrap();
@@ -431,4 +432,52 @@ fn corrupted_pending_index_cannot_trigger_a_second_export() {
         Store::open(tmp.path()),
         Err(ExchangeError::CorruptState(_))
     ));
+}
+
+#[test]
+fn durable_admission_intent_distinguishes_unsent_and_unknown_after_restart() {
+    use source::PreparedAction;
+    let tmp = TempDir::new("trusted-input-admission-intent");
+    let mut store = Store::open(tmp.path()).unwrap();
+    let job = PendingJob {
+        id: "a".repeat(64),
+        profile_id: "b".repeat(64),
+        profile: "Synthetic".into(),
+        deck_id: "1".into(),
+        deck: "Deck".into(),
+        deck_uuid: None,
+        process: "old-process".into(),
+        admission_started: false,
+    };
+    let key = job.key();
+    store.save_job(&key, job).unwrap();
+    drop(store);
+    let mut store = Store::open(tmp.path()).unwrap();
+    let mut job = store.pending(&key).unwrap().clone();
+    assert_eq!(
+        job.prepared_action("new-process").unwrap(),
+        PreparedAction::RenewSource
+    );
+    assert_eq!(
+        job.prepared_action("old-process").unwrap(),
+        PreparedAction::SubmitSameId
+    );
+    job.admission_started = true;
+    store.save_job(&key, job).unwrap();
+    drop(store);
+    let store = Store::open(tmp.path()).unwrap();
+    let job = store.pending(&key).unwrap();
+    assert_eq!(
+        job.prepared_action("new-process").unwrap_err().details["reason"],
+        "export_completion_unknown_after_restart"
+    );
+    assert_eq!(
+        job.prepared_action("old-process").unwrap(),
+        PreparedAction::SubmitSameId
+    );
+    let mut legacy = serde_json::to_value(job).unwrap();
+    legacy.as_object_mut().unwrap().remove("admission_started");
+    let legacy: PendingJob = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.admission_started);
+    assert!(legacy.prepared_action("new-process").is_err());
 }

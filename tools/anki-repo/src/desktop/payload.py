@@ -227,6 +227,12 @@ def save_result(path, value):
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp, path / "result.json")
+        if os.name != "nt":
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -386,14 +392,14 @@ def dispatch(request):
         if ticket.get("profile") != mw.pm.name and (not ticket.get("profile_id") or ticket["profile_id"] != profile_identity(mw)):
             raise ValueError("wrong_profile")
         if identifier in JOBS:
-            return JOBS[identifier]
+            return dict(JOBS[identifier], observer_process=PROCESS)
         persisted = path / "result.json"
         if persisted.exists():
             v = json.loads(safe_path(persisted).read_text("utf-8"))
             if v.get("state") in ("running", "queued"):
                 v["state"] = "interrupted"
-            return v
-        return dict(id=identifier, state="prepared")
+            return dict(v, observer_process=PROCESS)
+        return dict(id=identifier, state="prepared", observer_process=PROCESS)
     if action == "toolkitShutdown":
         owner = os.environ.get("ANKI_TOOLKIT_OWNER")
         if not owner or not hmac.compare_digest(str(params.get("owner", "")), owner):

@@ -346,7 +346,7 @@ fn state_text(state: &str) -> &str {
         "setup_plan" | "patch_plan" | "restore_plan" | "operation_plan" | "launch_plan"
         | "stop_plan" => "план без изменений",
         "submitted" | "queued" => "задание принято",
-        "prepared" => "задание не принято; операция не начиналась",
+        "prepared" => "нет сохранённого admission; прежнее выполнение не доказано",
         "running" => "выполняется",
         "succeeded" => "успешно",
         "partial" => "частичный результат",

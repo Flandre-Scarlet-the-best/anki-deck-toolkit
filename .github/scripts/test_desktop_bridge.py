@@ -273,6 +273,31 @@ class BridgeContract(unittest.TestCase):
         self.assertEqual(len(self.scheduled), 1)
         self.assertEqual(json.loads((path / 'result.json').read_text())['state'], 'queued')
 
+    def test_job_response_identifies_observer_without_rewriting_execution_process(self):
+        identifier,path=self.ticket()
+        prepared=self.call('toolkitJob',id=identifier)['result']
+        self.assertEqual(prepared['observer_process'],self.g['PROCESS'])
+        self.assertEqual(prepared['state'],'prepared')
+        (path/'result.json').write_text(json.dumps({'id':identifier,'state':'succeeded','process':'old-process','action':'export'}))
+        result=self.call('toolkitJob',id=identifier)['result']
+        self.assertEqual(result['observer_process'],self.g['PROCESS'])
+        self.assertEqual(result['process'],'old-process')
+
+    def test_admission_directory_sync_failure_does_not_schedule_an_export(self):
+        import os
+        import stat
+        identifier,_=self.ticket()
+        original=os.fsync
+        def sync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError('injected_directory_fsync_failure')
+            original(descriptor)
+        with patch('os.fsync',sync):
+            result=self.call('toolkitExport',id=identifier)
+        self.assertIn('injected_directory_fsync_failure',result['error'])
+        self.assertEqual(self.scheduled,[])
+        self.assertEqual(self.call('toolkitJob',id=identifier)['result']['state'],'interrupted')
+
     def test_legacy_job_remains_readable_until_upgrade_cleanup(self):
         identifier = 'c' * 64
         path = self.root / 'spool' / identifier

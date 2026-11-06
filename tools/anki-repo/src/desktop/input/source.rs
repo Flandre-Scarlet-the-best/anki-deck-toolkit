@@ -17,6 +17,13 @@ pub(super) struct PendingJob {
     pub deck: String,
     pub deck_uuid: Option<String>,
     pub process: String,
+    // Старый журнал без этого поля НЕ доказывает отсутствие HTTP admission.
+    #[serde(default = "uncertain_admission")]
+    pub admission_started: bool,
+}
+
+fn uncertain_admission() -> bool {
+    true
 }
 
 impl PendingJob {
@@ -26,6 +33,25 @@ impl PendingJob {
                 .expect("сериализуемые идентификаторы job"),
         )
     }
+
+    pub fn prepared_action(&self, observer: &str) -> Result<PreparedAction> {
+        if self.process == observer {
+            return Ok(PreparedAction::SubmitSameId);
+        }
+        if !self.admission_started {
+            return Ok(PreparedAction::RenewSource);
+        }
+        Err(super::super::external_error(
+            "export_completion_unknown_after_restart",
+            "Anki перезапущена, а durable result отсутствует после начала отправки. ID сохранён; prepared не доказывает отсутствие прежнего экспорта. Проверьте anki job и восстановите свидетельство; новый export автоматически не отправляется",
+        ))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PreparedAction {
+    SubmitSameId,
+    RenewSource,
 }
 
 /// Поля закрыты: production-путь создаёт его только по живому toolkitJob.
@@ -68,6 +94,7 @@ pub(super) fn prepare(
         deck: required(deck, "name")?,
         deck_uuid: deck["crowdanki_uuid"].as_str().map(str::to_owned),
         process: required(catalog, "process")?,
+        admission_started: false,
     };
     let path = t.state().join("spool").join(&job.id);
     crate::layout::guard_local_path(&path, "Задание Desktop")?;
@@ -357,6 +384,7 @@ mod tests {
             deck: "Test::Deck".into(),
             deck_uuid: Some("deck-uuid-1".into()),
             process: "process-1".into(),
+            admission_started: true,
         };
         let export = target.state().join("spool").join(&job.id).join("export");
         std::fs::create_dir_all(export.join("media")).unwrap();
