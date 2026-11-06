@@ -1,6 +1,7 @@
-//! Управляемый адаптер Desktop; не владеет ревизиями или публикацией в input.
+//! Управляемый адаптер Desktop и закрытый доверенный путь публикации input.
 
 mod environment;
+mod input;
 mod jobs;
 mod patch;
 mod setup;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub const CONNECT: &str = "2055492159";
 pub const CROWD: &str = "1788670778";
-pub const PATCH_VERSION: &str = "1.0.2";
+pub const PATCH_VERSION: &str = "1.1.0";
 pub(crate) const COMPATIBILITY: &str = include_str!("compatibility.json");
 pub(crate) type Result<T> = std::result::Result<T, DomainError>;
 
@@ -98,6 +99,26 @@ pub enum Action {
     },
     /// Состояние асинхронного задания: queued/running/succeeded/cancelled/failed/interrupted.
     Job { id: String },
+    /// Подтверждённый экспорт выбранных колод в закрытый decks/input.
+    SyncInput {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        /// Точные имена; выбранные поддеревья не экспортируются дважды.
+        #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+        deck: Vec<String>,
+        /// Все обычные корневые колоды активного профиля.
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Проверить сохранённые поколения и exchange; содержимое карточек не выводится.
+    InputStatus {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
 }
 
 impl Options {
@@ -111,6 +132,11 @@ impl Options {
         }
         if let Action::Import { source, .. } = &self.action {
             paths.push(("Источник CrowdAnki", source.as_path()));
+        }
+        if let Action::SyncInput { repository, .. } | Action::InputStatus { repository } =
+            &self.action
+        {
+            paths.push(("Корень публикации input", repository.as_path()));
         }
         paths
     }
@@ -144,6 +170,9 @@ pub fn execute(options: &Options) -> Result<Value> {
     for (role, p) in options.paths() {
         crate::layout::guard_local_path(p, role)?;
     }
+    if let Action::InputStatus { repository } = &options.action {
+        return input::status(repository);
+    }
     let target = environment::resolve(options)?;
     match &options.action {
         Action::Doctor => environment::doctor(&target, options),
@@ -160,6 +189,22 @@ pub fn execute(options: &Options) -> Result<Value> {
             jobs::submit(&target, options, "import", None, Some(source), *apply)
         }
         Action::Job { id } => jobs::status(&target, options, id),
+        Action::SyncInput {
+            repository,
+            deck,
+            all,
+            wait_seconds,
+            apply,
+        } => input::run(
+            &target,
+            options,
+            repository,
+            deck,
+            *all,
+            *wait_seconds,
+            *apply,
+        ),
+        Action::InputStatus { .. } => unreachable!("handled before Desktop discovery"),
     }
 }
 
@@ -177,6 +222,8 @@ pub fn render_text(value: &Value) -> String {
         ("endpoint", "API"),
         ("backup", "Резервная копия"),
         ("spool", "Каталог задания"),
+        ("profile", "Профиль"),
+        ("profile_id", "Идентичность профиля"),
     ] {
         if let Some(s) = value[key].as_str() {
             lines.push(format!("{label}: {s}"));
@@ -231,6 +278,38 @@ pub fn render_text(value: &Value) -> String {
             lines.push(s.into());
         }
     }
+    if let Some(items) = value["decks"].as_array() {
+        for item in items {
+            lines.push(format!(
+                "{}: {}{}",
+                item["name"].as_str().unwrap_or("?"),
+                item["state"].as_str().unwrap_or("planned"),
+                item.get("reason")
+                    .map(|r| format!(" — {r}"))
+                    .unwrap_or_default()
+            ));
+            if let Some(sequence) = item["source_sequence"].as_u64() {
+                lines.push(format!(
+                    "  Подтверждение {sequence}, ревизия {}",
+                    item["revision"].as_str().unwrap_or("?")
+                ));
+            }
+            if let Some(id) = item["job_id"].as_str() {
+                lines.push(format!("  Задание: {id}"));
+            }
+        }
+    }
+    if let Some(items) = value["streams"].as_array() {
+        for item in items {
+            lines.push(format!(
+                "Поток {} / {}: подтверждение {}, ревизия {}",
+                item["identity"]["profile"].as_str().unwrap_or("?"),
+                item["identity"]["crowdanki_uuid"].as_str().unwrap_or("?"),
+                item["source_sequence"],
+                item["revision"].as_str().unwrap_or("?")
+            ));
+        }
+    }
     if value["ready"] == false {
         lines.push(
             "Полная функциональная готовность не подтверждена. Подробные свидетельства: --json."
@@ -270,6 +349,8 @@ fn state_text(state: &str) -> &str {
         "prepared" => "задание не принято; операция не начиналась",
         "running" => "выполняется",
         "succeeded" => "успешно",
+        "partial" => "частичный результат",
+        "input_plan" => "план экспорта без записи",
         "cancelled" => "отменено пользователем",
         "failed" => "ошибка",
         "interrupted" => "прервано",
@@ -279,6 +360,13 @@ fn state_text(state: &str) -> &str {
 }
 
 pub(crate) fn exit_code(options: &Options, value: &Value) -> u8 {
+    if matches!(options.action, Action::SyncInput { .. }) {
+        return if matches!(value["state"].as_str(), Some("input_plan" | "succeeded")) {
+            0
+        } else {
+            6
+        };
+    }
     if matches!(options.action, Action::Doctor) {
         return if value["ready"] == true { 0 } else { 6 };
     }

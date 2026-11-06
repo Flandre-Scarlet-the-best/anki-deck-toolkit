@@ -3,7 +3,7 @@
 //! Файл проверяет две границы, которые не принадлежат ни одной предметной
 //! команде:
 //!
-//! * `decks/input/` — закрытая область будущего доверенного загрузчика. Ни одна
+//! * `decks/input/` — закрытая область доверенного экспортера. Обычная
 //!   команда `anki-repo` не имеет права её открыть, и отказ обязан быть
 //!   объяснимым, а не «файл не найден»;
 //! * `anki-repo migrate-layout` — контролируемая миграция прежней раскладки в
@@ -278,6 +278,8 @@ fn every_export_directory_command_refuses_the_closed_input_area() {
     let proposals = proposals.display().to_string();
 
     let cases: Vec<Vec<&str>> = vec![
+        vec!["anki", "sync-input", "--repository", &path, "--all"],
+        vec!["anki", "input-status", "--repository", &path],
         vec!["inspect", &path],
         vec!["stats", &path],
         vec!["validate", &path],

@@ -30,6 +30,7 @@ cargo run -p anki-e2e -- full
 | `addons` | `addons` | чистая Anki без аддонов → `setup --apply` → штатный установщик → второй пакет через работающую Anki → no-op повторный setup |
 | `patch` | `patch` | `patch install/status/repair/remove`, стёртый bootstrap, повреждённый payload, изменённый upstream, `restore`, загрузка после перезапуска |
 | `crowdanki` | `crowdanki` | настоящие export/import с PNG, диалог CrowdAnki (OK и Cancel), отказы предвалидации, перенос в чистую базу с сохранением GUID, `ready` |
+| `run --scenarios input_export` | `input_export` (также в `full`) | настоящий `sync-input`, две корневые колоды и дочерняя с другой моделью, физические SHA, V1→V2→V3, независимый output, повтор и рестарт, одноимённые профили разных баз |
 | `process` | `process` | `launch/restart/stop`, отказ при модальном окне и busy, смерть процесса, чужой процесс |
 | `errors` | `errors` | отказ в установщике, отключённый аддон, чужой слушатель порта, чужой профиль, сломанный аддон |
 | `gui` | `addons`, `crowdanki` | основные штатные диалоги и уведомления |
@@ -605,6 +606,8 @@ evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузк�
 
 Стенд проверяет **Linux** Anki и не доказывает Windows/WSL-интеграцию из
 `desktop.md`. Он не читает и не пишет пользовательские `Anki2`, `decks/**` и
-`.asset-store/`. Набор расширяется новым сценарием в
+`.asset-store/`. `input_export` создаёт отдельный синтетический репозиторий
+внутри контейнера: `input` публикует и проверяет только production-владелец,
+стенд сверяет его inventory с живым job и известным PNG. Набор расширяется новым сценарием в
 `src/agent/scenarios.rs` без изменения Docker-архитектуры — например, для
-будущего обмена `Anki → input → output → Anki`.
+дальнейшего обмена `input → output → Anki`.

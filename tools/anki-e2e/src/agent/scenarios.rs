@@ -13,6 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod input_export;
+
 pub type Outcome = Result<(), Fail>;
 
 /// Фикстуры прогона: создаются настоящими шагами и копируются только при
@@ -1501,6 +1503,7 @@ pub fn by_name(name: &str) -> Option<fn(&mut Ctx, &mut Fixtures) -> Outcome> {
         "addons" => addons,
         "patch" => patch,
         "crowdanki" => crowdanki,
+        "input_export" => input_export::run,
         "process" => process,
         "errors" => errors,
         _ => return None,

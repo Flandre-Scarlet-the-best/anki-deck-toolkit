@@ -79,11 +79,82 @@ class BridgeContract(unittest.TestCase):
         request = {'action': 'version'}
         self.assertEqual(self.client.handler_async(request), ('upstream', request))
 
+    def profile_manager(self):
+        pm = self.mw.pm
+        pm.meta, pm.profile = {}, {}
+        pm.save = lambda: None
+        pm.db = SimpleNamespace(all=lambda sql: [('Synthetic', pm.profile)])
+        pm._unpickle = lambda data: data
+        self.mw.col = SimpleNamespace(decks=SimpleNamespace(all=lambda: [
+            {'id': 1, 'name': 'Root'}, {'id': 2, 'name': 'Root::Child'},
+            {'id': 3, 'name': 'Filtered', 'dyn': 1}]))
+        return pm
+
+    def test_catalog_dry_run_is_read_only_and_profile_binding_survives_rename(self):
+        pm = self.profile_manager()
+        plan = self.call('toolkitCatalog')['result']
+        self.assertIsNone(plan['profile_id'])
+        self.assertEqual(pm.meta, {})
+        self.assertEqual(pm.profile, {})
+        self.assertEqual([d['name'] for d in plan['decks']], ['Root', 'Root::Child'])
+        self.assertIn('requires_approval', self.call('toolkitBindProfile')['error'])
+        first = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        self.assertEqual(first, self.call('toolkitBindProfile', approved=True)['result']['profile_id'])
+        pm.name = 'Renamed'
+        pm.db.all = lambda sql: [('Renamed', pm.profile)]
+        self.assertEqual(first, self.call('toolkitCatalog', profile='Renamed')['result']['profile_id'])
+        moved = self.base / 'copied-base'
+        moved.mkdir()
+        pm.base = str(moved)
+        result = self.client.handler_async({'action':'toolkitCatalog','version':6,'key':'upstream-secret',
+            'params':{'token':self.secret,'installation':str(moved),'profile':'Renamed'}})
+        self.assertIn('base_binding_mismatch', result['error'])
+
+    def test_profile_identity_distinguishes_bases_and_rejects_duplicates_or_corruption(self):
+        pm = self.profile_manager()
+        first = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        pm.meta['anki_deck_toolkit_identity'] = 'd' * 32
+        second = self.call('toolkitCatalog')['result']['profile_id']
+        self.assertNotEqual(first, second)
+        pm.db.all = lambda sql: [('Other', pm.profile)]
+        self.assertIn('identity_ambiguous', self.call('toolkitCatalog')['error'])
+        pm.profile['anki_deck_toolkit_identity'] = 'not-a-uuid'
+        self.assertIn('identity_corrupt', self.call('toolkitCatalog')['error'])
+
+    def test_catalog_respects_busy_and_modal_dialogs(self):
+        self.profile_manager()
+        self.g['BUSY'] = True
+        self.assertIn('anki_busy', self.call('toolkitCatalog')['error'])
+        self.g['BUSY'] = False
+        with patch.object(self.modules['aqt.qt'].QApplication, 'activeModalWidget', lambda: object()):
+            self.assertIn('anki_busy', self.call('toolkitBindProfile', approved=True)['error'])
+
+    def test_catalog_rejects_two_live_decks_with_the_same_crowdanki_uuid(self):
+        self.profile_manager()
+        self.mw.col.decks.all = lambda: [
+            {'id': 1, 'name': 'Root', 'crowdanki_uuid': 'same'},
+            {'id': 2, 'name': 'Other', 'crowdanki_uuid': 'same'}]
+        self.assertIn('ambiguous_deck_uuid', self.call('toolkitCatalog')['error'])
+
+    def test_export_inventory_hashes_complete_bytes_and_rejects_links(self):
+        import hashlib
+        import os
+        output = self.base / 'export'
+        (output / 'media').mkdir(parents=True)
+        data = bytes(range(251)) * 1000
+        (output / 'deck.json').write_bytes(b'{"unknown":true}')
+        (output / 'media/asset.bin').write_bytes(data)
+        result = self.g['export_inventory'](output)
+        self.assertEqual(result['media/asset.bin'], hashlib.sha256(data).hexdigest())
+        os.link(output / 'media/asset.bin', output / 'media/hardlink.bin')
+        with self.assertRaisesRegex(ValueError, 'unsafe_export_file'):
+            self.g['export_inventory'](output)
+
     def test_handshake_requires_both_authorizations_and_profile(self):
         result = self.call('toolkitStatus', nonce='challenge')['result']
         self.assertEqual(result['nonce'], 'challenge')
         self.assertEqual(result['upstream_api_version'], 6)
-        self.assertEqual(result['patch_version'], '1.0.2')
+        self.assertEqual(result['patch_version'], '1.1.0')
         for params, reason in [({'token': 'bad'}, 'unauthorized'), ({'profile': 'Other'}, 'wrong_profile'), ({'installation': '/'}, 'wrong_installation')]:
             self.assertIn(reason, self.call('toolkitStatus', **params)['error'])
         req = {'action': 'toolkitStatus', 'params': {'token': self.secret}, 'key': 'bad'}

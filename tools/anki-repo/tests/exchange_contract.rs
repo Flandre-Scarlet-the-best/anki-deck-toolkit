@@ -1255,8 +1255,10 @@ fn independent_processes_cannot_overwrite_each_others_revision() {
 fn normalized_name_and_registered_folder_collisions_are_diagnosed() {
     let mut value = base_export();
     value["name"] = json!("Parent::Child");
-    value["children"] = json!([{"__type__": "Deck", "crowdanki_uuid": "child",
-        "name": "Parent__Child", "notes": [], "children": []}]);
+    value["children"] = json!([
+        {"__type__": "Deck", "crowdanki_uuid": "child", "name": "A::B", "notes": [], "children": []},
+        {"__type__": "Deck", "crowdanki_uuid": "other-child", "name": "A__B", "notes": [], "children": []}
+    ]);
     assert!(
         Snapshot::from_bytes(profile(), &serde_json::to_vec(&value).unwrap(), &media()).is_err()
     );
@@ -1279,6 +1281,23 @@ fn normalized_name_and_registered_folder_collisions_are_diagnosed() {
     ));
     fs::write(f.state_file(), serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(f.store.read().is_err());
+}
+
+#[test]
+fn crowdanki_leaf_names_are_scoped_to_their_parent_tree() {
+    let mut value = base_export();
+    let empty_deck = |id: &str, name: &str| {
+        json!({"__type__":"Deck", "crowdanki_uuid":id,
+        "name":name,"deck_config_uuid":value["deck_config_uuid"],"notes":[],"children":[],"media_files":[]})
+    };
+    let mut left = empty_deck("left", "Left");
+    let mut right = empty_deck("right", "Right");
+    left["children"] = json!([empty_deck("left-child", "Child")]);
+    right["children"] = json!([empty_deck("right-child", "Child")]);
+    value["children"] = json!([left, right]);
+    assert!(
+        Snapshot::from_bytes(profile(), &serde_json::to_vec(&value).unwrap(), &media()).is_ok()
+    );
 }
 
 #[test]

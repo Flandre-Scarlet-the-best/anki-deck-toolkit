@@ -3,7 +3,9 @@
 Владелец контракта — `anki_repo::desktop` и группа `anki-repo anki`.
 Они готовят AnkiConnect и вызывают установленный CrowdAnki. Идентичностями,
 ревизиями и обменом владеет [exchange](exchange.md); этот адаптер не переносит
-`input ↔ output` и не открывает production `decks/input/`.
+`input ↔ output`. Отдельный закрытый владелец
+[`desktop::input`](input-export.md) публикует только проверенные результаты живого
+экспорта в `input`; обычные Desktop jobs по-прежнему работают со spool.
 
 ## Выбор установки
 
@@ -77,9 +79,13 @@ Anki и поддержку адаптером; `loaded` по диску оста
 ошибка авторизации и ошибка handshake разделены в машинном результате.
 
 Поддержка адаптера намеренно ограничена проверенными исходниками: Anki
-26.09.2 и 26.09.3 (числовые эквиваленты 26.9.2 и 26.9.3), AnkiConnect API 6
+26.09.2, 26.09.3 и 26.09.4 (числовые эквиваленты без ведущих нулей), AnkiConnect API 6
 из AnkiWeb с `mod` 1792032779 и CrowdAnki с `mod` 1789725370. Обе версии Anki
-подтверждены живым прогоном [E2E-стенда](../anki-e2e/README.md) на Linux Anki. Точный allowlist Python-файлов с
+26.09.2 и 26.09.3 подтверждены живым прогоном [E2E-стенда](../anki-e2e/README.md)
+на Linux Anki. Для 26.09.4 проверены
+[изменения upstream](https://github.com/ankitects/anki/compare/26.09.3...26.09.4)
+и совпадение байтов пакетов AnkiWeb с allowlist; отдельный полный E2E проверяет
+фактическую совместимость. Точный allowlist Python-файлов с
 SHA-256 находится в `src/desktop/compatibility.json`. Неизвестные изменения,
 включая добавленный Python-файл, приводят к `unsupported`/`incompatible`.
 Настройки `meta.json`, конфигурация и пользовательские файлы не заменяются
@@ -217,7 +223,9 @@ anki-repo --json anki --profile 'Selected profile' job JOB_ID
 пользователя, имеющий доступ к файлам и коду аддонов.
 
 Actions: `toolkitStatus`, `toolkitExport`, `toolkitImport`, `toolkitJob`,
-`toolkitShutdown`. Export вызывает `AnkiJsonExporter.export_to_directory` с
+`toolkitShutdown`, `toolkitCatalog`, `toolkitBindProfile`. Два последних обслуживают
+[доверенный экспорт](input-export.md), проходят прежнюю авторизацию и не возвращают
+произвольные файлы. Export вызывает `AnkiJsonExporter.export_to_directory` с
 физическим копированием media. Он также сохраняет служебные изменения в
 коллекции — это поведение CrowdAnki. Проверяется реальное наличие всех
 заявленных media после копирования, включая ошибки, которые upstream печатает

@@ -37,7 +37,7 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Данные будущего адаптера. `media` — полный набор физических файлов, включая
+    /// Данные доверенного адаптера. `media` — полный набор физических файлов, включая
     /// необъявленные. Отсутствующее объявленное media остаётся недоказанным.
     /// Метод не открывает ни одного пути, в том числе `decks/input`.
     pub fn from_bytes(
@@ -130,7 +130,18 @@ impl Snapshot {
                     "повторный UUID колоды".into(),
                 ));
             }
-            let normalized_name = export_name(string(node, "name")?)?;
+            // Оригинальный CrowdAnki сохраняет дочерним узлам только последнее
+            // имя. Одинаковые листья под разными родителями допустимы; коллизия
+            // проверяется по полному пути дерева, а не глобально по листу.
+            let mut full_name = String::new();
+            for depth in 0..=children.len() {
+                let ancestor = source::node_ref(&value, &children[..depth]).expect("путь дерева");
+                if depth > 0 {
+                    full_name.push_str("::");
+                }
+                full_name.push_str(string(ancestor, "name")?);
+            }
+            let normalized_name = export_name(&full_name)?;
             if !deck_names.insert(super::identity::path_key(&normalized_name)) {
                 return Err(ExchangeError::InvalidSnapshot(
                     "неоднозначные имена узлов колод после нормализации".into(),

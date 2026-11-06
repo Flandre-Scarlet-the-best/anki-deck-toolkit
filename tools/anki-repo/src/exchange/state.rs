@@ -17,7 +17,7 @@ const VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RevisionToken(String);
 
-/// Только будущий доверенный адаптер вправе утверждать, что это подтверждённый
+/// Только доверенный адаптер вправе утверждать, что это подтверждённый
 /// снимок Anki. Конструктор — явная граница доверия, не проверка живой Anki.
 #[derive(Debug, Clone)]
 pub struct Confirmation {
