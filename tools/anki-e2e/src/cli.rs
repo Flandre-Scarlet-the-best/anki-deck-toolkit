@@ -17,7 +17,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Полный набор на чистом контейнере: smoke, addons, patch, crowdanki, process, errors.
+    /// Полный набор на чистом контейнере: smoke, addons, patch, crowdanki, input_export, process, errors.
     Full(RunArgs),
     /// Обнаружение Anki, первый запуск, doctor, launch/stop без аддонов.
     Smoke(RunArgs),
@@ -136,7 +136,15 @@ pub struct RunArgs {
     pub rebuild: bool,
 }
 
-pub const FULL: &[&str] = &["smoke", "addons", "patch", "crowdanki", "process", "errors"];
+pub const FULL: &[&str] = &[
+    "smoke",
+    "addons",
+    "patch",
+    "crowdanki",
+    "input_export",
+    "process",
+    "errors",
+];
 pub const GUI: &[&str] = &["addons", "crowdanki"];
 
 impl Command {
@@ -224,7 +232,7 @@ mod tests {
             panic!("browser")
         };
         assert!(args.scenarios.is_empty());
-        // Граница берётся у production-владельца, а не из снимка числа.
+        // Граница берётся у рабочего владельца, а не из снимка числа.
         let production = asset_store::pronunciation::batch::MAX_BATCH_ITEMS;
         assert_eq!(usize::from(crate::browser::MAX_BATCH_ITEMS), production);
         let parse = |flag: &str, value: String| {

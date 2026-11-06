@@ -1,6 +1,6 @@
 """Версионированный адаптер, загружаемый проверенным bootstrap AnkiConnect.
 
-HTTP admission принадлежит upstream с дополнительным локальным capability token.
+Принятие задания по HTTP выполняет upstream с дополнительным локальным capability token.
 """
 import hashlib
 import hmac
@@ -10,10 +10,11 @@ import os
 from pathlib import Path
 import re
 import sys
+import stat
 import time
 import uuid
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 CONNECT = "2055492159"
 CROWD = "1788670778"
 ROOT = Path(__file__).parent
@@ -87,6 +88,8 @@ def context(request, params):
     requested = params.get("installation")
     if not isinstance(requested, str) or os.path.normcase(str(base)) != os.path.normcase(str(Path(requested).resolve())):
         raise ValueError("wrong_installation")
+    if params.get("profile") is not None and aqt.mw.pm.name is None:
+        raise ValueError("profile_not_ready")
     if params.get("profile") is not None and params["profile"] != aqt.mw.pm.name:
         raise ValueError("wrong_profile")
     return aqt.mw
@@ -117,9 +120,131 @@ def status(mw, params):
                 anki_version=aqt.appVersion, profile=mw.pm.name, data_dir=str(Path(mw.pm.base).resolve()),
                 addons_dir=mw.addonManager.addonsFolder(), process=PROCESS,
                 owner=os.environ.get("ANKI_TOOLKIT_OWNER"), nonce=params.get("nonce"),
-                capabilities=["toolkitStatus", "toolkitExport", "toolkitImport", "toolkitJob", "toolkitShutdown"],
+                capabilities=["toolkitStatus", "toolkitExport", "toolkitImport", "toolkitJob", "toolkitShutdown", "toolkitCatalog", "toolkitBindProfile"],
                 addons=addons, addons_ready=ready,
                 functional_evidence=EVIDENCE.get(mw.pm.name, {}), busy=BUSY)
+
+
+def profile_identity(mw, bind=False):
+    # prefs21.db принадлежит ProfileManager: имя меняется отдельно от данных
+    # профиля. UUID базы + UUID профиля не зависят от имени и WSL-пути.
+    key = "anki_deck_toolkit_identity"
+    base_id = mw.pm.meta.get(key)
+    profile_id = mw.pm.profile.get(key)
+    base_path = os.path.normcase(str(safe_path(Path(mw.pm.base)).resolve()))
+    binding = mw.pm.meta.get(key + "_base")
+    if binding is not None and binding != base_path:
+        raise ValueError("profile_base_binding_mismatch: используйте исходную базу Anki; перенос или копия prefs21.db требует отдельной явной привязки")
+    records = [(name, mw.pm._unpickle(data)) for name, data in
+               mw.pm.db.all("select name, cast(data as blob) from profiles where name != '_global'")]
+    registry_key, bound_key = key + "_profiles", key + "_bound"
+    registry = mw.pm.meta.get(registry_key)
+    def valid_uuid(value):
+        return isinstance(value, str) and re.fullmatch("[0-9a-f]{32}", value)
+    def corrupt():
+        raise ValueError("profile_identity_corrupt: восстановите согласованные prefs21.db из резервной копии")
+    clean = (key not in mw.pm.meta and key + "_base" not in mw.pm.meta
+             and registry_key not in mw.pm.meta and key not in mw.pm.profile
+             and bound_key not in mw.pm.profile
+             and not any(key in data or bound_key in data for _, data in records))
+    if clean:
+        if not bind:
+            return None
+        base_id, profile_id = uuid.uuid4().hex, uuid.uuid4().hex
+        registry = {}
+    else:
+        if not valid_uuid(base_id):
+            corrupt()
+        if binding is None:
+            raise ValueError("profile_base_binding_missing: восстановите согласованные prefs21.db из резервной копии")
+        if registry_key in mw.pm.meta:
+            if (not isinstance(registry, dict)
+                    or any(not isinstance(name, str) or not valid_uuid(value) for name, value in registry.items())
+                    or len(set(registry.values())) != len(registry)):
+                corrupt()
+        if bound_key in mw.pm.profile and mw.pm.profile[bound_key] is not True:
+            corrupt()
+        if key not in mw.pm.profile:
+            # Только запись, которая никогда не была привязана. Реестр имён и
+            # отдельная метка переносятся/сохраняются при переименовании профиля.
+            if (bound_key in mw.pm.profile or registry is None or mw.pm.name in registry
+                    or any(name == mw.pm.name and key in data for name, data in records)):
+                corrupt()
+            if not bind:
+                return None
+            profile_id = uuid.uuid4().hex
+        elif not valid_uuid(profile_id):
+            corrupt()
+        elif registry is not None:
+            if (profile_id not in registry.values()
+                    or (mw.pm.name in registry and registry[mw.pm.name] != profile_id)):
+                corrupt()
+        for name, data in records:
+            if name != mw.pm.name and data.get(key) == profile_id:
+                raise ValueError("profile_identity_ambiguous: дублирован UUID профиля в prefs21.db")
+        if registry is None and bind:
+            # Прежний формат сначала явно подтверждает существующий UUID;
+            # потерянный UUID не превращается в первичную привязку.
+            registry = {name: data[key] for name, data in records if key in data}
+            if any(not valid_uuid(value) for value in registry.values()) or len(set(registry.values())) != len(registry):
+                corrupt()
+    if bind:
+        registry = {name: value for name, value in registry.items() if value != profile_id}
+        registry[mw.pm.name] = profile_id
+        mw.pm.meta[key], mw.pm.meta[key + "_base"] = base_id, base_path
+        mw.pm.meta[registry_key] = registry
+        mw.pm.profile[key], mw.pm.profile[bound_key] = profile_id, True
+        mw.pm.save()
+    return hashlib.sha256((base_id + ":" + profile_id).encode("ascii")).hexdigest()
+
+
+def ticket_profile_matches(ticket, mw):
+    # Устойчивый ID всегда проверяется, даже если текстовое имя совпало.
+    # Старый билет без ID сохраняет прежнюю строгую проверку имени.
+    if "profile_id" in ticket:
+        return bool(ticket["profile_id"]) and ticket["profile_id"] == profile_identity(mw)
+    return ticket.get("profile") == mw.pm.name
+
+
+def catalog(mw, bind=False):
+    from aqt.qt import QApplication
+    if BUSY or not mw.col or mw.state not in ("deckBrowser", "overview") or QApplication.activeModalWidget() or getattr(mw, "_background_op_count", 0):
+        raise ValueError("anki_busy: завершите занятие или ответьте на диалог Anki")
+    upstream["ac"].runtime.gui.guard_lifecycle()
+    if not health(mw)[1]:
+        raise ValueError("addons_not_ready")
+    identity = profile_identity(mw, bind)
+    decks = [dict(id=str(d["id"]), name=d["name"], crowdanki_uuid=d.get("crowdanki_uuid"))
+             for d in mw.col.decks.all() if not d.get("dyn")]
+    uuids = [d["crowdanki_uuid"] for d in decks if d["crowdanki_uuid"] is not None]
+    if any(not isinstance(value, str) or not value for value in uuids) or len(set(uuids)) != len(uuids):
+        raise ValueError("ambiguous_deck_uuid: устраните повторяющиеся или повреждённые CrowdAnki UUID в Anki")
+    return dict(profile=mw.pm.name, profile_id=identity, process=PROCESS, decks=decks)
+
+
+def export_inventory(output):
+    # Свидетельство связывает полный набор байтов с живым завершением задания.
+    result = {}
+    files = [output / "deck.json"]
+    if (output / "import_config.yaml").exists():
+        files.append(output / "import_config.yaml")
+    media = output / "media"
+    if media.exists():
+        files.extend(media.iterdir())
+    for path in files:
+        safe_path(path)
+        metadata = path.stat()
+        if not path.is_file() or metadata.st_nlink != 1:
+            raise ValueError("unsafe_export_file")
+        if path.parent == media:
+            media_name(path.name)
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        after = path.stat()
+        if (metadata.st_size, metadata.st_mtime_ns, metadata.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            raise ValueError("export_changed_during_read")
+        result[path.relative_to(output).as_posix()] = digest
+    return result
 
 
 def job_path(identifier, mw):
@@ -137,7 +262,7 @@ def job_path(identifier, mw):
 def read_ticket(identifier, mw):
     path = job_path(identifier, mw)
     ticket = json.loads(safe_path(path / "request.json").read_text("utf-8"))
-    if ticket.get("profile") != mw.pm.name or ticket.get("approved") is not True:
+    if not ticket_profile_matches(ticket, mw) or ticket.get("approved") is not True:
         raise ValueError("unapproved_or_wrong_profile")
     if time.time() > ticket.get("expires", 0):
         raise ValueError("expired_ticket")
@@ -153,6 +278,12 @@ def save_result(path, value):
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp, path / "result.json")
+        if os.name != "nt":
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -215,7 +346,7 @@ def execute_job(identifier, mw, action, path, ticket):
     partial_changes_possible = False
     try:
         save_result(path, value)
-        if mw.pm.name != ticket["profile"] or not mw.col or mw.state not in ("deckBrowser", "overview"):
+        if not ticket_profile_matches(ticket, mw) or not mw.col or mw.state not in ("deckBrowser", "overview"):
             raise ValueError("profile_changed")
         if not health(mw)[1]:
             raise ValueError("addons_not_ready")
@@ -225,13 +356,27 @@ def execute_job(identifier, mw, action, path, ticket):
             config = importlib.import_module(CROWD + ".config.config_settings")
             class CheckedExporter(module.AnkiJsonExporter):
                 def _copy_media(self, deck, directory):
+                    originals = {}
                     for name in deck.get_media_file_list():
                         media_name(name)
-                        safe_path(Path(mw.col.media.dir()) / name)
+                        source = safe_path(Path(mw.col.media.dir()) / name)
+                        metadata = source.stat()
+                        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                            raise ValueError("unsafe_source_media")
+                        originals[name] = (metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
                     super()._copy_media(deck, directory)
+                    for name, before in originals.items():
+                        metadata = safe_path(Path(mw.col.media.dir()) / name).stat()
+                        if before != (metadata.st_ino, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns) or metadata.st_nlink != 1:
+                            raise ValueError("source_media_changed_during_export")
             deck = mw.col.decks.by_name(ticket["deck"])
             if deck is None:
                 raise ValueError("deck_not_found")
+            if ticket.get("profile_id") is not None:
+                if profile_identity(mw) != ticket["profile_id"] or str(deck["id"]) != ticket["deck_id"] or PROCESS != ticket["process"]:
+                    raise ValueError("export_source_changed")
+                if ticket.get("deck_uuid") and deck.get("crowdanki_uuid") != ticket["deck_uuid"]:
+                    raise ValueError("export_identity_changed")
             output = safe_path(path / "export")
             output.mkdir()  # Существующий экспорт или произвольный каталог не перезаписывается.
             partial_changes_possible = True
@@ -243,13 +388,19 @@ def execute_job(identifier, mw, action, path, ticket):
                 if not safe_path(output / "media" / name).is_file():
                     raise ValueError("export_media_copy_failed: " + name)
             value.update(state="succeeded", export_dir=str(output), notes=exporter.last_exported_count)
+            if ticket.get("profile_id") is not None:
+                if payload["crowdanki_uuid"] != mw.col.decks.by_name(ticket["deck"])["crowdanki_uuid"]:
+                    raise ValueError("export_uuid_mismatch")
+                value.update(profile_id=ticket["profile_id"], deck_id=ticket["deck_id"],
+                             deck_name=ticket["deck"], deck_uuid=payload["crowdanki_uuid"],
+                             inventory=export_inventory(output))
         else:
             source = safe_path(path / "source")
             payload = json.loads(safe_path(source / "deck.json").read_text("utf-8"))
             import_preflight(mw, payload, source)
             importer = importlib.import_module(CROWD + ".importer.anki_importer")
-            # Оригинальный загрузчик с диалогом конфигурации и backup.
-            # Выполняется в потоке GUI после завершения HTTP admission.
+            # Оригинальный загрузчик с диалогом конфигурации и резервным копированием.
+            # Выполняется в потоке GUI после завершения принятия задания по HTTP.
             partial_changes_possible = True
             ok = importer.AnkiJsonImporter(mw.col).load_deck(source)
             value["state"] = "succeeded" if ok else "cancelled"
@@ -281,21 +432,25 @@ def dispatch(request):
     mw = context(request, params)
     if action == "toolkitStatus":
         return status(mw, params)
+    if action in ("toolkitCatalog", "toolkitBindProfile"):
+        if action == "toolkitBindProfile" and params.get("approved") is not True:
+            raise ValueError("profile_binding_requires_approval")
+        return catalog(mw, action == "toolkitBindProfile")
     if action == "toolkitJob":
         identifier = params.get("id")
         path = job_path(identifier, mw)
         ticket = json.loads((path / "request.json").read_text("utf-8"))
-        if ticket.get("profile") != mw.pm.name:
+        if not ticket_profile_matches(ticket, mw):
             raise ValueError("wrong_profile")
         if identifier in JOBS:
-            return JOBS[identifier]
+            return dict(JOBS[identifier], observer_process=PROCESS)
         persisted = path / "result.json"
         if persisted.exists():
             v = json.loads(safe_path(persisted).read_text("utf-8"))
             if v.get("state") in ("running", "queued"):
                 v["state"] = "interrupted"
-            return v
-        return dict(id=identifier, state="prepared")
+            return dict(v, observer_process=PROCESS)
+        return dict(id=identifier, state="prepared", observer_process=PROCESS)
     if action == "toolkitShutdown":
         owner = os.environ.get("ANKI_TOOLKIT_OWNER")
         if not owner or not hmac.compare_digest(str(params.get("owner", "")), owner):
@@ -322,7 +477,7 @@ def dispatch(request):
     upstream["ac"].runtime.gui.guard_lifecycle()
     if not health(mw)[1]:
         raise ValueError("addons_not_ready")
-    value = dict(id=identifier, state="queued", process=PROCESS, profile=mw.pm.name, action=kind)
+    value = dict(id=identifier, state="queued", process=PROCESS, profile=ticket["profile"], action=kind)
     save_result(path, value)
     JOBS[identifier] = value
     BUSY = True

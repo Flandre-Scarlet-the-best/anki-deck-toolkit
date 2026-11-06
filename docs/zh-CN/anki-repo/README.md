@@ -29,12 +29,12 @@
 
 独立的 `anki-repo anki` 命令组管理 Anki Desktop：`doctor`、`setup`、
 `patch install/status/repair/remove`、`restore`、`launch/stop/restart`、`export/import`
-及 `job`。在 WSL 中选择已安装的 Windows Anki；普通 Linux 环境选择 Linux Anki。
+、`job` 以及 [`sync-input` / `input-status`](../../ru/anki-repo/input-export.md)。在 WSL 中选择已安装的 Windows Anki；普通 Linux 环境选择 Linux Anki。
 安装不明确时必须显式指定 `--executable`/`--data-dir`。诊断显示实际目标平台、
 可执行文件、版本、数据根目录和配置档案。插件安装使用官方软件包和 Anki 原生交互式
 安装程序。命名空间 actions 扩展现有 AnkiConnect 并调用原始 CrowdAnki；只有加载后
 执行真实操作才能确认就绪。这是单独的网络适配器：本地导出命令仍为离线操作，
-`decks/input/` 仍受保护。兼容性、备份、取消和重启限制见
+`decks/input/` 对普通命令仍受保护，`desktop::input` 是专用可信所有者。兼容性、备份、取消和重启限制见
 [Desktop 集成契约](../../ru/anki-repo/desktop.md)。
 
 独立的 `pronunciation_audio` 域提供本地 MP3 资源和只读
@@ -100,7 +100,7 @@ anki-repo maintenance disable
 
 ### 受限的 `decks/input` 区域
 
-`decks/input/` 是留给未来可信导入器的封闭区域。任何命令都不得读取、遍历或修改该目录。凡是指向 `decks/input` 的路径（导出目录、`--before`/`--after`、`--out`、`--root`）都会以 `invalid_request` 拒绝，且 `details.reason = input_area_forbidden`；错误消息会说明区域及其用途。不存在绕过标志：这是 API 层面的限制，而非文件系统权限限制。检查也被纳入导出目录的契约，因此不仅 CLI，库调用也必须遵守。牌组工作区应使用 `decks/output/`。
+`decks/input/` 是可信交换的封闭区域。普通导出命令不得读取、遍历或修改该目录。专用可信所有者 `desktop::input` 提供 [`anki sync-input` 和 `anki input-status`](../../ru/anki-repo/input-export.md)。凡是指向 `decks/input` 的路径（导出目录、`--before`/`--after`、`--out`、`--root`）都会以 `invalid_request` 拒绝，且 `details.reason = input_area_forbidden`；错误消息会说明区域及其用途。不存在绕过标志：这是 API 层面的限制，而非文件系统权限限制。检查也被纳入导出目录的契约，因此不仅 CLI，库调用也必须遵守。牌组工作区应使用 `decks/output/`。
 
 ### 布局边界
 
