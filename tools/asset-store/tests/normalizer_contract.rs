@@ -518,6 +518,32 @@ fn batch_processes_directory_once_with_duplicates_unicode_and_failures() {
     assert_eq!(json(&changed)["error"]["details"]["changed"][0], "good.mp3");
 }
 
+/// Заведомое превышение `--max-total-bytes` по `fstat` отклоняется до чтения:
+/// разреженный файл в 1 TiB не читается и не хешируется целиком.
+#[test]
+fn inventory_rejects_declared_total_overflow_before_reading() {
+    let ws = TempWorkspace::create("normalizer-total-before-read").unwrap();
+    let input = ws.path().join("corpus");
+    fs::create_dir_all(&input).unwrap();
+    fs::File::create(input.join("huge.mp3"))
+        .unwrap()
+        .set_len(1 << 40)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let refused = nbatch::inventory(
+        &input,
+        &nbatch::Limits {
+            jobs: 1,
+            max_files: 10,
+            max_total_bytes: 1 << 20,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::InvalidTransition);
+    assert!(refused.message.contains("--max-total-bytes"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
 #[test]
 fn batch_limits_cancellation_interruption_and_boundaries() {
     let ws = TempWorkspace::create("normalizer-limits").unwrap();
@@ -1327,8 +1353,14 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         })
     };
     // Подтверждённый ресурс не заменяется без явного флага; превью его не трогает.
-    assert!(publish(&original.sha256, false).is_err());
-    assert!(publish(&"0".repeat(64), true).is_err());
+    assert_eq!(
+        publish(&original.sha256, false).unwrap_err().code,
+        ErrorCode::InvalidTransition
+    );
+    assert_eq!(
+        publish(&"0".repeat(64), true).unwrap_err().code,
+        ErrorCode::IdentityConflict
+    );
     let current = derivation::current_record(&store, &request)
         .unwrap()
         .unwrap();
@@ -1389,22 +1421,38 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         });
         assert!(refused.is_err());
     }
-    // KEEP_ORIGINAL и неизвестная пара не публикуются.
+    // KEEP_ORIGINAL не публикуется: остальные условия запроса допустимы.
     let kept = process(good(), &profile, Mode::Normalize, &toolchain()).unwrap();
-    assert!(
-        derivation::publish(derivation::PublishRequest {
-            store: &store,
-            request: &Pronunciation::new("良い", "よい").unwrap(),
-            result: &kept.result,
-            profile: &profile,
-            output_bytes: b"",
-            source_bytes: good(),
-            replace_expected_sha256: &"0".repeat(64),
-            allow_replace_verified: false,
-            override_gate: false,
-        })
-        .is_err()
-    );
+    assert_eq!(kept.result.gate.outcome, GateOutcome::KeepOriginal);
+    let kept_refused = derivation::publish(derivation::PublishRequest {
+        store: &store,
+        request: &request,
+        result: &kept.result,
+        profile: &profile,
+        output_bytes: kept.output_bytes.as_deref().unwrap_or_default(),
+        source_bytes: good(),
+        replace_expected_sha256: &derived.sha256,
+        allow_replace_verified: true,
+        override_gate: false,
+    })
+    .unwrap_err();
+    assert_eq!(kept_refused.code, ErrorCode::InvalidIdentity);
+    assert!(kept_refused.message.contains("нет обработанного варианта"));
+    // Пары нет в хранилище: результат, байты и CAS при этом корректны.
+    let unknown_refused = derivation::publish(derivation::PublishRequest {
+        store: &store,
+        request: &Pronunciation::new("良い", "よい").unwrap(),
+        result: &processed.result,
+        profile: &profile,
+        output_bytes: &output,
+        source_bytes: padded(),
+        replace_expected_sha256: &original.sha256,
+        allow_replace_verified: true,
+        override_gate: false,
+    })
+    .unwrap_err();
+    assert_eq!(unknown_refused.code, ErrorCode::InvalidTransition);
+    assert!(unknown_refused.message.contains("нет записи этой пары"));
 }
 
 #[test]

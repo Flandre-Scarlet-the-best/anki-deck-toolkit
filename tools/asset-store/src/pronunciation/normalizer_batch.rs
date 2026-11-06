@@ -444,7 +444,22 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
                     Mode::empty(),
                 );
                 let (entry, counted) = match opened {
-                    Ok(descriptor) => read_entry(relative, File::from(descriptor)),
+                    Ok(descriptor) => {
+                        let file = File::from(descriptor);
+                        // Заведомое превышение по `fstat` отклоняется до чтения:
+                        // иначе большой файл читался и хешировался бы целиком.
+                        // При ошибке `fstat` `read_entry` вернёт ошибку записи,
+                        // не читая байтов; итоговая проверка ниже учитывает рост
+                        // файла во время чтения.
+                        if let Ok(metadata) = file.metadata()
+                            && total.saturating_add(metadata.len()) > limits.max_total_bytes
+                        {
+                            return Err(invalid(
+                                "суммарный размер входа превышает --max-total-bytes",
+                            ));
+                        }
+                        read_entry(relative, file)
+                    }
                     // Запись стала ссылкой после перечисления: не следуем ей.
                     Err(rustix::io::Errno::LOOP) => {
                         skipped.push(skip("symlink"));
