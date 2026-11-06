@@ -210,10 +210,10 @@ fn owned(workdir: &File) -> Result<bool, AudioBenchError> {
 /// исполнителя каждого пакета. Захват без ожидания: занятая блокировка —
 /// отказ, а не ожидание, поэтому взаимной блокировки нет. Возвращённые
 /// дескрипторы удерживают блокировки до конца сброса.
-fn lock_idle_runtime(workdir: &File) -> Result<Vec<File>, AudioBenchError> {
+fn lock_idle_runtime(workdir: &File) -> Result<HeldLocks, AudioBenchError> {
     let busy =
         || fail("рабочий каталог используется активным пакетом нормализатора; сброс отклонён");
-    let mut held = Vec::new();
+    let mut held = HeldLocks(Vec::new());
     let Some(runtime) = child_dir(workdir, ".runtime")? else {
         return Ok(held);
     };
@@ -236,15 +236,30 @@ fn lock_idle_runtime(workdir: &File) -> Result<Vec<File>, AudioBenchError> {
             continue;
         };
         flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|_| busy())?;
-        if let Some(execution) = child_dir(&directory, "execution")? {
+        held.0.push(directory);
+        let directory = held.0.last().expect("только что добавлен");
+        if let Some(execution) = child_dir(directory, "execution")? {
             flock(&execution, FlockOperation::NonBlockingLockExclusive).map_err(|_| busy())?;
-            held.push(execution);
+            held.0.push(execution);
         }
-        held.push(directory);
     }
-    held.push(batches);
-    held.push(runtime);
+    held.0.push(batches);
+    held.0.push(runtime);
     Ok(held)
+}
+
+/// Блокировки сброса снимаются явно, в том числе при частичном захвате:
+/// копия дескриптора в процессе, запущенном через `fork` до `exec`, иначе
+/// удерживала бы их и после закрытия наших дескрипторов. Снятие блокировки,
+/// которую этот дескриптор не держит (`batches`, `runtime`), безвредно.
+struct HeldLocks(Vec<File>);
+
+impl Drop for HeldLocks {
+    fn drop(&mut self) {
+        for file in self.0.iter().rev() {
+            let _ = flock(file, FlockOperation::Unlock);
+        }
+    }
 }
 
 /// Приводит рабочий каталог к нужному состоянию. Чужой непустой каталог не трогается.
@@ -281,7 +296,7 @@ pub fn reset_workspace(
         }
         Err(error) => return Err(io_fail("рабочий каталог", error)),
     };
-    let mut _locks = Vec::new();
+    let mut _locks = HeldLocks(Vec::new());
     if let Some(directory) = &existing {
         let empty = Dir::read_from(directory)
             .map_err(|e| io_fail("рабочий каталог", e))?

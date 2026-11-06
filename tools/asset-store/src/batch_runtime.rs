@@ -221,7 +221,38 @@ impl ArtifactDirectory {
     }
 }
 
+/// Как и у [`ExecutionLease`], блокировка снимается явно: копия дескриптора,
+/// унаследованная через `fork` до `exec` параллельно запущенным процессом,
+/// иначе удерживала бы её после закрытия нашего дескриптора.
+impl Drop for SafeBatchRuntime {
+    fn drop(&mut self) {
+        if !self.locked {
+            return;
+        }
+        if let Err(error) = flock(&self.directory, FlockOperation::Unlock) {
+            tracing::warn!(
+                operation = "batch_runtime_lock",
+                stage = "runtime_lock",
+                code = "lock_release_on_drop_failed",
+                batch_id = self.batch_id,
+                error = %error,
+                "Не удалось явно снять блокировку состояния пакета; она снимется при закрытии дескриптора"
+            );
+        }
+    }
+}
+
 impl SafeBatchRuntime {
+    /// Копия дескриптора блокировки с тем же открытым описанием файла — как
+    /// у процесса, унаследовавшего его через `fork`, — и путь каталога.
+    #[cfg(test)]
+    pub(crate) fn lock_description_copy(&self) -> (File, PathBuf) {
+        (
+            self.directory.try_clone().expect("копия дескриптора"),
+            self.directory_path.clone(),
+        )
+    }
+
     /// Короткая блокировка состояния может сниматься на время внешней работы.
     /// Этот отдельный lease сохраняет единственного исполнителя и не мешает status/cancel.
     pub(crate) fn execution_lease(&self) -> Result<ExecutionLease, AssetError> {
