@@ -1458,6 +1458,7 @@ retained = ["кэш результатов и обработанные вари�
 description = "Прогрев: один полный пакет warmup над тем же входом и с той же конфигурацией заполняет кэш результатов; в серию не входит."
 program = { kind = "cargo-bin", package = "asset-store", bin = "pronunciation-assets" }
 args = ["normalizer", "batch-start", "--batch-id", "warmup", "--input-dir", "{input.corpus}", "--workspace", "target/benchmark-workloads/audio-normalizer/work", "--mode", "{param.mode}", "--jobs", "{param.jobs}"]
+env = { inherit = ["PATH"] }
 touches = "scenario-temp"
 timeout_seconds = 1800
 
