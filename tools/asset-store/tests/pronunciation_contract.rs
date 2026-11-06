@@ -732,6 +732,80 @@ fn reimport_revalidates_stale_technical_version_for_unchanged_bytes() {
     );
 }
 
+/// Подтверждённая запись с прежним свидетельством `pronunciation-mp3-technical`
+/// v1 остаётся читаемыми данными, но доверия не даёт; штатная повторная
+/// проверка той же пары/SHA переводит её на текущую версию, не создавая и не
+/// теряя решения человека.
+#[test]
+fn version_one_evidence_is_kept_untrusted_until_validate_reissues_current_evidence() {
+    let ws = TempWorkspace::create("audio-validator-v1-migration").unwrap();
+    let store = store(&ws.path().join("store"));
+    let original = import(&store, &request());
+    let attestation = attest(&store, &request(), &original.sha256, HumanDecision::Approve)
+        .unwrap()
+        .asset
+        .human_attestation;
+    assert_eq!(technical_validator_identity().version, "2");
+
+    let manifest_path = store.root().join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let identity = serde_json::to_value(request().identity()).unwrap();
+    let asset = manifest["assets"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|asset| asset["identity"] == identity)
+        .unwrap();
+    // Точная форма свидетельства прежней версии.
+    asset["validation"]["validator"]["version"] = serde_json::json!("1");
+    let evidence = &mut asset["validation"]["evidence"][0];
+    evidence["kind"] = serde_json::json!("mp3_technical_v1");
+    evidence["details"]["probe"]["schema_version"] = serde_json::json!(1);
+    evidence["details"]["probe"]
+        .as_object_mut()
+        .unwrap()
+        .remove("gapless");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let stale = store
+        .verify_integrity()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.identity == request().identity())
+        .unwrap();
+    assert_eq!(stale.validation.as_ref().unwrap().validator.version, "1");
+    assert_eq!(stale.human_attestation, attestation);
+    assert!(read_trusted(store.root(), &[request()]).is_err());
+
+    let report = store
+        .validate(SelectionMode::New, &AudioTechnicalValidator)
+        .unwrap();
+    assert!(report.blockers.is_empty(), "{report:?}");
+    let current = store
+        .verify_integrity()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.identity == request().identity())
+        .unwrap();
+    let validation = current.validation.as_ref().unwrap();
+    assert_eq!(validation.validator, technical_validator_identity());
+    assert_eq!(validation.evidence[0].kind, "mp3_technical_v2");
+    assert_eq!(
+        validation.evidence[0].details.as_ref().unwrap()["probe"]["schema_version"],
+        2
+    );
+    assert_eq!(current.human_attestation, attestation);
+    assert_eq!(
+        read_trusted(store.root(), &[request()]).unwrap()[0].bytes,
+        audio()
+    );
+}
+
 #[test]
 fn invalid_identity_does_not_abort_other_verified_variant_visits() {
     let ws = TempWorkspace::create("audio-variant-invalid-request").unwrap();
@@ -991,8 +1065,20 @@ fn strict_batch_plan_identity_source_sha_and_runtime_blob_are_checked() {
     assert!(resume(&store, "tamper", 128).is_err());
     assert!(store.verify_integrity().unwrap().is_empty());
 }
+/// CLI `pronunciation-assets`, изолированный от личной конфигурации
+/// разработчика. Тесты проверяют поведение по умолчанию, а
+/// `$XDG_CONFIG_HOME/anki-deck-toolkit/config.toml` (например, режим Forvo
+/// `extension_only`) и `ANKI_DECK_TOOLKIT_CONFIG` законно меняют его:
+/// без изоляции результат зависел бы от машины, на которой запущен тест.
+fn pronunciation_assets(sandbox: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"));
+    command
+        .env("XDG_CONFIG_HOME", sandbox.join("xdg"))
+        .env_remove(asset_store::user_config::ENV_PATH);
+    command
+}
 fn cli(ws: &TempWorkspace, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    pronunciation_assets(ws.path())
         .arg("--repository-root")
         .arg(ws.path())
         .arg("--store")
@@ -1009,7 +1095,7 @@ fn json(output: &Output) -> serde_json::Value {
 fn forvo_login_without_gui_reports_a_blocker_before_creating_profile_or_store() {
     let workspace = TempWorkspace::create("forvo-no-gui").unwrap();
     let profile = workspace.path().join("profile");
-    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    let output = pronunciation_assets(workspace.path())
         .arg("--repository-root")
         .arg(workspace.path())
         .arg("forvo")
@@ -1062,7 +1148,7 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
     let tools = workspace.path().join("tools");
     fs::create_dir(&tools).unwrap();
     let run = |path: &Path| {
-        Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+        pronunciation_assets(workspace.path())
             .arg("--repository-root")
             .arg(workspace.path())
             .arg("--store")
@@ -1536,7 +1622,7 @@ fn cli_reports_missing_decoder_tools_explicitly() {
     let ws = TempWorkspace::create("audio-tools").unwrap();
     let path = ws.path().join("source.mp3");
     fs::write(&path, audio()).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    let output = pronunciation_assets(ws.path())
         .arg("--repository-root")
         .arg(ws.path())
         .args(["probe", "--file"])
@@ -1856,7 +1942,7 @@ fn forvo_cli_rejects_profile_store_overlap_before_any_writes() {
         ];
         for (root, profile) in cases {
             let before = (tree(ws.path()), tree(external.path()));
-            let mut command = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"));
+            let mut command = pronunciation_assets(ws.path());
             command.arg("--repository-root").arg(ws.path());
             if let Some(root) = root {
                 command.arg("--store").arg(root);
@@ -1895,7 +1981,7 @@ fn forvo_cli_accepts_separate_external_private_profile_and_preserves_it() {
         "anki-asset-store/forvo-browser-profile/v1\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    let output = pronunciation_assets(ws.path())
         .arg("--repository-root")
         .arg(ws.path())
         .args(["forvo", "--profile"])
