@@ -1065,8 +1065,20 @@ fn strict_batch_plan_identity_source_sha_and_runtime_blob_are_checked() {
     assert!(resume(&store, "tamper", 128).is_err());
     assert!(store.verify_integrity().unwrap().is_empty());
 }
+/// CLI `pronunciation-assets`, изолированный от личной конфигурации
+/// разработчика. Тесты проверяют поведение по умолчанию, а
+/// `$XDG_CONFIG_HOME/anki-deck-toolkit/config.toml` (например, режим Forvo
+/// `extension_only`) и `ANKI_DECK_TOOLKIT_CONFIG` законно меняют его:
+/// без изоляции результат зависел бы от машины, на которой запущен тест.
+fn pronunciation_assets(sandbox: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"));
+    command
+        .env("XDG_CONFIG_HOME", sandbox.join("xdg"))
+        .env_remove(asset_store::user_config::ENV_PATH);
+    command
+}
 fn cli(ws: &TempWorkspace, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    pronunciation_assets(ws.path())
         .arg("--repository-root")
         .arg(ws.path())
         .arg("--store")
@@ -1083,7 +1095,7 @@ fn json(output: &Output) -> serde_json::Value {
 fn forvo_login_without_gui_reports_a_blocker_before_creating_profile_or_store() {
     let workspace = TempWorkspace::create("forvo-no-gui").unwrap();
     let profile = workspace.path().join("profile");
-    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    let output = pronunciation_assets(workspace.path())
         .arg("--repository-root")
         .arg(workspace.path())
         .arg("forvo")
@@ -1136,7 +1148,7 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
     let tools = workspace.path().join("tools");
     fs::create_dir(&tools).unwrap();
     let run = |path: &Path| {
-        Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+        pronunciation_assets(workspace.path())
             .arg("--repository-root")
             .arg(workspace.path())
             .arg("--store")
@@ -1610,7 +1622,7 @@ fn cli_reports_missing_decoder_tools_explicitly() {
     let ws = TempWorkspace::create("audio-tools").unwrap();
     let path = ws.path().join("source.mp3");
     fs::write(&path, audio()).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    let output = pronunciation_assets(ws.path())
         .arg("--repository-root")
         .arg(ws.path())
         .args(["probe", "--file"])
@@ -1930,7 +1942,7 @@ fn forvo_cli_rejects_profile_store_overlap_before_any_writes() {
         ];
         for (root, profile) in cases {
             let before = (tree(ws.path()), tree(external.path()));
-            let mut command = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"));
+            let mut command = pronunciation_assets(ws.path());
             command.arg("--repository-root").arg(ws.path());
             if let Some(root) = root {
                 command.arg("--store").arg(root);
@@ -1969,7 +1981,7 @@ fn forvo_cli_accepts_separate_external_private_profile_and_preserves_it() {
         "anki-asset-store/forvo-browser-profile/v1\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+    let output = pronunciation_assets(ws.path())
         .arg("--repository-root")
         .arg(ws.path())
         .args(["forvo", "--profile"])
