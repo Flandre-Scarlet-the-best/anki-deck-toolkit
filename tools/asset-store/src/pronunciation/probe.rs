@@ -57,6 +57,30 @@ impl GaplessEvidence {
             .checked_sub(u64::from(self.padding).max(DECODER_DELAY_SAMPLES))
             .filter(|samples| *samples > 0)
     }
+
+    /// Согласуется ли заявленная `ffprobe` длительность с доказанным тегом.
+    /// FFmpeg 8.0 и новее вычитают из длительности потока задержку и
+    /// дополнение (`frames × spf − start_pad − end_pad`), прежние версии
+    /// сообщают полную длину кадров тега (`frames × spf`). Принимается любая
+    /// из двух конвенций с обычным допуском; иная длительность — расхождение.
+    fn declared_duration_consistent(
+        &self,
+        declared: f64,
+        decoded: f64,
+        sample_rate: u32,
+        tolerance: f64,
+    ) -> bool {
+        let full = u64::from(self.xing_frames) as f64 * samples_per_frame(sample_rate) as f64
+            / f64::from(sample_rate);
+        (declared - decoded).abs() <= tolerance || (declared - full).abs() <= tolerance
+    }
+}
+
+/// Без доказанного gapless-тега кадр Xing/Info и задержка кодировщика
+/// могут убрать до трёх кадров. Допуск абсолютный, а не процентный:
+/// длинная усечённая запись не проходит.
+fn duration_tolerance(sample_rate: u32) -> f64 {
+    3.0 * 1152.0 / f64::from(sample_rate) + 0.002
 }
 
 /// Отсчётов на кадр Layer III: MPEG-1 — 1152, MPEG-2/2.5 — 576.
@@ -554,22 +578,22 @@ fn probe_inner(bytes: &[u8]) -> Result<AudioProbe, AssetError> {
     }
     let samples = (pcm.len() / stride) as u64;
     let decoded = samples as f64 / sample_rate as f64;
-    // Без доказанного gapless-тега кадр Xing/Info и задержка кодировщика
-    // могут убрать до трёх кадров. Допуск абсолютный, а не процентный:
-    // длинная усечённая запись не проходит.
-    let tolerance = 3.0 * 1152.0 / sample_rate as f64 + 0.002;
+    let tolerance = duration_tolerance(sample_rate);
     // Структурно доказанный тег заменяет допуск точным равенством: FFmpeg
     // обязан выдать ровно столько отсчётов, сколько следует из тега. Тег,
     // которому декодер противоречит, — отказ, а не повод ослабить проверку.
     let gapless = gapless_tag(bytes, &scan);
-    let frames_consistent = match &gapless {
-        Some(tag) => tag.expected_decoded_samples(samples_per_frame(sample_rate)) == Some(samples),
-        None => (encoded_samples as f64 / sample_rate as f64 - decoded).abs() <= tolerance,
+    let (frames_consistent, declared_consistent) = match &gapless {
+        Some(tag) => (
+            tag.expected_decoded_samples(samples_per_frame(sample_rate)) == Some(samples),
+            tag.declared_duration_consistent(declared, decoded, sample_rate, tolerance),
+        ),
+        None => (
+            (encoded_samples as f64 / sample_rate as f64 - decoded).abs() <= tolerance,
+            (declared - decoded).abs() <= tolerance,
+        ),
     };
-    if decoded > MAX_DURATION_SECONDS
-        || (declared - decoded).abs() > tolerance
-        || !frames_consistent
-    {
+    if decoded > MAX_DURATION_SECONDS || !declared_consistent || !frames_consistent {
         return Err(AssetError::with_details(
             ErrorCode::ValidatorFailure,
             "заявленная/кадровая и декодированная длительности расходятся",
@@ -1002,8 +1026,38 @@ mod tests {
             let encoded_samples = u64::from(probe.frames) * spf;
             assert!(
                 (encoded_samples - probe.decoded_samples) as f64 / f64::from(rate)
-                    > 3.0 * 1152.0 / f64::from(rate) + 0.002
+                    > duration_tolerance(rate)
             );
+        }
+    }
+
+    /// Заявленная длительность доказанного тега сверяется в обеих конвенциях
+    /// FFmpeg: с вычетом задержки и дополнения (8.0 и новее) и полной длиной
+    /// кадров тега (прежние версии, например 6.1 из Ubuntu 24.04). Для
+    /// MPEG-2 с большим дополнением полная длина выходит за обычный допуск,
+    /// но иная длительность по-прежнему отвергается.
+    #[test]
+    fn declared_duration_of_proven_tag_accepts_both_ffmpeg_conventions() {
+        let rate = 22050;
+        let tag = GaplessEvidence {
+            encoder: "LAME".into(),
+            delay: 576,
+            padding: 3000,
+            xing_frames: 40,
+        };
+        let spf = samples_per_frame(rate);
+        let decoded = tag.expected_decoded_samples(spf).unwrap() as f64 / f64::from(rate);
+        let full = f64::from(tag.xing_frames) * spf as f64 / f64::from(rate);
+        let tolerance = duration_tolerance(rate);
+        assert!(
+            (full - decoded).abs() > tolerance,
+            "прежняя проверка отвергала бы"
+        );
+        for declared in [decoded, full] {
+            assert!(tag.declared_duration_consistent(declared, decoded, rate, tolerance));
+        }
+        for declared in [full + 2.0 * tolerance, decoded - 2.0 * tolerance] {
+            assert!(!tag.declared_duration_consistent(declared, decoded, rate, tolerance));
         }
     }
 
