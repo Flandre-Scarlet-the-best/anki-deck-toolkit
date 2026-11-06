@@ -278,11 +278,20 @@ pub fn publish_with_outcome(request: PublishRequest<'_>) -> Result<PublishOutcom
             "публикуется только вариант, прошедший пост-QC фактического результата",
         ));
     }
-    let gate_ok = matches!(
-        result.gate.outcome,
-        GateOutcome::Accept | GateOutcome::AcceptWithLimitations
-    ) && result.gate.proposed_variant == Some(Variant::Processed);
-    if !gate_ok {
+    let gate_selects_processed = result.gate.proposed_variant == Some(Variant::Processed);
+    let gate_ok = gate_selects_processed
+        && matches!(
+            result.gate.outcome,
+            GateOutcome::Accept | GateOutcome::AcceptWithLimitations
+        );
+    // Прежний `REVIEW_REQUIRED` публиковался по явному override. Такой результат
+    // годится только для завершения уже зафиксированной публикации: повтор
+    // сверяет решение со свидетельством записи, а новая замена ниже отвергается
+    // по версии схемы.
+    let legacy_overridden = result.schema_version == LEGACY_RESULT_SCHEMA_VERSION
+        && result.gate.outcome == GateOutcome::ReviewRequired
+        && gate_selects_processed;
+    if !gate_ok && !legacy_overridden {
         return Err(AssetError::new(
             ErrorCode::InvalidTransition,
             "QualityGate не выбрал обработанный вариант: публикуется только вариант с исходом ACCEPT или ACCEPT_WITH_LIMITATIONS",
@@ -621,6 +630,109 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::UnsupportedSchemaVersion
+        );
+    }
+
+    /// Прерванная прежняя публикация `REVIEW_REQUIRED` по override (запись уже
+    /// заменена, выписка не сохранилась) завершается повтором того же
+    /// результата схемы 1, но только при совпадении сохранённого свидетельства;
+    /// новая замена по такому результату по-прежнему отвергается.
+    #[test]
+    fn legacy_overridden_publication_resumes_only_with_matching_evidence() {
+        use crate::pronunciation::normalizer::{Severity, config_sha256_for};
+        let ws = TempWorkspace::create("derivation-legacy-resume").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(ws.path().join("store")),
+            PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let request = Pronunciation::new("こいつ", "こいつ").unwrap();
+        let bytes = source_mp3();
+        let original = import_bytes(&store, &request, &bytes, "こいつ.mp3", None).unwrap();
+        let profile = NormalizerProfile::balanced();
+        let tools = Toolchain::detect().unwrap();
+        let processed = process(&bytes, &profile, Mode::Normalize, &tools).unwrap();
+        let output = processed.output_bytes.clone().unwrap();
+        let mut legacy = processed.result.clone();
+        legacy.schema_version = LEGACY_RESULT_SCHEMA_VERSION;
+        legacy.config_sha256 = config_sha256_for(
+            LEGACY_RESULT_SCHEMA_VERSION,
+            &profile,
+            Mode::Normalize,
+            &tools,
+        );
+        legacy.gate.outcome = GateOutcome::ReviewRequired;
+        legacy.gate.next_action = None;
+        for reason in &mut legacy.gate.reasons {
+            reason.origin = None;
+            if reason.severity == Severity::Limitation {
+                reason.severity = Severity::Review;
+            }
+        }
+        legacy.validate().unwrap();
+        let publish = |result: &NormalizationResult| {
+            publish_with_outcome(PublishRequest {
+                store: &store,
+                request: &request,
+                result,
+                profile: &profile,
+                output_bytes: &output,
+                source_bytes: &bytes,
+                replace_expected_sha256: &original.sha256,
+                allow_replace_verified: false,
+            })
+        };
+        // Новая замена по прежнему решению невозможна.
+        assert_eq!(
+            publish(&legacy).unwrap_err().code,
+            ErrorCode::InvalidTransition
+        );
+        assert_eq!(
+            current_record(&store, &request).unwrap().unwrap().sha256,
+            original.sha256
+        );
+
+        // Запись, оставленная прежней публикацией с `--override-gate`.
+        let derivation = AudioDerivation {
+            schema_version: LEGACY_DERIVATION_SCHEMA_VERSION,
+            kind: DERIVATION_KIND.into(),
+            source_sha256: legacy.input.sha256.clone(),
+            source_provenance: original.provenance.clone(),
+            source_metadata: original.domain_metadata.clone().unwrap(),
+            output_sha256: sha256_hex(&output),
+            mode: Mode::Normalize,
+            profile: profile.clone(),
+            toolchain: tools.clone(),
+            config_sha256: legacy.config_sha256.clone(),
+            plan: legacy.plan.clone().unwrap(),
+            gate: legacy.gate.clone(),
+            gate_overridden: true,
+        };
+        let stored = super::super::import_derived_bytes(
+            &store,
+            &request,
+            &output,
+            &derivation,
+            original.sha256.clone(),
+            false,
+        )
+        .unwrap();
+
+        let resumed = publish(&legacy).unwrap();
+        assert!(resumed.already_published);
+        assert_eq!(resumed.record.sha256, stored.sha256);
+        assert_eq!(
+            resumed.record.domain_metadata.as_ref().unwrap()["derivation"],
+            stored.domain_metadata.as_ref().unwrap()["derivation"]
+        );
+
+        // Решение, не совпадающее со свидетельством записи, повтором не считается.
+        let mut other = legacy.clone();
+        other.gate.unresolved.push("other_decision".into());
+        other.validate().unwrap();
+        assert_eq!(
+            publish(&other).unwrap_err().code,
+            ErrorCode::IdentityConflict
         );
     }
 
