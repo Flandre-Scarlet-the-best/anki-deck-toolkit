@@ -171,6 +171,49 @@ class BridgeContract(unittest.TestCase):
         self.assertIn('identity_ambiguous', self.call('toolkitBindProfile', approved=True)['error'])
         self.assertEqual(saves, pm.saves)
 
+    def test_second_profile_can_bind_without_regenerating_first_and_missing_uuid_is_rejected(self):
+        pm = self.profile_manager()
+        first = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        base_id = pm.meta['anki_deck_toolkit_identity']
+        pm.name, pm.profile = 'Second', {}
+        pm.save()
+        saves = pm.saves
+        self.assertIsNone(self.call('toolkitCatalog', profile='Second')['result']['profile_id'])
+        self.assertEqual(pm.saves, saves)
+        second = self.call('toolkitBindProfile', profile='Second', approved=True)['result']['profile_id']
+        self.assertNotEqual(first, second)
+        self.assertEqual(base_id, pm.meta['anki_deck_toolkit_identity'])
+        pm.reload()
+        self.assertEqual(second, self.call('toolkitCatalog', profile='Second')['result']['profile_id'])
+        pm.name = 'Synthetic'
+        pm.reload()
+        self.assertEqual(first, self.call('toolkitCatalog')['result']['profile_id'])
+        del pm.profile['anki_deck_toolkit_identity']
+        pm.save()
+        saves = pm.saves
+        self.assertIn('identity_corrupt', self.call('toolkitBindProfile', approved=True)['error'])
+        self.assertEqual(pm.saves, saves)
+        pm.reload()
+        self.assertNotIn('anki_deck_toolkit_identity', pm.profile)
+
+    def test_legacy_binding_is_adopted_only_from_existing_valid_uuid(self):
+        pm = self.profile_manager()
+        key = 'anki_deck_toolkit_identity'
+        pm.meta = {key: 'a' * 32, key + '_base': str(self.base.resolve())}
+        pm.profile = {key: 'b' * 32}
+        pm.save()
+        previous = self.call('toolkitCatalog')['result']['profile_id']
+        self.assertEqual(previous, self.call('toolkitBindProfile', approved=True)['result']['profile_id'])
+        self.assertEqual(pm.meta[key + '_profiles'], {'Synthetic': 'b' * 32})
+        self.assertTrue(pm.profile[key + '_bound'])
+        pm.rename('Renamed')
+        pm.reload()
+        self.assertEqual(previous, self.call('toolkitBindProfile', profile='Renamed', approved=True)['result']['profile_id'])
+        self.assertEqual(pm.meta[key + '_profiles'], {'Renamed': 'b' * 32})
+        del pm.profile[key]
+        pm.save()
+        self.assertIn('identity_corrupt', self.call('toolkitBindProfile', profile='Renamed', approved=True)['error'])
+
     def test_renamed_profile_can_read_submit_and_execute_stable_ticket(self):
         pm = self.profile_manager()
         identity = self.call('toolkitBindProfile', approved=True)['result']['profile_id']

@@ -135,27 +135,66 @@ def profile_identity(mw, bind=False):
     binding = mw.pm.meta.get(key + "_base")
     if binding is not None and binding != base_path:
         raise ValueError("profile_base_binding_mismatch: используйте исходную базу Anki; перенос или копия prefs21.db требует отдельной явной привязки")
-    # Создавать всю связку можно только в действительно чистой базе.
     records = [(name, mw.pm._unpickle(data)) for name, data in
                mw.pm.db.all("select name, cast(data as blob) from profiles where name != '_global'")]
+    registry_key, bound_key = key + "_profiles", key + "_bound"
+    registry = mw.pm.meta.get(registry_key)
+    def valid_uuid(value):
+        return isinstance(value, str) and re.fullmatch("[0-9a-f]{32}", value)
+    def corrupt():
+        raise ValueError("profile_identity_corrupt: восстановите согласованные prefs21.db из резервной копии")
     clean = (key not in mw.pm.meta and key + "_base" not in mw.pm.meta
-             and key not in mw.pm.profile and not any(key in data for _, data in records))
-    if not clean:
-        for value in (base_id, profile_id):
-            if not isinstance(value, str) or not re.fullmatch("[0-9a-f]{32}", value):
-                raise ValueError("profile_identity_corrupt: восстановите согласованные prefs21.db из резервной копии")
+             and registry_key not in mw.pm.meta and key not in mw.pm.profile
+             and bound_key not in mw.pm.profile
+             and not any(key in data or bound_key in data for _, data in records))
+    if clean:
+        if not bind:
+            return None
+        base_id, profile_id = uuid.uuid4().hex, uuid.uuid4().hex
+        registry = {}
+    else:
+        if not valid_uuid(base_id):
+            corrupt()
         if binding is None:
             raise ValueError("profile_base_binding_missing: восстановите согласованные prefs21.db из резервной копии")
+        if registry_key in mw.pm.meta:
+            if (not isinstance(registry, dict)
+                    or any(not isinstance(name, str) or not valid_uuid(value) for name, value in registry.items())
+                    or len(set(registry.values())) != len(registry)):
+                corrupt()
+        if bound_key in mw.pm.profile and mw.pm.profile[bound_key] is not True:
+            corrupt()
+        if key not in mw.pm.profile:
+            # Только запись, которая никогда не была привязана. Реестр имён и
+            # отдельная метка переносятся/сохраняются при переименовании профиля.
+            if (bound_key in mw.pm.profile or registry is None or mw.pm.name in registry
+                    or any(name == mw.pm.name and key in data for name, data in records)):
+                corrupt()
+            if not bind:
+                return None
+            profile_id = uuid.uuid4().hex
+        elif not valid_uuid(profile_id):
+            corrupt()
+        elif registry is not None:
+            if (profile_id not in registry.values()
+                    or (mw.pm.name in registry and registry[mw.pm.name] != profile_id)):
+                corrupt()
         for name, data in records:
             if name != mw.pm.name and data.get(key) == profile_id:
                 raise ValueError("profile_identity_ambiguous: дублирован UUID профиля в prefs21.db")
-    elif bind:
-        base_id, profile_id = uuid.uuid4().hex, uuid.uuid4().hex
+        if registry is None and bind:
+            # Прежний формат сначала явно подтверждает существующий UUID;
+            # потерянный UUID не превращается в первичную привязку.
+            registry = {name: data[key] for name, data in records if key in data}
+            if any(not valid_uuid(value) for value in registry.values()) or len(set(registry.values())) != len(registry):
+                corrupt()
+    if bind:
+        registry = {name: value for name, value in registry.items() if value != profile_id}
+        registry[mw.pm.name] = profile_id
         mw.pm.meta[key], mw.pm.meta[key + "_base"] = base_id, base_path
-        mw.pm.profile[key] = profile_id
+        mw.pm.meta[registry_key] = registry
+        mw.pm.profile[key], mw.pm.profile[bound_key] = profile_id, True
         mw.pm.save()
-    else:
-        return None
     return hashlib.sha256((base_id + ":" + profile_id).encode("ascii")).hexdigest()
 
 

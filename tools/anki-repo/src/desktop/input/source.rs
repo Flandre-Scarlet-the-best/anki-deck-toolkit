@@ -100,7 +100,8 @@ pub(super) fn prepare(
     crate::layout::guard_local_path(&path, "Задание Desktop")?;
     let data = Directory::open(&t.data).map_err(io_error)?;
     let state = data.ensure_child("toolkit-desktop").map_err(io_error)?.0;
-    state.require_private().map_err(io_error)?;
+    state.require_private().map_err(|_| error("export_spool_not_private",
+        "Каталог toolkit-desktop не обеспечивает приватность spool. В WSL DrvFS без metadata не поддерживается: настройте проверяемые права 0700; задание не отправлено"))?;
     let spool = state.ensure_child("spool").map_err(io_error)?.0;
     let (directory, created) = spool.ensure_child(&job.id).map_err(io_error)?;
     if !created {
@@ -422,6 +423,35 @@ pub(super) mod tests {
                 "profile":job.profile,"deck_id":job.deck_id,"deck_name":job.deck,"deck_uuid":"deck-uuid-1",
                 "process":job.process,"inventory":inventory,"export_dir":"C:\\Anki2\\untrusted-native-path"}});
         (temp, target, job, result)
+    }
+
+    #[test]
+    fn windows_spool_without_private_modes_is_refused_before_creating_a_ticket() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, target, job, _) = live_fixture();
+        std::fs::set_permissions(target.state(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let failure = prepare(
+            &target,
+            &options(&target, 1),
+            &json!({"profile_id":job.profile_id,"process":job.process}),
+            &json!({"id":job.deck_id,"name":job.deck}),
+        )
+        .unwrap_err();
+        assert_eq!(failure.details["reason"], "export_spool_not_private");
+        assert!(
+            !target
+                .state()
+                .join("spool")
+                .join(&job.id)
+                .join("request.json")
+                .exists()
+        );
+        assert_eq!(
+            std::fs::read_dir(target.state().join("spool"))
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[test]

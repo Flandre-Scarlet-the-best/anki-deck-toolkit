@@ -86,7 +86,7 @@ impl Store {
         drop(parent_lock);
         let lock = input.try_lock()?;
         if initialize {
-            clean_temporaries(&input, &[".owner.json"])?;
+            clean_temporaries(&input, &[".owner.json", ".new-stream.json"])?;
         }
         let names = input.names()?;
         let control = if names.is_empty() && initialize {
@@ -225,6 +225,9 @@ impl Store {
         self.verify_location()?;
         let state = self.exchange.read()?;
         let mut streams = Vec::new();
+        if self.input.names()?.iter().any(|n| n == ".new-stream.json") {
+            return Err(ExchangeError::Blocked("recovery_required".into()));
+        }
         for name in self.input.names()? {
             if name == ".owner.json" {
                 continue;
@@ -288,6 +291,10 @@ impl Store {
     pub fn recover(&self) -> Result<Vec<Value>> {
         self.verify_location()?;
         let mut outcomes = Vec::new();
+        if let Some(outcome) = self.recover_new_stream()? {
+            outcomes.push(outcome);
+        }
+        let state = self.exchange.read()?;
         for key in self.input.names()? {
             if key == ".owner.json" {
                 continue;
@@ -302,6 +309,11 @@ impl Store {
                 .child(&key)?
                 .ok_or_else(|| corrupt("исчез поток"))?;
             dir.require_private()?;
+            if !state.streams.contains_key(&key)
+                && !dir.names()?.iter().any(|n| n == "transaction.json")
+            {
+                return Err(corrupt("каталог input не зарегистрирован в exchange"));
+            }
             clean_temporaries(&dir, &["receipt.json", "transaction.json"])?;
             let names = dir.names()?;
             if names.iter().any(|n| n == "transaction.json") {
@@ -325,13 +337,43 @@ impl Store {
         self.verify_location()?;
         let snapshot = export.snapshot();
         let key = snapshot.identity().key();
+        if self.input.names()?.iter().any(|n| n == ".new-stream.json") {
+            return Err(ExchangeError::Blocked(
+                "сначала восстановите первую публикацию".into(),
+            ));
+        }
+        let state = self.exchange.read()?;
+        let previous = state.streams.get(&key).map(|s| s.current.clone());
+        let new_stream = previous.is_none();
+        if new_stream {
+            if self.input.child(&key)?.is_some() {
+                return Err(corrupt("каталог input не зарегистрирован в exchange"));
+            }
+            // Намерение создания сохраняется ДО mkdir: только оно доказывает
+            // владение ещё не зарегистрированным каталогом после перезапуска.
+            let reservation = Transaction {
+                snapshot: snapshot.clone(),
+                sequence: 1,
+                evidence: export.evidence().into(),
+                inventory: export.inventory().clone(),
+                previous: None,
+                unchanged: false,
+                files_changed: Some(true),
+            };
+            self.input
+                .publish(".new-stream.json", &encode_transaction(&reservation)?)?;
+            #[cfg(test)]
+            self.checkpoint("reserved")?;
+        }
         let (dir, _) = self.input.ensure_child(&key)?;
         dir.require_private()?;
         if dir.names()?.iter().any(|n| n == "transaction.json") {
             return Err(corrupt("сначала выполните recovery"));
         }
-        let state = self.exchange.read()?;
-        let previous = state.streams.get(&key).map(|s| s.current.clone());
+        #[cfg(test)]
+        if new_stream {
+            self.checkpoint("created")?;
+        }
         if previous
             .as_ref()
             .is_some_and(|p| p.snapshot == *snapshot && p.evidence == export.evidence())
@@ -394,6 +436,10 @@ impl Store {
                 } else {
                     stage.publish(name, bytes)?;
                 }
+                #[cfg(test)]
+                if new_stream {
+                    self.checkpoint("writing")?;
+                }
             }
             stage.sync()?;
             dir.sync()?;
@@ -418,7 +464,102 @@ impl Store {
         dir.publish("transaction.json", &encode_transaction(&tx)?)?;
         #[cfg(test)]
         self.checkpoint("intent")?;
-        self.complete(&dir, &tx)
+        let outcome = self.complete(&dir, &tx)?;
+        #[cfg(test)]
+        if new_stream {
+            self.checkpoint("new_committed")?;
+        }
+        if new_stream {
+            self.input.remove_file(".new-stream.json")?;
+        }
+        Ok(outcome)
+    }
+
+    fn recover_new_stream(&self) -> Result<Option<Value>> {
+        if !self.input.names()?.iter().any(|n| n == ".new-stream.json") {
+            return Ok(None);
+        }
+        let tx = read_transaction(&self.input, ".new-stream.json")?;
+        if tx.previous.is_some()
+            || tx.sequence != 1
+            || tx.unchanged
+            || tx.files_changed != Some(true)
+        {
+            return Err(corrupt("неверное намерение создания потока"));
+        }
+        let state = self.check_exchange(&tx)?;
+        let key = tx.snapshot.identity().key();
+        let Some(dir) = self.input.child(&key)? else {
+            if state.streams.contains_key(&key) {
+                return Err(corrupt("нет каталога подтверждённого потока"));
+            }
+            self.input.remove_file(".new-stream.json")?;
+            return Ok(None);
+        };
+        dir.require_private()?;
+        let names = dir.names()?;
+        let mut outcome = None;
+        if names
+            .iter()
+            .any(|n| matches!(n.as_str(), "transaction.json" | "receipt.json"))
+        {
+            if names.iter().any(|n| {
+                !matches!(
+                    n.as_str(),
+                    "stage" | "current" | "previous" | "transaction.json" | "receipt.json"
+                )
+            }) {
+                return Err(corrupt("неучтённые данные первой публикации"));
+            }
+            for name in ["transaction.json", "receipt.json"] {
+                if names.iter().any(|n| n == name)
+                    && transaction_hash(&read_transaction(&dir, name)?)? != transaction_hash(&tx)?
+                {
+                    return Err(corrupt("несогласованные намерения первой публикации"));
+                }
+            }
+            if names.iter().any(|n| n == "transaction.json") {
+                outcome = Some(self.complete(&dir, &tx)?);
+            } else {
+                let current = dir
+                    .child("current")?
+                    .ok_or_else(|| corrupt("нет current"))?;
+                verify_generation(&current, &tx)?;
+                let state = self.exchange.read()?;
+                if state.streams.get(&key).is_none_or(|stream| {
+                    stream.current.snapshot != tx.snapshot
+                        || stream.current.source_sequence != tx.sequence
+                        || stream.current.evidence != tx.evidence
+                }) {
+                    return Err(ExchangeError::StaleState);
+                }
+                if names != ["current", "receipt.json"] {
+                    return Err(corrupt("лишние данные завершённой первой публикации"));
+                }
+                outcome = Some(published(&tx));
+            }
+        } else {
+            if names.iter().any(|n| n != "stage") {
+                return Err(corrupt("неучтённые данные первой публикации"));
+            }
+            if let Some(stage) = dir.child("stage")?
+                && verify_partial_generation(&stage, &tx)?
+            {
+                verify_generation(&stage, &tx)?;
+                dir.publish("transaction.json", &encode_transaction(&tx)?)?;
+                outcome = Some(self.complete(&dir, &tx)?);
+            }
+            if outcome.is_none() {
+                // Удаляется только зарезервированная нами незавершённая запись,
+                // каждый имеющийся файл которой доказан полным хешем inventory.
+                if !dir.is_same_child(&self.input, &key)? {
+                    return Err(corrupt("подмена потока"));
+                }
+                self.input.remove_tree(&key)?;
+            }
+        }
+        self.input.remove_file(".new-stream.json")?;
+        Ok(outcome)
     }
 
     fn complete(&self, dir: &Directory, tx: &Transaction) -> Result<Value> {
@@ -484,12 +625,7 @@ impl Store {
         dir.remove_tree("previous")?;
         dir.remove_file("transaction.json")?;
         self.verify_location()?;
-        Ok(
-            json!({"state":"published", "name":tx.snapshot.name(),"identity":tx.snapshot.identity(),
-            "revision":tx.snapshot.revision(),"source_sequence":tx.sequence,"evidence":tx.evidence,
-            "content_changed":!tx.unchanged,"files_changed":tx.files_changed.unwrap_or(!tx.unchanged),"input_directory":format!("decks/input/{key}/current"),
-            "inventory":tx.inventory}),
-        )
+        Ok(published(tx))
     }
 
     fn check_exchange(&self, tx: &Transaction) -> Result<crate::exchange::StateView> {
@@ -528,6 +664,46 @@ impl Store {
         }
         Ok(())
     }
+}
+
+fn published(tx: &Transaction) -> Value {
+    let key = tx.snapshot.identity().key();
+    json!({"state":"published", "name":tx.snapshot.name(),"identity":tx.snapshot.identity(),
+        "revision":tx.snapshot.revision(),"source_sequence":tx.sequence,"evidence":tx.evidence,
+        "content_changed":!tx.unchanged,"files_changed":tx.files_changed.unwrap_or(!tx.unchanged),
+        "input_directory":format!("decks/input/{key}/current"),"inventory":tx.inventory})
+}
+
+fn verify_partial_generation(directory: &Directory, tx: &Transaction) -> Result<bool> {
+    let mut present = BTreeMap::new();
+    for name in directory.names()? {
+        if name == "media" {
+            let media = directory
+                .child("media")?
+                .ok_or_else(|| corrupt("нет media"))?;
+            for name in media.names()? {
+                present.insert(
+                    format!("media/{name}"),
+                    asset_store::hashing::sha256_hex(media.read(&name)?),
+                );
+            }
+            if !media.is_same_child(directory, "media")? {
+                return Err(corrupt("подмена media"));
+            }
+        } else {
+            present.insert(
+                name.clone(),
+                asset_store::hashing::sha256_hex(directory.read(&name)?),
+            );
+        }
+    }
+    if present
+        .iter()
+        .any(|(name, hash)| tx.inventory.get(name) != Some(hash))
+    {
+        return Err(corrupt("неучтённые байты неполного поколения"));
+    }
+    Ok(present == tx.inventory)
 }
 
 fn verify_generation(directory: &Directory, tx: &Transaction) -> Result<()> {

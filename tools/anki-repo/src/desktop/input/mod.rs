@@ -136,7 +136,6 @@ fn select(catalog: &Value, requested: &[String], all: bool) -> Result<Vec<Value>
         let id = d["id"]
             .as_str()
             .ok_or_else(|| error("invalid_export_catalog", "Нет ID колоды"))?;
-        crate::exchange::export_name(name).map_err(io_error)?;
         if !names.insert(name) || !ids.insert(id) {
             return Err(error(
                 "ambiguous_export_catalog",
@@ -164,6 +163,23 @@ fn select(catalog: &Value, requested: &[String], all: bool) -> Result<Vec<Value>
         })
         .cloned()
         .collect();
+    for deck in decks {
+        let name = deck["name"].as_str().expect("проверено имя");
+        if selected.iter().any(|root| {
+            let root = root["name"].as_str().expect("проверено имя");
+            name == root
+                || name
+                    .strip_prefix(root)
+                    .is_some_and(|suffix| suffix.starts_with("::"))
+        }) {
+            crate::exchange::export_name(name).map_err(|_| {
+                error(
+                    "invalid_export_deck_name",
+                    "Имя выбранной колоды или её потомка непригодно для экспорта",
+                )
+            })?;
+        }
+    }
     selected.extend(
         wanted
             .iter()
@@ -397,6 +413,26 @@ fn publication_error(e: crate::exchange::ExchangeError) -> crate::error::DomainE
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unrelated_names_do_not_block_selected_exports_but_descendants_are_checked() {
+        let catalog = json!({"decks":[{"id":"1","name":"Good"},{"id":"2","name":"Что это?"},
+            {"id":"3","name":"Root"},{"id":"4","name":"Root::Bad?"}]});
+        assert_eq!(
+            select(&catalog, &["Good".into()], false).unwrap()[0]["name"],
+            "Good"
+        );
+        for (requested, all) in [
+            (vec!["Что это?".into()], false),
+            (vec!["Root".into()], false),
+            (vec![], true),
+        ] {
+            assert_eq!(
+                select(&catalog, &requested, all).unwrap_err().details["reason"],
+                "invalid_export_deck_name"
+            );
+        }
+    }
+
     #[test]
     fn selected_subtrees_are_exact_and_never_duplicate_children() {
         let catalog = json!({"decks":[{"id":"1","name":"A"},{"id":"2","name":"A::Child"},

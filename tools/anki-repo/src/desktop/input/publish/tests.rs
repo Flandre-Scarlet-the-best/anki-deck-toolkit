@@ -744,3 +744,96 @@ fn legacy_intent_keeps_checksum_but_cannot_confirm_inventory_of_other_bytes() {
         b"old config"
     );
 }
+
+#[test]
+fn first_publication_recovers_reservation_partial_stage_and_committed_receipt() {
+    for step in [
+        "reserved",
+        "created",
+        "writing",
+        "staged",
+        "intent",
+        "visible",
+        "recorded",
+        "receipt",
+        "new_committed",
+    ] {
+        let tmp = TempDir::new("trusted-first-publication");
+        let candidate = export("first", "first-job");
+        let store = Store::open(tmp.path()).unwrap();
+        store.fault.set(Some(step));
+        assert!(
+            matches!(store.publish(&candidate), Err(ExchangeError::Io(_))),
+            "{step}"
+        );
+        assert!(store.audit().is_err());
+        drop(store);
+        let store = Store::open(tmp.path()).unwrap();
+        store.recover().unwrap();
+        store.audit().unwrap();
+        let before = store.exchange.read().unwrap();
+        assert_eq!(
+            before.streams.len(),
+            usize::from(!matches!(step, "reserved" | "created" | "writing")),
+            "{step}"
+        );
+        assert_eq!(store.publish(&candidate).unwrap()["source_sequence"], 1);
+        assert_eq!(store.audit().unwrap()["streams"][0]["source_sequence"], 1);
+        assert!(
+            !store
+                .input
+                .names()
+                .unwrap()
+                .contains(&".new-stream.json".into())
+        );
+    }
+}
+
+#[test]
+fn recovery_never_removes_unaccounted_first_generation_bytes() {
+    for reserved in [false, true] {
+        let tmp = TempDir::new("trusted-first-unknown-bytes");
+        let candidate = export("first", "first-job");
+        let store = Store::open(tmp.path()).unwrap();
+        if reserved {
+            store.fault.set(Some("writing"));
+            assert!(store.publish(&candidate).is_err());
+        } else {
+            store
+                .input
+                .ensure_child(&candidate.snapshot().identity().key())
+                .unwrap();
+        }
+        let dir = key_dir(&store, &candidate);
+        let stage = dir.ensure_child("stage").unwrap().0;
+        stage.publish("unknown", b"preserve").unwrap();
+        assert!(store.recover().is_err());
+        assert_eq!(stage.read("unknown").unwrap(), b"preserve");
+        assert!(store.exchange.read().unwrap().streams.is_empty());
+    }
+}
+
+#[test]
+fn missing_committed_first_generation_keeps_the_creation_intent() {
+    let tmp = TempDir::new("trusted-first-missing-generation");
+    let store = Store::open(tmp.path()).unwrap();
+    let candidate = export("first", "first-job");
+    store.fault.set(Some("new_committed"));
+    assert!(store.publish(&candidate).is_err());
+    fs::rename(
+        tmp.path()
+            .join("decks/input")
+            .join(candidate.snapshot().identity().key()),
+        tmp.path().join("displaced"),
+    )
+    .unwrap();
+    assert!(store.recover().is_err());
+    assert!(!store.input.read(".new-stream.json").unwrap().is_empty());
+    assert_eq!(
+        store.exchange.read().unwrap().streams[&candidate.snapshot().identity().key()]
+            .current
+            .source_sequence,
+        1
+    );
+    assert!(tmp.path().join("displaced/current/deck.json").is_file());
+}
