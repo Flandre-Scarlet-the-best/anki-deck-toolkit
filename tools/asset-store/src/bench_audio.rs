@@ -390,8 +390,14 @@ pub fn reset_workspace(
     Ok(serde_json::json!({"reset": true, "kept_cache": keep_cache}))
 }
 
-/// Постусловие прогона: пакет завершён полностью, вход не изменён.
-pub fn verify(workdir: &Path, batch_id: &str) -> Result<serde_json::Value, AudioBenchError> {
+/// Постусловие прогона: пакет завершён полностью, вход не изменён; при
+/// `expect_cache` — ещё и целиком из кэша, без повторной обработки: иначе
+/// прогон профиля `warm` измерял бы другую работу.
+pub fn verify(
+    workdir: &Path,
+    batch_id: &str,
+    expect_cache: bool,
+) -> Result<serde_json::Value, AudioBenchError> {
     let (batch, inventory) =
         nbatch::load(workdir, batch_id).map_err(|e| fail(format!("пакет не читается: {e}")))?;
     // Пакет без входов ничего не обработал: такое измерение не годно.
@@ -406,6 +412,12 @@ pub fn verify(workdir: &Path, batch_id: &str) -> Result<serde_json::Value, Audio
             batch.progress.source_errors.len()
         )));
     }
+    if expect_cache && batch.progress.processed != 0 {
+        return Err(fail(format!(
+            "ожидался пакет целиком из кэша, но обработано заново {} входов",
+            batch.progress.processed
+        )));
+    }
     let check = nbatch::verify_sources(&batch, &inventory).map_err(|e| fail(e.to_string()))?;
     if !check.verified {
         return Err(fail(format!(
@@ -415,6 +427,7 @@ pub fn verify(workdir: &Path, batch_id: &str) -> Result<serde_json::Value, Audio
     }
     Ok(serde_json::json!({
         "completed": batch.progress.completed,
+        "processed": batch.progress.processed,
         "by_outcome": batch.progress.by_outcome,
         "inventory_sha256": batch.inventory_sha256,
         "sources_unchanged": check.unchanged,

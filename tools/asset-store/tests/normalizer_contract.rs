@@ -983,6 +983,27 @@ fn stale_cache_entries_and_changed_inputs_are_not_reused() {
         assert_eq!(format!("{}.mp3", sha256_hex(fs::read(blob).unwrap())), name);
     }
 
+    use std::io::Write;
+    // Вариант, раздутый сверх предела 8 MiB, тоже повреждён и заменяется,
+    // а не останавливает пакет нарушением границы.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&blobs[0])
+        .unwrap()
+        .write_all(&vec![0u8; 9 * 1024 * 1024])
+        .unwrap();
+    let inflated = run(args("batch-resume", "s1"));
+    assert_eq!(
+        inflated["result"]["run"]["outcome"], "completed",
+        "{inflated}"
+    );
+    assert_eq!(inflated["result"]["run"]["processed_now"], 1);
+    let name = blobs[0].file_name().unwrap().to_str().unwrap();
+    assert_eq!(
+        format!("{}.mp3", sha256_hex(fs::read(&blobs[0]).unwrap())),
+        name
+    );
+
     // Вход изменился после инвентаризации: прежний результат не переиспользуется.
     fs::write(input.join("good.mp3"), quiet()).unwrap();
     let changed = run(args("batch-resume", "s1"));

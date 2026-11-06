@@ -734,6 +734,26 @@ impl SafeBatchRuntime {
         })
     }
 
+    /// Лежит ли по ссылке обычный файл (без перехода по ссылке) больше
+    /// `maximum`. Отличает раздутый повреждённый blob, который можно заменить,
+    /// от прочих нарушений границы того же кода ошибки.
+    pub(crate) fn blob_is_oversized_regular_file(
+        &self,
+        blob: &RuntimeBlobRef,
+        maximum: u64,
+    ) -> Result<bool, AssetError> {
+        self.require_lock()?;
+        let name = validate_blob_ref(blob)?;
+        match statat(&self.blobs, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(
+                FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                    && stat.st_size as u64 > maximum,
+            ),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+            Err(error) => Err(boundary_io(error)),
+        }
+    }
+
     /// Удаляет blob по проверенной ссылке (только имя в `candidates/`, без
     /// перехода по ссылкам). Отсутствующий blob — не ошибка.
     pub(crate) fn remove_blob(&self, blob: &RuntimeBlobRef) -> Result<(), AssetError> {

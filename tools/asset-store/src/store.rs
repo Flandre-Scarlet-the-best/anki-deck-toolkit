@@ -4571,10 +4571,20 @@ fn scan_asset_directory(
             // Все потомки образуют непрерывный диапазон в BTreeSet.
             // Разделитель обязателен: assets/png-extra не потомок assets/png.
             let prefix = format!("{path}/");
-            if !registered_paths
-                .range(prefix.clone()..)
-                .next()
-                .is_some_and(|registered| registered.starts_with(&prefix))
+            // Каталог слота CAS-домена может остаться без текущей записи этой
+            // области: после замены кандидата и подтверждения новая запись
+            // переходит в канонический манифест, а прежние байты — нет. Такой
+            // каталог обходится как сирота; каждый файл в нём сверяется ниже
+            // по имени и фактическому SHA-256.
+            let orphan_slot = !reject_orphans
+                && policy.content_addressed_storage()
+                && relative_path == ASSETS_DIR
+                && validate_hash(&component).is_ok();
+            if !orphan_slot
+                && !registered_paths
+                    .range(prefix.clone()..)
+                    .next()
+                    .is_some_and(|registered| registered.starts_with(&prefix))
             {
                 if !reject_orphans {
                     let child = open_directory_at(directory, &name)
@@ -4624,7 +4634,7 @@ fn scan_asset_directory(
         // Плоская раскладка `assets/<sha>.<ext>` либо вложенная раскладка слота
         // `assets/<sha256(identity)>/<sha>.<ext>`: после CAS-замены прежние байты
         // слота остаются рядом с текущими. Имя файла ниже всё равно сверяется
-        // с фактическим SHA-256, а каталог слота без текущей записи отвергнут выше.
+        // с фактическим SHA-256.
         let nested_slot = path.matches('/').count() == 2
             && path
                 .split('/')
@@ -4634,7 +4644,7 @@ fn scan_asset_directory(
             return Err(AssetError::new(
                 ErrorCode::UnexpectedPath,
                 format!(
-                    "осиротевший файл с адресацией по хешу должен лежать непосредственно в assets/: {path}"
+                    "осиротевший файл с адресацией по хешу должен лежать в assets/ или в assets/<sha256 слота>/: {path}"
                 ),
             ));
         }

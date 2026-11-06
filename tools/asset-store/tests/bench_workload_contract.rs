@@ -928,7 +928,45 @@ fn audio_verify_rejects_an_empty_inventory() {
     .unwrap();
     let stop = std::sync::atomic::AtomicBool::new(false);
     nbatch::resume(&workspace, "empty", None, None, &stop).unwrap();
-    assert!(asset_store::bench_audio::verify(&workspace, "empty").is_err());
+    let error = asset_store::bench_audio::verify(&workspace, "empty", false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("пакет не завершён: 0/0"), "{error}");
+}
+
+/// `--expect-cache` принимает только пакет, целиком взятый из кэша: пакет,
+/// обработавший входы заново, профилю `warm` не годится.
+#[test]
+fn audio_verify_expect_cache_rejects_reprocessing() {
+    use asset_store::pronunciation::normalizer::{Mode, NormalizerProfile};
+    use asset_store::pronunciation::normalizer_batch as nbatch;
+    let root = asset_store::temp_workspace::TempWorkspace::create("audio-verify-cache").unwrap();
+    let corpus = root.path().join("corpus");
+    asset_store::bench_audio::generate_corpus(&corpus, 2, 5).unwrap();
+    let workspace = root.path().join("work");
+    fs::create_dir(&workspace).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    for batch_id in ["fresh", "cached"] {
+        nbatch::start(nbatch::StartRequest {
+            batch_id,
+            workspace: &workspace,
+            input_root: &fs::canonicalize(&corpus).unwrap(),
+            mode: Mode::Analyze,
+            profile: NormalizerProfile::balanced(),
+            limits: nbatch::Limits {
+                jobs: 1,
+                max_files: 10,
+                max_total_bytes: 1 << 24,
+            },
+        })
+        .unwrap();
+        nbatch::resume(&workspace, batch_id, None, None, &stop).unwrap();
+    }
+    let verify = asset_store::bench_audio::verify;
+    assert_eq!(verify(&workspace, "fresh", false).unwrap()["processed"], 2);
+    let error = verify(&workspace, "fresh", true).unwrap_err().to_string();
+    assert!(error.contains("обработано заново 2"), "{error}");
+    assert_eq!(verify(&workspace, "cached", true).unwrap()["processed"], 0);
 }
 
 /// Отсутствующий родитель `--out` создаётся; новым обязан быть только сам

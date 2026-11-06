@@ -87,6 +87,9 @@ enum Command {
         workdir: PathBuf,
         #[arg(long)]
         batch_id: String,
+        /// Пакет обязан быть завершён целиком из кэша (профиль `warm`).
+        #[arg(long)]
+        expect_cache: bool,
     },
     /// Удалить помеченный рабочий каталог.
     Clean {
@@ -113,7 +116,11 @@ fn audio(command: &Command) -> Option<Result<serde_json::Value, String>> {
             keep_cache,
             remove,
         } => bench_audio::reset_workspace(workdir, *keep_cache, *remove),
-        Command::AudioVerify { workdir, batch_id } => bench_audio::verify(workdir, batch_id),
+        Command::AudioVerify {
+            workdir,
+            batch_id,
+            expect_cache,
+        } => bench_audio::verify(workdir, batch_id, *expect_cache),
         _ => return None,
     };
     Some(result.map_err(|error| error.to_string()))

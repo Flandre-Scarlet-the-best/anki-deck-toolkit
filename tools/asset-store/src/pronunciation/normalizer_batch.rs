@@ -103,6 +103,10 @@ pub struct Progress {
     pub unique_inputs: u64,
     /// Входы с сохранённым результатом (по последней контрольной точке).
     pub completed: u64,
+    /// Входы, которые этот пакет обработал сам, а не взял готовыми из кэша,
+    /// за все свои запуски (по последней контрольной точке).
+    #[serde(default)]
+    pub processed: u64,
     pub by_outcome: BTreeMap<String, u64>,
     /// Сбои среды по SHA входа: вход остаётся незавершённым и повторяется
     /// следующим запуском; в исход входа и кэш сбой не превращается.
@@ -892,15 +896,25 @@ impl ResultCache {
         output: Option<&[u8]>,
     ) -> Result<NormalizationResult, AssetError> {
         if let (Some(bytes), Some(reference)) = (output, result.output.as_mut()) {
+            let existing = RuntimeBlobRef {
+                sha256: sha256_hex(bytes),
+                storage_path: format!("candidates/{}.mp3", sha256_hex(bytes)),
+            };
             let blob = match self
                 .runtime
                 .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)
             {
-                Err(error) if error.code == ErrorCode::IntegrityMismatch => {
-                    self.runtime.remove_blob(&RuntimeBlobRef {
-                        sha256: sha256_hex(bytes),
-                        storage_path: format!("candidates/{}.mp3", sha256_hex(bytes)),
-                    })?;
+                // По пути лежат другие байты либо обычный файл, раздутый
+                // сверх предела: оба — повреждённый прежний вариант. Прочие
+                // нарушения границы (ссылка, не файл) остаются ошибкой.
+                Err(error)
+                    if error.code == ErrorCode::IntegrityMismatch
+                        || (error.code == ErrorCode::BoundaryViolation
+                            && self
+                                .runtime
+                                .blob_is_oversized_regular_file(&existing, MAX_AUDIO_BYTES)?) =>
+                {
+                    self.runtime.remove_blob(&existing)?;
                     self.runtime
                         .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)?
                 }
@@ -1055,6 +1069,7 @@ fn resume_with(
     let mut by_outcome: BTreeMap<String, u64> = BTreeMap::new();
     let mut pending = Vec::new();
     let mut reused = 0u64;
+    let processed_before = batch.progress.processed;
     let mut infra = batch.progress.infrastructure_failures.clone();
     let mut source_errors = batch.progress.source_errors.clone();
     let unique = inventory.unique_inputs();
@@ -1090,6 +1105,7 @@ fn resume_with(
     let checkpoint = |batch: &mut NormalizerBatch,
                       runtime: &mut SafeBatchRuntime,
                       completed: u64,
+                      processed: u64,
                       by_outcome: &BTreeMap<String, u64>,
                       infra: &BTreeMap<String, u32>,
                       source_errors: &BTreeMap<String, String>|
@@ -1099,6 +1115,7 @@ fn resume_with(
             .reload_cached()?
             .ok_or_else(|| invalid("пакет нормализации исчез"))?;
         stored.progress.completed = completed;
+        stored.progress.processed = processed;
         stored.progress.by_outcome = by_outcome.clone();
         stored.progress.infrastructure_failures = infra.clone();
         stored.progress.source_errors = source_errors.clone();
@@ -1197,6 +1214,7 @@ fn resume_with(
                     &mut batch,
                     &mut runtime,
                     reused + processed_now,
+                    processed_before + processed_now,
                     &by_outcome,
                     &infra,
                     &source_errors,
@@ -1218,6 +1236,7 @@ fn resume_with(
         &mut batch,
         &mut runtime,
         reused + processed_now,
+        processed_before + processed_now,
         &by_outcome,
         &infra,
         &source_errors,

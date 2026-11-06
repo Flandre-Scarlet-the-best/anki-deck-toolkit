@@ -1470,9 +1470,9 @@ touches = "scenario-temp"
 timeout_seconds = 300
 
 [[scenario.profile.conclude]]
-description = "Постусловие: пакет завершён целиком из кэша, источники не изменились."
+description = "Постусловие: пакет завершён целиком из кэша (ни один вход не обработан заново), источники не изменились."
 program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
-args = ["audio-verify", "--workdir", "target/benchmark-workloads/audio-normalizer/work", "--batch-id", "bench"]
+args = ["audio-verify", "--workdir", "target/benchmark-workloads/audio-normalizer/work", "--batch-id", "bench", "--expect-cache"]
 touches = "read-only"
 timeout_seconds = 600
 
