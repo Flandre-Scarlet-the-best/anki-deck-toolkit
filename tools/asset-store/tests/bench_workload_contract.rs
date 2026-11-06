@@ -374,8 +374,14 @@ fn declared_scenarios() -> Vec<DeclaredSteps> {
             .cloned()
             .unwrap_or_default()
     };
+    // Сценарии с иной измеряемой программой (нормализатор MP3 над внешним
+    // каталогом) не исполняются asset-store-bench; их шаги проверяет
+    // `audio_normalizer_declaration_steps_run_with_the_real_executables`.
     list(&catalog, "scenario")
         .iter()
+        .filter(|scenario| {
+            scenario["target"]["program"]["bin"].as_str() == Some("asset-store-bench")
+        })
         .map(|scenario| {
             let choices = list(scenario, "parameter")
                 .iter()
@@ -669,4 +675,118 @@ fn every_contention_writer_must_have_work() {
             8
         );
     }
+}
+
+/// Шаги сценария `asset-store.audio-normalizer-batch` в объявленном порядке
+/// над настоящим синтетическим корпусом: подготовка, цель, постусловие, уборка.
+#[test]
+fn audio_normalizer_declaration_steps_run_with_the_real_executables() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/scenarios/asset-store.toml");
+    let catalog: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let scenario = catalog["scenario"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"].as_str() == Some("asset-store.audio-normalizer-batch"))
+        .expect("сценарий объявлен")
+        .clone();
+    let root = asset_store::temp_workspace::TempWorkspace::create("audio-bench-steps").unwrap();
+    let corpus = root.path().join("corpus");
+    let bench = env!("CARGO_BIN_EXE_asset-store-bench");
+    let generated = std::process::Command::new(bench)
+        .args(["audio-corpus", "--count", "4", "--seed", "3", "--out"])
+        .arg(&corpus)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let substitute = |args: Vec<String>, mode: &str| -> Vec<String> {
+        args.into_iter()
+            .map(|arg| {
+                arg.replace("{input.corpus}", corpus.to_str().unwrap())
+                    .replace("{param.mode}", mode)
+                    .replace("{param.jobs}", "2")
+            })
+            .collect()
+    };
+    let run = |step: &toml::Value, mode: &str| {
+        let program = match step["program"]["bin"].as_str().unwrap() {
+            "asset-store-bench" => bench,
+            "pronunciation-assets" => env!("CARGO_BIN_EXE_pronunciation-assets"),
+            other => panic!("неожиданная программа {other}"),
+        };
+        let output = std::process::Command::new(program)
+            .args(substitute(step_args(step), mode))
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}: {}{}",
+            step_args(step),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let steps = |value: &toml::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    for mode in ["analyze", "normalize"] {
+        for step in steps(&scenario, "setup") {
+            run(&step, mode);
+        }
+        for profile in steps(&scenario, "profile") {
+            for step in steps(&profile, "setup") {
+                run(&step, mode);
+            }
+            for _ in 0..2 {
+                for step in steps(&profile, "prepare") {
+                    run(&step, mode);
+                }
+                run(&scenario["target"], mode);
+                for step in steps(&profile, "conclude") {
+                    run(&step, mode);
+                }
+            }
+        }
+        for step in steps(&scenario, "cleanup") {
+            run(&step, mode);
+        }
+        assert!(
+            !root
+                .path()
+                .join("target/benchmark-workloads/audio-normalizer/work")
+                .exists()
+        );
+    }
+    // Чужой непустой каталог сценарий не удаляет.
+    let foreign = root.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("data"), b"x").unwrap();
+    let refused = std::process::Command::new(bench)
+        .args(["audio-reset", "--remove", "--workdir"])
+        .arg(&foreign)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(foreign.join("data").exists());
+}
+
+fn step_args(step: &toml::Value) -> Vec<String> {
+    assert_eq!(step["program"]["kind"].as_str(), Some("cargo-bin"));
+    assert_eq!(step["program"]["package"].as_str(), Some("asset-store"));
+    step["args"]
+        .as_array()
+        .expect("args — массив")
+        .iter()
+        .map(|arg| arg.as_str().expect("аргумент — строка").to_owned())
+        .collect()
 }
