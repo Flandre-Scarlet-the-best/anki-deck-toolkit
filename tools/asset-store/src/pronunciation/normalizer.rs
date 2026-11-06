@@ -1265,22 +1265,74 @@ pub fn post_qc(
     profile: &NormalizerProfile,
 ) -> Result<(PostQc, Option<AudioProbe>), AssetError> {
     let gate = &profile.gate;
-    let failed_probe = |id: &str| PostQc {
-        passed: false,
-        checks: vec![check(id, false, None, None)],
-        analysis: None,
-        alignment_lag_frames: None,
-        codec_snr_db: None,
+    let ceiling = profile.loudness.true_peak_ceiling_dbtp + gate.max_true_peak_overshoot_db;
+    // Потолок обязателен, только если сами операции не начинались выше него.
+    let tp_limit = ceiling.max(reference_analysis.true_peak_dbtp + gate.max_true_peak_overshoot_db);
+    let active_limit = gate
+        .max_active_change_ms
+        .max(reference_analysis.active_ms * gate.max_active_change_ratio);
+    let threshold = profile.trim.silence_threshold_dbfs;
+    let planned = plan
+        .gain
+        .measured_lufs
+        .map(|lufs| lufs + plan.gain.applied_db);
+    // Результат не прошёл техническую проверку или не декодировался:
+    // остальные обязательные проверки не выполнимы и остаются неразрешёнными,
+    // но присутствуют в `checks` с теми же пределами, что и при измерении.
+    let failed = |failed_id: &str, probe_passed: bool| {
+        let mut checks = Vec::new();
+        if probe_passed {
+            checks.push(check("output_technical_probe", true, None, None));
+        }
+        checks.push(check(failed_id, false, None, None));
+        checks.push(unresolved_check("output_layout", None));
+        checks.push(unresolved_check(
+            "duration_matches_plan",
+            Some(gate.max_duration_error_ms),
+        ));
+        checks.push(unresolved_check("true_peak_within_ceiling", Some(tp_limit)));
+        checks.push(unresolved_check(
+            "no_new_clipping",
+            Some(gate.max_new_clipped_samples as f64),
+        ));
+        if planned.is_some() {
+            checks.push(unresolved_check(
+                "loudness_matches_plan",
+                Some(gate.max_loudness_error_db),
+            ));
+        }
+        if plan.leading.trim_frames > 0 {
+            checks.push(unresolved_check("leading_edge_quiet", Some(threshold)));
+        }
+        if plan.trailing.trim_frames > 0 {
+            checks.push(unresolved_check("trailing_edge_quiet", Some(threshold)));
+        }
+        checks.push(unresolved_check(
+            "active_duration_preserved",
+            Some(active_limit),
+        ));
+        checks.push(unresolved_check(
+            "alignment_lag",
+            Some(gate.max_alignment_lag_ms),
+        ));
+        checks.push(unresolved_check("codec_snr", Some(gate.min_codec_snr_db)));
+        PostQc {
+            passed: false,
+            checks,
+            analysis: None,
+            alignment_lag_frames: None,
+            codec_snr_db: None,
+        }
     };
     let probe = match probe::probe_mp3(output) {
         Ok(probe) => probe,
         Err(error) if is_infrastructure_failure(&error) => return Err(error),
-        Err(_) => return Ok((failed_probe("output_technical_probe"), None)),
+        Err(_) => return Ok((failed("output_technical_probe", false), None)),
     };
     let samples = match probe::decode_f32(output, &probe) {
         Ok(samples) => samples,
         Err(error) if is_infrastructure_failure(&error) => return Err(error),
-        Err(_) => return Ok((failed_probe("output_decode"), Some(probe))),
+        Err(_) => return Ok((failed("output_decode", true), Some(probe))),
     };
     let decoded = Pcm {
         sample_rate: probe.sample_rate,
@@ -1307,9 +1359,6 @@ pub fn post_qc(
         Some(duration_error),
         Some(gate.max_duration_error_ms),
     ));
-    let ceiling = profile.loudness.true_peak_ceiling_dbtp + gate.max_true_peak_overshoot_db;
-    // Потолок обязателен, только если сами операции не начинались выше него.
-    let tp_limit = ceiling.max(reference_analysis.true_peak_dbtp + gate.max_true_peak_overshoot_db);
     checks.push(check(
         "true_peak_within_ceiling",
         after.true_peak_dbtp <= tp_limit,
@@ -1329,10 +1378,6 @@ pub fn post_qc(
     // Громкость сверяется с планом по фактически декодированному результату;
     // если план громкость задал, а измерить её у результата нельзя, проверка
     // неразрешима и не проходит.
-    let planned = plan
-        .gain
-        .measured_lufs
-        .map(|lufs| lufs + plan.gain.applied_db);
     let actual = actual_loudness(&after, plan);
     if let Some(planned) = planned {
         checks.push(match actual {
@@ -1348,7 +1393,6 @@ pub fn post_qc(
             None => unresolved_check("loudness_matches_plan", Some(gate.max_loudness_error_db)),
         });
     }
-    let threshold = profile.trim.silence_threshold_dbfs;
     let edge_frame = decoded.samples_for_ms(profile.analysis.frame_ms).max(1);
     let edge_levels = dsp::frame_levels(&decoded, edge_frame);
     if plan.leading.trim_frames > 0 {
@@ -1372,9 +1416,6 @@ pub fn post_qc(
     // Активная часть сравнивается с эталоном в том же масштабе,
     // поэтому усиление само по себе не меняет её длительность.
     let active_change = (after.active_ms - reference_analysis.active_ms).abs();
-    let active_limit = gate
-        .max_active_change_ms
-        .max(reference_analysis.active_ms * gate.max_active_change_ratio);
     checks.push(check(
         "active_duration_preserved",
         active_change <= active_limit,
@@ -2261,5 +2302,38 @@ mod tests {
         );
         let text = serde_json::to_string(&qc).unwrap();
         assert!(!text.contains("NaN"));
+    }
+
+    /// Результат, не прошедший техническую проверку, получает тот же набор
+    /// обязательных проверок, что и измеренный: невыполнимые — неразрешены.
+    #[test]
+    fn failed_output_probe_keeps_every_mandatory_check() {
+        let pcm = speech_like(1, false);
+        let policy = profile();
+        let prepared = prepare(&pcm, &policy);
+        let encoded = mp3(&prepared.processed);
+        let (measured, _) = post_qc(
+            &prepared.processed,
+            &prepared.processed_analysis,
+            &prepared.plan,
+            &encoded,
+            &policy,
+        )
+        .unwrap();
+        let (failed, probe) = post_qc(
+            &prepared.processed,
+            &prepared.processed_analysis,
+            &prepared.plan,
+            b"not an mp3",
+            &policy,
+        )
+        .unwrap();
+        assert!(probe.is_none() && !failed.passed);
+        let ids = |qc: &PostQc| qc.checks.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&failed), ids(&measured));
+        assert!(failed.checks.iter().all(|c| !c.passed && c.value.is_none()));
+        for (failed, measured) in failed.checks.iter().zip(&measured.checks) {
+            assert_eq!(failed.limit, measured.limit, "{}", failed.id);
+        }
     }
 }

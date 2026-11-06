@@ -580,6 +580,68 @@ fn inventory_rejects_declared_total_overflow_before_reading() {
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
+/// Нечитаемый MP3 учитывается в `--max-total-bytes` по размеру из каталога,
+/// а число перечисленных записей ограничено и для пропускаемых записей.
+#[test]
+fn inventory_bounds_unreadable_files_and_listed_entries() {
+    let ws = TempWorkspace::create("normalizer-inventory-bounds").unwrap();
+    let limits = |max_total_bytes| nbatch::Limits {
+        jobs: 1,
+        max_files: 10,
+        max_total_bytes,
+    };
+    if !running_as_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let input = ws.path().join("unreadable");
+        fs::create_dir_all(&input).unwrap();
+        let hidden = input.join("hidden.mp3");
+        fs::File::create(&hidden).unwrap().set_len(2 << 20).unwrap();
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = nbatch::inventory(&input, &limits(1 << 20)).unwrap_err();
+        assert!(refused.message.contains("--max-total-bytes"), "{refused:?}");
+        let listed = nbatch::inventory(&input, &limits(4 << 20)).unwrap();
+        assert_eq!(listed.entries[0].byte_length, 2 << 20);
+        assert!(listed.entries[0].error.is_some());
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let crowded = ws.path().join("crowded");
+    fs::create_dir_all(&crowded).unwrap();
+    for index in 0..=100_000 {
+        fs::File::create(crowded.join(format!("{index}.txt"))).unwrap();
+    }
+    let refused = nbatch::inventory(&crowded, &limits(1 << 20)).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::InvalidTransition);
+    assert!(refused.message.contains("записей каталогов"), "{refused:?}");
+}
+
+/// Разные имена не в UTF-8 с одинаковым путём после замены байтов
+/// различаются в инвентаризации: подмена одного из них обнаруживается.
+#[test]
+fn non_utf8_skipped_names_stay_distinct() {
+    use std::os::unix::ffi::OsStrExt;
+    let ws = TempWorkspace::create("normalizer-non-utf8").unwrap();
+    let input = ws.path().join("corpus");
+    fs::create_dir_all(&input).unwrap();
+    let name = |byte: u8| std::ffi::OsStr::from_bytes(&[b'a', byte, b'.', b't']).to_owned();
+    let limits = nbatch::Limits {
+        jobs: 1,
+        max_files: 10,
+        max_total_bytes: 1 << 20,
+    };
+    fs::write(input.join(name(0xff)), b"x").unwrap();
+    fs::write(input.join(name(0xfe)), b"x").unwrap();
+    let before = nbatch::inventory(&input, &limits).unwrap();
+    assert_eq!(before.skipped.len(), 2);
+    assert_eq!(before.skipped[0].path, before.skipped[1].path);
+    assert_ne!(
+        before.skipped[0].raw_name_hex,
+        before.skipped[1].raw_name_hex
+    );
+    fs::rename(input.join(name(0xfe)), input.join(name(0xfd))).unwrap();
+    let after = nbatch::inventory(&input, &limits).unwrap();
+    assert_ne!(before.skipped, after.skipped);
+}
+
 #[test]
 fn batch_limits_cancellation_interruption_and_boundaries() {
     let ws = TempWorkspace::create("normalizer-limits").unwrap();
@@ -717,7 +779,9 @@ fn which(tool: &str) -> std::path::PathBuf {
 /// Каталог PATH: настоящие `prlimit` и `ffprobe` и управляемая обёртка над
 /// `ffmpeg`. Файл `fail` в каталоге заставляет обработку (но не определение
 /// версий и отпечатка кодировщика) завершаться сигналом — сбой среды;
-/// `alter` дописывает байт к отпечатку кодировщика — «другая сборка LAME».
+/// `alter` дописывает байт к отпечатку кодировщика — «другая сборка LAME»;
+/// `replace` однажды меняет сам файл обёртки при обработке — «переустановка
+/// FFmpeg во время пакета».
 fn tool_dir(root: &Path, with_ffmpeg: bool) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let dir = root.join("tools");
@@ -736,6 +800,10 @@ case "$*" in
     if [ -e "{dir}/alter" ]; then printf x >> "$last"; fi
     exit 0 ;;
 esac
+if [ -e "{dir}/replace" ] && [ ! -e "{dir}/replaced" ]; then
+  : > "{dir}/replaced"
+  printf '\n' >> "$0"
+fi
 if [ -e "{dir}/fail" ]; then kill -KILL $$; fi
 exec "{real}" "$@"
 "#,
@@ -928,6 +996,7 @@ fn infrastructure_failure_is_retried_after_recovery_and_toolchain_change_is_dete
 
     fs::write(tools.join("alter"), b"").unwrap();
     let changed = json(&resume("infra"));
+    fs::remove_file(tools.join("alter")).unwrap();
     assert_eq!(changed["error"]["code"], "invalid_transition");
     assert!(
         changed["error"]["message"]
@@ -935,6 +1004,87 @@ fn infrastructure_failure_is_retried_after_recovery_and_toolchain_change_is_dete
             .unwrap()
             .contains("кодировщика")
     );
+
+    // Сбой среды снимается и тогда, когда результат входа появился из
+    // другого пакета того же рабочего каталога: повтор берёт его из кэша.
+    // Отдельный рабочий каталог: кэш первого уже заполнен.
+    let shared = ws.path().join("shared");
+    let in_shared = |args: &[&str]| {
+        let mut full = args.to_vec();
+        full.extend(["--workspace", shared.to_str().unwrap()]);
+        json(&cli_with_path(ws.path(), &tools, &full))
+    };
+    let input_dir = input.to_str().unwrap();
+    fs::write(tools.join("fail"), b"").unwrap();
+    let failed = in_shared(&["batch-start", "--batch-id", "a", "--input-dir", input_dir]);
+    assert_eq!(failed["result"]["run"]["outcome"], "paused", "{failed}");
+    fs::remove_file(tools.join("fail")).unwrap();
+    let filled = in_shared(&["batch-start", "--batch-id", "b", "--input-dir", input_dir]);
+    assert_eq!(filled["result"]["run"]["outcome"], "completed", "{filled}");
+    let reused = in_shared(&["batch-resume", "--batch-id", "a"]);
+    let run = &reused["result"]["run"];
+    assert_eq!(run["outcome"], "completed", "{reused}");
+    assert_eq!(run["processed_now"], 0, "{reused}");
+    assert_eq!(
+        reused["result"]["batch"]["progress"]["infrastructure_failures"],
+        serde_json::json!({}),
+        "{reused}"
+    );
+}
+
+/// Замена исполняемого файла FFmpeg во время пакета останавливает его, и
+/// результат, полученный, возможно, другой сборкой, в кэш не попадает;
+/// `batch-resume` заново определяет окружение и завершает пакет.
+#[test]
+fn tool_replaced_during_batch_is_not_cached() {
+    let ws = TempWorkspace::create("normalizer-tool-swap").unwrap();
+    let input = corpus(ws.path());
+    let workspace = ws.path().join("work");
+    let tools = tool_dir(ws.path(), true);
+    fs::write(tools.join("replace"), b"").unwrap();
+    let started = json(&cli_with_path(
+        ws.path(),
+        &tools,
+        &[
+            "batch-start",
+            "--batch-id",
+            "swap",
+            "--input-dir",
+            input.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    ));
+    assert_eq!(
+        started["error"]["details"]["blocker"], "audio_toolchain_changed",
+        "{started}"
+    );
+    assert!(tools.join("replaced").exists());
+    let results = fs::read_dir(workspace.join(".runtime/batches/normalizer-cache/results"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    // Сохранены только входы, отвергнутые до запуска FFmpeg.
+    assert!(results <= 2, "{results}");
+    let resumed = json(&cli_with_path(
+        ws.path(),
+        &tools,
+        &[
+            "batch-resume",
+            "--batch-id",
+            "swap",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(
+        resumed["result"]["run"]["outcome"], "completed",
+        "{resumed}"
+    );
+    let outcomes = &resumed["result"]["batch"]["progress"]["by_outcome"];
+    assert_eq!(outcomes["ACCEPT"], 2, "{outcomes}");
+    assert_eq!(outcomes["KEEP_ORIGINAL"], 1, "{outcomes}");
 }
 
 /// Повреждённый или потерянный вариант в кэше и изменённый после
@@ -1664,4 +1814,35 @@ fn sample_strata_count_only_selectable_items() {
     assert_ne!(quietest.selected[0], tiny.input.sha256);
     let shortest = sample.strata.iter().find(|s| s.id == "shortest").unwrap();
     assert_eq!(shortest.available, 2);
+
+    // Выборка с тем же ID и конфигурацией, но по другой инвентаризации
+    // (одноимённый пакет другого рабочего каталога) не принимается.
+    let mut foreign = sample.clone();
+    foreign.inventory_sha256 = "0".repeat(64);
+    let out = ws.path().join("report");
+    let refused = report::write_report(
+        &batch,
+        &inventory,
+        &cache,
+        &results,
+        report::ReportRequest {
+            out_dir: &out,
+            html: true,
+            include: report::Include::Sample(&foreign),
+            media_limit: 0,
+        },
+    )
+    .unwrap_err();
+    assert!(refused.message.contains("инвентаризации"), "{refused:?}");
+    assert!(!out.exists());
+    let decisions = report::Decisions {
+        schema_version: 1,
+        kind: "normalizer_review_decisions".into(),
+        batch_id: batch.batch_id.clone(),
+        config_sha256: batch.config_sha256.clone(),
+        decisions: Vec::new(),
+    };
+    assert!(report::review_summary(&batch, &results, &decisions, Some(&sample)).is_ok());
+    let refused = report::review_summary(&batch, &results, &decisions, Some(&foreign)).unwrap_err();
+    assert!(refused.message.contains("инвентаризации"), "{refused:?}");
 }

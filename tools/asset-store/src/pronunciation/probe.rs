@@ -116,27 +116,84 @@ fn frames(bytes: &[u8]) -> Result<(u32, u32, u32, u64), AssetError> {
     Ok((rate, channels, count, samples))
 }
 
+/// Первый исполняемый файл `tool` в `PATH` — тот, который запустит `run`.
+fn resolve_tool(tool: &str) -> Result<std::path::PathBuf, AssetError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH")
+        .and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|path| path.join(tool))
+                .find(|candidate| {
+                    std::fs::metadata(candidate)
+                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                })
+        })
+        .ok_or_else(|| {
+            AssetError::with_details(
+                ErrorCode::ValidatorFailure,
+                format!("в PATH отсутствует обязательный инструмент {tool}"),
+                serde_json::json!({"blocker":"audio_tool_missing","tool":tool}),
+            )
+        })
+}
+
+/// Снимок исполняемых файлов `prlimit`, `ffmpeg` и `ffprobe`, которые найдёт
+/// `run`: фактический путь (после ссылок), устройство, inode, размер и
+/// времена изменения. Замена или переустановка файла меняет снимок.
+/// Разделяемые библиотеки в снимок не входят.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ToolFiles(Vec<(std::path::PathBuf, [i64; 7])>);
+
+pub(super) fn tool_files() -> Result<ToolFiles, AssetError> {
+    use std::os::unix::fs::MetadataExt;
+    let mut files = Vec::new();
+    for tool in ["prlimit", "ffmpeg", "ffprobe"] {
+        let path = resolve_tool(tool)?;
+        let real = std::fs::canonicalize(&path)
+            .map_err(|e| infrastructure_failure("audio_tool_runtime_failed", e.to_string()))?;
+        let m = std::fs::metadata(&real)
+            .map_err(|e| infrastructure_failure("audio_tool_runtime_failed", e.to_string()))?;
+        files.push((
+            real,
+            [
+                m.dev() as i64,
+                m.ino() as i64,
+                m.size() as i64,
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+            ],
+        ));
+    }
+    Ok(ToolFiles(files))
+}
+
+/// Ошибка: инструменты заменены после определения окружения запуска.
+pub(super) fn toolchain_changed() -> AssetError {
+    AssetError::with_details(
+        ErrorCode::ValidatorFailure,
+        "FFmpeg/ffprobe/prlimit заменены во время пакета: результат не сохранён; batch-resume заново определит окружение",
+        serde_json::json!({"blocker":"audio_toolchain_changed"}),
+    )
+}
+
+/// Первые `cap` байтов канала; остаток читается и отбрасывается.
+fn read_capped(mut reader: impl Read, cap: u64) -> std::io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    (&mut reader).take(cap).read_to_end(&mut data)?;
+    std::io::copy(&mut reader, &mut std::io::sink())?;
+    Ok(data)
+}
+
 /// prlimit задаёт CPU/адресное пространство до exec без unsafe/pre_exec.
 /// stdout/stderr читаются одновременно с жёсткими пределами. При превышении времени
 /// дочерний процесс завершается принудительно с ожиданием его остановки,
 /// в том числе при заполненных каналах.
 pub(super) fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, AssetError> {
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     for required in ["prlimit", tool] {
-        let available = std::env::var_os("PATH").is_some_and(|paths| {
-            std::env::split_paths(&paths).any(|path| {
-                std::fs::metadata(path.join(required))
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
-        });
-        if !available {
-            return Err(AssetError::with_details(
-                ErrorCode::ValidatorFailure,
-                format!("в PATH отсутствует обязательный инструмент {required}"),
-                serde_json::json!({"blocker":"audio_tool_missing","tool":required}),
-            ));
-        }
+        resolve_tool(required)?;
     }
     let mut child = Command::new("prlimit")
         .args(["--as=1073741824", "--cpu=12", "--nofile=64", "--", tool])
@@ -160,14 +217,12 @@ pub(super) fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, Asse
         .stderr
         .take()
         .expect("stderr дочернего процесса открыт как канал");
-    let stdout = thread::spawn(move || {
-        let mut data = Vec::new();
-        out.take(limit + 1).read_to_end(&mut data).map(|_| data)
-    });
-    let stderr = thread::spawn(move || {
-        let mut data = Vec::new();
-        err.take(16 * 1024 + 1).read_to_end(&mut data).map(|_| data)
-    });
+    // Сверх предела канал дочитывается вхолостую до конца: закрытый раньше
+    // времени канал завершил бы процесс по SIGPIPE, и избыточный вывод
+    // повреждённого файла выглядел бы сбоем среды, а не отказом декодирования.
+    // Время чтения ограничено тем же 15-секундным пределом процесса.
+    let stdout = thread::spawn(move || read_capped(out, limit + 1));
+    let stderr = thread::spawn(move || read_capped(err, 16 * 1024 + 1));
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -708,4 +763,22 @@ pub(super) fn encoder_identity() -> Result<String, AssetError> {
         }
     })?;
     Ok(format!("libmp3lame sha256:{}", &sha256_hex(&bytes)[..16]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Вывод сверх предела дочитывается: процесс не получает SIGPIPE, и
+    /// избыточный stderr остаётся предметным отказом, а не сбоем среды.
+    #[test]
+    fn excess_stderr_is_drained_not_turned_into_sigpipe() {
+        if run("true", &[], 0).is_err() {
+            return; // нет prlimit: проверка невозможна в этом окружении
+        }
+        let script = "i=0; while [ $i -lt 400 ]; do printf '%0100d\\n' 0 >&2; i=$((i+1)); done";
+        let error = run("sh", &["-c", script], 1024).unwrap_err();
+        assert!(error.details["blocker"].is_null(), "{error:?}");
+        assert!(!super::super::normalizer::is_infrastructure_failure(&error));
+    }
 }

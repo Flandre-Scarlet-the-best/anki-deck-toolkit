@@ -806,4 +806,39 @@ mod tests {
         assert!(stereo_difference_db(&sine(8000, 2, 440.0, 0.5, 0.2)).unwrap() <= -119.0);
         assert!(stereo_difference_db(&sine(8000, 1, 440.0, 0.5, 0.2)).is_none());
     }
+
+    #[test]
+    fn stereo_difference_measures_distinct_channels() {
+        let scaled = |right_gain: f32| {
+            let mut pcm = sine(8000, 2, 440.0, 0.5, 0.2);
+            for frame in pcm.samples.as_chunks_mut::<2>().0 {
+                frame[1] *= right_gain;
+            }
+            pcm
+        };
+        // Правый канал вдвое тише: (1 − 0,5)² / ((1 + 0,25) / 2) = 0,4 → −3,98 dB.
+        let half = stereo_difference_db(&scaled(0.5)).unwrap();
+        assert!((half - 10.0 * 0.4f64.log10()).abs() < 0.01, "{half}");
+        // Разница в 1 % уровня (≈ −40 dB) — уже не двойное моно для порога −60 dB.
+        let near = stereo_difference_db(&scaled(0.99)).unwrap();
+        assert!((-41.0..-39.0).contains(&near), "{near}");
+        assert!(
+            near > super::super::normalizer::NormalizerProfile::balanced()
+                .output
+                .identical_channels_max_db
+        );
+        // Независимые каналы разной частоты далеки от двойного моно.
+        let mut distinct = sine(8000, 2, 440.0, 0.5, 0.2);
+        let other = sine(8000, 1, 660.0, 0.5, 0.2);
+        for (frame, value) in distinct
+            .samples
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(other.samples)
+        {
+            frame[1] = value;
+        }
+        assert!(stereo_difference_db(&distinct).unwrap() > -10.0);
+    }
 }

@@ -38,6 +38,15 @@ const MAX_DEPTH: usize = 16;
 const MAX_CONSECUTIVE_INFRA_FAILURES: usize = 8;
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_RECORDED_ERRORS: usize = 1000;
+/// Нижняя граница бюджета записей каталогов любого типа за инвентаризацию.
+const MIN_LISTED_ENTRIES: usize = 100_000;
+
+/// Сколько записей каталогов (MP3, пропущенных, подкаталогов) инвентаризация
+/// может перечислить: память обхода растёт с их числом, а `--max-files`
+/// ограничивает только MP3.
+fn listed_entries_budget(limits: &Limits) -> usize {
+    limits.max_files.saturating_mul(10).max(MIN_LISTED_ENTRIES)
+}
 
 fn invalid(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::InvalidTransition, message)
@@ -65,8 +74,14 @@ pub struct InventoryEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkippedEntry {
+    /// Путь для человека; у имени не в UTF-8 — с заменой недопустимых байтов,
+    /// поэтому разные такие имена могут совпасть.
     pub path: String,
     pub reason: String,
+    /// Байты имени не в UTF-8 в шестнадцатеричном виде: однозначно различают
+    /// записи, чьи `path` после замены совпали.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_name_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,7 +292,10 @@ fn open_relative_dir(root: &File, relative: &str) -> Result<File, AssetError> {
 /// Чтение одного MP3 по уже открытому дескриптору: длина по `fstat`,
 /// байты — не больше предела; у слишком большого файла хеш считается
 /// потоково, чтобы проверка неизменности могла его сверить.
-fn read_entry(relative: String, file: File) -> (InventoryEntry, u64) {
+///
+/// `budget` — остаток `--max-total-bytes`: чтение прекращается, как только
+/// прочитано больше, и возвращённый счёт превышает остаток.
+fn read_entry(relative: String, file: File, budget: u64) -> (InventoryEntry, u64) {
     let length = match file.metadata() {
         Ok(metadata) if metadata.is_file() => metadata.len(),
         Ok(_) => {
@@ -348,6 +366,11 @@ fn read_entry(relative: String, file: File) -> (InventoryEntry, u64) {
                     Ok(n) => {
                         hasher.update(&buffer[..n]);
                         total += n as u64;
+                        // Файл растёт во время чтения сверх остатка бюджета:
+                        // дальше читать незачем, вызывающий отклонит вход.
+                        if total > budget {
+                            break Err(std::io::Error::other("превышен --max-total-bytes"));
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(error) => break Err(error),
@@ -386,6 +409,8 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
     let mut skipped = Vec::new();
     let mut total = 0u64;
     let mut stack = vec![(String::new(), 0usize)];
+    let budget = listed_entries_budget(limits);
+    let mut listed_total = 0usize;
     while let Some((prefix, depth)) = stack.pop() {
         let directory = open_relative_dir(&root_fd, &prefix)?;
         let mut names = Vec::new();
@@ -397,6 +422,12 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
             if raw == b"." || raw == b".." {
                 continue;
             }
+            listed_total += 1;
+            if listed_total > budget {
+                return Err(invalid(format!(
+                    "вход содержит больше {budget} записей каталогов (включая пропускаемые): увеличьте --max-files или сузьте вход"
+                )));
+            }
             names.push((raw, entry.file_type()));
         }
         names.sort_by(|a, b| a.0.cmp(&b.0));
@@ -406,6 +437,7 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
                 skipped.push(SkippedEntry {
                     path: format!("{prefix}{}", String::from_utf8_lossy(&raw)),
                     reason: "non_utf8_name".into(),
+                    raw_name_hex: Some(crate::hashing::encode_lower_hex(&raw)),
                 });
                 continue;
             };
@@ -420,6 +452,7 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
             let skip = |reason: &str| SkippedEntry {
                 path: relative.clone(),
                 reason: reason.into(),
+                raw_name_hex: None,
             };
             if kind == FileType::Symlink {
                 skipped.push(skip("symlink"));
@@ -463,25 +496,31 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
                                 "суммарный размер входа превышает --max-total-bytes",
                             ));
                         }
-                        read_entry(relative, file)
+                        read_entry(relative, file, limits.max_total_bytes - total)
                     }
                     // Запись стала ссылкой после перечисления: не следуем ей.
                     Err(rustix::io::Errno::LOOP) => {
                         skipped.push(skip("symlink"));
                         continue;
                     }
-                    Err(error) => (
-                        InventoryEntry {
-                            path: relative,
-                            byte_length: 0,
-                            sha256: None,
-                            error: Some(
-                                AssetError::io("открытие файла входа", error.into()).message,
-                            ),
-                            content_sha256: None,
-                        },
-                        0,
-                    ),
+                    // Файл не открылся (например, нет права чтения): его размер
+                    // по-прежнему известен из каталога и входит в бюджет.
+                    Err(error) => {
+                        let known = statat(&directory, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+                            .map_or(0, |stat| stat.st_size.max(0) as u64);
+                        (
+                            InventoryEntry {
+                                path: relative,
+                                byte_length: known,
+                                sha256: None,
+                                error: Some(
+                                    AssetError::io("открытие файла входа", error.into()).message,
+                                ),
+                                content_sha256: None,
+                            },
+                            known,
+                        )
+                    }
                 };
                 total = total.saturating_add(counted);
                 if total > limits.max_total_bytes {
@@ -497,7 +536,11 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
         }
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
-    skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    skipped.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.raw_name_hex.cmp(&b.raw_name_hex))
+    });
     Ok(Inventory {
         schema_version: 1,
         entries,
@@ -726,8 +769,14 @@ pub fn start(request: StartRequest<'_>) -> Result<NormalizerBatch, AssetError> {
     if request.limits.jobs == 0 || request.limits.jobs > MAX_JOBS {
         return Err(invalid(format!("--jobs должен быть 1–{MAX_JOBS}")));
     }
+    let tools = super::probe::tool_files()?;
     let toolchain = Toolchain::detect()?;
     let inventory = inventory(request.input_root, &request.limits)?;
+    // Окружение, определённое до долгой инвентаризации, должно остаться тем
+    // же: `resume_started` переиспользует его без повторного определения.
+    if super::probe::tool_files()? != tools {
+        return Err(super::probe::toolchain_changed());
+    }
     let inventory_bytes = serde_json::to_vec(&inventory).expect("инвентаризация сериализуема");
     let mut runtime = open_batch_runtime(request.workspace, request.batch_id)?;
     if runtime.load::<NormalizerBatch>()?.is_some() {
@@ -1041,6 +1090,9 @@ fn resume_with(
         return Err(invalid("пакет нормализации отменён"));
     }
     let _lease = runtime.execution_lease()?;
+    // Снимок файлов инструментов до определения окружения: каждый результат
+    // сохраняется, только если с ним совпали файлы и после обработки.
+    let tools = super::probe::tool_files()?;
     let bytes = runtime.artifact_directory("data")?.read("inventory.json")?;
     if sha256_hex(&bytes) != batch.inventory_sha256 {
         return Err(AssetError::new(
@@ -1078,6 +1130,9 @@ fn resume_with(
             Some(result) => match read_input(&root, path, sha) {
                 Ok(_) => {
                     reused += 1;
+                    // Результат мог появиться из другого пакета того же
+                    // рабочего каталога: прежний сбой среды по входу снят.
+                    infra.remove(*sha);
                     source_errors.remove(*path);
                     *by_outcome
                         .entry(result.gate.outcome.as_str().into())
@@ -1131,8 +1186,8 @@ fn resume_with(
         let (sender, receiver) = std::sync::mpsc::sync_channel(jobs);
         for _ in 0..jobs.min(pending.len().max(1)) {
             let sender = sender.clone();
-            let (pending, next, halt, root, profile, toolchain) =
-                (&pending, &next, &halt, &root, &profile, &toolchain);
+            let (pending, next, halt, root, profile, toolchain, tools) =
+                (&pending, &next, &halt, &root, &profile, &toolchain, &tools);
             scope.spawn(move || {
                 loop {
                     if stop.load(Ordering::SeqCst) || halt.load(Ordering::SeqCst) {
@@ -1153,6 +1208,16 @@ fn resume_with(
                                 }
                             })
                         }
+                    };
+                    // Инструмент заменён во время обработки: результат мог
+                    // получиться другой сборкой и в кэш не попадает.
+                    let outcome = match outcome {
+                        Ok(processed) => match super::probe::tool_files() {
+                            Ok(now) if now == *tools => Ok(processed),
+                            Ok(_) => Err(ItemError::Fatal(super::probe::toolchain_changed())),
+                            Err(error) => Err(ItemError::Infrastructure(error)),
+                        },
+                        other => other,
                     };
                     if sender.send((index, outcome)).is_err() {
                         break;
@@ -1358,19 +1423,12 @@ pub fn verify_sources(
         .filter(|e| !known.contains(e.path.as_str()))
         .map(|e| e.path.clone())
         .collect();
-    let before: BTreeSet<(&str, &str)> = inventory
-        .skipped
-        .iter()
-        .map(|e| (e.path.as_str(), e.reason.as_str()))
-        .collect();
-    let after: BTreeSet<(&str, &str)> = current
-        .skipped
-        .iter()
-        .map(|e| (e.path.as_str(), e.reason.as_str()))
-        .collect();
+    let key = |e: &'_ SkippedEntry| (e.path.clone(), e.raw_name_hex.clone(), e.reason.clone());
+    let before: BTreeSet<_> = inventory.skipped.iter().map(key).collect();
+    let after: BTreeSet<_> = current.skipped.iter().map(key).collect();
     check.skipped_changed = before
         .symmetric_difference(&after)
-        .map(|(path, _)| (*path).to_owned())
+        .map(|(path, _, _)| path.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -1386,4 +1444,34 @@ pub fn verify_sources(
 
 pub fn open_input_root(batch: &NormalizerBatch) -> Result<File, AssetError> {
     open_dir(Path::new(&batch.input_root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Файл, растущий во время инвентаризации, не читается до конца: чтение
+    /// прекращается, как только превышен остаток `--max-total-bytes`.
+    #[test]
+    fn oversized_read_stops_at_remaining_budget() {
+        let ws = crate::temp_workspace::TempWorkspace::create("normalizer-read-budget").unwrap();
+        let path = ws.path().join("big.mp3");
+        let length = 24 * 1024 * 1024u64;
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(length)
+            .unwrap();
+        let budget = MAX_AUDIO_BYTES + 1024;
+        let (entry, counted) = read_entry("big.mp3".into(), File::open(&path).unwrap(), budget);
+        // Здесь `fstat` уже больше остатка; при росте файла после `fstat`
+        // превышение даёт сам счёт прочитанного.
+        assert!(counted > budget, "{counted}");
+        let read = entry.byte_length;
+        assert!(read > budget && read <= budget + 1024 * 1024, "{read}");
+        assert!(entry.content_sha256.is_none());
+        // Без давления бюджета тот же файл хешируется целиком.
+        let (entry, counted) = read_entry("big.mp3".into(), File::open(&path).unwrap(), u64::MAX);
+        assert_eq!(counted, length);
+        assert!(entry.content_sha256.is_some());
+    }
 }

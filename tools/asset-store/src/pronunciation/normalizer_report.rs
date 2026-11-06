@@ -702,6 +702,14 @@ pub struct ReviewSummary {
     pub metrics_by_verdict: BTreeMap<String, BTreeMap<String, Distribution>>,
 }
 
+/// Выборка принадлежит пакету, только если совпали ID, конфигурация и
+/// инвентаризация: одинаковый ID бывает у пакетов разных рабочих каталогов.
+fn sample_matches(sample: &SampleSet, batch: &NormalizerBatch) -> bool {
+    sample.batch_id == batch.batch_id
+        && sample.config_sha256 == batch.config_sha256
+        && sample.inventory_sha256 == batch.inventory_sha256
+}
+
 pub fn review_summary(
     batch: &NormalizerBatch,
     results: &[NormalizationResult],
@@ -719,10 +727,10 @@ pub fn review_summary(
         ));
     }
     if let Some(sample) = sample
-        && (sample.batch_id != batch.batch_id || sample.config_sha256 != batch.config_sha256)
+        && !sample_matches(sample, batch)
     {
         return Err(invalid(
-            "выборка относится к другому пакету или конфигурации",
+            "выборка относится к другому пакету, инвентаризации или конфигурации",
         ));
     }
     let by_sha: BTreeMap<&str, &NormalizationResult> = results
@@ -994,10 +1002,9 @@ fn write_contents(
                 })
                 .collect(),
             Include::Sample(sample) => {
-                if sample.batch_id != batch.batch_id || sample.config_sha256 != batch.config_sha256
-                {
+                if !sample_matches(sample, batch) {
                     return Err(invalid(
-                        "выборка относится к другому пакету или конфигурации",
+                        "выборка относится к другому пакету, инвентаризации или конфигурации",
                     ));
                 }
                 let wanted: BTreeSet<&str> = sample
