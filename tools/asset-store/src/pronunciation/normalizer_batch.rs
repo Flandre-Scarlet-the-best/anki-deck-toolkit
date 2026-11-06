@@ -698,8 +698,25 @@ pub struct StartRequest<'a> {
     pub limits: Limits,
 }
 
+/// Состояние пакета с ID кэша жило бы в каталоге кэша под той же блокировкой:
+/// первая же контрольная точка ждала бы блокировку, которую держит сам кэш.
+fn reject_reserved_batch_id(batch_id: &str) -> Result<(), AssetError> {
+    if batch_id == CACHE_ID {
+        return Err(invalid(format!(
+            "batch_id {CACHE_ID} зарезервирован для кэша результатов"
+        )));
+    }
+    Ok(())
+}
+
+fn open_batch_runtime(workspace: &Path, batch_id: &str) -> Result<SafeBatchRuntime, AssetError> {
+    reject_reserved_batch_id(batch_id)?;
+    SafeBatchRuntime::open(workspace, batch_id)
+}
+
 /// Фиксирует инвентаризацию и конфигурацию; обработку выполняет [`resume`].
 pub fn start(request: StartRequest<'_>) -> Result<NormalizerBatch, AssetError> {
+    reject_reserved_batch_id(request.batch_id)?;
     request.profile.validate()?;
     if request.limits.jobs == 0 || request.limits.jobs > MAX_JOBS {
         return Err(invalid(format!("--jobs должен быть 1–{MAX_JOBS}")));
@@ -707,7 +724,7 @@ pub fn start(request: StartRequest<'_>) -> Result<NormalizerBatch, AssetError> {
     let toolchain = Toolchain::detect()?;
     let inventory = inventory(request.input_root, &request.limits)?;
     let inventory_bytes = serde_json::to_vec(&inventory).expect("инвентаризация сериализуема");
-    let mut runtime = SafeBatchRuntime::open(request.workspace, request.batch_id)?;
+    let mut runtime = open_batch_runtime(request.workspace, request.batch_id)?;
     if runtime.load::<NormalizerBatch>()?.is_some() {
         return Err(AssetError::new(
             ErrorCode::IdentityConflict,
@@ -743,7 +760,7 @@ pub fn start(request: StartRequest<'_>) -> Result<NormalizerBatch, AssetError> {
 }
 
 pub fn load(workspace: &Path, batch_id: &str) -> Result<(NormalizerBatch, Inventory), AssetError> {
-    let mut runtime = SafeBatchRuntime::open(workspace, batch_id)?;
+    let mut runtime = open_batch_runtime(workspace, batch_id)?;
     let batch: NormalizerBatch = runtime
         .load()?
         .ok_or_else(|| invalid("пакет нормализации отсутствует"))?;
@@ -764,7 +781,7 @@ pub fn status(workspace: &Path, batch_id: &str) -> Result<NormalizerBatch, Asset
 }
 
 pub fn cancel(workspace: &Path, batch_id: &str) -> Result<NormalizerBatch, AssetError> {
-    let mut runtime = SafeBatchRuntime::open(workspace, batch_id)?;
+    let mut runtime = open_batch_runtime(workspace, batch_id)?;
     let mut batch: NormalizerBatch = runtime
         .load()?
         .ok_or_else(|| invalid("пакет нормализации отсутствует"))?;
@@ -1001,7 +1018,7 @@ fn resume_with(
     stop: &AtomicBool,
     detected: Option<Toolchain>,
 ) -> Result<RunSummary, AssetError> {
-    let mut runtime = SafeBatchRuntime::open(workspace, batch_id)?;
+    let mut runtime = open_batch_runtime(workspace, batch_id)?;
     let mut batch: NormalizerBatch = runtime
         .load()?
         .ok_or_else(|| invalid("пакет нормализации отсутствует"))?;

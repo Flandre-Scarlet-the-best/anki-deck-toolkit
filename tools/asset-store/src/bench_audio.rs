@@ -302,10 +302,17 @@ pub fn reset_workspace(
     };
     let mut _locks = HeldLocks(Vec::new());
     if let Some(directory) = &existing {
-        let empty = Dir::read_from(directory)
-            .map_err(|e| io_fail("рабочий каталог", e))?
-            .filter_map(Result::ok)
-            .all(|entry| matches!(entry.file_name().to_bytes(), b"." | b".."));
+        // Ошибка чтения не считается пустотой: иначе чужой каталог прошёл бы
+        // без проверки маркера и был бы очищен.
+        let mut empty = true;
+        for entry in Dir::read_from(directory).map_err(|e| io_fail("рабочий каталог", e))?
+        {
+            let entry = entry.map_err(|e| io_fail("рабочий каталог", e))?;
+            if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+                empty = false;
+                break;
+            }
+        }
         if !empty && !owned(directory)? {
             return Err(fail(
                 "рабочий каталог не пуст и не помечен asset-store-bench; удалять чужие данные нельзя",
@@ -387,7 +394,9 @@ pub fn reset_workspace(
 pub fn verify(workdir: &Path, batch_id: &str) -> Result<serde_json::Value, AudioBenchError> {
     let (batch, inventory) =
         nbatch::load(workdir, batch_id).map_err(|e| fail(format!("пакет не читается: {e}")))?;
-    if batch.progress.completed != batch.progress.unique_inputs
+    // Пакет без входов ничего не обработал: такое измерение не годно.
+    if batch.progress.unique_inputs == 0
+        || batch.progress.completed != batch.progress.unique_inputs
         || !batch.progress.source_errors.is_empty()
     {
         return Err(fail(format!(

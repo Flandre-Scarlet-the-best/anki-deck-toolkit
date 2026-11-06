@@ -290,6 +290,9 @@ $B normalizer publish --batch-id corpus-1 --workspace .codex/local/normalizer/wo
 <workspace>/.runtime/batches/normalizer-cache/candidates/<sha варианта>.mp3
 ```
 
+ID `normalizer-cache` зарезервирован за кэшем: пакет с ним отклоняется
+(`invalid_transition`) до открытия состояния.
+
 Результат каждого уникального входа — отдельная атомарная контрольная точка.
 Дубли байтов обрабатываются один раз. Повторный запуск того же пакета и новый
 пакет той же конфигурации в том же рабочем каталоге переиспользуют готовые

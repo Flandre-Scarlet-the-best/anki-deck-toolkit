@@ -518,6 +518,42 @@ fn batch_processes_directory_once_with_duplicates_unicode_and_failures() {
     assert_eq!(json(&changed)["error"]["details"]["changed"][0], "good.mp3");
 }
 
+/// ID кэша зарезервирован: пакет с ним иначе ждал бы блокировку, которую
+/// держит сам кэш, и зависал на первой контрольной точке.
+#[test]
+fn cache_batch_id_is_reserved() {
+    let ws = TempWorkspace::create("normalizer-reserved-id").unwrap();
+    let input = ws.path().join("corpus");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("good.mp3"), good()).unwrap();
+    let workspace = ws.path().join("work");
+    fs::create_dir(&workspace).unwrap();
+    let refused = nbatch::start(nbatch::StartRequest {
+        batch_id: nbatch::CACHE_ID,
+        workspace: &workspace,
+        input_root: &fs::canonicalize(&input).unwrap(),
+        mode: Mode::Analyze,
+        profile: NormalizerProfile::balanced(),
+        limits: nbatch::Limits {
+            jobs: 1,
+            max_files: 10,
+            max_total_bytes: 1 << 20,
+        },
+    })
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::InvalidTransition);
+    assert!(!workspace.join(".runtime").exists());
+    let stop = AtomicBool::new(false);
+    for result in [
+        nbatch::resume(&workspace, nbatch::CACHE_ID, None, Some(0), &stop).map(|_| ()),
+        nbatch::status(&workspace, nbatch::CACHE_ID).map(|_| ()),
+        nbatch::cancel(&workspace, nbatch::CACHE_ID).map(|_| ()),
+        nbatch::load(&workspace, nbatch::CACHE_ID).map(|_| ()),
+    ] {
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidTransition);
+    }
+}
+
 /// Заведомое превышение `--max-total-bytes` по `fstat` отклоняется до чтения:
 /// разреженный файл в 1 TiB не читается и не хешируется целиком.
 #[test]

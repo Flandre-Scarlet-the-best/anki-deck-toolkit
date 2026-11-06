@@ -902,6 +902,35 @@ fn audio_reset_rejects_conflicting_flags() {
     assert!(workdir.exists());
 }
 
+/// Пакет без единого MP3 ничего не обработал: постусловие замера его отклоняет.
+#[test]
+fn audio_verify_rejects_an_empty_inventory() {
+    use asset_store::pronunciation::normalizer::{Mode, NormalizerProfile};
+    use asset_store::pronunciation::normalizer_batch as nbatch;
+    let root = asset_store::temp_workspace::TempWorkspace::create("audio-verify-empty").unwrap();
+    let corpus = root.path().join("corpus");
+    fs::create_dir(&corpus).unwrap();
+    fs::write(corpus.join("notes.txt"), b"x").unwrap();
+    let workspace = root.path().join("work");
+    fs::create_dir(&workspace).unwrap();
+    nbatch::start(nbatch::StartRequest {
+        batch_id: "empty",
+        workspace: &workspace,
+        input_root: &fs::canonicalize(&corpus).unwrap(),
+        mode: Mode::Analyze,
+        profile: NormalizerProfile::balanced(),
+        limits: nbatch::Limits {
+            jobs: 1,
+            max_files: 10,
+            max_total_bytes: 1 << 20,
+        },
+    })
+    .unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    nbatch::resume(&workspace, "empty", None, None, &stop).unwrap();
+    assert!(asset_store::bench_audio::verify(&workspace, "empty").is_err());
+}
+
 /// Отсутствующий родитель `--out` создаётся; новым обязан быть только сам
 /// каталог корпуса.
 #[test]
