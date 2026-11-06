@@ -732,6 +732,80 @@ fn reimport_revalidates_stale_technical_version_for_unchanged_bytes() {
     );
 }
 
+/// Подтверждённая запись с прежним свидетельством `pronunciation-mp3-technical`
+/// v1 остаётся читаемыми данными, но доверия не даёт; штатная повторная
+/// проверка той же пары/SHA переводит её на текущую версию, не создавая и не
+/// теряя решения человека.
+#[test]
+fn version_one_evidence_is_kept_untrusted_until_validate_reissues_current_evidence() {
+    let ws = TempWorkspace::create("audio-validator-v1-migration").unwrap();
+    let store = store(&ws.path().join("store"));
+    let original = import(&store, &request());
+    let attestation = attest(&store, &request(), &original.sha256, HumanDecision::Approve)
+        .unwrap()
+        .asset
+        .human_attestation;
+    assert_eq!(technical_validator_identity().version, "2");
+
+    let manifest_path = store.root().join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let identity = serde_json::to_value(request().identity()).unwrap();
+    let asset = manifest["assets"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|asset| asset["identity"] == identity)
+        .unwrap();
+    // Точная форма свидетельства прежней версии.
+    asset["validation"]["validator"]["version"] = serde_json::json!("1");
+    let evidence = &mut asset["validation"]["evidence"][0];
+    evidence["kind"] = serde_json::json!("mp3_technical_v1");
+    evidence["details"]["probe"]["schema_version"] = serde_json::json!(1);
+    evidence["details"]["probe"]
+        .as_object_mut()
+        .unwrap()
+        .remove("gapless");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let stale = store
+        .verify_integrity()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.identity == request().identity())
+        .unwrap();
+    assert_eq!(stale.validation.as_ref().unwrap().validator.version, "1");
+    assert_eq!(stale.human_attestation, attestation);
+    assert!(read_trusted(store.root(), &[request()]).is_err());
+
+    let report = store
+        .validate(SelectionMode::New, &AudioTechnicalValidator)
+        .unwrap();
+    assert!(report.blockers.is_empty(), "{report:?}");
+    let current = store
+        .verify_integrity()
+        .unwrap()
+        .into_iter()
+        .find(|record| record.identity == request().identity())
+        .unwrap();
+    let validation = current.validation.as_ref().unwrap();
+    assert_eq!(validation.validator, technical_validator_identity());
+    assert_eq!(validation.evidence[0].kind, "mp3_technical_v2");
+    assert_eq!(
+        validation.evidence[0].details.as_ref().unwrap()["probe"]["schema_version"],
+        2
+    );
+    assert_eq!(current.human_attestation, attestation);
+    assert_eq!(
+        read_trusted(store.root(), &[request()]).unwrap()[0].bytes,
+        audio()
+    );
+}
+
 #[test]
 fn invalid_identity_does_not_abort_other_verified_variant_visits() {
     let ws = TempWorkspace::create("audio-variant-invalid-request").unwrap();

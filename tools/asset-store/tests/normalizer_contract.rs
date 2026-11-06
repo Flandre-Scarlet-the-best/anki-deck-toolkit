@@ -1578,7 +1578,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
             source_bytes: padded(),
             replace_expected_sha256: replace,
             allow_replace_verified: allow,
-            override_gate: false,
         })
     };
     // Подтверждённый ресурс не заменяется без явного флага; превью его не трогает.
@@ -1652,7 +1651,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         source_bytes: &output,
         replace_expected_sha256: &derived.sha256,
         allow_replace_verified: true,
-        override_gate: false,
     })
     .unwrap_err();
     assert_eq!(refused.code, ErrorCode::InvalidTransition);
@@ -1669,7 +1667,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         source_bytes: good(),
         replace_expected_sha256: &derived.sha256,
         allow_replace_verified: true,
-        override_gate: false,
     })
     .unwrap_err();
     assert_eq!(kept_refused.code, ErrorCode::InvalidIdentity);
@@ -1684,7 +1681,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         source_bytes: padded(),
         replace_expected_sha256: &original.sha256,
         allow_replace_verified: true,
-        override_gate: false,
     })
     .unwrap_err();
     assert_eq!(unknown_refused.code, ErrorCode::InvalidTransition);
@@ -1731,7 +1727,6 @@ fn derived_record_keeps_forvo_provenance_of_the_source() {
         source_bytes: padded(),
         replace_expected_sha256: &source.sha256,
         allow_replace_verified: false,
-        override_gate: false,
     })
     .unwrap();
     let derivation = &derived.domain_metadata.as_ref().unwrap()["derivation"];

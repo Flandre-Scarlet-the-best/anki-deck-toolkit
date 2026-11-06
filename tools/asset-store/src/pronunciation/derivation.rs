@@ -4,7 +4,10 @@
 //! `audio_derivative`. Свидетельство связывает его с SHA исходника, исходным
 //! происхождением (включая Forvo) и точными параметрами обработки. Публикация
 //! заменяет текущую запись только через CAS и никогда не переносит прежнее
-//! решение человека: новый SHA снова требует прослушивания и `attest`.
+//! решение человека: доверие к новому SHA снова требует `attest` по модели
+//! доверия хранилища. Публикуется только вариант, который QualityGate сам
+//! выбрал (`proposed_variant: processed` после пройденного пост-QC);
+//! обхода решения QualityGate нет.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +42,9 @@ pub struct AudioDerivation {
     pub config_sha256: String,
     pub plan: Plan,
     pub gate: GateDecision,
-    /// Публикация вопреки исходу QualityGate (только по явному флагу).
+    /// `true` возможно только у свидетельств прежних версий, где вариант с
+    /// `REVIEW_REQUIRED` публиковался по явному флагу. Новые публикации
+    /// всегда `false`.
     pub gate_overridden: bool,
 }
 
@@ -73,12 +78,16 @@ impl AudioDerivation {
             || normalizer::config_sha256(&self.profile, self.mode, &self.toolchain)
                 != self.config_sha256
             || self.profile.validate().is_err()
-            || !matches!(
-                self.gate.outcome,
-                GateOutcome::Accept | GateOutcome::ReviewRequired
-            )
             || !self.gate.post_qc_verified
-            || (self.gate.outcome != GateOutcome::Accept && !self.gate_overridden)
+            || self.gate.proposed_variant.is_none()
+            || !match self.gate.outcome {
+                GateOutcome::Accept | GateOutcome::AcceptWithLimitations => {
+                    self.gate.proposed_variant == Some(Variant::Processed) && !self.gate_overridden
+                }
+                // Прежнее свидетельство: допускалось только с явным флагом.
+                GateOutcome::ReviewRequired => self.gate_overridden,
+                _ => false,
+            }
         {
             return Err(invalid(
                 "неполное или противоречивое свидетельство производного MP3",
@@ -124,7 +133,6 @@ pub struct PublishRequest<'a> {
     pub source_bytes: &'a [u8],
     pub replace_expected_sha256: &'a str,
     pub allow_replace_verified: bool,
-    pub override_gate: bool,
 }
 
 /// Текущая запись пары в общем корпусе (основной и runtime-манифесты).
@@ -231,12 +239,14 @@ pub fn publish_with_outcome(request: PublishRequest<'_>) -> Result<PublishOutcom
             "публикуется только вариант, прошедший пост-QC фактического результата",
         ));
     }
-    let gate_ok = result.gate.outcome == GateOutcome::Accept
-        && result.gate.proposed_variant == Some(Variant::Processed);
-    if !gate_ok && !(request.override_gate && result.gate.outcome == GateOutcome::ReviewRequired) {
+    let gate_ok = matches!(
+        result.gate.outcome,
+        GateOutcome::Accept | GateOutcome::AcceptWithLimitations
+    ) && result.gate.proposed_variant == Some(Variant::Processed);
+    if !gate_ok {
         return Err(AssetError::new(
             ErrorCode::InvalidTransition,
-            "QualityGate не предлагает этот вариант; для REVIEW_REQUIRED после прослушивания нужен --override-gate",
+            "QualityGate не выбрал обработанный вариант: публикуется только вариант с исходом ACCEPT или ACCEPT_WITH_LIMITATIONS",
         ));
     }
     if sha256_hex(request.output_bytes) != output.sha256
@@ -295,7 +305,7 @@ pub fn publish_with_outcome(request: PublishRequest<'_>) -> Result<PublishOutcom
             .clone()
             .ok_or_else(|| invalid("у результата нет плана"))?,
         gate: result.gate.clone(),
-        gate_overridden: !gate_ok,
+        gate_overridden: false,
     };
     derivation.validate(
         request.request,
@@ -431,7 +441,6 @@ mod tests {
                 source_bytes: &bytes,
                 replace_expected_sha256: &original.sha256,
                 allow_replace_verified: allow,
-                override_gate: false,
             })
         };
         // Другой процесс-владелец того же хранилища подтверждает текущий SHA

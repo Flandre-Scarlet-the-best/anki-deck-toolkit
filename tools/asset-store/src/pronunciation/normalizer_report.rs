@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::normalizer::{GateOutcome, NormalizationResult, Severity, Variant};
+use super::normalizer::{GateOutcome, NextAction, NormalizationResult, Severity, Variant};
 use super::normalizer_batch::{self, Inventory, NormalizerBatch, ResultCache};
 use crate::hashing::sha256_hex;
 use crate::{AssetError, ErrorCode};
@@ -176,9 +176,22 @@ pub struct Summary {
     pub inventory: InventorySummary,
     pub results: usize,
     pub missing_results: usize,
+    /// Исходы по уникальным входам (SHA-256).
     pub outcomes: BTreeMap<String, usize>,
+    /// Те же исходы по физическим файлам: дубли байтов получают решение
+    /// своего SHA, поэтому сумма равна `inventory.readable_files`.
+    pub outcomes_by_files: BTreeMap<String, usize>,
     pub proposed_variants: BTreeMap<String, usize>,
+    /// Следующее автоматическое действие по уникальным входам и по файлам.
+    pub next_actions: BTreeMap<String, usize>,
+    pub next_actions_by_files: BTreeMap<String, usize>,
     pub reasons: BTreeMap<String, usize>,
+    /// Ограничения по источнику (`origin`) и их точные сочетания у входа:
+    /// у одного входа может быть несколько ограничений, поэтому сумма
+    /// `reasons` больше числа входов, а сумма `limitation_combinations` —
+    /// ровно число входов с ограничениями.
+    pub limitation_origins: BTreeMap<String, usize>,
+    pub limitation_combinations: BTreeMap<String, usize>,
     pub loudness_methods: BTreeMap<String, usize>,
     pub edge_confidence: BTreeMap<String, usize>,
     pub post_qc_failed_checks: BTreeMap<String, usize>,
@@ -221,11 +234,54 @@ pub fn summarize(
         BTreeMap::new(),
     );
     let (mut rates, mut channels) = (BTreeMap::new(), BTreeMap::new());
+    let (mut outcomes_by_files, mut actions, mut actions_by_files) =
+        (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+    let (mut origins, mut combinations) = (BTreeMap::new(), BTreeMap::new());
     for outcome in GateOutcome::ALL {
         outcomes.insert(outcome.as_str().to_owned(), 0);
+        outcomes_by_files.insert(outcome.as_str().to_owned(), 0);
+    }
+    for action in NextAction::ALL {
+        actions.insert(action.as_str().to_owned(), 0);
+        actions_by_files.insert(action.as_str().to_owned(), 0);
     }
     for result in results {
+        let files = groups.get(result.input.sha256.as_str()).map_or(0, Vec::len);
         count(&mut outcomes, result.gate.outcome.as_str().into());
+        *outcomes_by_files
+            .entry(result.gate.outcome.as_str().to_owned())
+            .or_default() += files;
+        let action = result
+            .gate
+            .next_action
+            .map_or("legacy_without_next_action", NextAction::as_str);
+        count(&mut actions, action.into());
+        *actions_by_files.entry(action.to_owned()).or_default() += files;
+        let limited: Vec<_> = result
+            .gate
+            .reasons
+            .iter()
+            .filter(|r| r.severity == Severity::Limitation)
+            .collect();
+        for reason in &limited {
+            count(
+                &mut origins,
+                reason.origin.map_or_else(
+                    || "unknown".to_owned(),
+                    |o| {
+                        serde_json::to_value(o)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_default()
+                    },
+                ),
+            );
+        }
+        if !limited.is_empty() {
+            let mut codes: Vec<_> = limited.iter().map(|r| r.code.as_str()).collect();
+            codes.sort_unstable();
+            count(&mut combinations, codes.join("+"));
+        }
         count(
             &mut variants,
             match result.gate.proposed_variant {
@@ -273,7 +329,7 @@ pub fn summarize(
         .collect();
     let unique = groups.len();
     Summary {
-        schema_version: 1,
+        schema_version: 2,
         batch_id: batch.batch_id.clone(),
         mode: batch.mode,
         profile: batch.profile.clone(),
@@ -301,8 +357,13 @@ pub fn summarize(
         results: results.len(),
         missing_results: unique.saturating_sub(results.len()),
         outcomes,
+        outcomes_by_files,
         proposed_variants: variants,
+        next_actions: actions,
+        next_actions_by_files: actions_by_files,
         reasons,
+        limitation_origins: origins,
+        limitation_combinations: combinations,
         loudness_methods: methods,
         edge_confidence: confidence,
         post_qc_failed_checks: failed,
@@ -336,7 +397,7 @@ fn number(value: Option<f64>) -> String {
 pub fn tsv(inventory: &Inventory, results: &[NormalizationResult]) -> String {
     let paths = paths_by_sha(inventory);
     let metrics = metrics();
-    let mut out = String::from("input_sha256\tpaths\toutcome\tproposed\treasons");
+    let mut out = String::from("input_sha256\tpaths\toutcome\tproposed\tnext_action\treasons");
     for (name, _) in &metrics {
         out.push('\t');
         out.push_str(name);
@@ -348,7 +409,7 @@ pub fn tsv(inventory: &Inventory, results: &[NormalizationResult]) -> String {
             .map(|p| p.join(" | "))
             .unwrap_or_default();
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             result.input.sha256,
             tsv_cell(&names),
             result.gate.outcome.as_str(),
@@ -357,6 +418,7 @@ pub fn tsv(inventory: &Inventory, results: &[NormalizationResult]) -> String {
                 Some(Variant::Processed) => "processed",
                 None => "",
             },
+            result.gate.next_action.map_or("", NextAction::as_str),
             reason_codes(result)
         ));
         for (_, extract) in &metrics {
@@ -450,9 +512,15 @@ fn strata() -> Vec<(&'static str, &'static str, Filter, Order)> {
             Order::Random,
         ),
         (
-            "random_review",
-            "случайные REVIEW_REQUIRED",
-            |r| r.gate.outcome == ReviewRequired,
+            "random_accept_with_limitations",
+            "случайные ACCEPT_WITH_LIMITATIONS",
+            |r| r.gate.outcome == AcceptWithLimitations,
+            Order::Random,
+        ),
+        (
+            "random_original_with_limitations",
+            "случайные ORIGINAL_WITH_LIMITATIONS",
+            |r| r.gate.outcome == OriginalWithLimitations,
             Order::Random,
         ),
         (
@@ -695,9 +763,11 @@ pub struct ReviewSummary {
     pub decisions: usize,
     pub by_outcome_and_verdict: BTreeMap<String, BTreeMap<String, usize>>,
     pub by_stratum_and_verdict: BTreeMap<String, BTreeMap<String, usize>>,
-    /// ACCEPT, который человек счёл плохой обрезкой или ухудшением.
+    /// ACCEPT/ACCEPT_WITH_LIMITATIONS, который человек счёл плохой обрезкой
+    /// или ухудшением.
     pub false_accepts: Vec<String>,
-    /// REVIEW_REQUIRED/REJECT, который человек счёл приемлемым.
+    /// ORIGINAL_WITH_LIMITATIONS/REJECT (и прежний REVIEW_REQUIRED), который
+    /// человек счёл приемлемым.
     pub conservative_flags: Vec<String>,
     pub metrics_by_verdict: BTreeMap<String, BTreeMap<String, Distribution>>,
 }
@@ -789,10 +859,16 @@ pub fn review_summary(
                 .or_default() += 1;
         }
         match (result.gate.outcome, decision.verdict) {
-            (GateOutcome::Accept, Verdict::BadTrim | Verdict::Degraded) => {
-                summary.false_accepts.push(decision.input_sha256.clone())
-            }
-            (GateOutcome::ReviewRequired | GateOutcome::Reject, Verdict::Acceptable) => summary
+            (
+                GateOutcome::Accept | GateOutcome::AcceptWithLimitations,
+                Verdict::BadTrim | Verdict::Degraded,
+            ) => summary.false_accepts.push(decision.input_sha256.clone()),
+            (
+                GateOutcome::OriginalWithLimitations
+                | GateOutcome::ReviewRequired
+                | GateOutcome::Reject,
+                Verdict::Acceptable,
+            ) => summary
                 .conservative_flags
                 .push(decision.input_sha256.clone()),
             _ => {}
@@ -1065,6 +1141,7 @@ fn write_contents(
                 "sha": result.input.sha256,
                 "paths": paths.get(result.input.sha256.as_str()).cloned().unwrap_or_default(),
                 "outcome": result.gate.outcome.as_str(),
+                "next_action": result.gate.next_action.map(NextAction::as_str),
                 "proposed": result.gate.proposed_variant,
                 "verified": result.gate.post_qc_verified,
                 "reasons": result.gate.reasons,
@@ -1108,7 +1185,7 @@ const HTML_TEMPLATE: &str = r#"<!doctype html>
 <title>Нормализация: до и после</title>
 <style>
 :root { color-scheme: light dark; --bg:#fafafa; --fg:#1d1d1f; --muted:#6b6b70; --card:#fff; --line:#ddd;
-  --accept:#1f7a3a; --keep:#3b5bab; --review:#9a6400; --reject:#b3261e; }
+  --accept:#1f7a3a; --keep:#3b5bab; --review:#9a6400; --limited:#6b4fa3; --reject:#b3261e; }
 @media (prefers-color-scheme: dark) { :root { --bg:#161618; --fg:#ececf0; --muted:#a0a0a8; --card:#202024; --line:#38383e; } }
 * { box-sizing: border-box; }
 body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
@@ -1122,13 +1199,13 @@ button { font:inherit; padding:4px 10px; border-radius:6px; border:1px solid var
 .row { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
 .top { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
 .badge { font-weight:600; padding:1px 8px; border-radius:10px; color:#fff; font-size:12px; }
-.ACCEPT { background:var(--accept);} .KEEP_ORIGINAL { background:var(--keep);} .REVIEW_REQUIRED { background:var(--review);} .REJECT { background:var(--reject);}
+.ACCEPT { background:var(--accept);} .KEEP_ORIGINAL { background:var(--keep);} .ACCEPT_WITH_LIMITATIONS, .ORIGINAL_WITH_LIMITATIONS { background:var(--limited);} .REVIEW_REQUIRED { background:var(--review);} .REJECT { background:var(--reject);}
 .name { font-weight:600; overflow-wrap:anywhere; }
 .players { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:8px; margin:8px 0; }
 .players audio { width:100%; }
 .metrics { display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:2px 12px; font-size:12px; font-variant-numeric: tabular-nums; }
 .reasons { font-size:12px; margin:6px 0 0; padding-left:18px; }
-.sev-review, .sev-reject { color:var(--reject); } .sev-warning { color:var(--review); }
+.sev-review, .sev-reject { color:var(--reject); } .sev-warning { color:var(--review); } .sev-limitation { color:var(--limited); }
 .verdict { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }
 .verdict textarea { flex:1 1 220px; min-height:28px; }
 .warn { color:var(--reject); font-weight:600; }
@@ -1139,13 +1216,15 @@ button { font:inherit; padding:4px 10px; border-radius:6px; border:1px solid var
   <h1>Нормализация: до и после</h1>
   <span class="muted" id="meta"></span>
 </header>
-<p class="muted">ACCEPT означает лишь техническую пригодность варианта. Чтение и фонетику проверяет человек. Отчёт не обращается к сети.</p>
+<p class="muted">Каждая запись уже имеет машинное решение: исход, выбранный вариант и следующее автоматическое действие. ACCEPT означает лишь техническую пригодность варианта; чтение и фонетика этим этапом не проверяются. Оценки ниже необязательны и на результат пакета не влияют. Отчёт не обращается к сети.</p>
 <p class="warn" id="incomplete" hidden></p>
 <p class="muted">Оценки хранятся в этом браузере отдельно по каждой записи и сразу видны в других вкладках того же отчёта. Одну и ту же запись в двух вкладках не правьте одновременно: сохранится последнее изменение. Итог выгружайте кнопкой «Сохранить решения».</p>
 <div class="filters">
   <label><input type="checkbox" value="ACCEPT" checked> ACCEPT</label>
+  <label><input type="checkbox" value="ACCEPT_WITH_LIMITATIONS" checked> ACCEPT_WITH_LIMITATIONS</label>
   <label><input type="checkbox" value="KEEP_ORIGINAL" checked> KEEP_ORIGINAL</label>
-  <label><input type="checkbox" value="REVIEW_REQUIRED" checked> REVIEW_REQUIRED</label>
+  <label><input type="checkbox" value="ORIGINAL_WITH_LIMITATIONS" checked> ORIGINAL_WITH_LIMITATIONS</label>
+  <label><input type="checkbox" value="REVIEW_REQUIRED" checked> REVIEW_REQUIRED (прежние версии)</label>
   <label><input type="checkbox" value="REJECT" checked> REJECT</label>
   <select id="reason"><option value="">любая причина</option></select>
   <input type="search" id="search" placeholder="поиск по имени">
@@ -1226,7 +1305,7 @@ function render() {
     top.appendChild(el("span", "badge " + row.outcome, row.outcome));
     top.appendChild(el("span", "name", row.paths[0] || row.sha));
     if (row.paths.length > 1) top.appendChild(el("span", "muted", "+" + (row.paths.length - 1) + " дубл."));
-    top.appendChild(el("span", "muted", "предложен: " + (row.proposed || "нет") + (row.verified ? "" : " (без пост-QC)")));
+    top.appendChild(el("span", "muted", "выбран: " + (row.proposed || "нет") + (row.verified ? "" : " (без пост-QC)") + " · дальше: " + (row.next_action || "—")));
     if (row.strata) top.appendChild(el("span", "muted", "страты: " + row.strata.join(", ")));
     card.appendChild(top);
     const players = el("div", "players");
