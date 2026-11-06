@@ -802,6 +802,11 @@ pub enum ReasonOrigin {
     ProfilePolicy,
     Encoder,
     PostQc,
+    /// Этап улучшения речи: нейровариант не прошёл Enhancement QC. Сам
+    /// нормализатор этот источник не выдаёт.
+    EnhancementQc,
+    /// Этап улучшения речи: модель к записи сейчас не применяется.
+    EnhancementPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1474,6 +1479,31 @@ pub struct Prepared {
 }
 
 pub fn prepare(pcm: &Pcm, profile: &NormalizerProfile) -> Prepared {
+    prepare_from(pcm, pcm, profile)
+}
+
+/// План Balanced, в котором края, отказ и свойства исходника определяются по
+/// `edge_source`, а обрезка, раскладка и усиление применяются к `signal` той
+/// же длины, частоты и раскладки. [`prepare`] — частный случай с одним и тем
+/// же сигналом. Этап улучшения речи передаёт исходный PCM как `edge_source`
+/// и улучшенный PCM как `signal`: границы слова решаются по исходнику, где
+/// видны слабые звуки, а громкость — по фактически кодируемому сигналу,
+/// поэтому усиление, обрезка и фейд применяются ровно один раз.
+pub(crate) fn prepare_from(
+    edge_source: &Pcm,
+    signal: &Pcm,
+    profile: &NormalizerProfile,
+) -> Prepared {
+    assert_eq!(
+        (
+            edge_source.sample_rate,
+            edge_source.channels,
+            edge_source.frames()
+        ),
+        (signal.sample_rate, signal.channels, signal.frames()),
+        "сигнал плана обязан совпадать с исходником по частоте, раскладке и длине"
+    );
+    let pcm = edge_source;
     let analysis = analyze_pcm(pcm, profile);
     let mut reasons = Vec::new();
     let rejected = analysis.digital_silence
@@ -1504,7 +1534,7 @@ pub fn prepare(pcm: &Pcm, profile: &NormalizerProfile) -> Prepared {
     let start = leading.trim_frames as usize;
     let end = pcm.frames() - trailing.trim_frames as usize;
     let mut channels_out = pcm.channels as u32;
-    let mut working = pcm.slice_frames(start, end);
+    let mut working = signal.slice_frames(start, end);
     if pcm.channels == 2 && !rejected {
         let identical = analysis
             .stereo_difference_db
@@ -1931,16 +1961,70 @@ pub fn process(
         samples,
     };
     let prepared = prepare(&pcm, profile);
-    let mut result = base(InputRef {
+    let result = base(InputRef {
         probe: Some(probe),
         ..input
     });
+    decide(result, prepared, mode, profile, false)
+}
+
+/// Balanced над улучшенным PCM того же входа: края — по исходнику, громкость
+/// и кодирование — по улучшенному сигналу, одно кодирование и обычный
+/// пост-QC. Вариант создаётся всегда (улучшенный сигнал отличается от
+/// исходника, даже если обрезка и усиление не нужны), а решение QualityGate
+/// о нём принимает тот же код, что и для обычной нормализации.
+pub(crate) fn balance_enhanced(
+    input: InputRef,
+    original: &Pcm,
+    enhanced: &Pcm,
+    profile: &NormalizerProfile,
+    toolchain: &Toolchain,
+) -> Result<Processed, AssetError> {
+    profile.validate()?;
+    let mut prepared = prepare_from(original, enhanced, profile);
+    prepared.plan.needs_processing = !prepared.rejected;
+    let result = NormalizationResult {
+        schema_version: RESULT_SCHEMA_VERSION,
+        mode: Mode::Normalize,
+        config_sha256: config_sha256(profile, Mode::Normalize, toolchain),
+        profile: ProfileRef {
+            id: profile.id.clone(),
+            version: profile.version,
+        },
+        toolchain: toolchain.clone(),
+        input,
+        analysis: None,
+        plan: None,
+        output: None,
+        post_qc: None,
+        gate: GateDecision {
+            outcome: GateOutcome::Reject,
+            proposed_variant: None,
+            next_action: Some(NextAction::DiscardInput),
+            post_qc_verified: false,
+            reasons: Vec::new(),
+            unresolved: unresolved(),
+        },
+    };
+    decide(result, prepared, Mode::Normalize, profile, true)
+}
+
+/// Решение QualityGate по готовому плану: без изменений, прогноз analyze или
+/// одно кодирование с пост-QC. `force_variant` кодирует вариант и тогда,
+/// когда план ничего не меняет (улучшенный сигнал).
+fn decide(
+    mut result: NormalizationResult,
+    prepared: Prepared,
+    mode: Mode,
+    profile: &NormalizerProfile,
+    force_variant: bool,
+) -> Result<Processed, AssetError> {
     result.analysis = Some(prepared.analysis.clone());
     result.plan = Some(prepared.plan.clone());
     let mut reasons = prepared.reasons.clone();
     let (outcome, variant) = if prepared.rejected {
         route(&reasons, Route::Rejected)
-    } else if !prepared.plan.needs_processing {
+    } else if !prepared.plan.needs_processing && !force_variant {
         original_ceiling_limitation(&prepared.analysis, profile, &mut reasons);
         if !has_limitation(&reasons) {
             reasons.push(reason(

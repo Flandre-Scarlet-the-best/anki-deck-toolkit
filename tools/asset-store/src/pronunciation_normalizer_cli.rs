@@ -176,7 +176,7 @@ pub(crate) enum NormalizerAction {
     },
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
     path: &Path,
     protected: &BTreeSet<PathBuf>,
 ) -> Result<T, AssetError> {
@@ -223,7 +223,7 @@ fn forbidden_outputs(
     roots
 }
 
-fn create_new_file(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
+pub(crate) fn create_new_file(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
     use std::io::Write;
     let mut file = std::fs::File::options()
         .write(true)
@@ -237,7 +237,7 @@ fn create_new_file(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
 
 /// Флаг остановки по SIGINT/SIGTERM. Регистрация заменяет стандартное
 /// завершение процесса: пакет сохраняет контрольные точки и выходит сам.
-fn stop_flag() -> &'static AtomicBool {
+pub(crate) fn stop_flag() -> &'static AtomicBool {
     static STOP: AtomicBool = AtomicBool::new(false);
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
@@ -296,7 +296,7 @@ fn run_json(summary: nbatch::RunSummary) -> serde_json::Value {
     })
 }
 
-fn ok(result: serde_json::Value) -> serde_json::Value {
+pub(crate) fn ok(result: serde_json::Value) -> serde_json::Value {
     serde_json::json!({"schema_version":1,"outcome":"ok","result":result})
 }
 

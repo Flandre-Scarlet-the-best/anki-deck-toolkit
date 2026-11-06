@@ -131,7 +131,7 @@ pub struct Distribution {
     pub quantiles: BTreeMap<String, f64>,
 }
 
-fn distribution(values: &[Option<f64>]) -> Distribution {
+pub(crate) fn distribution(values: &[Option<f64>]) -> Distribution {
     let present: Vec<f64> = values
         .iter()
         .flatten()
@@ -152,7 +152,7 @@ fn distribution(values: &[Option<f64>]) -> Distribution {
     }
 }
 
-fn paths_by_sha(inventory: &Inventory) -> BTreeMap<&str, Vec<&str>> {
+pub(crate) fn paths_by_sha(inventory: &Inventory) -> BTreeMap<&str, Vec<&str>> {
     let mut map: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for entry in &inventory.entries {
         if let Some(sha) = &entry.sha256 {
@@ -934,7 +934,7 @@ pub struct ReportOutcome {
     pub media_skipped: usize,
 }
 
-fn create_new(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), AssetError> {
+pub(crate) fn create_new(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), AssetError> {
     let mut file = File::options()
         .write(true)
         .create_new(true)
@@ -968,9 +968,27 @@ pub fn write_report(
     results: &[NormalizationResult],
     request: ReportRequest<'_>,
 ) -> Result<ReportOutcome, AssetError> {
+    publish_new_directory(
+        request.out_dir,
+        Path::new(&batch.input_root),
+        "normalizer_report",
+        |staging| write_contents(batch, inventory, cache, results, &request, staging),
+    )
+}
+
+/// Атомарная публикация нового каталога отчёта: содержимое пишется во
+/// временный каталог рядом с целевым (`.<имя>.partial-<pid>-<время>`), затем
+/// он переименовывается без замены существующего. Каталог не может
+/// пересекаться со входом и не должен существовать заранее. Общая для
+/// отчётов пакетных этапов.
+pub(crate) fn publish_new_directory<T>(
+    out_dir: &Path,
+    input_root: &Path,
+    operation: &'static str,
+    write: impl FnOnce(&Path) -> Result<T, AssetError>,
+) -> Result<T, AssetError> {
     use rustix::fs::{Mode, OFlags, RenameFlags, mkdirat, open, renameat_with};
-    let out = normalizer_batch::resolve_path(request.out_dir)?;
-    let input_root = Path::new(&batch.input_root);
+    let out = normalizer_batch::resolve_path(out_dir)?;
     if out.starts_with(input_root) || input_root.starts_with(&out) {
         return Err(AssetError::new(
             ErrorCode::BoundaryViolation,
@@ -1006,30 +1024,29 @@ pub fn write_report(
     )
     .map_err(|e| AssetError::io("временный каталог отчёта", e.into()))?;
     let staging = parent.join(&temporary);
-    let written =
-        write_contents(batch, inventory, cache, results, &request, &staging).and_then(|outcome| {
-            File::open(&staging)
-                .and_then(|dir| dir.sync_all())
-                .map_err(|e| AssetError::io("синхронизация отчёта", e))?;
-            renameat_with(
-                &parent_fd,
-                temporary.as_os_str(),
-                &parent_fd,
-                name,
-                RenameFlags::NOREPLACE,
-            )
-            .map_err(|e| {
-                if e == rustix::io::Errno::EXIST {
-                    AssetError::new(
-                        ErrorCode::IdentityConflict,
-                        "каталог отчёта появился во время записи; отчёт не опубликован",
-                    )
-                } else {
-                    AssetError::io("публикация каталога отчёта", e.into())
-                }
-            })?;
-            Ok(outcome)
-        });
+    let written = write(&staging).and_then(|outcome| {
+        File::open(&staging)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| AssetError::io("синхронизация отчёта", e))?;
+        renameat_with(
+            &parent_fd,
+            temporary.as_os_str(),
+            &parent_fd,
+            name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|e| {
+            if e == rustix::io::Errno::EXIST {
+                AssetError::new(
+                    ErrorCode::IdentityConflict,
+                    "каталог отчёта появился во время записи; отчёт не опубликован",
+                )
+            } else {
+                AssetError::io("публикация каталога отчёта", e.into())
+            }
+        })?;
+        Ok(outcome)
+    });
     match written {
         Ok(outcome) => {
             let _ = File::from(parent_fd).sync_all();
@@ -1040,7 +1057,7 @@ pub fn write_report(
             // не разыменовываются (`remove_dir_all` не следует ссылкам).
             if let Err(cleanup) = std::fs::remove_dir_all(&staging) {
                 tracing::warn!(
-                    operation = "normalizer_report",
+                    operation = operation,
                     code = "report_staging_cleanup_failed",
                     error = %cleanup,
                     "Не удалось удалить временный каталог отчёта"

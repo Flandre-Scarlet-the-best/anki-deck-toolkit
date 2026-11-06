@@ -1,0 +1,60 @@
+[package]
+name = "speech-enhance"
+version = "0.1.0"
+# `edition` и MSRV наследуются из корневого `[workspace.package]`.
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Изолированный локальный CPU-воркер нейросетевого улучшения речи (DeepFilterNet3) для пакетной обработки произношений"
+publish = false
+autotests = false
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+# Точная версия: идентичность backend входит в ключ кэша результатов, а
+# веса модели сверяются по закреплённым SHA-256 (см. src/model.rs).
+deep-filter-rt = "=0.1.1"
+flate2 = "1.1"
+ndarray = "0.17"
+rustix = { version = "1.1", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
+tar = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+# Сквозной тест: настоящий воркер под управлением этапа улучшения asset-store.
+asset-store = { path = "../asset-store" }
+# Спектральная метрика тестов против известного чистого эталона.
+realfft = "3.1"
+
+[lib]
+name = "speech_enhance"
+path = "src/lib.rs"
+doctest = false
+
+# Процесс-воркер: asset-store запускает его через prlimit с пределами времени и
+# памяти и обменивается с ним файлами PCM f32 и JSON. Python не нужен.
+[[bin]]
+name = "speech-enhance-dfn"
+path = "src/bin/speech_enhance_dfn.rs"
+test = false
+
+[[test]]
+name = "inference"
+path = "tests/inference.rs"
+
+[[test]]
+name = "pipeline"
+path = "tests/pipeline.rs"
+
+# Воркер Resemble Enhance (Python, вне сборки Cargo): граница доверия к весам.
+[[test]]
+name = "resemble"
+path = "tests/resemble.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

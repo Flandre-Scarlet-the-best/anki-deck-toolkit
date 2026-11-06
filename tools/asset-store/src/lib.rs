@@ -46,6 +46,7 @@ pub mod pitch_review;
 mod pitch_review_decisions;
 pub mod pronunciation;
 pub mod pronunciation_cli;
+mod pronunciation_enhancer_cli;
 mod pronunciation_normalizer_cli;
 mod review_snapshot;
 pub mod selection;

@@ -1053,13 +1053,75 @@ pub struct RunSummary {
     pub batch: NormalizerBatch,
 }
 
-enum ItemError {
+pub(crate) enum ItemError {
     /// Байты входа не совпали с инвентаризацией или вход не читается.
     Source(String),
     /// Сбой среды: восстановимо, результат не записывается.
     Infrastructure(AssetError),
-    /// Нарушение инварианта самого нормализатора: пакет останавливается.
+    /// Нарушение инварианта самого этапа: пакет останавливается.
     Fatal(AssetError),
+}
+
+/// Общий исполнитель пакетных этапов: `jobs` потоков берут входы из
+/// `pending` по очереди, а результаты через ограниченный канал (не больше
+/// `jobs` в пути) получает `consume` в вызывающем потоке — там же
+/// сохраняются контрольные точки. Новые входы не выдаются после `stop`
+/// (сигнал) или `halt` (решение `consume`).
+pub(crate) fn run_items<R: Send>(
+    pending: &[(String, String)],
+    jobs: usize,
+    stop: &AtomicBool,
+    halt: &AtomicBool,
+    work: impl Fn(&str, &str) -> Result<R, ItemError> + Sync,
+    mut consume: impl FnMut(usize, Result<R, ItemError>),
+) {
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(jobs);
+        for _ in 0..jobs.min(pending.len().max(1)) {
+            let sender = sender.clone();
+            let (next, work) = (&next, &work);
+            scope.spawn(move || {
+                loop {
+                    if stop.load(Ordering::SeqCst) || halt.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some((sha, path)) = pending.get(index) else {
+                        break;
+                    };
+                    let outcome = interrupted_if_stopped(stop, work(sha, path));
+                    if sender.send((index, outcome)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for (index, outcome) in receiver {
+            consume(index, interrupted_if_stopped(stop, outcome));
+        }
+    });
+}
+
+/// Результат, полученный после сигнала остановки, не доверяется: Ctrl+C
+/// получает вся группа процессов, и FFmpeg, перехватив SIGINT, завершается
+/// обычным ненулевым кодом. Его отказ выглядел бы свойством входа
+/// (`REJECT`, `encode_failed`) и попал бы в кэш. Такой вход остаётся
+/// незавершённым и обрабатывается следующим запуском.
+fn interrupted_if_stopped<R>(
+    stop: &AtomicBool,
+    outcome: Result<R, ItemError>,
+) -> Result<R, ItemError> {
+    if stop.load(Ordering::SeqCst) {
+        Err(ItemError::Infrastructure(AssetError::with_details(
+            ErrorCode::ValidatorFailure,
+            "обработка прервана сигналом остановки: результат не сохранён",
+            serde_json::json!({"blocker":"interrupted"}),
+        )))
+    } else {
+        outcome
+    }
 }
 
 /// Обрабатывает недостающие результаты с ограниченной конкуренцией.
@@ -1186,7 +1248,6 @@ fn resume_with(
     let mut cancelled = false;
     let mut last_checkpoint = Instant::now();
     let halt = AtomicBool::new(false);
-    let next = AtomicUsize::new(0);
     let mut consecutive_infra = 0usize;
     let checkpoint = |batch: &mut NormalizerBatch,
                       runtime: &mut SafeBatchRuntime,
@@ -1213,117 +1274,94 @@ fn resume_with(
     };
     let profile = batch.profile.clone();
     let mode = batch.mode;
-    std::thread::scope(|scope| {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(jobs);
-        for _ in 0..jobs.min(pending.len().max(1)) {
-            let sender = sender.clone();
-            let (pending, next, halt, root, profile, toolchain, tools) =
-                (&pending, &next, &halt, &root, &profile, &toolchain, &tools);
-            scope.spawn(move || {
-                loop {
-                    if stop.load(Ordering::SeqCst) || halt.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let index = next.fetch_add(1, Ordering::SeqCst);
-                    let Some((sha, path)) = pending.get(index) else {
-                        break;
-                    };
-                    let outcome = match read_input(root, path, sha) {
-                        Err(error) => Err(ItemError::Source(error.message)),
-                        Ok(bytes) => {
-                            normalizer::process(&bytes, profile, mode, toolchain).map_err(|error| {
-                                if normalizer::is_infrastructure_failure(&error) {
-                                    ItemError::Infrastructure(error)
-                                } else {
-                                    ItemError::Fatal(error)
-                                }
-                            })
-                        }
-                    };
-                    // Инструмент заменён во время обработки: результат мог
-                    // получиться другой сборкой и в кэш не попадает.
-                    let outcome = match outcome {
-                        Ok(processed) => match super::probe::tool_files() {
-                            Ok(now) if now == *tools => Ok(processed),
-                            Ok(_) => Err(ItemError::Fatal(super::probe::toolchain_changed())),
-                            Err(error) => Err(ItemError::Infrastructure(error)),
-                        },
-                        other => other,
-                    };
-                    if sender.send((index, outcome)).is_err() {
-                        break;
-                    }
+    let work = |sha: &str, path: &str| {
+        let outcome = match read_input(&root, path, sha) {
+            Err(error) => Err(ItemError::Source(error.message)),
+            Ok(bytes) => normalizer::process(&bytes, &profile, mode, &toolchain).map_err(|error| {
+                if normalizer::is_infrastructure_failure(&error) {
+                    ItemError::Infrastructure(error)
+                } else {
+                    ItemError::Fatal(error)
                 }
-            });
+            }),
+        };
+        // Инструмент заменён во время обработки: результат мог
+        // получиться другой сборкой и в кэш не попадает.
+        match outcome {
+            Ok(processed) => match super::probe::tool_files() {
+                Ok(now) if now == tools => Ok(processed),
+                Ok(_) => Err(ItemError::Fatal(super::probe::toolchain_changed())),
+                Err(error) => Err(ItemError::Infrastructure(error)),
+            },
+            other => other,
         }
-        drop(sender);
-        for (index, outcome) in receiver {
-            let (sha, path) = &pending[index];
-            let stored = match outcome {
-                Ok(processed) => {
-                    consecutive_infra = 0;
-                    cache.put(processed.result, processed.output_bytes.as_deref())
+    };
+    run_items(&pending, jobs, stop, &halt, work, |index, outcome| {
+        let (sha, path) = &pending[index];
+        let stored = match outcome {
+            Ok(processed) => {
+                consecutive_infra = 0;
+                cache.put(processed.result, processed.output_bytes.as_deref())
+            }
+            Err(ItemError::Source(message)) => {
+                if source_errors.len() < MAX_RECORDED_ERRORS {
+                    source_errors.insert(path.clone(), message);
                 }
-                Err(ItemError::Source(message)) => {
-                    if source_errors.len() < MAX_RECORDED_ERRORS {
-                        source_errors.insert(path.clone(), message);
-                    }
-                    continue;
+                return;
+            }
+            Err(ItemError::Infrastructure(error)) => {
+                if stop.load(Ordering::SeqCst) {
+                    return;
                 }
-                Err(ItemError::Infrastructure(error)) => {
-                    if stop.load(Ordering::SeqCst) {
-                        continue;
-                    }
-                    infrastructure_failed_now += 1;
-                    consecutive_infra += 1;
-                    *infra.entry(sha.clone()).or_default() += 1;
-                    if consecutive_infra >= MAX_CONSECUTIVE_INFRA_FAILURES {
-                        halt.store(true, Ordering::SeqCst);
-                        failure.get_or_insert(error);
-                    }
-                    continue;
-                }
-                Err(ItemError::Fatal(error)) => {
+                infrastructure_failed_now += 1;
+                consecutive_infra += 1;
+                *infra.entry(sha.clone()).or_default() += 1;
+                if consecutive_infra >= MAX_CONSECUTIVE_INFRA_FAILURES {
                     halt.store(true, Ordering::SeqCst);
                     failure.get_or_insert(error);
-                    continue;
                 }
-            };
-            match stored {
-                Ok(result) => {
-                    processed_now += 1;
-                    infra.remove(sha);
-                    source_errors.remove(path);
-                    *by_outcome
-                        .entry(result.gate.outcome.as_str().into())
-                        .or_default() += 1;
+                return;
+            }
+            Err(ItemError::Fatal(error)) => {
+                halt.store(true, Ordering::SeqCst);
+                failure.get_or_insert(error);
+                return;
+            }
+        };
+        match stored {
+            Ok(result) => {
+                processed_now += 1;
+                infra.remove(sha);
+                source_errors.remove(path);
+                *by_outcome
+                    .entry(result.gate.outcome.as_str().into())
+                    .or_default() += 1;
+            }
+            Err(error) => {
+                halt.store(true, Ordering::SeqCst);
+                failure.get_or_insert(error);
+                return;
+            }
+        }
+        if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+            last_checkpoint = Instant::now();
+            match checkpoint(
+                &mut batch,
+                &mut runtime,
+                reused + processed_now,
+                processed_before + processed_now,
+                &by_outcome,
+                &infra,
+                &source_errors,
+            ) {
+                Ok(true) => {
+                    cancelled = true;
+                    halt.store(true, Ordering::SeqCst);
                 }
+                Ok(false) => {}
                 Err(error) => {
                     halt.store(true, Ordering::SeqCst);
                     failure.get_or_insert(error);
-                    continue;
-                }
-            }
-            if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-                last_checkpoint = Instant::now();
-                match checkpoint(
-                    &mut batch,
-                    &mut runtime,
-                    reused + processed_now,
-                    processed_before + processed_now,
-                    &by_outcome,
-                    &infra,
-                    &source_errors,
-                ) {
-                    Ok(true) => {
-                        cancelled = true;
-                        halt.store(true, Ordering::SeqCst);
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        halt.store(true, Ordering::SeqCst);
-                        failure.get_or_insert(error);
-                    }
                 }
             }
         }
@@ -1479,6 +1517,46 @@ pub fn open_input_root(batch: &NormalizerBatch) -> Result<File, AssetError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn results_finished_after_stop_signal_are_never_accepted() {
+        let pending: Vec<(String, String)> =
+            (0..6).map(|i| (format!("{i}"), String::new())).collect();
+        let stop = AtomicBool::new(false);
+        let halt = AtomicBool::new(false);
+        let mut accepted = Vec::new();
+        let mut interrupted = 0;
+        // Обработка «видит» сигнал на третьем входе так же, как FFmpeg,
+        // получивший SIGINT группы процессов, вернул бы обычную ошибку.
+        run_items(
+            &pending,
+            1,
+            &stop,
+            &halt,
+            |sha: &str, _: &str| {
+                if sha == "2" {
+                    stop.store(true, Ordering::SeqCst);
+                }
+                Ok::<_, ItemError>(sha.to_owned())
+            },
+            |_, outcome| match outcome {
+                Ok(sha) => accepted.push(sha),
+                Err(ItemError::Infrastructure(e)) => {
+                    assert_eq!(e.details["blocker"], "interrupted");
+                    interrupted += 1;
+                }
+                Err(_) => panic!("неожиданный класс ошибки"),
+            },
+        );
+        // Ни один вход, завершённый после сигнала, не принят; вход, принятый
+        // потребителем уже после сигнала, тоже отброшен (будет пересчитан).
+        assert!(
+            accepted.iter().all(|sha| sha == "0" || sha == "1"),
+            "{accepted:?}"
+        );
+        assert!(interrupted >= 1);
+        assert!(accepted.len() + interrupted <= 3);
+    }
+
     use super::*;
 
     /// Состояние пакета прежней версии без `result_schema_version` читается
