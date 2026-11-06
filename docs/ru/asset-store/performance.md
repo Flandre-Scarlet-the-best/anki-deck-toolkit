@@ -107,6 +107,35 @@ cargo run -p benchmark-history -- baseline <ID>
 (порядок — skill
 [`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md)).
 
+## Нормализатор MP3
+
+Сценарий `asset-store.audio-normalizer-batch` измеряет штатный
+`pronunciation-assets normalizer batch-start` ([контракт](normalizer.md))
+от старта процесса до выхода, включая все дочерние FFmpeg, ffprobe и
+`prlimit`. Вход — внешний каталог MP3 (`corpus_path`, путь не публикуется,
+идентичность — SHA-256 дерева); рабочий каталог принадлежит сценарию и
+помечен маркером `asset-store-bench`. Профиль `cold` перед каждым прогоном
+пересоздаёт пустой рабочий каталог: измеряется вся работа. Профиль `warm`
+заполняет кэш результатов прогревочным пакетом и перед каждым прогоном
+удаляет только состояние пакета: измеряется повторный запуск без повторной
+обработки. Постусловие вне интервала — пакет обработал все уникальные входы,
+вход не изменился. Параметры `mode` (`analyze`/`normalize`) и `jobs` влияют на
+сопоставимость.
+
+Воспроизводимая синтетическая нагрузка:
+
+```bash
+cargo run --locked --release -p asset-store --bin asset-store-bench -- \
+  audio-corpus --out target/benchmark-workloads/audio-corpus-300 --count 300 --seed 1
+cargo run -p benchmark-runner -- run asset-store.audio-normalizer-batch --profile cold \
+  --param corpus_path=target/benchmark-workloads/audio-corpus-300 --param mode=normalize
+```
+
+Генератор детерминирован: тоны 150–900 Гц с уровнем от −44 до −8 dBFS,
+краевая тишина 0–1.2 с, внутренняя пауза у части клипов, моно/стерео,
+22.05/44.1/48 кГц. Скорость единственного Forvo worker этим сценарием не
+измеряется и требованием к CPU/DSP-обработке не является.
+
 ## Снимки
 
 Блоки ниже генерирует `benchmark-history snapshot` из проверенных результатов
@@ -391,6 +420,84 @@ cargo run -p benchmark-history -- baseline <ID>
 | `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 3.3 MiB ± 0 B | 3.3 MiB | 3.3 MiB – 3.3 MiB | 10 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
+<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"cold","recorded_at":"2026-11-05T23:50:31Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":3203312.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
+### `asset-store.audio-normalizer-batch` · профиль `cold`
+
+Последнее подтверждённое измерение: 2026-11-05 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · cold · online · итог `success`: успешных прогонов 5 из 5, прогревов 0.
+
+| Факт окружения | Значение |
+|---|---|
+| `arch` ★ | x86_64 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730972160 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| Нагрузка | Значение |
+|---|---|
+| параметр `jobs` | `4` |
+| параметр `mode` | `normalize` |
+| `corpus` · `bytes` | 3.05 MiB |
+| `corpus` · `files` | 301 |
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 32.775 s ± 761.52 ms | 32.86 s | 31.759 s – 33.608 s | 5 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 73.944 s ± 2.039 s | 74.467 s | 71.33 s – 75.877 s | 5 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 46.574 s ± 1.437 s | 46.376 s | 44.703 s – 48.523 s | 5 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 51.34 MiB ± 28.9 KiB | 51.34 MiB | 51.31 MiB – 51.39 MiB | 5 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 121.808 s ± 3.445 s | 122.135 s | 117.286 s – 125.717 s | 5 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 163.19 MiB ± 2.54 MiB | 163.23 MiB | 159.25 MiB – 166.21 MiB | 5 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 3.72 ядра ± 0.02 ядра | 3.72 ядра | 3.69 ядра – 3.74 ядра | 5 |
+| `disk_usage@path/workspace` | path / filesystem | 4.2 MiB ± 0 B | 4.2 MiB | 4.2 MiB – 4.2 MiB | 5 |
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
+<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"warm","recorded_at":"2026-11-06T00:14:56Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":3203312.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
+### `asset-store.audio-normalizer-batch` · профиль `warm`
+
+Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 5 из 5, прогревов 0.
+
+| Факт окружения | Значение |
+|---|---|
+| `arch` ★ | x86_64 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730972160 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| Нагрузка | Значение |
+|---|---|
+| параметр `jobs` | `4` |
+| параметр `mode` | `normalize` |
+| `corpus` · `bytes` | 3.05 MiB |
+| `corpus` · `files` | 301 |
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 120.1 ms ± 14.94 ms | 111.31 ms | 110.69 ms – 145.38 ms | 5 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 60.04 ms ± 11.41 ms | 65.32 ms | 42.64 ms – 69.88 ms | 5 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 44.54 ms ± 12.04 ms | 46.33 ms | 28.08 ms – 58.77 ms | 5 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 43 MiB ± 203.4 KiB | 43 MiB | 42.8 MiB – 43.29 MiB | 5 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 107.28 ms ± 9.22 ms | 103.47 ms | 100.57 ms – 123.47 ms | 5 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 17.21 MiB ± 227.71 KiB | 17.16 MiB | 16.91 MiB – 17.46 MiB | 5 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.81 ядра ± 0.08 ядра | 0.84 ядра | 0.68 ядра – 0.85 ядра | 5 |
+| `disk_usage@path/workspace` | path / filesystem | 4.2 MiB ± 0 B | 4.2 MiB | 4.2 MiB – 4.2 MiB | 5 |
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
