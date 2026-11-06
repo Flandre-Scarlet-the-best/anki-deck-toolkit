@@ -368,7 +368,7 @@ pub(crate) fn execute(
             // отказ не оставляет следов ни во входе, ни в decks/**.
             nbatch::check_boundaries(&input, workspace, protected)?;
             let workspace = nbatch::create_workspace(workspace, &input, protected)?;
-            nbatch::start(nbatch::StartRequest {
+            let started = nbatch::start(nbatch::StartRequest {
                 batch_id,
                 workspace: &workspace,
                 input_root: &input,
@@ -380,10 +380,9 @@ pub(crate) fn execute(
                     max_total_bytes: *max_total_bytes,
                 },
             })?;
-            Ok(run_json(nbatch::resume(
+            Ok(run_json(nbatch::resume_started(
                 &workspace,
-                batch_id,
-                None,
+                &started,
                 *max_items,
                 stop_flag(),
             )?))

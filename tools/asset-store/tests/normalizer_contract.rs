@@ -1404,23 +1404,30 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
             .blockers
             .is_empty()
     );
-    // Повторная обработка производного варианта не допускается.
+    // Тот же профиль не предлагает нового варианта для уже выровненного.
     let again = process(&output, &profile, Mode::Normalize, &toolchain()).unwrap();
-    let again_output = again.output_bytes.clone();
-    if let Some(bytes) = again_output {
-        let refused = derivation::publish(derivation::PublishRequest {
-            store: &store,
-            request: &request,
-            result: &again.result,
-            profile: &profile,
-            output_bytes: &bytes,
-            source_bytes: &output,
-            replace_expected_sha256: &derived.sha256,
-            allow_replace_verified: true,
-            override_gate: true,
-        });
-        assert!(refused.is_err());
-    }
+    assert_eq!(again.result.gate.outcome, GateOutcome::KeepOriginal);
+    assert!(again.output_bytes.is_none());
+    // Другая цель даёт новый вариант, но публикация поверх производного
+    // варианта запрещена: CAS, байты и гейт при этом корректны.
+    let mut quieter = profile.clone();
+    quieter.loudness.target_lufs -= 6.0;
+    let reprocessed = process(&output, &quieter, Mode::Normalize, &toolchain()).unwrap();
+    assert_eq!(reprocessed.result.gate.outcome, GateOutcome::Accept);
+    let refused = derivation::publish(derivation::PublishRequest {
+        store: &store,
+        request: &request,
+        result: &reprocessed.result,
+        profile: &quieter,
+        output_bytes: reprocessed.output_bytes.as_deref().unwrap(),
+        source_bytes: &output,
+        replace_expected_sha256: &derived.sha256,
+        allow_replace_verified: true,
+        override_gate: false,
+    })
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::InvalidTransition);
+    assert!(refused.message.contains("производного варианта"));
     // KEEP_ORIGINAL не публикуется: остальные условия запроса допустимы.
     let kept = process(good(), &profile, Mode::Normalize, &toolchain()).unwrap();
     assert_eq!(kept.result.gate.outcome, GateOutcome::KeepOriginal);

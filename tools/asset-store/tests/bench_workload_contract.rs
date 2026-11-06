@@ -902,6 +902,17 @@ fn audio_reset_rejects_conflicting_flags() {
     assert!(workdir.exists());
 }
 
+/// Отсутствующий родитель `--out` создаётся; новым обязан быть только сам
+/// каталог корпуса.
+#[test]
+fn audio_corpus_creates_missing_parent_but_requires_new_output() {
+    let root = TempWorkspace::create("audio-corpus-parent").unwrap();
+    let out = root.path().join("missing/nested/corpus");
+    asset_store::bench_audio::generate_corpus(&out, 1, 1).unwrap();
+    assert!(out.join("clip-00000.mp3").is_file());
+    assert!(asset_store::bench_audio::generate_corpus(&out, 1, 1).is_err());
+}
+
 /// Пиковые уровни синтетического корпуса лежат в заявленном диапазоне
 /// −44…−8 dBFS (с допуском на кодирование) и действительно его покрывают;
 /// генерация детерминирована по seed.

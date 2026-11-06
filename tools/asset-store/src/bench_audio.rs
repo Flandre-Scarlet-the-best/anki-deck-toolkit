@@ -69,6 +69,10 @@ pub fn generate_corpus(
     if count == 0 || count > 20_000 {
         return Err(fail("--count должен быть 1–20000"));
     }
+    // Родитель создаётся заранее: новым обязан быть только сам каталог корпуса.
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|e| fail(format!("родитель каталога корпуса: {e}")))?;
+    }
     fs::create_dir(out).map_err(|e| fail(format!("каталог корпуса должен быть новым: {e}")))?;
     let mut rng = Rng(seed);
     let mut bytes = 0u64;

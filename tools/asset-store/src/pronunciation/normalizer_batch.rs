@@ -970,6 +970,37 @@ pub fn resume(
     max_items: Option<usize>,
     stop: &AtomicBool,
 ) -> Result<RunSummary, AssetError> {
+    resume_with(workspace, batch_id, jobs, max_items, stop, None)
+}
+
+/// [`resume`] сразу после [`start`] в том же процессе: окружение, только что
+/// определённое и записанное в пакет при старте, повторно не определяется
+/// (каждое определение запускает FFmpeg/ffprobe и пробное кодирование).
+/// Сверка с `batch.toolchain` сохраняется.
+pub fn resume_started(
+    workspace: &Path,
+    started: &NormalizerBatch,
+    max_items: Option<usize>,
+    stop: &AtomicBool,
+) -> Result<RunSummary, AssetError> {
+    resume_with(
+        workspace,
+        &started.batch_id,
+        None,
+        max_items,
+        stop,
+        Some(started.toolchain.clone()),
+    )
+}
+
+fn resume_with(
+    workspace: &Path,
+    batch_id: &str,
+    jobs: Option<usize>,
+    max_items: Option<usize>,
+    stop: &AtomicBool,
+    detected: Option<Toolchain>,
+) -> Result<RunSummary, AssetError> {
     let mut runtime = SafeBatchRuntime::open(workspace, batch_id)?;
     let mut batch: NormalizerBatch = runtime
         .load()?
@@ -987,7 +1018,10 @@ pub fn resume(
     }
     let inventory: Inventory =
         serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
-    let toolchain = Toolchain::detect()?;
+    let toolchain = match detected {
+        Some(toolchain) => toolchain,
+        None => Toolchain::detect()?,
+    };
     if toolchain != batch.toolchain {
         return Err(invalid(
             "версия FFmpeg/ffprobe/кодировщика/анализатора изменилась: результаты несопоставимы, начните новый пакет",
