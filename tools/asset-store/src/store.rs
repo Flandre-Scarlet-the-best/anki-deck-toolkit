@@ -218,6 +218,13 @@ fn lifecycle_from_str(value: Option<&str>) -> Option<LifecycleState> {
     }
 }
 
+/// Можно ли импортом заменить текущую запись слота в состоянии `Verified`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifiedReplacement {
+    Allowed,
+    Forbidden,
+}
+
 /// Запрос на явный вызов `ingest` для одного указанного локального файла.
 #[derive(Debug, Clone)]
 pub struct IngestRequest {
@@ -1366,7 +1373,28 @@ impl AssetStore {
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         let source = open_source_file(&request.source_path)?;
-        self.ingest_source(request, source, Some(provenance), false)
+        self.ingest_source(
+            request,
+            source,
+            Some(provenance),
+            false,
+            VerifiedReplacement::Allowed,
+        )
+    }
+
+    /// Как [`Self::ingest_with_provenance`], но замена текущей записи в
+    /// состоянии `Verified` проверяется **под той же исключительной
+    /// блокировкой**, что и CAS по SHA: подтверждение человека, зафиксированное
+    /// между чтением состояния вызывающим кодом и импортом, не теряется.
+    pub(crate) fn ingest_with_provenance_guarded(
+        &self,
+        request: IngestRequest,
+        provenance: Provenance,
+        verified: VerifiedReplacement,
+    ) -> Result<IngestOutcome, AssetError> {
+        self.policy.validate_identity(&request.identity)?;
+        let source = open_source_file(&request.source_path)?;
+        self.ingest_source(request, source, Some(provenance), false, verified)
     }
 
     /// Явное обновление происхождения/метаданных даже при прежнем SHA. Требует
@@ -1379,7 +1407,13 @@ impl AssetStore {
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         let source = open_source_file(&request.source_path)?;
-        self.ingest_source(request, source, Some(provenance), true)
+        self.ingest_source(
+            request,
+            source,
+            Some(provenance),
+            true,
+            VerifiedReplacement::Allowed,
+        )
     }
 
     /// Импортирует уже открытый и проверенный дескриптор исходного файла через `CLI`.
@@ -1388,7 +1422,7 @@ impl AssetStore {
         request: IngestRequest,
         source: File,
     ) -> Result<IngestOutcome, AssetError> {
-        self.ingest_source(request, source, None, false)
+        self.ingest_source(request, source, None, false, VerifiedReplacement::Allowed)
     }
 
     fn ingest_source(
@@ -1397,6 +1431,7 @@ impl AssetStore {
         source: File,
         provenance: Option<Provenance>,
         refresh_metadata: bool,
+        verified: VerifiedReplacement,
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         if let Some(expected) = &request.expected_source_sha256 {
@@ -1472,6 +1507,19 @@ impl AssetStore {
                         "identity": existing.identity,
                         "existing_sha256": existing.sha256,
                         "candidate_sha256": staged.sha256,
+                    }),
+                ));
+            }
+            if verified == VerifiedReplacement::Forbidden
+                && existing.lifecycle == LifecycleState::Verified
+            {
+                return Err(AssetError::with_details(
+                    ErrorCode::InvalidTransition,
+                    "текущая запись подтверждена человеком; замена требует явного разрешения и нового подтверждения",
+                    serde_json::json!({
+                        "blocker": "verified_replacement_forbidden",
+                        "identity": existing.identity,
+                        "existing_sha256": existing.sha256,
                     }),
                 ));
             }
@@ -4523,10 +4571,20 @@ fn scan_asset_directory(
             // Все потомки образуют непрерывный диапазон в BTreeSet.
             // Разделитель обязателен: assets/png-extra не потомок assets/png.
             let prefix = format!("{path}/");
-            if !registered_paths
-                .range(prefix.clone()..)
-                .next()
-                .is_some_and(|registered| registered.starts_with(&prefix))
+            // Каталог слота CAS-домена может остаться без текущей записи этой
+            // области: после замены кандидата и подтверждения новая запись
+            // переходит в канонический манифест, а прежние байты — нет. Такой
+            // каталог обходится как сирота; каждый файл в нём сверяется ниже
+            // по имени и фактическому SHA-256.
+            let orphan_slot = !reject_orphans
+                && policy.content_addressed_storage()
+                && relative_path == ASSETS_DIR
+                && validate_hash(&component).is_ok();
+            if !orphan_slot
+                && !registered_paths
+                    .range(prefix.clone()..)
+                    .next()
+                    .is_some_and(|registered| registered.starts_with(&prefix))
             {
                 if !reject_orphans {
                     let child = open_directory_at(directory, &name)
@@ -4573,15 +4631,32 @@ fn scan_asset_directory(
                 format!("незарегистрированный файл в каноническом хранилище ресурсов: {path}"),
             ));
         }
-        if path.matches('/').count() != 1 {
+        // Плоская раскладка `assets/<sha>.<ext>` либо вложенная раскладка слота
+        // `assets/<sha256(identity)>/<sha>.<ext>`: после CAS-замены прежние байты
+        // слота остаются рядом с текущими. Имя файла ниже всё равно сверяется
+        // с фактическим SHA-256.
+        let nested_slot = path.matches('/').count() == 2
+            && path
+                .split('/')
+                .nth(1)
+                .is_some_and(|slot| validate_hash(slot).is_ok());
+        if path.matches('/').count() != 1 && !nested_slot {
             return Err(AssetError::new(
                 ErrorCode::UnexpectedPath,
                 format!(
-                    "осиротевший файл с адресацией по хешу должен лежать непосредственно в assets/: {path}"
+                    "осиротевший файл с адресацией по хешу должен лежать в assets/ или в assets/<sha256 слота>/: {path}"
                 ),
             ));
         }
-        let Some(hash) = embedded_content_hash(&component) else {
+        let embedded = if nested_slot {
+            component
+                .rsplit_once('.')
+                .map(|(stem, _)| stem)
+                .filter(|stem| stem.len() == 64)
+        } else {
+            embedded_content_hash(&component)
+        };
+        let Some(hash) = embedded else {
             return Err(AssetError::new(
                 ErrorCode::UnexpectedPath,
                 format!("неизвестный файл в каноническом хранилище ресурсов: {path}"),

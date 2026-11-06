@@ -21,6 +21,8 @@ mod forvo_transport_contract;
 mod journal_contract;
 #[path = "kanji_ocr_contract.rs"]
 mod kanji_ocr_contract;
+#[path = "normalizer_contract.rs"]
+mod normalizer_contract;
 #[path = "pitch_cli_contract.rs"]
 mod pitch_cli_contract;
 #[path = "pitch_corpus_trust_contract.rs"]

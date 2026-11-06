@@ -221,7 +221,38 @@ impl ArtifactDirectory {
     }
 }
 
+/// Как и у [`ExecutionLease`], блокировка снимается явно: копия дескриптора,
+/// унаследованная через `fork` до `exec` параллельно запущенным процессом,
+/// иначе удерживала бы её после закрытия нашего дескриптора.
+impl Drop for SafeBatchRuntime {
+    fn drop(&mut self) {
+        if !self.locked {
+            return;
+        }
+        if let Err(error) = flock(&self.directory, FlockOperation::Unlock) {
+            tracing::warn!(
+                operation = "batch_runtime_lock",
+                stage = "runtime_lock",
+                code = "lock_release_on_drop_failed",
+                batch_id = self.batch_id,
+                error = %error,
+                "Не удалось явно снять блокировку состояния пакета; она снимется при закрытии дескриптора"
+            );
+        }
+    }
+}
+
 impl SafeBatchRuntime {
+    /// Копия дескриптора блокировки с тем же открытым описанием файла — как
+    /// у процесса, унаследовавшего его через `fork`, — и путь каталога.
+    #[cfg(test)]
+    pub(crate) fn lock_description_copy(&self) -> (File, PathBuf) {
+        (
+            self.directory.try_clone().expect("копия дескриптора"),
+            self.directory_path.clone(),
+        )
+    }
+
     /// Короткая блокировка состояния может сниматься на время внешней работы.
     /// Этот отдельный lease сохраняет единственного исполнителя и не мешает status/cancel.
     pub(crate) fn execution_lease(&self) -> Result<ExecutionLease, AssetError> {
@@ -701,6 +732,38 @@ impl SafeBatchRuntime {
             sha256,
             storage_path,
         })
+    }
+
+    /// Лежит ли по ссылке обычный файл (без перехода по ссылке) больше
+    /// `maximum`. Отличает раздутый повреждённый blob, который можно заменить,
+    /// от прочих нарушений границы того же кода ошибки.
+    pub(crate) fn blob_is_oversized_regular_file(
+        &self,
+        blob: &RuntimeBlobRef,
+        maximum: u64,
+    ) -> Result<bool, AssetError> {
+        self.require_lock()?;
+        let name = validate_blob_ref(blob)?;
+        match statat(&self.blobs, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(
+                FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                    && stat.st_size as u64 > maximum,
+            ),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+            Err(error) => Err(boundary_io(error)),
+        }
+    }
+
+    /// Удаляет blob по проверенной ссылке (только имя в `candidates/`, без
+    /// перехода по ссылкам). Отсутствующий blob — не ошибка.
+    pub(crate) fn remove_blob(&self, blob: &RuntimeBlobRef) -> Result<(), AssetError> {
+        self.require_lock()?;
+        let name = validate_blob_ref(blob)?;
+        match rustix::fs::unlinkat(&self.blobs, name, rustix::fs::AtFlags::empty()) {
+            Ok(()) => Ok(()),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+            Err(error) => Err(boundary_io(error)),
+        }
     }
 
     /// Возвращает байты только после проверки пути, обычного файла, размера и SHA.

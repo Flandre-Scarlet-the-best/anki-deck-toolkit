@@ -11,6 +11,7 @@ compile_error!("asset-store пока поддерживает только Linux
 mod acquisition_pool;
 pub mod batch;
 pub mod batch_runtime;
+pub mod bench_audio;
 pub mod bench_workload;
 pub mod browser_diagnostics;
 mod browser_process;
@@ -45,6 +46,7 @@ pub mod pitch_review;
 mod pitch_review_decisions;
 pub mod pronunciation;
 pub mod pronunciation_cli;
+mod pronunciation_normalizer_cli;
 mod review_snapshot;
 pub mod selection;
 pub mod store;

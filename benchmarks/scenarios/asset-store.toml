@@ -1344,3 +1344,194 @@ required = false
 [scenario.environment]
 record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
 comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]
+
+# Пакетный Balanced Normalizer над каталогом MP3: инвентаризация с SHA-256,
+# полное техническое декодирование, анализ, при mode=normalize — одно
+# кодирование и пост-QC фактического результата каждого уникального входа.
+# Вход — внешний каталог (синтетический корпус asset-store-bench audio-corpus
+# или приватный корпус пользователя); путь не публикуется, идентичность —
+# SHA-256 дерева. Рабочий каталог нормализатора принадлежит сценарию и
+# помечен маркером asset-store-bench.
+[[scenario]]
+id = "asset-store.audio-normalizer-batch"
+title = "Пакетный нормализатор MP3"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "pronunciation-assets normalizer batch-start над каталогом MP3: инвентаризация и хеширование, probe_mp3, повторное декодирование в f32, анализ BS.1770, true peak и тишины, план и QualityGate; при mode=normalize — кодирование libmp3lame и пост-QC с декодированием результата. Профиль cold — пустой рабочий каталог (вся работа), warm — повторный пакет при готовом кэше результатов (только инвентаризация и чтение кэша)."
+measured = "Один запуск release-бинарника pronunciation-assets от старта процесса до выхода, включая все дочерние процессы FFmpeg/ffprobe/prlimit. Подготовка рабочего каталога и проверка постусловия (пакет завершён, вход не изменён) в интервал не входят."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "cargo-bin", package = "asset-store", bin = "pronunciation-assets" }
+args = ["normalizer", "batch-start", "--batch-id", "bench", "--input-dir", "{input.corpus}", "--workspace", "target/benchmark-workloads/audio-normalizer/work", "--mode", "{param.mode}", "--jobs", "{param.jobs}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+
+[[scenario.parameter]]
+name = "corpus_path"
+description = "Каталог MP3 (только чтение). Путь не публикуется: нагрузку представляют SHA-256 дерева, число и объём файлов."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.parameter]]
+name = "mode"
+description = "analyze — только измерения и план; normalize — дополнительно кодирование и пост-QC."
+required = false
+default = "normalize"
+choices = ["analyze", "normalize"]
+record = true
+affects_comparability = true
+
+[[scenario.parameter]]
+name = "jobs"
+description = "Число параллельных обработчиков (каждый внешний процесс однопоточный)."
+required = false
+default = "4"
+record = true
+affects_comparability = true
+
+[[scenario.input]]
+id = "corpus"
+kind = "external-path"
+role = "workload"
+identity = "content-tree-sha256"
+parameter = "corpus_path"
+description = "Каталог входных MP3; любые файлы кроме *.mp3 пропускаются нормализатором и учитываются только в идентичности дерева."
+size = [
+    { name = "files", unit = "count", description = "Файлов в дереве входа.", measure = { kind = "tree-files" } },
+    { name = "bytes", unit = "byte", description = "Суммарный размер дерева входа.", measure = { kind = "tree-bytes" } },
+]
+
+[[scenario.setup]]
+description = "Создание пустого помеченного рабочего каталога нормализатора; чужой непустой каталог не трогается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["audio-reset", "--workdir", "target/benchmark-workloads/audio-normalizer/work"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[[scenario.cleanup]]
+description = "Удаление помеченного рабочего каталога нормализатора; вход не затрагивается."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["audio-reset", "--workdir", "target/benchmark-workloads/audio-normalizer/work", "--remove"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[scenario.runs]
+warmup = 0
+min_runs = 3
+max_runs = 10
+single_run_allowed = false
+run_timeout_seconds = 600
+total_budget_seconds = 3600
+
+[[scenario.profile]]
+id = "cold"
+cache_definition = "Перед каждым прогоном рабочий каталог нормализатора пересоздаётся пустым: нет ни состояния пакета, ни кэша результатов, ни сохранённых вариантов. Page cache ОС не сбрасывается: файлы входа обычно уже в памяти."
+cleared = ["состояние пакета нормализатора", "кэш результатов и обработанные варианты"]
+retained = ["page cache ОС", "вход"]
+
+[[scenario.profile.prepare]]
+description = "Пересоздание пустого помеченного рабочего каталога нормализатора."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["audio-reset", "--workdir", "target/benchmark-workloads/audio-normalizer/work"]
+touches = "module-owned"
+timeout_seconds = 300
+
+[[scenario.profile.conclude]]
+description = "Постусловие: пакет обработал все уникальные входы, источники не изменились."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["audio-verify", "--workdir", "target/benchmark-workloads/audio-normalizer/work", "--batch-id", "bench"]
+touches = "read-only"
+timeout_seconds = 600
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Кэш результатов того же входа и той же конфигурации заполнен прогревочным прогоном; перед каждым прогоном удаляется только состояние пакета bench. Измеряется повторный запуск без повторной обработки: инвентаризация с хешированием, проверка версии FFmpeg и чтение кэша."
+cleared = ["состояние пакета bench"]
+retained = ["кэш результатов и обработанные варианты", "page cache ОС", "вход"]
+
+[[scenario.profile.setup]]
+description = "Прогрев: один полный пакет warmup над тем же входом и с той же конфигурацией заполняет кэш результатов; в серию не входит."
+program = { kind = "cargo-bin", package = "asset-store", bin = "pronunciation-assets" }
+args = ["normalizer", "batch-start", "--batch-id", "warmup", "--input-dir", "{input.corpus}", "--workspace", "target/benchmark-workloads/audio-normalizer/work", "--mode", "{param.mode}", "--jobs", "{param.jobs}"]
+env = { inherit = ["PATH"] }
+touches = "scenario-temp"
+timeout_seconds = 1800
+
+[[scenario.profile.prepare]]
+description = "Удаление состояния пакета bench с сохранением кэша результатов."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["audio-reset", "--workdir", "target/benchmark-workloads/audio-normalizer/work", "--keep-cache"]
+touches = "scenario-temp"
+timeout_seconds = 300
+
+[[scenario.profile.conclude]]
+description = "Постусловие: пакет завершён целиком из кэша (ни один вход не обработан заново), источники не изменились."
+program = { kind = "cargo-bin", package = "asset-store", bin = "asset-store-bench" }
+args = ["audio-verify", "--workdir", "target/benchmark-workloads/audio-normalizer/work", "--batch-id", "bench", "--expect-cache"]
+touches = "read-only"
+timeout_seconds = 600
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_user"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Пользовательское время дерева процессов, включая FFmpeg и ffprobe."
+
+[[scenario.metric]]
+metric = "time_system"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+description = "Время ядра: запуск процессов, временные файлы, fsync контрольных точек."
+
+[[scenario.metric]]
+metric = "memory_peak_resident"
+scope = "largest-process-in-tree"
+source = "hyperfine"
+required = false
+
+[[scenario.metric]]
+metric = "cpu_time_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Процессорное время подгруппы прогона: цель, все внешние процессы и Hyperfine."
+
+[[scenario.metric]]
+metric = "memory_peak_cgroup"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "memory.peak подгруппы прогона: включает page cache, записанный целью, и Hyperfine; это не RSS процесса."
+
+[[scenario.metric]]
+metric = "cpu_utilization_mean"
+scope = "cgroup"
+source = "cgroup-v2"
+required = false
+description = "Среднее число занятых ядер подгруппой прогона: эффективность ограниченной конкуренции --jobs."
+
+[[scenario.metric]]
+metric = "disk_usage"
+scope = "path"
+source = "filesystem"
+label = "workspace"
+required = false
+path = "target/benchmark-workloads/audio-normalizer/work"
+description = "Объём рабочего каталога после прогона: состояние, результаты и сохранённые варианты."
+
+[scenario.environment]
+record = ["os", "arch", "kernel_release", "virtualization", "cpu_model", "logical_cpus", "memory_total_bytes", "module_version", "rustc_version", "hyperfine_version"]
+comparable = ["os", "arch", "virtualization", "cpu_model", "logical_cpus"]

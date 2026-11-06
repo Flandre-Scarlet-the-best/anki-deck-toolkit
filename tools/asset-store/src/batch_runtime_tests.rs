@@ -965,3 +965,21 @@ fn opening_removes_only_orphan_atomic_temporaries_under_exclusive_lock() {
         bytes
     );
 }
+
+/// Копия дескриптора, унаследованная запущенным процессом до `exec`, держит то
+/// же открытое описание файла. После освобождения объекта блокировка всё равно
+/// должна быть свободна, иначе следующий исполнитель или сброс ложно видят
+/// активный пакет.
+#[test]
+fn dropping_runtime_releases_lock_even_if_a_descriptor_copy_survives() {
+    use rustix::fs::{FlockOperation, flock};
+    let temporary = TemporaryDirectory::new();
+    let runtime = SafeBatchRuntime::open(temporary.path(), "inherited").unwrap();
+    let (inherited, path) = runtime.lock_description_copy();
+    let other = fs::File::open(&path).unwrap();
+    assert!(flock(&other, FlockOperation::NonBlockingLockExclusive).is_err());
+    drop(runtime);
+    flock(&other, FlockOperation::NonBlockingLockExclusive)
+        .expect("блокировка снята, хотя копия дескриптора ещё открыта");
+    drop(inherited);
+}

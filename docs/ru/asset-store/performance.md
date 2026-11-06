@@ -19,7 +19,8 @@
 браузерной сессии; синтетический локальный fixture также не измеряет
 скорость настоящего Forvo.
 
-Сценарии `asset-store.*` исполняет `asset-store-bench` — постоянный исполнитель
+Сценарии `asset-store.*`, кроме `asset-store.audio-normalizer-batch`
+(см. [«Нормализатор MP3»](#нормализатор-mp3)), исполняет `asset-store-bench` — постоянный исполнитель
 настоящих операций `AssetStore` и `SafeBatchRuntime`. Каждый сценарий измеряет
 один класс операций, чтобы будущая гипотеза об I/O, блокировках, повторной
 проверке или масштабировании проверялась на своей границе:
@@ -34,7 +35,7 @@
 | `asset-store.batch-reopen` | `SafeBatchRuntime::open` и `load` | блокировка пакета, чтение и проверка состояния, полная сверка каждого blob |
 | `asset-store.batch-checkpoint` | `open`, `load` и `save`; `change` = `unchanged` или `modified` | `modified` — новый blob, ревизия + 1 и атомарная запись состояния с синхронизацией файла и каталога; `unchanged` — потоковое сравнение байтов и `fsync` существующего файла и каталога без новой записи |
 
-Во всех сценариях интервал — один запуск собранного release-бинарника
+Во всех сценариях таблицы интервал — один запуск собранного release-бинарника
 `asset-store-bench` от старта процесса до выхода, включая открытие хранилища.
 Построение эталона, восстановление рабочей копии и проверка постусловий в
 интервал не входят. Метрики: `time_wall_clock` (обязательная), `time_user`,
@@ -106,6 +107,40 @@ cargo run -p benchmark-history -- baseline <ID>
 спецификацией и профилем и сравни их `benchmark-history compare`
 (порядок — skill
 [`performance-benchmarking`](../../../.agents/skills/performance-benchmarking/SKILL.md)).
+
+## Нормализатор MP3
+
+Сценарий `asset-store.audio-normalizer-batch` измеряет штатный
+`pronunciation-assets normalizer batch-start` ([контракт](normalizer.md))
+от старта процесса до выхода, включая все дочерние FFmpeg, ffprobe и
+`prlimit`. Вход — внешний каталог MP3 (`corpus_path`, путь не публикуется,
+идентичность — SHA-256 дерева); рабочий каталог принадлежит сценарию и
+помечен маркером `asset-store-bench`. Профиль `cold` перед каждым прогоном
+пересоздаёт пустой рабочий каталог: измеряется вся работа. Профиль `warm`
+заполняет кэш результатов прогревочным пакетом и перед каждым прогоном
+удаляет только состояние пакета: измеряется повторный запуск без повторной
+обработки. Постусловие вне интервала — пакет обработал все уникальные входы,
+вход не изменился, а в `warm` ни один вход не обработан заново
+(`progress.processed` = 0). Параметры `mode` (`analyze`/`normalize`) и `jobs` влияют на
+сопоставимость.
+
+Воспроизводимая синтетическая нагрузка:
+
+```bash
+cargo run --locked --release -p asset-store --bin asset-store-bench -- \
+  audio-corpus --out target/benchmark-workloads/audio-corpus-300 --count 300 --seed 1
+cargo run -p benchmark-runner -- run asset-store.audio-normalizer-batch --profile cold \
+  --param corpus_path=target/benchmark-workloads/audio-corpus-300 --param mode=normalize
+```
+
+Генератор детерминирован по seed: два тона 150–940 Гц (второй на 40 Гц выше
+первого) с **пиковым** уровнем до
+кодирования от −44 до −8 dBFS (амплитуда 1/8 фильтра FFmpeg `sine` учтена;
+это уровень пика, а не громкость в LUFS), краевая тишина 0–1.2 с, внутренняя
+пауза у части клипов, моно/стерео, 22.05/44.1/48 кГц. Версия генератора 2;
+у версии 1 уровни фактически были около −36…0 dBFS, поэтому её результаты —
+другая нагрузка и с результатами версии 2 не сравниваются. Скорость единственного Forvo worker этим сценарием не
+измеряется и требованием к CPU/DSP-обработке не является.
 
 ## Снимки
 
@@ -391,6 +426,84 @@ cargo run -p benchmark-history -- baseline <ID>
 | `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 3.3 MiB ± 0 B | 3.3 MiB | 3.3 MiB – 3.3 MiB | 10 |
 
 Не измерено: `io_read_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_bytes@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_read_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно; `io_write_operations@cgroup` — `unsupported`: контроллер io не делегирован группе исполнителя; CPU и память доступны отдельно.
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
+<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"cold","recorded_at":"2026-11-06T09:18:17Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":2915273.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
+### `asset-store.audio-normalizer-batch` · профиль `cold`
+
+Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · cold · online · итог `success`: успешных прогонов 3 из 3, прогревов 0.
+
+| Факт окружения | Значение |
+|---|---|
+| `arch` ★ | x86_64 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730972160 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| Нагрузка | Значение |
+|---|---|
+| параметр `jobs` | `4` |
+| параметр `mode` | `normalize` |
+| `corpus` · `bytes` | 2.78 MiB |
+| `corpus` · `files` | 301 |
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 36.811 s ± 55.15 ms | 36.792 s | 36.768 s – 36.873 s | 3 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 90.92 s ± 217.22 ms | 91.031 s | 90.669 s – 91.059 s | 3 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 45.209 s ± 86.68 ms | 45.198 s | 45.128 s – 45.3 s | 3 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 51.4 MiB ± 61.1 KiB | 51.39 MiB | 51.35 MiB – 51.46 MiB | 3 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 137.342 s ± 303.48 ms | 137.443 s | 137.001 s – 137.582 s | 3 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 157.63 MiB ± 3.33 MiB | 156.66 MiB | 154.88 MiB – 161.33 MiB | 3 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 3.73 ядра ± 0 ядер | 3.73 ядра | 3.73 ядра – 3.74 ядра | 3 |
+| `disk_usage@path/workspace` | path / filesystem | 4.39 MiB ± 0 B | 4.39 MiB | 4.39 MiB – 4.39 MiB | 3 |
+
+★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
+<!-- /benchmark-snapshot -->
+
+<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"warm","recorded_at":"2026-11-06T11:27:30Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":2915273.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
+### `asset-store.audio-normalizer-batch` · профиль `warm`
+
+Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 0.
+
+| Факт окружения | Значение |
+|---|---|
+| `arch` ★ | x86_64 |
+| `cpu_model` ★ | AMD Ryzen 7 5800X3D 8-Core Processor |
+| `hyperfine_version` | 2.0.0 |
+| `kernel_release` | 6.18.54.1-microsoft-standard-WSL2 |
+| `logical_cpus` ★ | 16 |
+| `memory_total_bytes` ★ | 16730972160 |
+| `module_version` | 0.1.0 |
+| `os` ★ | linux |
+| `rustc_version` | rustc 1.99.1 (58cf8f9c3 2026-10-13) |
+| `virtualization` ★ | wsl2 |
+
+| Нагрузка | Значение |
+|---|---|
+| параметр `jobs` | `4` |
+| параметр `mode` | `normalize` |
+| `corpus` · `bytes` | 2.78 MiB |
+| `corpus` · `files` | 301 |
+
+| Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
+|---|---|---|---|---|---|
+| `time_wall_clock@command` | command / hyperfine | 182.03 ms ± 8.85 ms | 178.99 ms | 169.2 ms – 201.14 ms | 10 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 86.85 ms ± 9.43 ms | 86.76 ms | 71.32 ms – 101.9 ms | 10 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 73.45 ms ± 7.98 ms | 73.75 ms | 59.99 ms – 84.97 ms | 10 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 47.89 MiB ± 206.19 KiB | 47.87 MiB | 47.55 MiB – 48.19 MiB | 10 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 164.03 ms ± 5.52 ms | 161.63 ms | 159.14 ms – 174.31 ms | 10 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 17.79 MiB ± 259.8 KiB | 17.79 MiB | 17.4 MiB – 18.22 MiB | 10 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.83 ядра ± 0.05 ядра | 0.85 ядра | 0.74 ядра – 0.88 ядра | 10 |
+| `disk_usage@path/workspace` | path / filesystem | 4.39 MiB ± 0 B | 4.39 MiB | 4.39 MiB – 4.39 MiB | 10 |
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->

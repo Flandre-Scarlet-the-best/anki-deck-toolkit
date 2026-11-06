@@ -522,6 +522,107 @@ fn rejection_reimport_replacement_and_stale_cas_are_safe() {
         other_audio()
     );
 }
+/// После CAS-замены кандидата и подтверждения новой записи прежние байты
+/// остаются в каталоге слота `.runtime` без текущей записи; хранилище
+/// по-прежнему проверяется и открывается.
+#[test]
+fn approving_a_replaced_candidate_keeps_the_store_readable() {
+    let ws = TempWorkspace::create("audio-replace-approve").unwrap();
+    let store = store(&ws.path().join("store"));
+    let original = import(&store, &request());
+    let changed = import_bytes(
+        &store,
+        &request(),
+        other_audio(),
+        "other.mp3",
+        Some(original.sha256.clone()),
+    )
+    .unwrap();
+    attest(&store, &request(), &changed.sha256, HumanDecision::Approve).unwrap();
+    let records = store.verify_integrity().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].sha256, changed.sha256);
+    let reopened = AssetStore::open_existing_with_policy(
+        StoreOptions::new(store.root()),
+        PronunciationDomainPolicy,
+    )
+    .unwrap();
+    assert!(
+        reopened
+            .validate(SelectionMode::Full, &AudioTechnicalValidator)
+            .unwrap()
+            .blockers
+            .is_empty()
+    );
+    // Чужой файл в каталоге слота-сироты по-прежнему отвергается.
+    let slot = store
+        .root()
+        .join(".runtime")
+        .join(&records[0].storage_path)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(slot.is_dir());
+    fs::write(slot.join("unknown.mp3"), audio()).unwrap();
+    assert_eq!(
+        store.verify_integrity().unwrap_err().code,
+        ErrorCode::UnexpectedPath
+    );
+}
+
+#[test]
+fn replacing_a_quarantined_candidate_keeps_the_store_readable() {
+    // Прежние байты слота остаются во вложенной CAS-раскладке рядом с новыми.
+    let ws = TempWorkspace::create("audio-quarantine-replace").unwrap();
+    let store = store(&ws.path().join("store"));
+    let original = import(&store, &request());
+    assert_eq!(original.lifecycle, LifecycleState::Quarantined);
+    let changed = import_bytes(
+        &store,
+        &request(),
+        other_audio(),
+        "other.mp3",
+        Some(original.sha256.clone()),
+    )
+    .unwrap();
+    let back = import_bytes(
+        &store,
+        &request(),
+        audio(),
+        "again.mp3",
+        Some(changed.sha256.clone()),
+    )
+    .unwrap();
+    assert_eq!(back.sha256, original.sha256);
+    let records = store.verify_integrity().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].sha256, original.sha256);
+    let reopened = AssetStore::open_existing_with_policy(
+        StoreOptions::new(store.root()),
+        PronunciationDomainPolicy,
+    )
+    .unwrap();
+    assert!(
+        reopened
+            .validate(SelectionMode::Full, &AudioTechnicalValidator)
+            .unwrap()
+            .blockers
+            .is_empty()
+    );
+    // Чужой файл с ложным SHA в имени по-прежнему отвергается.
+    let slot = store
+        .root()
+        .join(".runtime")
+        .join(&records[0].storage_path)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    fs::write(slot.join(format!("{}.mp3", "a".repeat(64))), audio()).unwrap();
+    assert_eq!(
+        store.verify_integrity().unwrap_err().code,
+        ErrorCode::IntegrityMismatch
+    );
+}
 #[test]
 fn unvalidated_and_corrupt_candidates_cannot_be_human_approved() {
     let ws = TempWorkspace::create("audio-pending").unwrap();

@@ -374,8 +374,14 @@ fn declared_scenarios() -> Vec<DeclaredSteps> {
             .cloned()
             .unwrap_or_default()
     };
+    // Сценарии с иной измеряемой программой (нормализатор MP3 над внешним
+    // каталогом) не исполняются asset-store-bench; их шаги проверяет
+    // `audio_normalizer_declaration_steps_run_with_the_real_executables`.
     list(&catalog, "scenario")
         .iter()
+        .filter(|scenario| {
+            scenario["target"]["program"]["bin"].as_str() == Some("asset-store-bench")
+        })
         .map(|scenario| {
             let choices = list(scenario, "parameter")
                 .iter()
@@ -669,4 +675,351 @@ fn every_contention_writer_must_have_work() {
             8
         );
     }
+}
+
+/// Шаги сценария `asset-store.audio-normalizer-batch` в объявленном порядке
+/// над настоящим синтетическим корпусом: подготовка, цель, постусловие, уборка.
+#[test]
+fn audio_normalizer_declaration_steps_run_with_the_real_executables() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/scenarios/asset-store.toml");
+    let catalog: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let scenario = catalog["scenario"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"].as_str() == Some("asset-store.audio-normalizer-batch"))
+        .expect("сценарий объявлен")
+        .clone();
+    let root = asset_store::temp_workspace::TempWorkspace::create("audio-bench-steps").unwrap();
+    let corpus = root.path().join("corpus");
+    let bench = env!("CARGO_BIN_EXE_asset-store-bench");
+    let generated = std::process::Command::new(bench)
+        .args(["audio-corpus", "--count", "4", "--seed", "3", "--out"])
+        .arg(&corpus)
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let substitute = |args: Vec<String>, mode: &str| -> Vec<String> {
+        args.into_iter()
+            .map(|arg| {
+                arg.replace("{input.corpus}", corpus.to_str().unwrap())
+                    .replace("{param.mode}", mode)
+                    .replace("{param.jobs}", "2")
+            })
+            .collect()
+    };
+    let run = |step: &toml::Value, mode: &str| {
+        let program = match step["program"]["bin"].as_str().unwrap() {
+            "asset-store-bench" => bench,
+            "pronunciation-assets" => env!("CARGO_BIN_EXE_pronunciation-assets"),
+            other => panic!("неожиданная программа {other}"),
+        };
+        let output = std::process::Command::new(program)
+            .args(substitute(step_args(step), mode))
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}: {}{}",
+            step_args(step),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let steps = |value: &toml::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    for mode in ["analyze", "normalize"] {
+        for step in steps(&scenario, "setup") {
+            run(&step, mode);
+        }
+        for profile in steps(&scenario, "profile") {
+            for step in steps(&profile, "setup") {
+                run(&step, mode);
+            }
+            for _ in 0..2 {
+                for step in steps(&profile, "prepare") {
+                    run(&step, mode);
+                }
+                run(&scenario["target"], mode);
+                for step in steps(&profile, "conclude") {
+                    run(&step, mode);
+                }
+            }
+        }
+        for step in steps(&scenario, "cleanup") {
+            run(&step, mode);
+        }
+        assert!(
+            !root
+                .path()
+                .join("target/benchmark-workloads/audio-normalizer/work")
+                .exists()
+        );
+    }
+    // Чужой непустой каталог сценарий не удаляет.
+    let foreign = root.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("data"), b"x").unwrap();
+    let refused = std::process::Command::new(bench)
+        .args(["audio-reset", "--remove", "--workdir"])
+        .arg(&foreign)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(foreign.join("data").exists());
+}
+
+fn step_args(step: &toml::Value) -> Vec<String> {
+    assert_eq!(step["program"]["kind"].as_str(), Some("cargo-bin"));
+    assert_eq!(step["program"]["package"].as_str(), Some("asset-store"));
+    step["args"]
+        .as_array()
+        .expect("args — массив")
+        .iter()
+        .map(|arg| arg.as_str().expect("аргумент — строка").to_owned())
+        .collect()
+}
+
+/// Помеченный рабочий каталог нормализатора с кэшем и одним пакетом.
+fn audio_workdir(root: &Path) -> PathBuf {
+    let workdir = root.join("work");
+    asset_store::bench_audio::reset_workspace(&workdir, false, false).unwrap();
+    fs::create_dir_all(workdir.join(".runtime/batches/normalizer-cache/results")).unwrap();
+    fs::write(
+        workdir.join(".runtime/batches/normalizer-cache/results/kept.json"),
+        b"{}",
+    )
+    .unwrap();
+    fs::create_dir_all(workdir.join(".runtime/batches/bench/data")).unwrap();
+    workdir
+}
+
+/// `audio-reset` не переходит по ссылкам: ни `.runtime/batches`, ни запись
+/// внутри него не дают удалить посторонние данные; маркер не расширяет
+/// право удаления за пределы рабочего каталога.
+#[test]
+fn audio_reset_never_follows_symlinks_out_of_the_workdir() {
+    let root = TempWorkspace::create("audio-reset-links").unwrap();
+    let foreign = root.path().join("foreign");
+    fs::create_dir_all(foreign.join("precious")).unwrap();
+    fs::write(foreign.join("precious/data.txt"), b"keep").unwrap();
+
+    let workdir = audio_workdir(root.path());
+    std::os::unix::fs::symlink(&foreign, workdir.join(".runtime/batches/evil")).unwrap();
+    for (keep, remove) in [(true, false), (false, false), (false, true)] {
+        assert!(
+            asset_store::bench_audio::reset_workspace(&workdir, keep, remove).is_err(),
+            "{keep} {remove}"
+        );
+        assert_eq!(
+            fs::read(foreign.join("precious/data.txt")).unwrap(),
+            b"keep"
+        );
+    }
+    fs::remove_file(workdir.join(".runtime/batches/evil")).unwrap();
+
+    // Подменённый `.runtime/batches` целиком.
+    fs::remove_dir_all(workdir.join(".runtime/batches")).unwrap();
+    std::os::unix::fs::symlink(&foreign, workdir.join(".runtime/batches")).unwrap();
+    assert!(asset_store::bench_audio::reset_workspace(&workdir, true, false).is_err());
+    assert_eq!(
+        fs::read(foreign.join("precious/data.txt")).unwrap(),
+        b"keep"
+    );
+    fs::remove_file(workdir.join(".runtime/batches")).unwrap();
+
+    // Тёплый сброс сохраняет кэш и удаляет только пакеты.
+    fs::create_dir_all(workdir.join(".runtime/batches/normalizer-cache/results")).unwrap();
+    fs::write(
+        workdir.join(".runtime/batches/normalizer-cache/results/kept.json"),
+        b"{}",
+    )
+    .unwrap();
+    fs::create_dir_all(workdir.join(".runtime/batches/bench/data")).unwrap();
+    asset_store::bench_audio::reset_workspace(&workdir, true, false).unwrap();
+    assert!(
+        workdir
+            .join(".runtime/batches/normalizer-cache/results/kept.json")
+            .exists()
+    );
+    assert!(!workdir.join(".runtime/batches/bench").exists());
+    assert_eq!(
+        fs::read(foreign.join("precious/data.txt")).unwrap(),
+        b"keep"
+    );
+}
+
+/// Сброс отклоняется, пока работающий пакет держит блокировку кэша.
+#[test]
+fn audio_reset_refuses_while_a_batch_holds_the_cache() {
+    let root = TempWorkspace::create("audio-reset-active").unwrap();
+    let workdir = audio_workdir(root.path());
+    let cache = asset_store::pronunciation::normalizer_batch::ResultCache::open(&workdir).unwrap();
+    for (keep, remove) in [(true, false), (false, false), (false, true)] {
+        let refused = asset_store::bench_audio::reset_workspace(&workdir, keep, remove)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("активным пакетом"), "{refused}");
+        assert!(
+            workdir
+                .join(".runtime/batches/normalizer-cache/results/kept.json")
+                .exists()
+        );
+    }
+    drop(cache);
+    asset_store::bench_audio::reset_workspace(&workdir, false, true).unwrap();
+    assert!(!workdir.exists());
+}
+
+/// `--keep-cache` и `--remove` несовместимы: отказ использования, каталог цел.
+#[test]
+fn audio_reset_rejects_conflicting_flags() {
+    let root = TempWorkspace::create("audio-reset-flags").unwrap();
+    let workdir = audio_workdir(root.path());
+    let output = Command::new(BIN)
+        .args(["audio-reset", "--keep-cache", "--remove", "--workdir"])
+        .arg(&workdir)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        workdir
+            .join(".runtime/batches/normalizer-cache/results/kept.json")
+            .exists()
+    );
+    assert!(asset_store::bench_audio::reset_workspace(&workdir, true, true).is_err());
+    assert!(workdir.exists());
+}
+
+/// Пакет без единого MP3 ничего не обработал: постусловие замера его отклоняет.
+#[test]
+fn audio_verify_rejects_an_empty_inventory() {
+    use asset_store::pronunciation::normalizer::{Mode, NormalizerProfile};
+    use asset_store::pronunciation::normalizer_batch as nbatch;
+    let root = asset_store::temp_workspace::TempWorkspace::create("audio-verify-empty").unwrap();
+    let corpus = root.path().join("corpus");
+    fs::create_dir(&corpus).unwrap();
+    fs::write(corpus.join("notes.txt"), b"x").unwrap();
+    let workspace = root.path().join("work");
+    fs::create_dir(&workspace).unwrap();
+    nbatch::start(nbatch::StartRequest {
+        batch_id: "empty",
+        workspace: &workspace,
+        input_root: &fs::canonicalize(&corpus).unwrap(),
+        mode: Mode::Analyze,
+        profile: NormalizerProfile::balanced(),
+        limits: nbatch::Limits {
+            jobs: 1,
+            max_files: 10,
+            max_total_bytes: 1 << 20,
+        },
+    })
+    .unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    nbatch::resume(&workspace, "empty", None, None, &stop).unwrap();
+    let error = asset_store::bench_audio::verify(&workspace, "empty", false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("пакет не завершён: 0/0"), "{error}");
+}
+
+/// `--expect-cache` принимает только пакет, целиком взятый из кэша: пакет,
+/// обработавший входы заново, профилю `warm` не годится.
+#[test]
+fn audio_verify_expect_cache_rejects_reprocessing() {
+    use asset_store::pronunciation::normalizer::{Mode, NormalizerProfile};
+    use asset_store::pronunciation::normalizer_batch as nbatch;
+    let root = asset_store::temp_workspace::TempWorkspace::create("audio-verify-cache").unwrap();
+    let corpus = root.path().join("corpus");
+    asset_store::bench_audio::generate_corpus(&corpus, 2, 5).unwrap();
+    let workspace = root.path().join("work");
+    fs::create_dir(&workspace).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    for batch_id in ["fresh", "cached"] {
+        nbatch::start(nbatch::StartRequest {
+            batch_id,
+            workspace: &workspace,
+            input_root: &fs::canonicalize(&corpus).unwrap(),
+            mode: Mode::Analyze,
+            profile: NormalizerProfile::balanced(),
+            limits: nbatch::Limits {
+                jobs: 1,
+                max_files: 10,
+                max_total_bytes: 1 << 24,
+            },
+        })
+        .unwrap();
+        nbatch::resume(&workspace, batch_id, None, None, &stop).unwrap();
+    }
+    let verify = asset_store::bench_audio::verify;
+    assert_eq!(verify(&workspace, "fresh", false).unwrap()["processed"], 2);
+    let error = verify(&workspace, "fresh", true).unwrap_err().to_string();
+    assert!(error.contains("обработано заново 2"), "{error}");
+    assert_eq!(verify(&workspace, "cached", true).unwrap()["processed"], 0);
+}
+
+/// Отсутствующий родитель `--out` создаётся; новым обязан быть только сам
+/// каталог корпуса.
+#[test]
+fn audio_corpus_creates_missing_parent_but_requires_new_output() {
+    let root = TempWorkspace::create("audio-corpus-parent").unwrap();
+    let out = root.path().join("missing/nested/corpus");
+    asset_store::bench_audio::generate_corpus(&out, 1, 1).unwrap();
+    assert!(out.join("clip-00000.mp3").is_file());
+    assert!(asset_store::bench_audio::generate_corpus(&out, 1, 1).is_err());
+}
+
+/// Пиковые уровни синтетического корпуса лежат в заявленном диапазоне
+/// −44…−8 dBFS (с допуском на кодирование) и действительно его покрывают;
+/// генерация детерминирована по seed.
+#[test]
+fn audio_corpus_levels_match_the_documented_peak_range() {
+    let root = TempWorkspace::create("audio-corpus-levels").unwrap();
+    let generate = |name: &str| {
+        let out = root.path().join(name);
+        asset_store::bench_audio::generate_corpus(&out, 40, 11).unwrap();
+        out
+    };
+    let first = generate("a");
+    let second = generate("b");
+    let mut peaks = Vec::new();
+    for index in 0..40 {
+        let name = format!("clip-{index:05}.mp3");
+        let bytes = fs::read(first.join(&name)).unwrap();
+        assert_eq!(bytes, fs::read(second.join(&name)).unwrap(), "{name}");
+        let decoded = Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(first.join(&name))
+            .args(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        let peak = decoded
+            .stdout
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b).abs())
+            .fold(0.0f32, f32::max);
+        peaks.push(20.0 * f64::from(peak).log10());
+    }
+    let (low, high) = peaks
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(*p), h.max(*p)));
+    assert!(low >= -45.5 && high <= -6.5, "{low:.1}…{high:.1}");
+    assert!(
+        low < -36.0 && high > -16.0,
+        "диапазон не покрыт: {low:.1}…{high:.1}"
+    );
 }
