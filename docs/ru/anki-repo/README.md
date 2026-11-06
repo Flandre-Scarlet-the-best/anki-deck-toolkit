@@ -71,13 +71,14 @@
 
 Группа `anki-repo anki` отдельно управляет Anki Desktop: `doctor`, `setup`,
 `patch install/status/repair/remove`, `restore`, `launch/stop/restart`, `export/import`
-и `job`. В WSL выбирается установленная Windows Anki, в обычном Linux — Linux Anki;
+и `job`, а также [`sync-input` и `input-status`](input-export.md). В WSL выбирается установленная Windows Anki, в обычном Linux — Linux Anki;
 неоднозначная установка требует явного `--executable`/`--data-dir`. Диагностика
 показывает фактическую платформу, executable, версию, базу и профиль. Установка
 аддонов использует официальные пакеты и интерактивный штатный установщик Anki.
 Namespaced actions расширяют существующий AnkiConnect и вызывают оригинальный
 CrowdAnki; готовность требует настоящих операций после загрузки. Это отдельный
-сетевой адаптер: локальные команды экспорта остаются офлайн, `decks/input/` закрыт.
+сетевой адаптер: локальные команды экспорта остаются офлайн; `decks/input/` закрыт
+для обычных команд, а `desktop::input` — выделенный доверенный владелец.
 Полный контракт, ограничения совместимости, backup, отмена и перезапуск —
 [интеграция Desktop](desktop.md).
 

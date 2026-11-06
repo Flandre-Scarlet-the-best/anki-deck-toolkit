@@ -29,14 +29,14 @@ The “create and verify” workflow uses `models` to obtain the actual note-mod
 
 The separate `anki-repo anki` group manages Anki Desktop: `doctor`, `setup`,
 `patch install/status/repair/remove`, `restore`, `launch/stop/restart`, `export/import`,
-and `job`. WSL selects the installed Windows Anki; ordinary Linux selects Linux
+`job`, and [`sync-input` / `input-status`](../../ru/anki-repo/input-export.md). WSL selects the installed Windows Anki; ordinary Linux selects Linux
 Anki. Ambiguous installations require explicit `--executable`/`--data-dir`.
 Diagnostics report the actual target platform, executable, version, data root,
 and profile. Add-on setup uses official packages and Anki's native interactive
 installer. Namespaced actions extend the existing AnkiConnect and invoke the
 original CrowdAnki; readiness requires real operations after loading. This is a
 separate network adapter: local export commands remain offline and `decks/input/`
-stays protected. See the [Desktop integration contract](../../ru/anki-repo/desktop.md) for compatibility,
+stays protected from ordinary commands; `desktop::input` is the dedicated trusted owner. See the [Desktop integration contract](../../ru/anki-repo/desktop.md) for compatibility,
 backups, cancellation, and restart limits.
 
 The independent `pronunciation_audio` domain provides local MP3 assets and the read-only
@@ -103,7 +103,7 @@ Example paths and field names are illustrative. The toolkit supports arbitrary C
 
 ### Restricted `decks/input` area
 
-`decks/input/` is a closed area reserved for a future trusted importer. No command reads, traverses, or changes it. Any path addressing `decks/input` (an export directory, `--before`/`--after`, `--out`, or `--root`) is rejected with `invalid_request` and `details.reason = input_area_forbidden`; the error message identifies the restricted area and its purpose. There is no bypass flag: this is an API boundary, not a filesystem restriction. The check is part of the export-directory contract, so library calls also respect it, not just CLI calls. Use `decks/output/` for working decks.
+`decks/input/` is reserved for trusted exchange. Ordinary export commands do not read, traverse, or change it. The dedicated `desktop::input` owner provides [`anki sync-input` and `anki input-status`](../../ru/anki-repo/input-export.md). Any path addressing `decks/input` (an export directory, `--before`/`--after`, `--out`, or `--root`) is rejected with `invalid_request` and `details.reason = input_area_forbidden`; the error message identifies the restricted area and its purpose. There is no bypass flag: this is an API boundary, not a filesystem restriction. The check is part of the export-directory contract, so library calls also respect it, not just CLI calls. Use `decks/output/` for working decks.
 
 ### Layout boundaries
 

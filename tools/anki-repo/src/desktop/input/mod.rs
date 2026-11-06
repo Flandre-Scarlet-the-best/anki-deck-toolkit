@@ -253,7 +253,8 @@ fn export_one(
                         "Anki перезапущена до принятия задания; задание не выполнялось, повторите команду",
                     ));
                 }
-                if !job.admission_started {
+                let prior_admission_started = job.admission_started;
+                if !prior_admission_started {
                     job.admission_started = true;
                     // Намерение отправки надёжно сохраняется ДО HTTP, включая неизвестный
                     // результат принятия задания и падение CLI между этими действиями.
@@ -263,10 +264,8 @@ fn export_one(
                 }
                 sent = true;
                 // При неизвестном результате принятия задания следующий шаг — только toolkitJob с тем же ID.
-                if let Err(e) = source::submit(&current, o, &job)
-                    && e.details["submission_state"] != "unknown"
-                {
-                    return Err(e);
+                if let Err(e) = source::submit(&current, o, &job) {
+                    submission_error(store, key, &mut job, prior_admission_started, e)?;
                 }
             }
             Some("succeeded") => {
@@ -313,6 +312,32 @@ fn export_one(
         }
         std::thread::sleep(Duration::from_millis(400));
     }
+}
+
+fn submission_error(
+    store: &mut publish::Store,
+    key: &str,
+    job: &mut source::PendingJob,
+    prior_admission_started: bool,
+    failure: crate::error::DomainError,
+) -> Result<()> {
+    if failure.details["submission_state"] == "unknown" {
+        return Ok(());
+    }
+    // Transport помечает все неопределённые отказы после отправки как unknown.
+    // API-ошибка сама по себе не доказывает отказ до принятия: consumed_ticket
+    // и внутренние сбои могут относиться к уже принятому заданию.
+    let preflight =
+        failure.details["submission_state"].is_null() && failure.details["reason"] != "api_error";
+    let refused = failure.details["submission_state"] == "rejected"
+        && matches!(failure.message.as_str(), "anki_busy" | "addons_not_ready");
+    if !prior_admission_started && (preflight || refused) {
+        job.admission_started = false;
+        store
+            .save_job(key, job.clone())
+            .map_err(publication_error)?;
+    }
+    Err(failure)
 }
 
 fn validate_pending_source(job: &source::PendingJob, catalog: &Value, deck: &Value) -> Result<()> {
@@ -418,6 +443,86 @@ fn publication_error(e: crate::exchange::ExchangeError) -> crate::error::DomainE
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proven_first_submission_refusal_survives_restart_without_erasing_old_uncertainty() {
+        for prior in [false, true] {
+            for (state, reason, message, proven) in [
+                (None, "desktop_io", "ошибка до HTTP", true),
+                (Some("rejected"), "api_error", "anki_busy", true),
+                (Some("rejected"), "api_error", "addons_not_ready", true),
+                (
+                    Some("unknown"),
+                    "http_unreachable",
+                    "неизвестная отправка",
+                    false,
+                ),
+                (
+                    Some("rejected"),
+                    "api_error",
+                    "consumed_ticket: query toolkitJob",
+                    false,
+                ),
+                (
+                    Some("rejected"),
+                    "api_error",
+                    "ошибка сохранения результата",
+                    false,
+                ),
+                (None, "api_error", "неполный API-отказ", false),
+            ] {
+                let repository = crate::test_support::TempDir::new("submission-refusal-proof");
+                let (_spool, _target, mut job, _) = source::tests::live_fixture();
+                let key = job.key();
+                job.admission_started = true;
+                let mut store = publish::Store::open(repository.path()).unwrap();
+                store.save_job(&key, job.clone()).unwrap();
+                let mut failure = external_error(reason, message);
+                if let Some(state) = state {
+                    failure.details["submission_state"] = json!(state);
+                }
+                let result = submission_error(&mut store, &key, &mut job, prior, failure);
+                assert_eq!(result.is_ok(), state == Some("unknown"));
+                drop(store);
+                // Положительная проверка повторного открытия допускает занятость
+                // advisory-блокировки, но не ждёт бесконечно и не меняет политику CLI.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let store = loop {
+                    match publish::Store::open(repository.path()) {
+                        Ok(store) => break store,
+                        Err(crate::exchange::ExchangeError::Io(e))
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                let persisted = store.pending(&key).unwrap();
+                assert_eq!(persisted.id, job.id);
+                assert_eq!(
+                    persisted.admission_started,
+                    prior || !proven,
+                    "{prior} {state:?} {message}"
+                );
+                if prior || !proven {
+                    assert_eq!(
+                        persisted
+                            .prepared_action("after-restart")
+                            .unwrap_err()
+                            .details["reason"],
+                        "export_completion_unknown_after_restart"
+                    );
+                } else {
+                    assert_eq!(
+                        persisted.prepared_action("after-restart").unwrap(),
+                        source::PreparedAction::RenewSource
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn busy_input_refuses_apply_before_anki_setup_and_dry_run_never_opens_store() {
         let (_spool, mut target, _job, _) = source::tests::live_fixture();
