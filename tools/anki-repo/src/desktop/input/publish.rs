@@ -225,7 +225,9 @@ impl Store {
         self.verify_location()?;
         let state = self.exchange.read()?;
         let mut streams = Vec::new();
-        if self.input.names()?.iter().any(|n| n == ".new-stream.json") {
+        if self.input.names()?.iter().any(|name| {
+            name == ".new-stream.json" || is_temporary(name, &[".owner.json", ".new-stream.json"])
+        }) {
             return Err(ExchangeError::Blocked("recovery_required".into()));
         }
         for name in self.input.names()? {
@@ -765,18 +767,22 @@ fn read_transaction(dir: &Directory, name: &str) -> Result<Transaction> {
     Ok(envelope.transaction)
 }
 
+fn is_temporary(name: &str, targets: &[&str]) -> bool {
+    targets.iter().any(|target| {
+        name.strip_prefix(&format!(".{target}.tmp-"))
+            .is_some_and(|suffix| {
+                let parts: Vec<_> = suffix.split('-').collect();
+                parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            })
+    })
+}
+
 fn clean_temporaries(directory: &Directory, targets: &[&str]) -> Result<()> {
     for name in directory.names()? {
-        if targets.iter().any(|target| {
-            name.strip_prefix(&format!(".{target}.tmp-"))
-                .is_some_and(|suffix| {
-                    let parts: Vec<_> = suffix.split('-').collect();
-                    parts.len() == 3
-                        && parts
-                            .iter()
-                            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-                })
-        }) {
+        if is_temporary(&name, targets) {
             directory.remove_file(&name)?;
         }
     }

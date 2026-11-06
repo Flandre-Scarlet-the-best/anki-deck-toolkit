@@ -837,3 +837,49 @@ fn missing_committed_first_generation_keeps_the_creation_intent() {
     );
     assert!(tmp.path().join("displaced/current/deck.json").is_file());
 }
+
+#[test]
+fn status_preserves_recognized_temporaries_and_requires_explicit_recovery() {
+    for name in [
+        "..owner.json.tmp-1-2-3",
+        "..new-stream.json.tmp-1-2-3",
+        "..owner.json.tmp-1-2-invalid",
+        "..new-stream.json.tmp-1-2",
+    ] {
+        let tmp = TempDir::new("trusted-audit-temporary");
+        let store = Store::open(tmp.path()).unwrap();
+        let export = export("v1", "job");
+        store.publish(&export).unwrap();
+        store.input.publish(name, b"keep until recovery").unwrap();
+        let path = tmp.path().join("decks/input").join(name);
+        let recognized = name.ends_with("1-2-3");
+        drop(store);
+        let error = super::super::status(tmp.path()).unwrap_err();
+        assert_eq!(
+            error.details["reason"],
+            if recognized {
+                "input_recovery_required"
+            } else {
+                "input_state_corrupt"
+            },
+            "{name}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"keep until recovery");
+        let store = Store::open(tmp.path()).unwrap();
+        if recognized {
+            store.recover().unwrap();
+            assert!(!path.exists());
+            assert_eq!(
+                store.audit().unwrap()["streams"].as_array().unwrap().len(),
+                1
+            );
+            assert_eq!(receipt(&key_dir(&store, &export)).sequence, 1);
+        } else {
+            assert!(matches!(
+                store.recover(),
+                Err(ExchangeError::CorruptState(_))
+            ));
+            assert_eq!(fs::read(&path).unwrap(), b"keep until recovery");
+        }
+    }
+}

@@ -316,7 +316,23 @@ pub(super) fn run(c: &mut Ctx, fx: &mut Fixtures) -> Outcome {
         ],
         &Policy::none(),
     )?;
-    let roots = all_plan.result()["decks"].as_array().map_or(0, Vec::len);
+    let root_names = |result: &Value| -> Option<Vec<String>> {
+        let mut names = result["decks"]
+            .as_array()?
+            .iter()
+            .map(|item| item["name"].as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()?;
+        names.sort();
+        Some(names)
+    };
+    let expected_roots = vec!["Default".to_owned(), DECK.to_owned()];
+    c.check(
+        "--all планирует ровно Default и корень синтетической колоды",
+        all_plan.exit == 0
+            && all_plan.state() == "input_plan"
+            && root_names(all_plan.result()).as_ref() == Some(&expected_roots),
+        all_plan.json,
+    )?;
     let all = c.anki_repo(
         &[
             "sync-input",
@@ -330,14 +346,19 @@ pub(super) fn run(c: &mut Ctx, fx: &mut Fixtures) -> Outcome {
     c.check(
         "--all экспортирует именно живой план корней выбранного профиля",
         all.exit == 0
-            && roots > 0
-            && all.result()["decks"]
-                .as_array()
-                .is_some_and(|v| v.len() == roots)
+            && root_names(all.result()).as_ref() == Some(&expected_roots)
             && published(all.result(), DECK)?["source_sequence"] == 3,
-        all.json,
+        all.json.clone(),
     )?;
-    audit(c, &repo)?;
+    let default = published(all.result(), "Default")?;
+    let after_all = audit(c, &repo)?;
+    c.check(
+        "Default подтверждён отдельным потоком выбранного профиля",
+        default["state"] == "published"
+            && default["identity"]["profile"] == other["identity"]["profile"]
+            && stream(&after_all, &default)?["source_sequence"] == 1,
+        default,
+    )?;
     stop_owned(c)?;
     c.base = original_base;
     Ok(())
