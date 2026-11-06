@@ -24,10 +24,7 @@ use rustix::fs::{Mode, OFlags, open, openat};
 use serde::{Deserialize, Serialize};
 
 use super::MAX_AUDIO_BYTES;
-use super::normalizer::{
-    self, GateDecision, GateOutcome, InputRef, Mode as RunMode, NormalizationResult,
-    NormalizerProfile, ProfileRef, Reason, Severity, Toolchain, Variant,
-};
+use super::normalizer::{self, Mode as RunMode, NormalizationResult, NormalizerProfile, Toolchain};
 use crate::batch_runtime::{RuntimeBatchState, RuntimeBlobRef, SafeBatchRuntime};
 use crate::hashing::sha256_hex;
 use crate::{AssetError, ErrorCode};
@@ -38,7 +35,6 @@ pub const DEFAULT_MAX_FILES: usize = 20_000;
 pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MAX_JOBS: usize = 32;
 const MAX_DEPTH: usize = 16;
-const MAX_INFRA_ATTEMPTS: u32 = 3;
 const MAX_CONSECUTIVE_INFRA_FAILURES: usize = 8;
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_RECORDED_ERRORS: usize = 1000;
@@ -57,8 +53,13 @@ fn corrupt(message: impl Into<String>) -> AssetError {
 pub struct InventoryEntry {
     pub path: String,
     pub byte_length: u64,
+    /// SHA-256 файла, пригодного к обработке; у записи с ошибкой — `None`.
     pub sha256: Option<String>,
     pub error: Option<String>,
+    /// SHA-256 всех байтов файла, который прочитан, но к обработке не допущен
+    /// (больше 8 MiB). Нужен только проверке неизменности входа.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,63 +250,186 @@ pub fn read_input(root: &File, relative: &str, expected_sha: &str) -> Result<Vec
     Ok(bytes)
 }
 
-/// Рекурсивный обход без перехода по ссылкам. Сортировка по байтам имени
-/// делает инвентаризацию воспроизводимой между запусками.
+/// Каталог относительно корня; каждый компонент — без перехода по ссылкам.
+fn open_relative_dir(root: &File, relative: &str) -> Result<File, AssetError> {
+    let mut current = root
+        .try_clone()
+        .map_err(|e| AssetError::io("дескриптор", e))?;
+    for part in relative.split('/').filter(|p| !p.is_empty()) {
+        current = File::from(
+            openat(
+                &current,
+                part,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| AssetError::io("открытие каталога входа", e.into()))?,
+        );
+    }
+    Ok(current)
+}
+
+/// Чтение одного MP3 по уже открытому дескриптору: длина по `fstat`,
+/// байты — не больше предела; у слишком большого файла хеш считается
+/// потоково, чтобы проверка неизменности могла его сверить.
+fn read_entry(relative: String, file: File) -> (InventoryEntry, u64) {
+    let length = match file.metadata() {
+        Ok(metadata) if metadata.is_file() => metadata.len(),
+        Ok(_) => {
+            return (
+                InventoryEntry {
+                    path: relative,
+                    byte_length: 0,
+                    sha256: None,
+                    error: Some("вход не является обычным файлом".into()),
+                    content_sha256: None,
+                },
+                0,
+            );
+        }
+        Err(error) => {
+            return (
+                InventoryEntry {
+                    path: relative,
+                    byte_length: 0,
+                    sha256: None,
+                    error: Some(AssetError::io("метаданные входа", error).message),
+                    content_sha256: None,
+                },
+                0,
+            );
+        }
+    };
+    let mut file = file;
+    let mut head = Vec::new();
+    let read = (&mut file)
+        .take(MAX_AUDIO_BYTES + 1)
+        .read_to_end(&mut head)
+        .map_err(|e| AssetError::io("чтение входа", e));
+    match read {
+        Err(error) => (
+            InventoryEntry {
+                path: relative,
+                byte_length: length,
+                sha256: None,
+                error: Some(error.message),
+                content_sha256: None,
+            },
+            length,
+        ),
+        Ok(_) if head.len() as u64 <= MAX_AUDIO_BYTES => {
+            // Длина — по фактически прочитанным байтам, а не по метаданным.
+            let actual = head.len() as u64;
+            (
+                InventoryEntry {
+                    path: relative,
+                    byte_length: actual,
+                    sha256: Some(sha256_hex(&head)),
+                    error: None,
+                    content_sha256: None,
+                },
+                actual.max(length),
+            )
+        }
+        Ok(_) => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&head);
+            let mut total = head.len() as u64;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            let rest = loop {
+                match file.read(&mut buffer) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => {
+                        hasher.update(&buffer[..n]);
+                        total += n as u64;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => break Err(error),
+                }
+            };
+            let content = rest
+                .is_ok()
+                .then(|| crate::hashing::encode_lower_hex(hasher.finalize()));
+            (
+                InventoryEntry {
+                    path: relative,
+                    byte_length: total,
+                    sha256: None,
+                    error: Some("файл превышает предел 8 MiB".into()),
+                    content_sha256: content,
+                },
+                total.max(length),
+            )
+        }
+    }
+}
+
+/// Рекурсивный обход без перехода по ссылкам. Каждый каталог и файл
+/// открывается относительно дескриптора корня с `NOFOLLOW` на каждом
+/// компоненте, а тип берётся у открытого дескриптора: подмена записи
+/// ссылкой между перечислением и открытием не выводит обход за пределы входа.
+/// Сортировка по байтам имени делает инвентаризацию воспроизводимой.
+///
+/// `--max-total-bytes` ограничивает суммарный размер **всех** MP3-записей,
+/// включая не прошедшие предел 8 MiB и непрочитанные: учитывается наибольшее
+/// из длины по `fstat` и фактически прочитанного.
 pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> {
+    use rustix::fs::{AtFlags, Dir, FileType, statat};
     let root_fd = open_dir(root)?;
     let mut entries = Vec::new();
     let mut skipped = Vec::new();
     let mut total = 0u64;
-    let mut stack = vec![(root.to_path_buf(), String::new(), 0usize)];
-    while let Some((directory, prefix, depth)) = stack.pop() {
-        let mut names: Vec<_> = std::fs::read_dir(&directory)
-            .map_err(|e| AssetError::io("обход каталога входа", e))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AssetError::io("обход каталога входа", e))?;
-        names.sort_by_key(|e| e.file_name());
+    let mut stack = vec![(String::new(), 0usize)];
+    while let Some((prefix, depth)) = stack.pop() {
+        let directory = open_relative_dir(&root_fd, &prefix)?;
+        let mut names = Vec::new();
+        for entry in Dir::read_from(&directory)
+            .map_err(|e| AssetError::io("обход каталога входа", e.into()))?
+        {
+            let entry = entry.map_err(|e| AssetError::io("обход каталога входа", e.into()))?;
+            let raw = entry.file_name().to_bytes().to_vec();
+            if raw == b"." || raw == b".." {
+                continue;
+            }
+            names.push((raw, entry.file_type()));
+        }
+        names.sort_by(|a, b| a.0.cmp(&b.0));
         let mut subdirectories = Vec::new();
-        for entry in names {
-            let raw = entry.file_name();
-            let Some(name) = raw.to_str().map(str::to_owned) else {
+        for (raw, listed) in names {
+            let Ok(name) = String::from_utf8(raw.clone()) else {
                 skipped.push(SkippedEntry {
-                    path: format!("{prefix}{}", raw.to_string_lossy()),
+                    path: format!("{prefix}{}", String::from_utf8_lossy(&raw)),
                     reason: "non_utf8_name".into(),
                 });
                 continue;
             };
             let relative = format!("{prefix}{name}");
-            let kind = entry
-                .file_type()
-                .map_err(|e| AssetError::io("тип записи каталога", e))?;
-            if kind.is_symlink() {
-                skipped.push(SkippedEntry {
-                    path: relative,
-                    reason: "symlink".into(),
-                });
-            } else if kind.is_dir() {
+            let kind = if listed == FileType::Unknown {
+                statat(&directory, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+                    .map(|stat| FileType::from_raw_mode(stat.st_mode))
+                    .map_err(|e| AssetError::io("тип записи каталога", e.into()))?
+            } else {
+                listed
+            };
+            let skip = |reason: &str| SkippedEntry {
+                path: relative.clone(),
+                reason: reason.into(),
+            };
+            if kind == FileType::Symlink {
+                skipped.push(skip("symlink"));
+            } else if kind == FileType::Directory {
                 if depth + 1 >= MAX_DEPTH {
-                    skipped.push(SkippedEntry {
-                        path: relative,
-                        reason: "depth_limit".into(),
-                    });
+                    skipped.push(skip("depth_limit"));
                 } else {
-                    subdirectories.push((entry.path(), format!("{relative}/"), depth + 1));
+                    subdirectories.push((format!("{relative}/"), depth + 1));
                 }
-            } else if !kind.is_file() {
-                skipped.push(SkippedEntry {
-                    path: relative,
-                    reason: "not_regular".into(),
-                });
+            } else if kind != FileType::RegularFile {
+                skipped.push(skip("not_regular"));
             } else if name.contains(['\\', '\0']) || name.chars().any(char::is_control) {
-                skipped.push(SkippedEntry {
-                    path: relative,
-                    reason: "unsafe_name".into(),
-                });
+                skipped.push(skip("unsafe_name"));
             } else if !is_mp3_name(&name) {
-                skipped.push(SkippedEntry {
-                    path: relative,
-                    reason: "unsupported_extension".into(),
-                });
+                skipped.push(skip("unsupported_extension"));
             } else {
                 if entries.len() >= limits.max_files {
                     return Err(invalid(format!(
@@ -313,37 +437,33 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
                         limits.max_files
                     )));
                 }
-                let read = open_relative(&root_fd, &relative).and_then(|file| {
-                    let length = file
-                        .metadata()
-                        .map_err(|e| AssetError::io("метаданные входа", e))?
-                        .len();
-                    Ok((length, read_limited(file)))
-                });
-                let entry = match read {
-                    // Длина — по фактически прочитанным байтам, а не по метаданным.
-                    Ok((_, Ok(bytes))) => {
-                        total = total.saturating_add(bytes.len() as u64);
+                let opened = openat(
+                    &directory,
+                    name.as_str(),
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                    Mode::empty(),
+                );
+                let (entry, counted) = match opened {
+                    Ok(descriptor) => read_entry(relative, File::from(descriptor)),
+                    // Запись стала ссылкой после перечисления: не следуем ей.
+                    Err(rustix::io::Errno::LOOP) => {
+                        skipped.push(skip("symlink"));
+                        continue;
+                    }
+                    Err(error) => (
                         InventoryEntry {
                             path: relative,
-                            byte_length: bytes.len() as u64,
-                            sha256: Some(sha256_hex(&bytes)),
-                            error: None,
-                        }
-                    }
-                    Ok((length, Err(error))) => InventoryEntry {
-                        path: relative,
-                        byte_length: length,
-                        sha256: None,
-                        error: Some(error.message),
-                    },
-                    Err(error) => InventoryEntry {
-                        path: relative,
-                        byte_length: 0,
-                        sha256: None,
-                        error: Some(error.message),
-                    },
+                            byte_length: 0,
+                            sha256: None,
+                            error: Some(
+                                AssetError::io("открытие файла входа", error.into()).message,
+                            ),
+                            content_sha256: None,
+                        },
+                        0,
+                    ),
                 };
+                total = total.saturating_add(counted);
                 if total > limits.max_total_bytes {
                     return Err(invalid(
                         "суммарный размер входа превышает --max-total-bytes",
@@ -365,34 +485,174 @@ pub fn inventory(root: &Path, limits: &Limits) -> Result<Inventory, AssetError> 
     })
 }
 
-/// Пути входа и рабочего каталога не должны пересекаться друг с другом и с
-/// защищёнными корнями (`decks/**`).
+fn boundary(message: impl Into<String>) -> AssetError {
+    AssetError::new(ErrorCode::BoundaryViolation, message)
+}
+
+/// Фактический путь, в том числе ещё не существующий: наибольший
+/// существующий предок канонизируется (символические ссылки разрешаются),
+/// остальные компоненты присоединяются как есть. `.` и `..` в
+/// несуществующей части отвергаются. Ничего не создаёт.
+pub fn resolve_path(path: &Path) -> Result<PathBuf, AssetError> {
+    use std::path::Component;
+    let absolute = std::path::absolute(path).map_err(|e| AssetError::io("путь", e))?;
+    let mut existing = absolute.as_path();
+    let mut rest = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing
+                    .file_name()
+                    .ok_or_else(|| boundary("путь не имеет существующего предка"))?;
+                rest.push(name.to_owned());
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| boundary("путь не имеет существующего предка"))?;
+            }
+            Err(error) => return Err(AssetError::io("путь", error)),
+        }
+    }
+    if absolute.strip_prefix(existing).is_ok_and(|tail| {
+        tail.components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+    }) {
+        return Err(boundary(
+            "несуществующая часть пути не может содержать . и ..",
+        ));
+    }
+    let mut resolved = std::fs::canonicalize(existing).map_err(|e| AssetError::io("путь", e))?;
+    for name in rest.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
+
+/// Защищённые корни в лексической и фактической форме.
+pub fn protected_roots(protected: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in protected {
+        roots.push(root.clone());
+        if let Ok(resolved) = resolve_path(root) {
+            roots.push(resolved);
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+/// Запрещает путь вывода внутри (или поверх) любого из `forbidden`. Путь
+/// сравнивается в фактической форме ещё до первой записи.
+pub fn ensure_outside(
+    path: &Path,
+    forbidden: &[PathBuf],
+    message: &str,
+) -> Result<PathBuf, AssetError> {
+    let resolved = resolve_path(path)?;
+    if forbidden.iter().any(|root| overlaps(&resolved, root)) {
+        return Err(boundary(message));
+    }
+    Ok(resolved)
+}
+
+/// Пути входа и рабочего каталога (уже в фактической форме) не должны
+/// пересекаться друг с другом и с защищёнными корнями (`decks/**`).
 pub fn check_boundaries(
     input_root: &Path,
     workspace: &Path,
     protected: &BTreeSet<PathBuf>,
 ) -> Result<(), AssetError> {
-    let overlaps = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
-    if overlaps(input_root, workspace) {
-        return Err(AssetError::new(
-            ErrorCode::BoundaryViolation,
+    let input = resolve_path(input_root)?;
+    let work = resolve_path(workspace)?;
+    if overlaps(&input, &work) {
+        return Err(boundary(
             "каталог входа и рабочий каталог должны быть раздельными и невложенными",
         ));
     }
-    for root in protected {
-        let resolved = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        if overlaps(input_root, &resolved)
-            || overlaps(workspace, &resolved)
-            || overlaps(input_root, root)
-            || overlaps(workspace, root)
-        {
-            return Err(AssetError::new(
-                ErrorCode::BoundaryViolation,
-                "нормализатор не читает и не пишет в защищённые каталоги (decks/**)",
-            ));
-        }
+    let roots = protected_roots(protected);
+    if roots
+        .iter()
+        .any(|root| overlaps(&input, root) || overlaps(&work, root))
+    {
+        return Err(boundary(
+            "нормализатор не читает и не пишет в защищённые каталоги (decks/**)",
+        ));
     }
     Ok(())
+}
+
+/// Создаёт рабочий каталог только после проверки его фактического пути.
+/// Недостающие компоненты создаются относительно дескриптора проверенного
+/// предка без перехода по ссылкам; итог сверяется с проверенным путём.
+pub fn create_workspace(
+    path: &Path,
+    input_root: &Path,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<PathBuf, AssetError> {
+    let resolved = resolve_path(path)?;
+    check_boundaries(input_root, &resolved, protected)?;
+    let mut ancestor = resolved.as_path();
+    let mut missing = Vec::new();
+    while std::fs::symlink_metadata(ancestor).is_err() {
+        missing.push(
+            ancestor
+                .file_name()
+                .ok_or_else(|| boundary("путь не имеет существующего предка"))?
+                .to_owned(),
+        );
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| boundary("путь не имеет существующего предка"))?;
+    }
+    let mut current = open_dir(ancestor).map_err(|_| {
+        boundary("предок рабочего каталога должен быть каталогом без символической ссылки")
+    })?;
+    for name in missing.into_iter().rev() {
+        match rustix::fs::mkdirat(&current, name.as_os_str(), Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(AssetError::io("рабочий каталог", error.into())),
+        }
+        current = File::from(
+            openat(
+                &current,
+                name.as_os_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| boundary("компонент рабочего каталога подменён ссылкой"))?,
+        );
+    }
+    existing_workspace(&resolved, protected)
+}
+
+/// Открытие существующего рабочего каталога для любых подкоманд: фактический
+/// путь — каталог вне защищённых корней. Связь со входом проверяет
+/// [`check_boundaries`] после чтения состояния пакета.
+pub fn existing_workspace(
+    path: &Path,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<PathBuf, AssetError> {
+    let resolved = resolve_path(path)?;
+    let metadata =
+        std::fs::symlink_metadata(&resolved).map_err(|e| AssetError::io("рабочий каталог", e))?;
+    if !metadata.is_dir() {
+        return Err(AssetError::new(
+            ErrorCode::SourceNotRegular,
+            "ожидается каталог",
+        ));
+    }
+    if protected_roots(protected)
+        .iter()
+        .any(|root| overlaps(&resolved, root))
+    {
+        return Err(boundary("рабочий каталог не может пересекаться с decks/**"));
+    }
+    Ok(resolved)
 }
 
 /// Канонизирует существующий каталог и запрещает ссылки в любом компоненте.
@@ -501,6 +761,13 @@ pub fn cancel(workspace: &Path, batch_id: &str) -> Result<NormalizerBatch, Asset
     Ok(batch)
 }
 
+enum CacheLookup {
+    Hit(Box<NormalizationResult>),
+    Missing,
+    /// Запись есть, но непригодна (повреждена, потерян вариант).
+    Stale(String),
+}
+
 /// Кэш результатов рабочего каталога. Держит исключительную блокировку.
 pub struct ResultCache {
     runtime: SafeBatchRuntime,
@@ -513,38 +780,99 @@ impl ResultCache {
         })
     }
 
+    /// Готовый результат входа или `None`. Результат годен, только если JSON
+    /// соответствует ключу, а указанный им обработанный вариант существует и
+    /// совпадает по SHA-256; иначе вход считается необработанным.
     pub fn get(
         &self,
         input_sha: &str,
         config_sha: &str,
     ) -> Result<Option<NormalizationResult>, AssetError> {
-        match self
+        Ok(match self.lookup(input_sha, config_sha)? {
+            CacheLookup::Hit(result) => Some(*result),
+            CacheLookup::Missing => None,
+            CacheLookup::Stale(why) => {
+                tracing::warn!(
+                    operation = "normalizer_cache",
+                    code = "cache_entry_stale",
+                    input_sha256 = input_sha,
+                    reason = %why,
+                    "Результат кэша непригоден и будет пересчитан"
+                );
+                None
+            }
+        })
+    }
+
+    fn lookup(&self, input_sha: &str, config_sha: &str) -> Result<CacheLookup, AssetError> {
+        let bytes = match self
             .runtime
             .artifact_directory("results")?
             .read(&result_name(input_sha, config_sha))
         {
-            Ok(bytes) => {
-                let result: NormalizationResult =
-                    serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
-                if result.input.sha256 != input_sha || result.config_sha256 != config_sha {
-                    return Err(corrupt("результат кэша не соответствует своему ключу"));
-                }
-                Ok(Some(result))
+            Ok(bytes) => bytes,
+            Err(error) if error.code == ErrorCode::MissingAssetFile => {
+                return Ok(CacheLookup::Missing);
             }
-            Err(error) if error.code == ErrorCode::MissingAssetFile => Ok(None),
-            Err(error) => Err(error),
+            Err(error) => return Err(error),
+        };
+        let Ok(result) = serde_json::from_slice::<NormalizationResult>(&bytes) else {
+            return Ok(CacheLookup::Stale("результат кэша не разбирается".into()));
+        };
+        if result.input.sha256 != input_sha || result.config_sha256 != config_sha {
+            return Ok(CacheLookup::Stale(
+                "результат кэша не соответствует своему ключу".into(),
+            ));
         }
+        if let Some(output) = &result.output {
+            match self.variant_bytes(output) {
+                Ok(bytes) if bytes.len() as u64 == output.byte_length => {}
+                Ok(_) => return Ok(CacheLookup::Stale("длина варианта не совпала".into())),
+                Err(error)
+                    if matches!(
+                        error.code,
+                        ErrorCode::MissingAssetFile
+                            | ErrorCode::IntegrityMismatch
+                            | ErrorCode::InvalidTransition
+                            | ErrorCode::UnexpectedPath
+                            | ErrorCode::PathTraversal
+                    ) =>
+                {
+                    return Ok(CacheLookup::Stale(format!(
+                        "обработанный вариант недоступен: {}",
+                        error.message
+                    )));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(CacheLookup::Hit(Box::new(result)))
     }
 
+    /// Сохраняет результат и вариант. Повреждённый прежний результат того же
+    /// ключа и повреждённые байты варианта заменяются атомарно: ключ
+    /// детерминирован, а исключительная блокировка кэша не допускает
+    /// параллельного писателя.
     fn put(
         &self,
         mut result: NormalizationResult,
         output: Option<&[u8]>,
     ) -> Result<NormalizationResult, AssetError> {
         if let (Some(bytes), Some(reference)) = (output, result.output.as_mut()) {
-            let blob = self
+            let blob = match self
                 .runtime
-                .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)?;
+                .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)
+            {
+                Err(error) if error.code == ErrorCode::IntegrityMismatch => {
+                    self.runtime.remove_blob(&RuntimeBlobRef {
+                        sha256: sha256_hex(bytes),
+                        storage_path: format!("candidates/{}.mp3", sha256_hex(bytes)),
+                    })?;
+                    self.runtime
+                        .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)?
+                }
+                other => other?,
+            };
             if blob.sha256 != reference.sha256 {
                 return Err(AssetError::new(
                     ErrorCode::IntegrityMismatch,
@@ -554,12 +882,10 @@ impl ResultCache {
             reference.storage_path = Some(blob.storage_path);
         }
         let bytes = serde_json::to_vec_pretty(&result).expect("результат сериализуем");
-        self.runtime
-            .artifact_directory("results")?
-            .write_if_absent(
-                &result_name(&result.input.sha256, &result.config_sha256),
-                &bytes,
-            )?;
+        self.runtime.artifact_directory("results")?.write(
+            &result_name(&result.input.sha256, &result.config_sha256),
+            &bytes,
+        )?;
         Ok(result)
     }
 
@@ -599,57 +925,29 @@ pub struct RunSummary {
     pub processed_now: u64,
     pub reused: u64,
     pub remaining: u64,
+    /// Входы, обработка которых в этом запуске прервана сбоем среды; они
+    /// остаются незавершёнными и повторяются при следующем запуске.
+    pub infrastructure_failed_now: u64,
     pub batch: NormalizerBatch,
 }
 
 enum ItemError {
+    /// Байты входа не совпали с инвентаризацией или вход не читается.
     Source(String),
+    /// Сбой среды: восстановимо, результат не записывается.
     Infrastructure(AssetError),
-}
-
-fn failure_result(
-    batch: &NormalizerBatch,
-    sha: &str,
-    length: u64,
-    message: &str,
-) -> NormalizationResult {
-    NormalizationResult {
-        schema_version: normalizer::RESULT_SCHEMA_VERSION,
-        mode: batch.mode,
-        config_sha256: batch.config_sha256.clone(),
-        profile: ProfileRef {
-            id: batch.profile.id.clone(),
-            version: batch.profile.version,
-        },
-        toolchain: batch.toolchain.clone(),
-        input: InputRef {
-            sha256: sha.into(),
-            byte_length: length,
-            probe: None,
-            error: Some(message.into()),
-        },
-        analysis: None,
-        plan: None,
-        output: None,
-        post_qc: None,
-        gate: GateDecision {
-            outcome: GateOutcome::ReviewRequired,
-            proposed_variant: Some(Variant::Original),
-            post_qc_verified: false,
-            reasons: vec![Reason {
-                code: "processing_failed_repeatedly".into(),
-                severity: Severity::Review,
-                message: format!(
-                    "обработка {MAX_INFRA_ATTEMPTS} раза завершилась сбоем среды: {message}"
-                ),
-            }],
-            unresolved: Vec::new(),
-        },
-    }
+    /// Нарушение инварианта самого нормализатора: пакет останавливается.
+    Fatal(AssetError),
 }
 
 /// Обрабатывает недостающие результаты с ограниченной конкуренцией.
 /// `stop` выставляется обработчиком SIGINT/SIGTERM вызывающего процесса.
+///
+/// Готовый результат переиспользуется, только если вход по-прежнему совпадает
+/// с инвентаризацией и результат годен (см. [`ResultCache::get`]). Сбой среды
+/// не превращается в исход входа: вход остаётся незавершённым, число сбоев
+/// копится в `progress.infrastructure_failures`, а следующий запуск повторяет
+/// обработку.
 pub fn resume(
     workspace: &Path,
     batch_id: &str,
@@ -665,23 +963,19 @@ pub fn resume(
         return Err(invalid("пакет нормализации отменён"));
     }
     let _lease = runtime.execution_lease()?;
-    let (_, inventory) = {
-        let bytes = runtime.artifact_directory("data")?.read("inventory.json")?;
-        if sha256_hex(&bytes) != batch.inventory_sha256 {
-            return Err(AssetError::new(
-                ErrorCode::IntegrityMismatch,
-                "инвентаризация пакета изменена",
-            ));
-        }
-        (
-            (),
-            serde_json::from_slice::<Inventory>(&bytes).map_err(|e| corrupt(e.to_string()))?,
-        )
-    };
+    let bytes = runtime.artifact_directory("data")?.read("inventory.json")?;
+    if sha256_hex(&bytes) != batch.inventory_sha256 {
+        return Err(AssetError::new(
+            ErrorCode::IntegrityMismatch,
+            "инвентаризация пакета изменена",
+        ));
+    }
+    let inventory: Inventory =
+        serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
     let toolchain = Toolchain::detect()?;
     if toolchain != batch.toolchain {
         return Err(invalid(
-            "версия FFmpeg/анализатора изменилась: результаты несопоставимы, начните новый пакет",
+            "версия FFmpeg/ffprobe/кодировщика/анализатора изменилась: результаты несопоставимы, начните новый пакет",
         ));
     }
     let jobs = jobs.unwrap_or(batch.limits.jobs);
@@ -691,36 +985,41 @@ pub fn resume(
     runtime.release_lock()?;
     let cache = ResultCache::open(workspace)?;
     let root = open_dir(Path::new(&batch.input_root))?;
-    let lengths: BTreeMap<&str, u64> = inventory
-        .entries
-        .iter()
-        .filter_map(|e| e.sha256.as_deref().map(|s| (s, e.byte_length)))
-        .collect();
     let mut by_outcome: BTreeMap<String, u64> = BTreeMap::new();
     let mut pending = Vec::new();
     let mut reused = 0u64;
-    for (sha, path) in inventory.unique_inputs() {
+    let mut infra = batch.progress.infrastructure_failures.clone();
+    let mut source_errors = batch.progress.source_errors.clone();
+    let unique = inventory.unique_inputs();
+    for (sha, path) in &unique {
         match cache.get(sha, &batch.config_sha256)? {
-            Some(result) => {
-                reused += 1;
-                *by_outcome
-                    .entry(result.gate.outcome.as_str().into())
-                    .or_default() += 1;
-            }
-            None => pending.push((sha.to_owned(), path.to_owned())),
+            Some(result) => match read_input(&root, path, sha) {
+                Ok(_) => {
+                    reused += 1;
+                    source_errors.remove(*path);
+                    *by_outcome
+                        .entry(result.gate.outcome.as_str().into())
+                        .or_default() += 1;
+                }
+                Err(error) => {
+                    if source_errors.len() < MAX_RECORDED_ERRORS {
+                        source_errors.insert((*path).to_owned(), error.message);
+                    }
+                }
+            },
+            None => pending.push((sha.to_string(), path.to_string())),
         }
     }
-    let total_pending = pending.len();
+    let unique_count = unique.len() as u64;
     pending.truncate(max_items.unwrap_or(usize::MAX));
     let mut processed_now = 0u64;
+    let mut infrastructure_failed_now = 0u64;
     let mut failure: Option<AssetError> = None;
     let mut cancelled = false;
     let mut last_checkpoint = Instant::now();
     let halt = AtomicBool::new(false);
     let next = AtomicUsize::new(0);
     let mut consecutive_infra = 0usize;
-    let mut infra = batch.progress.infrastructure_failures.clone();
-    let mut source_errors = batch.progress.source_errors.clone();
     let checkpoint = |batch: &mut NormalizerBatch,
                       runtime: &mut SafeBatchRuntime,
                       completed: u64,
@@ -761,8 +1060,15 @@ pub fn resume(
                     };
                     let outcome = match read_input(root, path, sha) {
                         Err(error) => Err(ItemError::Source(error.message)),
-                        Ok(bytes) => normalizer::process(&bytes, profile, mode, toolchain)
-                            .map_err(ItemError::Infrastructure),
+                        Ok(bytes) => {
+                            normalizer::process(&bytes, profile, mode, toolchain).map_err(|error| {
+                                if normalizer::is_infrastructure_failure(&error) {
+                                    ItemError::Infrastructure(error)
+                                } else {
+                                    ItemError::Fatal(error)
+                                }
+                            })
+                        }
                     };
                     if sender.send((index, outcome)).is_err() {
                         break;
@@ -788,26 +1094,26 @@ pub fn resume(
                     if stop.load(Ordering::SeqCst) {
                         continue;
                     }
+                    infrastructure_failed_now += 1;
                     consecutive_infra += 1;
-                    let attempts = infra.entry(sha.clone()).or_default();
-                    *attempts += 1;
+                    *infra.entry(sha.clone()).or_default() += 1;
                     if consecutive_infra >= MAX_CONSECUTIVE_INFRA_FAILURES {
                         halt.store(true, Ordering::SeqCst);
                         failure.get_or_insert(error);
-                        continue;
                     }
-                    if *attempts < MAX_INFRA_ATTEMPTS {
-                        continue;
-                    }
-                    cache.put(
-                        failure_result(&batch, sha, lengths[sha.as_str()], &error.message),
-                        None,
-                    )
+                    continue;
+                }
+                Err(ItemError::Fatal(error)) => {
+                    halt.store(true, Ordering::SeqCst);
+                    failure.get_or_insert(error);
+                    continue;
                 }
             };
             match stored {
                 Ok(result) => {
                     processed_now += 1;
+                    infra.remove(sha);
+                    source_errors.remove(path);
                     *by_outcome
                         .entry(result.gate.outcome.as_str().into())
                         .or_default() += 1;
@@ -853,7 +1159,7 @@ pub fn resume(
         return Err(error);
     }
     cancelled |= final_checkpoint?;
-    let remaining = total_pending as u64 - processed_now;
+    let remaining = unique_count.saturating_sub(reused + processed_now);
     Ok(RunSummary {
         outcome: if stop.load(Ordering::SeqCst) {
             "interrupted"
@@ -867,6 +1173,7 @@ pub fn resume(
         processed_now,
         reused,
         remaining,
+        infrastructure_failed_now,
         batch,
     })
 }
@@ -886,35 +1193,108 @@ pub fn collect_results(
     Ok(results)
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Итог повторной проверки входа против зафиксированной инвентаризации.
+/// `verified: true` только если инвариант доказан полностью.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SourceCheck {
+    pub verified: bool,
+    /// MP3-записей в зафиксированной инвентаризации.
     pub checked: u64,
     pub unchanged: u64,
+    /// Тот же путь, но другие байты, длина или ошибка чтения.
     pub changed: Vec<String>,
+    /// Был прочитан, теперь не читается.
     pub unreadable: Vec<String>,
+    /// Новые MP3, которых нет в инвентаризации.
+    pub added: Vec<String>,
+    /// MP3 инвентаризации, которых больше нет.
+    pub removed: Vec<String>,
+    /// В инвентаризации нет хеша содержимого (файл не читался): неизменность
+    /// не доказуема, это не успех.
+    pub unverifiable: Vec<String>,
+    /// Пропущенные при обходе записи (ссылки, другие расширения, небезопасные
+    /// имена) появились, исчезли или сменили причину пропуска.
+    pub skipped_changed: Vec<String>,
 }
 
-/// Повторно хеширует все входы инвентаризации: доказательство, что корпус не изменён.
+/// Повторная полная инвентаризация того же корня тем же безопасным обходом и
+/// сверка с зафиксированным снимком: набор путей MP3, длины, SHA-256 и ошибки
+/// чтения, а также список пропущенных записей с причинами. Содержимое
+/// посторонних (не MP3) файлов не хешируется: их изменение вне инварианта.
 pub fn verify_sources(
     batch: &NormalizerBatch,
     inventory: &Inventory,
 ) -> Result<SourceCheck, AssetError> {
-    let root = open_dir(Path::new(&batch.input_root))?;
+    let current =
+        self::inventory(Path::new(&batch.input_root), &batch.limits).map_err(|error| {
+            AssetError::with_details(
+                ErrorCode::IntegrityMismatch,
+                format!(
+                    "повторная инвентаризация входа не выполнена: {}",
+                    error.message
+                ),
+                serde_json::json!({"code": error.code.as_str()}),
+            )
+        })?;
+    let now: BTreeMap<&str, &InventoryEntry> = current
+        .entries
+        .iter()
+        .map(|e| (e.path.as_str(), e))
+        .collect();
     let mut check = SourceCheck {
-        checked: 0,
-        unchanged: 0,
-        changed: Vec::new(),
-        unreadable: Vec::new(),
+        checked: inventory.entries.len() as u64,
+        ..SourceCheck::default()
     };
     for entry in &inventory.entries {
-        let Some(sha) = &entry.sha256 else { continue };
-        check.checked += 1;
-        match open_relative(&root, &entry.path).and_then(read_limited) {
-            Ok(bytes) if &sha256_hex(&bytes) == sha => check.unchanged += 1,
-            Ok(_) => check.changed.push(entry.path.clone()),
-            Err(_) => check.unreadable.push(entry.path.clone()),
+        let content = entry.sha256.as_ref().or(entry.content_sha256.as_ref());
+        let Some(after) = now.get(entry.path.as_str()) else {
+            check.removed.push(entry.path.clone());
+            continue;
+        };
+        let after_content = after.sha256.as_ref().or(after.content_sha256.as_ref());
+        match (content, after_content) {
+            (None, _) => check.unverifiable.push(entry.path.clone()),
+            (Some(_), None) => check.unreadable.push(entry.path.clone()),
+            (Some(a), Some(b))
+                if a == b
+                    && entry.byte_length == after.byte_length
+                    && entry.sha256 == after.sha256 =>
+            {
+                check.unchanged += 1
+            }
+            _ => check.changed.push(entry.path.clone()),
         }
     }
+    let known: BTreeSet<&str> = inventory.entries.iter().map(|e| e.path.as_str()).collect();
+    check.added = current
+        .entries
+        .iter()
+        .filter(|e| !known.contains(e.path.as_str()))
+        .map(|e| e.path.clone())
+        .collect();
+    let before: BTreeSet<(&str, &str)> = inventory
+        .skipped
+        .iter()
+        .map(|e| (e.path.as_str(), e.reason.as_str()))
+        .collect();
+    let after: BTreeSet<(&str, &str)> = current
+        .skipped
+        .iter()
+        .map(|e| (e.path.as_str(), e.reason.as_str()))
+        .collect();
+    check.skipped_changed = before
+        .symmetric_difference(&after)
+        .map(|(path, _)| (*path).to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    check.verified = check.changed.is_empty()
+        && check.unreadable.is_empty()
+        && check.added.is_empty()
+        && check.removed.is_empty()
+        && check.unverifiable.is_empty()
+        && check.skipped_changed.is_empty()
+        && check.unchanged == check.checked;
     Ok(check)
 }
 

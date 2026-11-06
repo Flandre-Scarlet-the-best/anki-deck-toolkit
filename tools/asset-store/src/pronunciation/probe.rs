@@ -152,8 +152,14 @@ pub(super) fn run(tool: &str, args: &[&str], limit: u64) -> Result<Vec<u8>, Asse
                 format!("не удалось запустить {tool}: требуются FFmpeg/ffprobe и prlimit в PATH"),
             )
         })?;
-    let out = child.stdout.take().expect("pipe");
-    let err = child.stderr.take().expect("pipe");
+    let out = child
+        .stdout
+        .take()
+        .expect("stdout дочернего процесса открыт как канал");
+    let err = child
+        .stderr
+        .take()
+        .expect("stderr дочернего процесса открыт как канал");
     let stdout = thread::spawn(move || {
         let mut data = Vec::new();
         out.take(limit + 1).read_to_end(&mut data).map(|_| data)
@@ -389,8 +395,8 @@ fn probe_inner(bytes: &[u8], allow_lame_gapless: bool) -> Result<AudioProbe, Ass
     })
 }
 
-/// Повторно декодирует уже проверенный `probe_mp3` поток в interleaved `f32`
-/// той же частоты и раскладки. `f32` сохраняет выбросы декодера выше полной
+/// Повторно декодирует уже проверенный `probe_mp3` поток в отсчёты `f32` с
+/// чередованием каналов той же частоты и раскладки. `f32` сохраняет выбросы декодера выше полной
 /// шкалы, которые `s16` скрыл бы насыщением.
 pub(super) fn decode_f32(bytes: &[u8], probe: &AudioProbe) -> Result<Vec<f32>, AssetError> {
     let workspace = TempWorkspace::create("pronunciation-decode")
@@ -464,10 +470,23 @@ pub(super) fn encode_mp3(
     output_rate: u32,
     encoder: &[String],
 ) -> Result<Vec<u8>, AssetError> {
+    encode_mp3_in("", samples, input_rate, channels, output_rate, encoder)
+}
+
+/// `stem` различает назначение файлов (`""` — вариант, `"toolchain-"` —
+/// отпечаток кодировщика), чтобы диагностика и тестовые обёртки отличали их.
+fn encode_mp3_in(
+    stem: &str,
+    samples: &[f32],
+    input_rate: u32,
+    channels: u32,
+    output_rate: u32,
+    encoder: &[String],
+) -> Result<Vec<u8>, AssetError> {
     let workspace = TempWorkspace::create("pronunciation-encode")
         .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
-    let input = workspace.path().join("input.f32");
-    let output = workspace.path().join("output.mp3");
+    let input = workspace.path().join(format!("{stem}input.f32"));
+    let output = workspace.path().join(format!("{stem}output.mp3"));
     let raw: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
     std::fs::write(&input, raw)
         .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
@@ -532,20 +551,99 @@ pub(super) fn encode_mp3(
     Ok(bytes)
 }
 
-/// Версии FFmpeg и libavcodec из `ffmpeg -version`: входят в отпечаток
-/// конфигурации, потому что другой сборки достаточно для иных байтов.
-pub(super) fn ffmpeg_identity() -> Result<String, AssetError> {
-    let output = run("ffmpeg", &["-hide_banner", "-version"], 64 * 1024)?;
+/// Пересэмплирует подготовленный PCM `f32` тем же `libswresample`, которым
+/// пользуется кодировщик, без иной обработки. Результат — точный эталон для
+/// пост-QC при фиксированной частоте вывода: кодировщик получает уже эти
+/// отсчёты, и сравнение «декодированный вывод ↔ эталон» идёт на одной частоте.
+pub(super) fn resample_f32(
+    samples: &[f32],
+    input_rate: u32,
+    channels: u32,
+    output_rate: u32,
+) -> Result<Vec<f32>, AssetError> {
+    let workspace = TempWorkspace::create("pronunciation-resample")
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
+    let input = workspace.path().join("input.f32");
+    let raw: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    std::fs::write(&input, raw)
+        .map_err(|e| infrastructure_failure("audio_temp_io_failure", e.to_string()))?;
+    let name = input
+        .to_str()
+        .ok_or_else(|| failure("временный путь должен быть UTF-8"))?;
+    let (input_rate, channels_text, output_rate) = (
+        input_rate.to_string(),
+        channels.to_string(),
+        output_rate.to_string(),
+    );
+    let pcm = run(
+        "ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-nostdin",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-protocol_whitelist",
+            "file",
+            "-f",
+            "f32le",
+            "-ar",
+            &input_rate,
+            "-ac",
+            &channels_text,
+            "-i",
+            name,
+            "-ar",
+            &output_rate,
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ],
+        MAX_F32_PCM_BYTES,
+    )?;
+    let stride = channels as usize * 4;
+    if pcm.is_empty() || pcm.len() % stride != 0 {
+        return Err(failure("пересэмплирование не выдало полный поток PCM f32"));
+    }
+    let samples: Vec<f32> = pcm
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
+        .collect();
+    if samples.iter().any(|s| !s.is_finite()) {
+        return Err(failure("пересэмплирование выдало неконечные отсчёты"));
+    }
+    Ok(samples)
+}
+
+/// Название инструмента и версии библиотек из `<tool> -version`.
+fn tool_identity(tool: &str) -> Result<String, AssetError> {
+    let output = run(tool, &["-hide_banner", "-version"], 64 * 1024)?;
     let text = String::from_utf8_lossy(&output);
     let mut parts = Vec::new();
+    let banner = format!("{tool} version ");
     for line in text.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("ffmpeg version ") {
+        if let Some(rest) = line.strip_prefix(&banner) {
             parts.push(format!(
-                "ffmpeg {}",
+                "{tool} {}",
                 rest.split_whitespace().next().unwrap_or("unknown")
             ));
-        } else if line.starts_with("libavcodec") || line.starts_with("libswresample") {
+        } else if [
+            "libavutil",
+            "libavcodec",
+            "libavformat",
+            "libavfilter",
+            "libswresample",
+        ]
+        .iter()
+        .any(|library| line.starts_with(library))
+        {
             parts.push(
                 line.split('/')
                     .next()
@@ -556,11 +654,58 @@ pub(super) fn ffmpeg_identity() -> Result<String, AssetError> {
             );
         }
     }
-    if parts.is_empty() || parts.iter().any(|p| p.chars().any(char::is_control)) {
+    if !parts.first().is_some_and(|p| p.starts_with(tool))
+        || parts.iter().any(|p| p.chars().any(char::is_control))
+    {
         return Err(infrastructure_failure(
             "audio_tool_runtime_failed",
-            "не удалось определить версию FFmpeg",
+            format!("не удалось определить версию {tool}"),
         ));
     }
     Ok(parts.join("; "))
+}
+
+/// Версии FFmpeg и его библиотек из `ffmpeg -version`: входят в отпечаток
+/// конфигурации, потому что другой сборки достаточно для иных байтов.
+pub(super) fn ffmpeg_identity() -> Result<String, AssetError> {
+    tool_identity("ffmpeg")
+}
+
+/// Версии `ffprobe` и его библиотек: техническая проверка `probe_mp3` входа
+/// и результата идёт через него, поэтому он тоже определяет результат.
+pub(super) fn ffprobe_identity() -> Result<String, AssetError> {
+    tool_identity("ffprobe")
+}
+
+/// Функциональный отпечаток MP3-кодировщика. `ffmpeg -version` не сообщает
+/// версию связанной libmp3lame, поэтому фиксированный детерминированный сигнал
+/// кодируется тем же путём, что и варианты (`-bitexact`), и в отпечаток входит
+/// SHA-256 полученных байтов. Иная сборка LAME, меняющая байты, меняет отпечаток.
+pub(super) fn encoder_identity() -> Result<String, AssetError> {
+    const RATE: u32 = 44100;
+    let samples: Vec<f32> = (0..RATE as usize / 4)
+        .map(|i| {
+            let t = i as f64 / f64::from(RATE);
+            (0.25 * (2.0 * std::f64::consts::PI * (220.0 + 1800.0 * t) * t).sin()) as f32
+        })
+        .collect();
+    let bytes = encode_mp3_in(
+        "toolchain-",
+        &samples,
+        RATE,
+        1,
+        RATE,
+        &["-q:a".into(), "2".into()],
+    )
+    .map_err(|error| {
+        if error.details["blocker"].is_string() {
+            error
+        } else {
+            infrastructure_failure(
+                "audio_tool_runtime_failed",
+                format!("кодировщик libmp3lame недоступен: {}", error.message),
+            )
+        }
+    })?;
+    Ok(format!("libmp3lame sha256:{}", &sha256_hex(&bytes)[..16]))
 }

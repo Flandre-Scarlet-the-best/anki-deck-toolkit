@@ -640,37 +640,104 @@ fn batch_limits_cancellation_interruption_and_boundaries() {
     assert!(!input.join("work").exists());
 }
 
+/// Абсолютный путь инструмента из текущего PATH.
+fn which(tool: &str) -> std::path::PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join(tool))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("для теста нужен {tool}"))
+}
+
+/// Каталог PATH: настоящие `prlimit` и `ffprobe` и управляемая обёртка над
+/// `ffmpeg`. Файл `fail` в каталоге заставляет обработку (но не определение
+/// версий и отпечатка кодировщика) завершаться сигналом — сбой среды;
+/// `alter` дописывает байт к отпечатку кодировщика — «другая сборка LAME».
+fn tool_dir(root: &Path, with_ffmpeg: bool) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.join("tools");
+    fs::create_dir_all(&dir).unwrap();
+    for tool in ["prlimit", "ffprobe"] {
+        std::os::unix::fs::symlink(which(tool), dir.join(tool)).unwrap();
+    }
+    if with_ffmpeg {
+        let script = format!(
+            r#"#!/bin/sh
+case "$*" in
+  *-version*) exec "{real}" "$@" ;;
+  *toolchain-input*)
+    for last; do :; done
+    "{real}" "$@" || exit $?
+    if [ -e "{dir}/alter" ]; then printf x >> "$last"; fi
+    exit 0 ;;
+esac
+if [ -e "{dir}/fail" ]; then kill -KILL $$; fi
+exec "{real}" "$@"
+"#,
+            real = which("ffmpeg").display(),
+            dir = dir.display()
+        );
+        let path = dir.join("ffmpeg");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+fn cli_with_path(ws: &Path, path: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
+        .arg("--repository-root")
+        .arg(ws)
+        .arg("--store")
+        .arg(ws.join("store"))
+        .arg("normalizer")
+        .args(args)
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+fn running_as_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+/// Отсутствует именно FFmpeg: `prlimit` и `ffprobe` доступны, ошибка
+/// называет недостающий инструмент, состояние пакета не создаётся.
 #[test]
-fn missing_ffmpeg_and_unwritable_workspace_fail_before_any_state() {
+fn missing_ffmpeg_fails_before_any_state_and_names_the_tool() {
     let ws = TempWorkspace::create("normalizer-env").unwrap();
     let input = corpus(ws.path());
     let workspace = ws.path().join("work");
-    let tools = ws.path().join("tools");
-    fs::create_dir(&tools).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pronunciation-assets"))
-        .arg("--repository-root")
-        .arg(ws.path())
-        .args([
-            "normalizer",
+    let tools = tool_dir(ws.path(), false);
+    assert!(tools.join("prlimit").exists() && !tools.join("ffmpeg").exists());
+    let output = cli_with_path(
+        ws.path(),
+        &tools,
+        &[
             "batch-start",
             "--batch-id",
             "nofm",
             "--input-dir",
-        ])
-        .arg(&input)
-        .arg("--workspace")
-        .arg(&workspace)
-        .env("PATH", &tools)
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert_eq!(
-        json(&output)["error"]["details"]["blocker"],
-        "audio_tool_missing"
+            input.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
     );
+    assert!(!output.status.success());
+    let error = &json(&output)["error"];
+    assert_eq!(error["details"]["blocker"], "audio_tool_missing");
+    assert_eq!(error["details"]["tool"], "ffmpeg");
     assert!(!workspace.join(".runtime/batches/nofm").exists());
+}
 
+/// Недоступный для записи рабочий каталог — отдельное условие.
+#[test]
+fn unwritable_workspace_fails_without_state() {
     use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        return;
+    }
+    let ws = TempWorkspace::create("normalizer-ro").unwrap();
+    let input = corpus(ws.path());
     let locked = ws.path().join("locked");
     fs::create_dir(&locked).unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
@@ -692,6 +759,526 @@ fn missing_ffmpeg_and_unwritable_workspace_fail_before_any_state() {
         json(&denied)["error"]["code"].as_str(),
         Some("io_failure" | "boundary_violation")
     ));
+    assert!(fs::read_dir(&locked).unwrap().next().is_none());
+}
+
+/// Сбой среды не становится исходом входа и не попадает в кэш; после
+/// восстановления FFmpeg повтор реально обрабатывает незавершённые входы.
+/// Изменение сборки кодировщика останавливает возобновление.
+#[test]
+fn infrastructure_failure_is_retried_after_recovery_and_toolchain_change_is_detected() {
+    let ws = TempWorkspace::create("normalizer-infra").unwrap();
+    let input = corpus(ws.path());
+    let workspace = ws.path().join("work");
+    let tools = tool_dir(ws.path(), true);
+    let start = |id: &str| {
+        cli_with_path(
+            ws.path(),
+            &tools,
+            &[
+                "batch-start",
+                "--batch-id",
+                id,
+                "--input-dir",
+                input.to_str().unwrap(),
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "--jobs",
+                "2",
+            ],
+        )
+    };
+    let resume = |id: &str| {
+        cli_with_path(
+            ws.path(),
+            &tools,
+            &[
+                "batch-resume",
+                "--batch-id",
+                id,
+                "--workspace",
+                workspace.to_str().unwrap(),
+            ],
+        )
+    };
+    fs::write(tools.join("fail"), b"").unwrap();
+    let failed = json(&start("infra"));
+    let run = &failed["result"]["run"];
+    assert_eq!(run["outcome"], "paused", "{failed}");
+    assert!(
+        run["infrastructure_failed_now"].as_u64().unwrap() >= 3,
+        "{failed}"
+    );
+    assert!(run["remaining"].as_u64().unwrap() >= 3);
+    let outcomes = &failed["result"]["batch"]["progress"]["by_outcome"];
+    assert!(outcomes.get("REVIEW_REQUIRED").is_none(), "{outcomes}");
+    let results = fs::read_dir(workspace.join(".runtime/batches/normalizer-cache/results"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    // В кэше только входы, отвергнутые до запуска FFmpeg (не MP3, усечённый).
+    assert_eq!(outcomes["REJECT"], 2, "{outcomes}");
+    assert_eq!(results, 2, "в кэш попал результат сбоя среды: {results}");
+    // Отчётная выборка по неполному пакету отклоняется явно.
+    let sample = cli_with_path(
+        ws.path(),
+        &tools,
+        &[
+            "batch-sample",
+            "--batch-id",
+            "infra",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--out",
+            ws.path().join("sample.json").to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        json(&sample)["error"]["details"]["blocker"],
+        "batch_incomplete"
+    );
+    assert!(
+        json(&sample)["error"]["details"]["missing_results"]
+            .as_u64()
+            .unwrap()
+            >= 3
+    );
+    assert!(!ws.path().join("sample.json").exists());
+
+    fs::remove_file(tools.join("fail")).unwrap();
+    let recovered = json(&resume("infra"));
+    assert_eq!(
+        recovered["result"]["run"]["outcome"], "completed",
+        "{recovered}"
+    );
+    let outcomes = &recovered["result"]["batch"]["progress"]["by_outcome"];
+    assert_eq!(outcomes["REJECT"], 2);
+    assert_eq!(outcomes["KEEP_ORIGINAL"], 1);
+    assert_eq!(outcomes["ACCEPT"], 2);
+    assert_eq!(
+        recovered["result"]["batch"]["progress"]["infrastructure_failures"],
+        serde_json::json!({})
+    );
+
+    fs::write(tools.join("alter"), b"").unwrap();
+    let changed = json(&resume("infra"));
+    assert_eq!(changed["error"]["code"], "invalid_transition");
+    assert!(
+        changed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("кодировщика")
+    );
+}
+
+/// Повреждённый или потерянный вариант в кэше и изменённый после
+/// инвентаризации вход не считаются готовыми; годный кэш не выбрасывается.
+#[test]
+fn stale_cache_entries_and_changed_inputs_are_not_reused() {
+    let ws = TempWorkspace::create("normalizer-stale").unwrap();
+    let input = corpus(ws.path());
+    let workspace = ws.path().join("work");
+    let args = |command: &str, id: &str| -> Vec<String> {
+        let mut all = vec![command.into(), "--batch-id".into(), id.into()];
+        if command == "batch-start" {
+            all.extend(["--input-dir".into(), input.to_str().unwrap().into()]);
+        }
+        all.extend(["--workspace".into(), workspace.to_str().unwrap().into()]);
+        all
+    };
+    let run = |all: Vec<String>| {
+        json(&cli(
+            ws.path(),
+            &all.iter().map(String::as_str).collect::<Vec<_>>(),
+        ))
+    };
+    assert_eq!(
+        run(args("batch-start", "s1"))["result"]["run"]["outcome"],
+        "completed"
+    );
+    let candidates = workspace.join(".runtime/batches/normalizer-cache/candidates");
+    let mut blobs: Vec<_> = fs::read_dir(&candidates)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    blobs.sort();
+    assert_eq!(blobs.len(), 2, "{blobs:?}");
+    fs::write(&blobs[0], b"corrupted").unwrap();
+    fs::remove_file(&blobs[1]).unwrap();
+    let resumed = run(args("batch-resume", "s1"));
+    assert_eq!(
+        resumed["result"]["run"]["outcome"], "completed",
+        "{resumed}"
+    );
+    assert_eq!(resumed["result"]["run"]["processed_now"], 2);
+    assert_eq!(resumed["result"]["run"]["reused"], 3);
+    for blob in &blobs {
+        let name = blob.file_name().unwrap().to_str().unwrap();
+        assert_eq!(format!("{}.mp3", sha256_hex(fs::read(blob).unwrap())), name);
+    }
+
+    // Вход изменился после инвентаризации: прежний результат не переиспользуется.
+    fs::write(input.join("good.mp3"), quiet()).unwrap();
+    let changed = run(args("batch-resume", "s1"));
+    let run_summary = &changed["result"]["run"];
+    assert_eq!(run_summary["outcome"], "paused", "{changed}");
+    assert_eq!(run_summary["reused"], 4);
+    assert_eq!(run_summary["remaining"], 1);
+    assert!(
+        changed["result"]["batch"]["progress"]["source_errors"]
+            .get("good.mp3")
+            .is_some()
+    );
+}
+
+/// Инвентаризация учитывает все MP3 в общем пределе, а проверка неизменности
+/// обнаруживает новые, удалённые, изменённые и непроверяемые записи.
+#[test]
+fn inventory_limits_and_source_verification_cover_the_whole_input() {
+    let ws = TempWorkspace::create("normalizer-inventory").unwrap();
+    let input = corpus(ws.path());
+    let workspace = ws.path().join("work");
+    let big: Vec<u8> = (0..9 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    fs::write(input.join("big.mp3"), &big).unwrap();
+    let small_total: u64 = [
+        "padded.mp3",
+        "good.mp3",
+        "こいつ.MP3",
+        "подкаталог/quiet.mp3",
+        "truncated.mp3",
+        "<img src=x onerror=alert(1)>.mp3",
+    ]
+    .iter()
+    .map(|p| fs::metadata(input.join(p)).unwrap().len())
+    .sum::<u64>()
+        + 4096;
+    // Файл больше 8 MiB не обходит общий предел.
+    let limited = cli(
+        ws.path(),
+        &[
+            "batch-start",
+            "--batch-id",
+            "limit",
+            "--input-dir",
+            input.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--max-total-bytes",
+            &small_total.to_string(),
+        ],
+    );
+    assert_eq!(json(&limited)["error"]["code"], "invalid_transition");
+    let started = json(&cli(
+        ws.path(),
+        &[
+            "batch-start",
+            "--batch-id",
+            "v1",
+            "--input-dir",
+            input.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(
+        started["result"]["run"]["outcome"], "completed",
+        "{started}"
+    );
+    let verify = || {
+        json(&cli(
+            ws.path(),
+            &[
+                "batch-verify-sources",
+                "--batch-id",
+                "v1",
+                "--workspace",
+                workspace.to_str().unwrap(),
+            ],
+        ))
+    };
+    let ok = verify();
+    assert_eq!(ok["result"]["verified"], true, "{ok}");
+    assert_eq!(ok["result"]["unchanged"], 7);
+    // Изменённые байты слишком большого файла обнаруживаются по его хешу.
+    let mut altered = big.clone();
+    altered[100] ^= 1;
+    fs::write(input.join("big.mp3"), &altered).unwrap();
+    let details = verify()["error"]["details"].clone();
+    assert_eq!(details["changed"], serde_json::json!(["big.mp3"]));
+    fs::write(input.join("big.mp3"), &big).unwrap();
+    // Новый MP3, удалённый MP3 и новая посторонняя запись.
+    fs::write(input.join("new.mp3"), good()).unwrap();
+    fs::remove_file(input.join("подкаталог/quiet.mp3")).unwrap();
+    fs::write(input.join("extra.txt"), b"x").unwrap();
+    let details = verify()["error"]["details"].clone();
+    assert_eq!(details["verified"], false);
+    assert_eq!(details["added"], serde_json::json!(["new.mp3"]));
+    assert_eq!(
+        details["removed"],
+        serde_json::json!(["подкаталог/quiet.mp3"])
+    );
+    assert_eq!(details["skipped_changed"], serde_json::json!(["extra.txt"]));
+    fs::remove_file(input.join("new.mp3")).unwrap();
+    fs::remove_file(input.join("extra.txt")).unwrap();
+    fs::write(input.join("подкаталог/quiet.mp3"), quiet()).unwrap();
+    assert_eq!(verify()["result"]["verified"], true);
+
+    // Нечитаемый при инвентаризации файл непроверяем, даже если стал читаемым.
+    if !running_as_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let hidden = input.join("hidden.mp3");
+        fs::write(&hidden, good()).unwrap();
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o000)).unwrap();
+        let second = json(&cli(
+            ws.path(),
+            &[
+                "batch-start",
+                "--batch-id",
+                "v2",
+                "--input-dir",
+                input.to_str().unwrap(),
+                "--workspace",
+                workspace.to_str().unwrap(),
+            ],
+        ));
+        assert_eq!(second["result"]["run"]["outcome"], "completed", "{second}");
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o644)).unwrap();
+        let unverifiable = json(&cli(
+            ws.path(),
+            &[
+                "batch-verify-sources",
+                "--batch-id",
+                "v2",
+                "--workspace",
+                workspace.to_str().unwrap(),
+            ],
+        ));
+        assert_eq!(
+            unverifiable["error"]["details"]["unverifiable"],
+            serde_json::json!(["hidden.mp3"])
+        );
+    }
+}
+
+/// Рабочий каталог, отчёт и выборка не попадают во вход и в decks/** ни
+/// напрямую, ни через символическую ссылку на родителя; отказ не оставляет
+/// следов. Отчёт публикуется атомарно и повторяем после сбоя.
+#[test]
+fn outputs_never_reach_protected_trees_and_report_is_atomic() {
+    let ws = TempWorkspace::create("normalizer-bounds").unwrap();
+    let input = corpus(ws.path());
+    fs::create_dir_all(ws.path().join("decks/output")).unwrap();
+    fs::write(ws.path().join("AGENTS.md"), b"").unwrap();
+    std::os::unix::fs::symlink(ws.path().join("decks/output"), ws.path().join("to-decks")).unwrap();
+    std::os::unix::fs::symlink(&input, ws.path().join("to-input")).unwrap();
+    let decks_before = snapshot(&ws.path().join("decks"));
+    let input_before = snapshot(&input);
+    for target in ["to-decks/work", "to-input/work"] {
+        let refused = cli(
+            ws.path(),
+            &[
+                "batch-start",
+                "--batch-id",
+                "b",
+                "--input-dir",
+                input.to_str().unwrap(),
+                "--workspace",
+                ws.path().join(target).to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            json(&refused)["error"]["code"],
+            "boundary_violation",
+            "{target}"
+        );
+    }
+    let workspace = ws.path().join("work");
+    let started = cli(
+        ws.path(),
+        &[
+            "batch-start",
+            "--batch-id",
+            "b",
+            "--input-dir",
+            input.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert!(started.status.success());
+    for (command, extra) in [
+        ("batch-sample", vec!["--seed", "1"]),
+        ("batch-report", vec![]),
+    ] {
+        for target in ["to-decks/out", "to-input/out", "work/.runtime/out"] {
+            let mut all = vec![
+                command,
+                "--batch-id",
+                "b",
+                "--workspace",
+                workspace.to_str().unwrap(),
+            ];
+            all.extend(extra.iter().copied());
+            let out = ws.path().join(target);
+            all.extend(["--out", out.to_str().unwrap()]);
+            let refused = cli(ws.path(), &all);
+            assert_eq!(
+                json(&refused)["error"]["code"],
+                "boundary_violation",
+                "{command} {target}"
+            );
+        }
+    }
+    assert_eq!(snapshot(&ws.path().join("decks")), decks_before);
+    assert_eq!(snapshot(&input), input_before);
+
+    // Рабочий каталог, перенесённый в decks/**, не открывается ни одной подкомандой.
+    let moved = ws.path().join("decks/output/work");
+    fs::rename(&workspace, &moved).unwrap();
+    for command in ["batch-status", "batch-resume", "batch-verify-sources"] {
+        let refused = cli(
+            ws.path(),
+            &[
+                command,
+                "--batch-id",
+                "b",
+                "--workspace",
+                moved.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            json(&refused)["error"]["code"],
+            "boundary_violation",
+            "{command}"
+        );
+    }
+    fs::rename(&moved, &workspace).unwrap();
+
+    // Сбой на середине копирования media не оставляет частичного отчёта.
+    let report_dir = ws.path().join("report");
+    let report = |out: &Path| {
+        cli(
+            ws.path(),
+            &[
+                "batch-report",
+                "--batch-id",
+                "b",
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "--out",
+                out.to_str().unwrap(),
+                "--html",
+                "--include",
+                "all",
+            ],
+        )
+    };
+    if !running_as_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let source = input.join("подкаталог/quiet.mp3");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o000)).unwrap();
+        let failed = report(&report_dir);
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!failed.status.success());
+        assert!(!report_dir.exists());
+        let leftovers: Vec<_> = fs::read_dir(ws.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("partial"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+    let done = report(&report_dir);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stdout)
+    );
+    assert!(report_dir.join("report.html").exists());
+    assert_eq!(snapshot(&input), input_before);
+}
+
+/// Выписка publications/ не сохранилась после фиксации в хранилище: ошибка
+/// явно сообщает о совершённой публикации, а повтор идемпотентен.
+#[test]
+fn publication_record_failure_after_store_commit_is_repairable() {
+    use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        return;
+    }
+    let ws = TempWorkspace::create("normalizer-publish-repair").unwrap();
+    let input = ws.path().join("corpus");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("padded.mp3"), padded()).unwrap();
+    let workspace = ws.path().join("work");
+    let started = cli(
+        ws.path(),
+        &[
+            "batch-start",
+            "--batch-id",
+            "p",
+            "--input-dir",
+            input.to_str().unwrap(),
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert!(started.status.success());
+    let request = Pronunciation::new("こいつ", "こいつ").unwrap();
+    let source_sha = sha256_hex(padded());
+    {
+        let store = store(&ws.path().join("store"));
+        import_bytes(&store, &request, padded(), "こいつ.mp3", None).unwrap();
+    }
+    let publications = workspace.join(".runtime/batches/normalizer-cache/publications");
+    fs::create_dir_all(&publications).unwrap();
+    fs::set_permissions(&publications, fs::Permissions::from_mode(0o500)).unwrap();
+    let publish = || {
+        cli(
+            ws.path(),
+            &[
+                "publish",
+                "--batch-id",
+                "p",
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "--input-sha256",
+                &source_sha,
+                "--surface",
+                "こいつ",
+                "--reading",
+                "こいつ",
+                "--replace-expected-sha256",
+                &source_sha,
+            ],
+        )
+    };
+    let failed = json(&publish());
+    fs::set_permissions(&publications, fs::Permissions::from_mode(0o700)).unwrap();
+    let details = &failed["error"]["details"];
+    assert_eq!(details["store_committed"], true, "{failed}");
+    let published = details["published_sha256"].as_str().unwrap().to_owned();
+    let store_view = store(&ws.path().join("store"));
+    let current = derivation::current_record(&store_view, &request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.sha256, published);
+    for _ in 0..2 {
+        let repaired = json(&publish());
+        assert_eq!(repaired["result"]["already_published"], true, "{repaired}");
+        assert_eq!(repaired["result"]["asset"]["sha256"], published.as_str());
+    }
+    assert!(
+        publications
+            .join(format!("{source_sha}.{published}.json"))
+            .exists()
+    );
+    let after = derivation::current_record(&store_view, &request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.sha256, current.sha256);
+    assert_eq!(after.lifecycle, current.lifecycle);
 }
 
 fn store(path: &Path) -> AssetStore {
@@ -882,4 +1469,65 @@ fn derived_record_keeps_forvo_provenance_of_the_source() {
             .iter()
             .any(|r| r.sha256 == derived.sha256)
     );
+}
+
+/// `available` страты крайних значений считает только элементы с конечной
+/// метрикой сортировки: запись без измеримой громкости в «самые тихие» не
+/// попадает и доступной не считается.
+#[test]
+fn sample_strata_count_only_selectable_items() {
+    use asset_store::pronunciation::normalizer_report as report;
+    let ws = TempWorkspace::create("normalizer-sample").unwrap();
+    let input = ws.path().join("corpus");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("good.mp3"), good()).unwrap();
+    fs::write(
+        input.join("tiny.mp3"),
+        encode(
+            "tiny",
+            "sine=frequency=440:duration=0.06:sample_rate=44100,volume=0.8",
+        ),
+    )
+    .unwrap();
+    let workspace = ws.path().join("work");
+    fs::create_dir(&workspace).unwrap();
+    nbatch::start(nbatch::StartRequest {
+        batch_id: "s",
+        workspace: &workspace,
+        input_root: &fs::canonicalize(&input).unwrap(),
+        mode: Mode::Analyze,
+        profile: NormalizerProfile::balanced(),
+        limits: nbatch::Limits {
+            jobs: 1,
+            max_files: 10,
+            max_total_bytes: 1 << 20,
+        },
+    })
+    .unwrap();
+    let stop = AtomicBool::new(false);
+    assert_eq!(
+        nbatch::resume(&workspace, "s", None, None, &stop)
+            .unwrap()
+            .outcome,
+        "completed"
+    );
+    let (batch, inventory) = nbatch::load(&workspace, "s").unwrap();
+    let cache = nbatch::ResultCache::open(&workspace).unwrap();
+    let results = nbatch::collect_results(&cache, &batch, &inventory).unwrap();
+    let tiny = results
+        .iter()
+        .find(|r| {
+            r.plan
+                .as_ref()
+                .is_some_and(|p| p.gain.measured_lufs.is_none())
+        })
+        .expect("короткий клип без измеримой громкости");
+    assert!(tiny.analysis.is_some());
+    let sample = report::sample(&batch, &inventory, &results, 1, 5);
+    let quietest = sample.strata.iter().find(|s| s.id == "quietest").unwrap();
+    assert_eq!(quietest.available, 1);
+    assert_eq!(quietest.selected.len(), 1);
+    assert_ne!(quietest.selected[0], tiny.input.sha256);
+    let shortest = sample.strata.iter().find(|s| s.id == "shortest").unwrap();
+    assert_eq!(shortest.available, 2);
 }

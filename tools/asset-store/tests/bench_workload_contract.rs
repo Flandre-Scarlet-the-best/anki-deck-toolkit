@@ -790,3 +790,158 @@ fn step_args(step: &toml::Value) -> Vec<String> {
         .map(|arg| arg.as_str().expect("аргумент — строка").to_owned())
         .collect()
 }
+
+/// Помеченный рабочий каталог нормализатора с кэшем и одним пакетом.
+fn audio_workdir(root: &Path) -> PathBuf {
+    let workdir = root.join("work");
+    asset_store::bench_audio::reset_workspace(&workdir, false, false).unwrap();
+    fs::create_dir_all(workdir.join(".runtime/batches/normalizer-cache/results")).unwrap();
+    fs::write(
+        workdir.join(".runtime/batches/normalizer-cache/results/kept.json"),
+        b"{}",
+    )
+    .unwrap();
+    fs::create_dir_all(workdir.join(".runtime/batches/bench/data")).unwrap();
+    workdir
+}
+
+/// `audio-reset` не переходит по ссылкам: ни `.runtime/batches`, ни запись
+/// внутри него не дают удалить посторонние данные; маркер не расширяет
+/// право удаления за пределы рабочего каталога.
+#[test]
+fn audio_reset_never_follows_symlinks_out_of_the_workdir() {
+    let root = TempWorkspace::create("audio-reset-links").unwrap();
+    let foreign = root.path().join("foreign");
+    fs::create_dir_all(foreign.join("precious")).unwrap();
+    fs::write(foreign.join("precious/data.txt"), b"keep").unwrap();
+
+    let workdir = audio_workdir(root.path());
+    std::os::unix::fs::symlink(&foreign, workdir.join(".runtime/batches/evil")).unwrap();
+    for (keep, remove) in [(true, false), (false, false), (false, true)] {
+        assert!(
+            asset_store::bench_audio::reset_workspace(&workdir, keep, remove).is_err(),
+            "{keep} {remove}"
+        );
+        assert_eq!(
+            fs::read(foreign.join("precious/data.txt")).unwrap(),
+            b"keep"
+        );
+    }
+    fs::remove_file(workdir.join(".runtime/batches/evil")).unwrap();
+
+    // Подменённый `.runtime/batches` целиком.
+    fs::remove_dir_all(workdir.join(".runtime/batches")).unwrap();
+    std::os::unix::fs::symlink(&foreign, workdir.join(".runtime/batches")).unwrap();
+    assert!(asset_store::bench_audio::reset_workspace(&workdir, true, false).is_err());
+    assert_eq!(
+        fs::read(foreign.join("precious/data.txt")).unwrap(),
+        b"keep"
+    );
+    fs::remove_file(workdir.join(".runtime/batches")).unwrap();
+
+    // Тёплый сброс сохраняет кэш и удаляет только пакеты.
+    fs::create_dir_all(workdir.join(".runtime/batches/normalizer-cache/results")).unwrap();
+    fs::write(
+        workdir.join(".runtime/batches/normalizer-cache/results/kept.json"),
+        b"{}",
+    )
+    .unwrap();
+    fs::create_dir_all(workdir.join(".runtime/batches/bench/data")).unwrap();
+    asset_store::bench_audio::reset_workspace(&workdir, true, false).unwrap();
+    assert!(
+        workdir
+            .join(".runtime/batches/normalizer-cache/results/kept.json")
+            .exists()
+    );
+    assert!(!workdir.join(".runtime/batches/bench").exists());
+    assert_eq!(
+        fs::read(foreign.join("precious/data.txt")).unwrap(),
+        b"keep"
+    );
+}
+
+/// Сброс отклоняется, пока работающий пакет держит блокировку кэша.
+#[test]
+fn audio_reset_refuses_while_a_batch_holds_the_cache() {
+    let root = TempWorkspace::create("audio-reset-active").unwrap();
+    let workdir = audio_workdir(root.path());
+    let cache = asset_store::pronunciation::normalizer_batch::ResultCache::open(&workdir).unwrap();
+    for (keep, remove) in [(true, false), (false, false), (false, true)] {
+        let refused = asset_store::bench_audio::reset_workspace(&workdir, keep, remove)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("активным пакетом"), "{refused}");
+        assert!(
+            workdir
+                .join(".runtime/batches/normalizer-cache/results/kept.json")
+                .exists()
+        );
+    }
+    drop(cache);
+    asset_store::bench_audio::reset_workspace(&workdir, false, true).unwrap();
+    assert!(!workdir.exists());
+}
+
+/// `--keep-cache` и `--remove` несовместимы: отказ использования, каталог цел.
+#[test]
+fn audio_reset_rejects_conflicting_flags() {
+    let root = TempWorkspace::create("audio-reset-flags").unwrap();
+    let workdir = audio_workdir(root.path());
+    let output = Command::new(BIN)
+        .args(["audio-reset", "--keep-cache", "--remove", "--workdir"])
+        .arg(&workdir)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        workdir
+            .join(".runtime/batches/normalizer-cache/results/kept.json")
+            .exists()
+    );
+    assert!(asset_store::bench_audio::reset_workspace(&workdir, true, true).is_err());
+    assert!(workdir.exists());
+}
+
+/// Пиковые уровни синтетического корпуса лежат в заявленном диапазоне
+/// −44…−8 dBFS (с допуском на кодирование) и действительно его покрывают;
+/// генерация детерминирована по seed.
+#[test]
+fn audio_corpus_levels_match_the_documented_peak_range() {
+    let root = TempWorkspace::create("audio-corpus-levels").unwrap();
+    let generate = |name: &str| {
+        let out = root.path().join(name);
+        asset_store::bench_audio::generate_corpus(&out, 40, 11).unwrap();
+        out
+    };
+    let first = generate("a");
+    let second = generate("b");
+    let mut peaks = Vec::new();
+    for index in 0..40 {
+        let name = format!("clip-{index:05}.mp3");
+        let bytes = fs::read(first.join(&name)).unwrap();
+        assert_eq!(bytes, fs::read(second.join(&name)).unwrap(), "{name}");
+        let decoded = Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(first.join(&name))
+            .args(["-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        let peak = decoded
+            .stdout
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b).abs())
+            .fold(0.0f32, f32::max);
+        peaks.push(20.0 * f64::from(peak).log10());
+    }
+    let (low, high) = peaks
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(*p), h.max(*p)));
+    assert!(low >= -45.5 && high <= -6.5, "{low:.1}…{high:.1}");
+    assert!(
+        low < -36.0 && high > -16.0,
+        "диапазон не покрыт: {low:.1}…{high:.1}"
+    );
+}

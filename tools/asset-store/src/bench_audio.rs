@@ -3,9 +3,15 @@
 //! постусловия прогона. Измеряемая операция — штатный `pronunciation-assets
 //! normalizer batch-start`; здесь только подготовка и проверка вне интервала.
 
-use std::fs;
+use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Command;
+
+use rustix::fs::{AtFlags, Dir, FlockOperation, Mode, OFlags, flock, openat, unlinkat};
+use rustix::io::Errno;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +20,9 @@ use crate::pronunciation::normalizer_batch as nbatch;
 
 pub const CORPUS_MARKER: &str = ".asset-store-bench-audio.json";
 pub const WORK_MARKER: &str = ".asset-store-bench-audio-work.json";
-const GENERATOR_VERSION: u32 = 1;
+/// `2`: уровни приведены к заявленному пиковому диапазону −44…−8 dBFS
+/// (у первой версии фактически было около −36…0 dBFS).
+const GENERATOR_VERSION: u32 = 2;
 const MARKER_TOOL: &str = "asset-store-bench";
 
 #[derive(Debug, thiserror::Error)]
@@ -50,8 +58,9 @@ impl Rng {
     }
 }
 
-/// Создаёт новый каталог с `count` MP3: тоны разной громкости и длительности,
-/// краевая тишина 0–1.2 с, иногда внутренняя пауза, моно/стерео, 22.05–48 кГц.
+/// Создаёт новый каталог с `count` MP3: тоны с пиковым уровнем от −44 до
+/// −8 dBFS и разной длительности, краевая тишина 0–1.2 с, иногда внутренняя
+/// пауза, моно/стерео, 22.05–48 кГц.
 pub fn generate_corpus(
     out: &Path,
     count: usize,
@@ -75,8 +84,11 @@ pub fn generate_corpus(
             0
         };
         let frequency = rng.range(150, 900);
-        // Амплитуда источника sine — 1/8; volume задаёт итог от −44 до −8 dBFS.
-        let volume = 10f64.powf(rng.range(0, 36) as f64 / 20.0) / 8.0;
+        // Пиковый уровень тона до кодирования — от −44 до −8 dBFS с шагом 1 dB.
+        // Фильтр FFmpeg `sine` выдаёт амплитуду 1/8 полной шкалы, поэтому
+        // `volume` = требуемая амплитуда / (1/8).
+        let peak_dbfs = -44.0 + rng.range(0, 36) as f64;
+        let volume = 8.0 * 10f64.powf(peak_dbfs / 20.0);
         let first = speech / 2;
         let filter = format!(
             "sine=frequency={frequency}:duration={a}:sample_rate={rate},volume={volume:.5},apad=pad_dur={p}[a];\
@@ -121,63 +133,216 @@ pub fn generate_corpus(
     )
 }
 
-fn owned(workdir: &Path) -> Result<bool, AudioBenchError> {
-    match fs::read(workdir.join(WORK_MARKER)) {
-        Ok(bytes) => {
-            let marker: Marker = serde_json::from_slice(&bytes)
-                .map_err(|e| fail(format!("маркер повреждён: {e}")))?;
-            Ok(marker.tool == MARKER_TOOL && marker.kind == "audio-work")
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(fail(e.to_string())),
+fn io_fail(context: &str, error: impl std::fmt::Display) -> AudioBenchError {
+    fail(format!("{context}: {error}"))
+}
+
+fn dir_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
+/// Подкаталог без перехода по ссылкам: `None`, если его нет; ссылка или
+/// не-каталог — отказ.
+fn child_dir(parent: &File, name: &str) -> Result<Option<File>, AudioBenchError> {
+    match openat(parent, name, dir_flags(), Mode::empty()) {
+        Ok(fd) => Ok(Some(File::from(fd))),
+        Err(Errno::NOENT) => Ok(None),
+        Err(Errno::LOOP | Errno::NOTDIR) => Err(fail(format!(
+            "{name} в рабочем каталоге — не каталог или символическая ссылка; удалять через неё нельзя"
+        ))),
+        Err(error) => Err(io_fail(name, error)),
     }
 }
 
+/// Рекурсивное удаление относительно дескриптора родителя. Ссылки не
+/// разыменовываются (удаляется сама ссылка), каждый каталог открывается с
+/// `NOFOLLOW`: содержимое вне рабочего каталога недостижимо.
+fn remove_tree_at(parent: &File, name: &OsStr) -> Result<(), AudioBenchError> {
+    match openat(parent, name, dir_flags(), Mode::empty()) {
+        Ok(fd) => {
+            let directory = File::from(fd);
+            let mut names = Vec::new();
+            for entry in Dir::read_from(&directory).map_err(|e| io_fail("обход", e))? {
+                let entry = entry.map_err(|e| io_fail("обход", e))?;
+                let child = entry.file_name().to_bytes();
+                if child != b"." && child != b".." {
+                    names.push(OsStr::from_bytes(child).to_owned());
+                }
+            }
+            for child in names {
+                remove_tree_at(&directory, &child)?;
+            }
+            unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|e| io_fail("удаление", e))
+        }
+        Err(Errno::NOTDIR | Errno::LOOP) => {
+            unlinkat(parent, name, AtFlags::empty()).map_err(|e| io_fail("удаление", e))
+        }
+        Err(Errno::NOENT) => Ok(()),
+        Err(error) => Err(io_fail("удаление", error)),
+    }
+}
+
+fn owned(workdir: &File) -> Result<bool, AudioBenchError> {
+    let file = match openat(
+        workdir,
+        WORK_MARKER,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => File::from(fd),
+        Err(Errno::NOENT) => return Ok(false),
+        Err(error) => return Err(io_fail("маркер", error)),
+    };
+    if !file.metadata().map_err(|e| io_fail("маркер", e))?.is_file() {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    file.take(64 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_fail("маркер", e))?;
+    let marker: Marker =
+        serde_json::from_slice(&bytes).map_err(|e| fail(format!("маркер повреждён: {e}")))?;
+    Ok(marker.tool == MARKER_TOOL && marker.kind == "audio-work")
+}
+
+/// Исключительные блокировки, которые держит работающий нормализатор:
+/// кэш результатов (на всё время работы исполнителя), состояние и lease
+/// исполнителя каждого пакета. Захват без ожидания: занятая блокировка —
+/// отказ, а не ожидание, поэтому взаимной блокировки нет. Возвращённые
+/// дескрипторы удерживают блокировки до конца сброса.
+fn lock_idle_runtime(workdir: &File) -> Result<Vec<File>, AudioBenchError> {
+    let busy =
+        || fail("рабочий каталог используется активным пакетом нормализатора; сброс отклонён");
+    let mut held = Vec::new();
+    let Some(runtime) = child_dir(workdir, ".runtime")? else {
+        return Ok(held);
+    };
+    let Some(batches) = child_dir(&runtime, "batches")? else {
+        return Ok(held);
+    };
+    let mut names = Vec::new();
+    for entry in Dir::read_from(&batches).map_err(|e| io_fail("обход", e))? {
+        let entry = entry.map_err(|e| io_fail("обход", e))?;
+        let name = entry.file_name().to_bytes();
+        if name != b"." && name != b".." {
+            names.push(String::from_utf8_lossy(name).into_owned());
+        }
+    }
+    names.sort();
+    // Кэш первым: исполнитель держит его дольше всего.
+    names.sort_by_key(|name| name != nbatch::CACHE_ID);
+    for name in names {
+        let Some(directory) = child_dir(&batches, &name)? else {
+            continue;
+        };
+        flock(&directory, FlockOperation::NonBlockingLockExclusive).map_err(|_| busy())?;
+        if let Some(execution) = child_dir(&directory, "execution")? {
+            flock(&execution, FlockOperation::NonBlockingLockExclusive).map_err(|_| busy())?;
+            held.push(execution);
+        }
+        held.push(directory);
+    }
+    held.push(batches);
+    held.push(runtime);
+    Ok(held)
+}
+
 /// Приводит рабочий каталог к нужному состоянию. Чужой непустой каталог не трогается.
-/// `keep_cache` сохраняет кэш результатов (тёплый повторный запуск), `remove` удаляет всё.
+/// `keep_cache` сохраняет кэш результатов (тёплый повторный запуск), `remove` удаляет всё;
+/// флаги несовместимы. Удаление идёт по дескрипторам без перехода по ссылкам и
+/// отклоняется, пока каталог использует работающий пакет.
 pub fn reset_workspace(
     workdir: &Path,
     keep_cache: bool,
     remove: bool,
 ) -> Result<serde_json::Value, AudioBenchError> {
-    match fs::symlink_metadata(workdir) {
-        Ok(meta) if !meta.is_dir() => return Err(fail("рабочий путь не является каталогом")),
-        Ok(_) => {
-            let empty = fs::read_dir(workdir)
-                .map_err(|e| fail(e.to_string()))?
-                .next()
-                .is_none();
-            if !empty && !owned(workdir)? {
-                return Err(fail(
-                    "рабочий каталог не пуст и не помечен asset-store-bench; удалять чужие данные нельзя",
-                ));
-            }
+    if keep_cache && remove {
+        return Err(fail(
+            "--keep-cache и --remove несовместимы: удаление каталога уничтожило бы сохраняемый кэш",
+        ));
+    }
+    let absolute = std::path::absolute(workdir).map_err(|e| io_fail("рабочий путь", e))?;
+    let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) else {
+        return Err(fail("рабочий путь должен иметь родительский каталог"));
+    };
+    if !remove {
+        fs::create_dir_all(parent).map_err(|e| io_fail("родитель рабочего каталога", e))?;
+    }
+    let parent_fd = match rustix::fs::open(parent, dir_flags(), Mode::empty()) {
+        Ok(fd) => File::from(fd),
+        Err(Errno::NOENT) if remove => return Ok(serde_json::json!({"removed": true})),
+        Err(error) => return Err(io_fail("родитель рабочего каталога", error)),
+    };
+    let existing = match openat(&parent_fd, name, dir_flags(), Mode::empty()) {
+        Ok(fd) => Some(File::from(fd)),
+        Err(Errno::NOENT) => None,
+        Err(Errno::LOOP | Errno::NOTDIR) => {
+            return Err(fail("рабочий путь не является каталогом"));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(fail(e.to_string())),
+        Err(error) => return Err(io_fail("рабочий каталог", error)),
+    };
+    let mut _locks = Vec::new();
+    if let Some(directory) = &existing {
+        let empty = Dir::read_from(directory)
+            .map_err(|e| io_fail("рабочий каталог", e))?
+            .filter_map(Result::ok)
+            .all(|entry| matches!(entry.file_name().to_bytes(), b"." | b".."));
+        if !empty && !owned(directory)? {
+            return Err(fail(
+                "рабочий каталог не пуст и не помечен asset-store-bench; удалять чужие данные нельзя",
+            ));
+        }
+        _locks = lock_idle_runtime(directory)?;
     }
     if remove {
-        if workdir.exists() {
-            fs::remove_dir_all(workdir).map_err(|e| fail(e.to_string()))?;
+        if existing.is_some() {
+            remove_tree_at(&parent_fd, name)?;
         }
         return Ok(serde_json::json!({"removed": true}));
     }
-    if workdir.exists() {
-        let batches = workdir.join(".runtime/batches");
+    if let Some(directory) = &existing {
         if keep_cache {
-            if batches.exists() {
-                for entry in fs::read_dir(&batches).map_err(|e| fail(e.to_string()))? {
-                    let entry = entry.map_err(|e| fail(e.to_string()))?;
-                    if entry.file_name() != nbatch::CACHE_ID {
-                        fs::remove_dir_all(entry.path()).map_err(|e| fail(e.to_string()))?;
+            if let Some(runtime) = child_dir(directory, ".runtime")?
+                && let Some(batches) = child_dir(&runtime, "batches")?
+            {
+                let mut names = Vec::new();
+                for entry in Dir::read_from(&batches).map_err(|e| io_fail("обход", e))? {
+                    let entry = entry.map_err(|e| io_fail("обход", e))?;
+                    let child = entry.file_name().to_bytes();
+                    if child != b"." && child != b".." && child != nbatch::CACHE_ID.as_bytes() {
+                        names.push(OsStr::from_bytes(child).to_owned());
                     }
+                }
+                for child in names {
+                    remove_tree_at(&batches, &child)?;
                 }
             }
         } else {
-            fs::remove_dir_all(workdir).map_err(|e| fail(e.to_string()))?;
+            let mut names = Vec::new();
+            for entry in Dir::read_from(directory).map_err(|e| io_fail("обход", e))? {
+                let entry = entry.map_err(|e| io_fail("обход", e))?;
+                let child = entry.file_name().to_bytes();
+                if child != b"." && child != b".." {
+                    names.push(OsStr::from_bytes(child).to_owned());
+                }
+            }
+            for child in names {
+                remove_tree_at(directory, &child)?;
+            }
         }
     }
-    fs::create_dir_all(workdir).map_err(|e| fail(e.to_string()))?;
+    drop(_locks);
+    let directory = match existing {
+        Some(directory) => directory,
+        None => {
+            rustix::fs::mkdirat(&parent_fd, name, Mode::from_raw_mode(0o755))
+                .map_err(|e| io_fail("рабочий каталог", e))?;
+            File::from(
+                openat(&parent_fd, name, dir_flags(), Mode::empty())
+                    .map_err(|e| io_fail("рабочий каталог", e))?,
+            )
+        }
+    };
     let marker = Marker {
         tool: MARKER_TOOL.into(),
         kind: "audio-work".into(),
@@ -185,11 +350,17 @@ pub fn reset_workspace(
         seed: None,
         count: None,
     };
-    fs::write(
-        workdir.join(WORK_MARKER),
-        serde_json::to_vec_pretty(&marker).expect("маркер"),
-    )
-    .map_err(|e| fail(e.to_string()))?;
+    let mut file = File::from(
+        openat(
+            &directory,
+            WORK_MARKER,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o644),
+        )
+        .map_err(|e| io_fail("маркер", e))?,
+    );
+    file.write_all(&serde_json::to_vec_pretty(&marker).expect("маркер"))
+        .map_err(|e| io_fail("маркер", e))?;
     Ok(serde_json::json!({"reset": true, "kept_cache": keep_cache}))
 }
 
@@ -208,8 +379,11 @@ pub fn verify(workdir: &Path, batch_id: &str) -> Result<serde_json::Value, Audio
         )));
     }
     let check = nbatch::verify_sources(&batch, &inventory).map_err(|e| fail(e.to_string()))?;
-    if !check.changed.is_empty() || !check.unreadable.is_empty() {
-        return Err(fail("вход изменился во время прогона"));
+    if !check.verified {
+        return Err(fail(format!(
+            "неизменность входа не доказана: {}",
+            serde_json::json!(check)
+        )));
     }
     Ok(serde_json::json!({
         "completed": batch.progress.completed,

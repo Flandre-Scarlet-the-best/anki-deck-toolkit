@@ -200,30 +200,30 @@ fn load_profile(
     Ok(profile)
 }
 
-/// Границы проверяются до создания каталога: отказ не оставляет следов во входе.
-fn workspace_path(
-    path: &Path,
-    input: &Path,
+/// Рабочий каталог существующего пакета: фактический путь вне защищённых
+/// корней, а вход пакета не пересекается ни с ним, ни с `decks/**`.
+fn open_batch(
+    workspace: &Path,
+    batch_id: &str,
     protected: &BTreeSet<PathBuf>,
-) -> Result<PathBuf, AssetError> {
-    let absolute = std::path::absolute(path).map_err(|e| AssetError::io("рабочий каталог", e))?;
-    nbatch::check_boundaries(input, &absolute, protected)?;
-    std::fs::create_dir_all(path).map_err(|e| AssetError::io("рабочий каталог", e))?;
-    let canonical = nbatch::canonical_directory(path)?;
-    for root in protected {
-        let resolved = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        if canonical.starts_with(&resolved) || resolved.starts_with(&canonical) {
-            return Err(AssetError::new(
-                ErrorCode::BoundaryViolation,
-                "рабочий каталог не может пересекаться с decks/**",
-            ));
-        }
-    }
-    Ok(canonical)
+) -> Result<(PathBuf, nbatch::NormalizerBatch, nbatch::Inventory), AssetError> {
+    let workspace = nbatch::existing_workspace(workspace, protected)?;
+    let (batch, inventory) = nbatch::load(&workspace, batch_id)?;
+    nbatch::check_boundaries(Path::new(&batch.input_root), &workspace, protected)?;
+    Ok((workspace, batch, inventory))
 }
 
-fn existing_workspace(path: &Path) -> Result<PathBuf, AssetError> {
-    nbatch::canonical_directory(path)
+/// Запрещённые для вывода деревья пакета: вход, служебная область рабочего
+/// каталога и защищённые корни — все в фактической форме.
+fn forbidden_outputs(
+    workspace: &Path,
+    batch: &nbatch::NormalizerBatch,
+    protected: &BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots = nbatch::protected_roots(protected);
+    roots.push(PathBuf::from(&batch.input_root));
+    roots.push(workspace.join(".runtime"));
+    roots
 }
 
 fn create_new_file(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
@@ -287,6 +287,7 @@ fn run_json(summary: nbatch::RunSummary) -> serde_json::Value {
             "processed_now": summary.processed_now,
             "reused": summary.reused,
             "remaining": summary.remaining,
+            "infrastructure_failed_now": summary.infrastructure_failed_now,
         },
         "batch": summary.batch,
         "paused": if interrupted { serde_json::json!({"code":"interrupted"}) } else { serde_json::Value::Null },
@@ -325,25 +326,13 @@ pub(crate) fn execute(
             let output = out;
             let profile = load_profile(profile.as_deref(), protected)?;
             let source = std::fs::canonicalize(file).map_err(|e| AssetError::io("исходник", e))?;
-            let target_parent = std::path::absolute(output)
-                .map_err(|e| AssetError::io("путь вывода", e))?
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| AssetError::new(ErrorCode::PathTraversal, "нет каталога вывода"))?;
-            let target_parent = std::fs::canonicalize(&target_parent)
-                .map_err(|e| AssetError::io("каталог вывода", e))?;
-            let source_dir = source.parent().unwrap_or(Path::new("/"));
-            if target_parent.starts_with(source_dir)
-                || protected.iter().any(|p| {
-                    target_parent
-                        .starts_with(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
-                })
-            {
-                return Err(AssetError::new(
-                    ErrorCode::BoundaryViolation,
-                    "вариант пишется только в отдельный каталог вне каталога исходника и decks/**",
-                ));
-            }
+            let mut forbidden = nbatch::protected_roots(protected);
+            forbidden.push(source.parent().unwrap_or(Path::new("/")).to_path_buf());
+            let output = nbatch::ensure_outside(
+                output,
+                &forbidden,
+                "вариант пишется только в отдельный каталог вне каталога исходника и decks/**",
+            )?;
             let bytes =
                 crate::pronunciation_cli::read_local(file, protected, audio::MAX_AUDIO_BYTES)?;
             let processed =
@@ -353,7 +342,7 @@ pub(crate) fn execute(
                 processed.result.gate.proposed_variant,
             ) {
                 (Some(bytes), Some(normalizer::Variant::Processed)) => {
-                    create_new_file(output, bytes)?;
+                    create_new_file(&output, bytes)?;
                     true
                 }
                 _ => false,
@@ -375,8 +364,10 @@ pub(crate) fn execute(
         } => {
             let profile = load_profile(profile.as_deref(), protected)?;
             let input = nbatch::canonical_directory(input_dir)?;
-            let workspace = workspace_path(workspace, &input, protected)?;
-            nbatch::check_boundaries(&input, &workspace, protected)?;
+            // Границы проверяются по фактическим путям до первой записи:
+            // отказ не оставляет следов ни во входе, ни в decks/**.
+            nbatch::check_boundaries(&input, workspace, protected)?;
+            let workspace = nbatch::create_workspace(workspace, &input, protected)?;
             nbatch::start(nbatch::StartRequest {
                 batch_id,
                 workspace: &workspace,
@@ -402,27 +393,30 @@ pub(crate) fn execute(
             workspace,
             jobs,
             max_items,
-        } => Ok(run_json(nbatch::resume(
-            &existing_workspace(workspace)?,
-            batch_id,
-            *jobs,
-            *max_items,
-            stop_flag(),
-        )?)),
+        } => {
+            let (workspace, _, _) = open_batch(workspace, batch_id, protected)?;
+            Ok(run_json(nbatch::resume(
+                &workspace,
+                batch_id,
+                *jobs,
+                *max_items,
+                stop_flag(),
+            )?))
+        }
         NormalizerAction::BatchStatus {
             batch_id,
             workspace,
-        } => Ok(ok(serde_json::json!(nbatch::status(
-            &existing_workspace(workspace)?,
-            batch_id
-        )?))),
+        } => {
+            let (_, batch, _) = open_batch(workspace, batch_id, protected)?;
+            Ok(ok(serde_json::json!(batch)))
+        }
         NormalizerAction::BatchCancel {
             batch_id,
             workspace,
-        } => Ok(ok(serde_json::json!(nbatch::cancel(
-            &existing_workspace(workspace)?,
-            batch_id
-        )?))),
+        } => {
+            let (workspace, _, _) = open_batch(workspace, batch_id, protected)?;
+            Ok(ok(serde_json::json!(nbatch::cancel(&workspace, batch_id)?)))
+        }
         NormalizerAction::BatchReport {
             batch_id,
             workspace,
@@ -432,17 +426,12 @@ pub(crate) fn execute(
             sample,
             media_limit,
         } => {
-            let workspace = existing_workspace(workspace)?;
-            let out_absolute =
-                std::path::absolute(out).map_err(|e| AssetError::io("каталог отчёта", e))?;
-            if out_absolute.starts_with(workspace.join(".runtime"))
-                || protected.iter().any(|p| out_absolute.starts_with(p))
-            {
-                return Err(AssetError::new(
-                    ErrorCode::BoundaryViolation,
-                    "каталог отчёта не может находиться в .runtime или decks/**",
-                ));
-            }
+            let (workspace, batch, inventory) = open_batch(workspace, batch_id, protected)?;
+            let out = nbatch::ensure_outside(
+                out,
+                &forbidden_outputs(&workspace, &batch, protected),
+                "каталог отчёта не может находиться во входе, в .runtime или в decks/**",
+            )?;
             let sample: Option<SampleSet> = sample
                 .as_deref()
                 .map(|path| read_json(path, protected))
@@ -458,7 +447,6 @@ pub(crate) fn execute(
                 (IncludeArg::All, _) => Include::All,
                 (IncludeArg::Problems, _) => Include::Problems,
             };
-            let (batch, inventory) = nbatch::load(&workspace, batch_id)?;
             let cache = ResultCache::open(&workspace)?;
             let results = nbatch::collect_results(&cache, &batch, &inventory)?;
             let outcome = report::write_report(
@@ -467,7 +455,7 @@ pub(crate) fn execute(
                 &cache,
                 &results,
                 report::ReportRequest {
-                    out_dir: out,
+                    out_dir: &out,
                     html: *html,
                     include,
                     media_limit: *media_limit,
@@ -485,13 +473,31 @@ pub(crate) fn execute(
             per_stratum,
             out,
         } => {
-            let workspace = existing_workspace(workspace)?;
-            let (batch, inventory) = nbatch::load(&workspace, batch_id)?;
+            let (workspace, batch, inventory) = open_batch(workspace, batch_id, protected)?;
+            let out = nbatch::ensure_outside(
+                out,
+                &forbidden_outputs(&workspace, &batch, protected),
+                "файл выборки не может находиться во входе, в .runtime или в decks/**",
+            )?;
             let cache = ResultCache::open(&workspace)?;
             let results = nbatch::collect_results(&cache, &batch, &inventory)?;
+            // Выборка по неполному пакету не репрезентативна для инвентаризации.
+            let expected = inventory.unique_inputs().len();
+            if results.len() < expected {
+                return Err(AssetError::with_details(
+                    ErrorCode::InvalidTransition,
+                    "пакет обработан не полностью: выборка по части результатов не репрезентативна; завершите batch-resume",
+                    serde_json::json!({
+                        "blocker": "batch_incomplete",
+                        "unique_inputs": expected,
+                        "results": results.len(),
+                        "missing_results": expected - results.len(),
+                    }),
+                ));
+            }
             let sample = report::sample(&batch, &inventory, &results, *seed, *per_stratum);
             create_new_file(
-                out,
+                &out,
                 &serde_json::to_vec_pretty(&sample).expect("выборка сериализуема"),
             )?;
             Ok(ok(serde_json::json!({
@@ -505,13 +511,12 @@ pub(crate) fn execute(
             decisions,
             sample,
         } => {
-            let workspace = existing_workspace(workspace)?;
+            let (workspace, batch, inventory) = open_batch(workspace, batch_id, protected)?;
             let decisions: Decisions = read_json(decisions, protected)?;
             let sample: Option<SampleSet> = sample
                 .as_deref()
                 .map(|path| read_json(path, protected))
                 .transpose()?;
-            let (batch, inventory) = nbatch::load(&workspace, batch_id)?;
             let cache = ResultCache::open(&workspace)?;
             let results = nbatch::collect_results(&cache, &batch, &inventory)?;
             Ok(ok(serde_json::json!(report::review_summary(
@@ -525,12 +530,12 @@ pub(crate) fn execute(
             batch_id,
             workspace,
         } => {
-            let (batch, inventory) = nbatch::load(&existing_workspace(workspace)?, batch_id)?;
+            let (_, batch, inventory) = open_batch(workspace, batch_id, protected)?;
             let check = nbatch::verify_sources(&batch, &inventory)?;
-            if !check.changed.is_empty() || !check.unreadable.is_empty() {
+            if !check.verified {
                 return Err(AssetError::with_details(
                     ErrorCode::IntegrityMismatch,
-                    "вход изменился после инвентаризации",
+                    "неизменность входа не доказана: вход изменился или часть записей непроверяема",
                     serde_json::json!(check),
                 ));
             }
@@ -546,9 +551,8 @@ pub(crate) fn execute(
             allow_replace_verified,
             override_gate,
         } => {
-            let workspace = existing_workspace(workspace)?;
+            let (workspace, batch, inventory) = open_batch(workspace, batch_id, protected)?;
             let request = Pronunciation::new(surface, reading)?;
-            let (batch, inventory) = nbatch::load(&workspace, batch_id)?;
             let cache = ResultCache::open(&workspace)?;
             let result = cache
                 .get(input_sha256, &batch.config_sha256)?
@@ -579,7 +583,7 @@ pub(crate) fn execute(
             let store = AssetStore::open_existing_with_policy(options, PronunciationDomainPolicy)?;
             // Исходные байты остаются в рабочем каталоге до записи в хранилище.
             let retained = cache.retain_original(&source_bytes)?;
-            let record = derivation::publish(derivation::PublishRequest {
+            let published = derivation::publish_with_outcome(derivation::PublishRequest {
                 store: &store,
                 request: &request,
                 result: &result,
@@ -590,6 +594,9 @@ pub(crate) fn execute(
                 allow_replace_verified: *allow_replace_verified,
                 override_gate: *override_gate,
             })?;
+            let record = published.record;
+            // Источник истины — запись хранилища и его журнал; файл
+            // publications/ — вспомогательная выписка для рабочего каталога.
             let publication = serde_json::json!({
                 "schema_version": 1,
                 "batch_id": batch.batch_id,
@@ -598,16 +605,28 @@ pub(crate) fn execute(
                 "source_sha256": input_sha256,
                 "retained_source": retained,
                 "published_sha256": record.sha256,
-                "lifecycle": record.lifecycle,
             });
-            cache.write_record(
+            if let Err(error) = cache.write_record(
                 "publications",
                 &format!("{input_sha256}.{}.json", record.sha256),
                 &serde_json::to_vec_pretty(&publication).expect("запись публикации"),
-            )?;
-            Ok(ok(
-                serde_json::json!({"asset": record, "publication": publication}),
-            ))
+            ) {
+                return Err(AssetError::with_details(
+                    error.code,
+                    "вариант опубликован в хранилище, но выписка publications/ не сохранена: повторите publish с теми же аргументами — повтор не заменит запись второй раз",
+                    serde_json::json!({
+                        "blocker": "publication_record_failed",
+                        "store_committed": true,
+                        "published_sha256": record.sha256,
+                        "cause": error.message,
+                    }),
+                ));
+            }
+            Ok(ok(serde_json::json!({
+                "asset": record,
+                "already_published": published.already_published,
+                "publication": publication,
+            })))
         }
     }
 }

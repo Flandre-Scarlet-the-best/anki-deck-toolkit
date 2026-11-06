@@ -389,6 +389,8 @@ pub fn jsonl(inventory: &Inventory, results: &[NormalizationResult]) -> String {
 pub struct Stratum {
     pub id: String,
     pub description: String,
+    /// Элементы страты, реально пригодные для отбора (для страт крайних
+    /// значений — только с конечной метрикой сортировки).
     pub available: usize,
     pub selected: Vec<String>,
 }
@@ -589,10 +591,11 @@ pub fn sample(
     for (id, description, filter, order) in strata() {
         let mut candidates: Vec<&NormalizationResult> =
             results.iter().filter(|r| filter(r)).collect();
-        let available = candidates.len();
         match order {
             Order::Random => candidates.sort_by_cached_key(|r| key(&r.input.sha256)),
             Order::Ascending(metric) | Order::Descending(metric) => {
+                // Без конечной метрики сортировки элемент нельзя отобрать в
+                // страту крайних значений: он не считается доступным.
                 candidates.retain(|r| metric(r).is_some_and(f64::is_finite));
                 candidates.sort_by(|a, b| {
                     let (x, y) = (metric(a).unwrap_or(0.0), metric(b).unwrap_or(0.0));
@@ -606,6 +609,7 @@ pub fn sample(
                 });
             }
         }
+        let available = candidates.len();
         let selected: Vec<String> = candidates
             .iter()
             .take(per_stratum)
@@ -849,6 +853,11 @@ fn embed_json(value: &serde_json::Value) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
+/// Атомарная публикация отчёта: всё пишется во временный каталог рядом с
+/// целевым (`.<имя>.partial-<pid>-<время>`), который затем переименовывается
+/// в целевое имя без замены существующего (`RENAME_NOREPLACE`). После ошибки
+/// временный каталог этого запуска удаляется; после аварийной остановки
+/// остаётся только он, под другим именем, и повтор с тем же `--out` возможен.
 pub fn write_report(
     batch: &NormalizerBatch,
     inventory: &Inventory,
@@ -856,22 +865,97 @@ pub fn write_report(
     results: &[NormalizationResult],
     request: ReportRequest<'_>,
 ) -> Result<ReportOutcome, AssetError> {
-    let out = request.out_dir;
+    use rustix::fs::{Mode, OFlags, RenameFlags, mkdirat, open, renameat_with};
+    let out = normalizer_batch::resolve_path(request.out_dir)?;
     let input_root = Path::new(&batch.input_root);
-    let overlaps = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
-    let absolute = std::path::absolute(out).map_err(|e| AssetError::io("каталог отчёта", e))?;
-    if overlaps(&absolute, input_root) {
+    if out.starts_with(input_root) || input_root.starts_with(&out) {
         return Err(AssetError::new(
             ErrorCode::BoundaryViolation,
             "каталог отчёта не может пересекаться с каталогом входа",
         ));
     }
-    std::fs::create_dir(&absolute).map_err(|e| {
-        AssetError::io(
+    let (Some(parent), Some(name)) = (out.parent(), out.file_name()) else {
+        return Err(invalid("у каталога отчёта нет родительского каталога"));
+    };
+    if std::fs::symlink_metadata(&out).is_ok() {
+        return Err(AssetError::new(
+            ErrorCode::IdentityConflict,
             "каталог отчёта должен быть новым (не существовать заранее)",
-            e,
-        )
-    })?;
+        ));
+    }
+    let parent_fd = open(
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| AssetError::io("родительский каталог отчёта", e.into()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut temporary = std::ffi::OsString::from(".");
+    temporary.push(name);
+    temporary.push(format!(".partial-{}-{nanos}", std::process::id()));
+    mkdirat(
+        &parent_fd,
+        temporary.as_os_str(),
+        Mode::from_raw_mode(0o700),
+    )
+    .map_err(|e| AssetError::io("временный каталог отчёта", e.into()))?;
+    let staging = parent.join(&temporary);
+    let written =
+        write_contents(batch, inventory, cache, results, &request, &staging).and_then(|outcome| {
+            File::open(&staging)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|e| AssetError::io("синхронизация отчёта", e))?;
+            renameat_with(
+                &parent_fd,
+                temporary.as_os_str(),
+                &parent_fd,
+                name,
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(|e| {
+                if e == rustix::io::Errno::EXIST {
+                    AssetError::new(
+                        ErrorCode::IdentityConflict,
+                        "каталог отчёта появился во время записи; отчёт не опубликован",
+                    )
+                } else {
+                    AssetError::io("публикация каталога отчёта", e.into())
+                }
+            })?;
+            Ok(outcome)
+        });
+    match written {
+        Ok(outcome) => {
+            let _ = File::from(parent_fd).sync_all();
+            Ok(outcome)
+        }
+        Err(error) => {
+            // Удаляется только временный каталог этого запуска; ссылки внутри
+            // не разыменовываются (`remove_dir_all` не следует ссылкам).
+            if let Err(cleanup) = std::fs::remove_dir_all(&staging) {
+                tracing::warn!(
+                    operation = "normalizer_report",
+                    code = "report_staging_cleanup_failed",
+                    error = %cleanup,
+                    "Не удалось удалить временный каталог отчёта"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+fn write_contents(
+    batch: &NormalizerBatch,
+    inventory: &Inventory,
+    cache: &ResultCache,
+    results: &[NormalizationResult],
+    request: &ReportRequest<'_>,
+    absolute: &Path,
+) -> Result<ReportOutcome, AssetError> {
     let summary = summarize(batch, inventory, results);
     let mut files = vec![
         "summary.json".to_owned(),
@@ -879,16 +963,16 @@ pub fn write_report(
         "items.tsv".into(),
     ];
     create_new(
-        &absolute,
+        absolute,
         "summary.json",
         &serde_json::to_vec_pretty(&summary).expect("сводка"),
     )?;
     create_new(
-        &absolute,
+        absolute,
         "items.jsonl",
         jsonl(inventory, results).as_bytes(),
     )?;
-    create_new(&absolute, "items.tsv", tsv(inventory, results).as_bytes())?;
+    create_new(absolute, "items.tsv", tsv(inventory, results).as_bytes())?;
     let mut outcome = ReportOutcome {
         files: Vec::new(),
         html_items: 0,
@@ -896,7 +980,7 @@ pub fn write_report(
         media_skipped: 0,
     };
     if request.html {
-        let selected: Vec<&NormalizationResult> = match request.include {
+        let selected: Vec<&NormalizationResult> = match &request.include {
             Include::All => results.iter().collect(),
             Include::Problems => results
                 .iter()
@@ -931,7 +1015,7 @@ pub fn write_report(
         std::fs::create_dir(&media).map_err(|e| AssetError::io("каталог media отчёта", e))?;
         let root = normalizer_batch::open_input_root(batch)?;
         let paths = paths_by_sha(inventory);
-        let strata: BTreeMap<&str, &Vec<String>> = match request.include {
+        let strata: BTreeMap<&str, &Vec<String>> = match &request.include {
             Include::Sample(sample) => sample
                 .items
                 .iter()
@@ -991,13 +1075,11 @@ pub fn write_report(
             "profile": {"id": batch.profile.id, "version": batch.profile.version},
             "mode": batch.mode,
             "outcomes": summary.outcomes,
+            "missing_results": summary.missing_results,
+            "unique_inputs": summary.inventory.unique_sha256,
             "rows": rows,
         });
-        create_new(
-            &absolute,
-            "report.html",
-            html(&embed_json(&data)).as_bytes(),
-        )?;
+        create_new(absolute, "report.html", html(&embed_json(&data)).as_bytes())?;
         files.push("report.html".into());
         files.push("media/".into());
     }
@@ -1042,6 +1124,7 @@ button { font:inherit; padding:4px 10px; border-radius:6px; border:1px solid var
 .sev-review, .sev-reject { color:var(--reject); } .sev-warning { color:var(--review); }
 .verdict { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }
 .verdict textarea { flex:1 1 220px; min-height:28px; }
+.warn { color:var(--reject); font-weight:600; }
 </style>
 </head>
 <body>
@@ -1050,6 +1133,8 @@ button { font:inherit; padding:4px 10px; border-radius:6px; border:1px solid var
   <span class="muted" id="meta"></span>
 </header>
 <p class="muted">ACCEPT означает лишь техническую пригодность варианта. Чтение и фонетику проверяет человек. Отчёт не обращается к сети.</p>
+<p class="warn" id="incomplete" hidden></p>
+<p class="muted">Оценки хранятся в этом браузере отдельно по каждой записи и сразу видны в других вкладках того же отчёта. Одну и ту же запись в двух вкладках не правьте одновременно: сохранится последнее изменение. Итог выгружайте кнопкой «Сохранить решения».</p>
 <div class="filters">
   <label><input type="checkbox" value="ACCEPT" checked> ACCEPT</label>
   <label><input type="checkbox" value="KEEP_ORIGINAL" checked> KEEP_ORIGINAL</label>
@@ -1066,10 +1151,43 @@ button { font:inherit; padding:4px 10px; border-radius:6px; border:1px solid var
 <script>
 "use strict";
 const data = JSON.parse(document.getElementById("data").textContent);
+// Каждое решение — отдельный ключ: правки разных записей в разных вкладках
+// не перезаписывают друг друга (прежде весь набор сохранялся одним снимком).
 const storeKey = "normalizer-decisions:" + data.batch_id + ":" + data.config_sha256;
+const itemPrefix = storeKey + ":item:";
 let decisions = {};
-try { decisions = JSON.parse(localStorage.getItem(storeKey) || "{}") || {}; } catch (e) { decisions = {}; }
-function persist() { try { localStorage.setItem(storeKey, JSON.stringify(decisions)); } catch (e) {} }
+function readItem(raw) { try { const d = JSON.parse(raw); return d && d.verdict ? { verdict: String(d.verdict), note: String(d.note || "") } : null; } catch (e) { return null; } }
+function loadDecisions() {
+  const next = {};
+  try {
+    const legacy = JSON.parse(localStorage.getItem(storeKey) || "{}") || {};
+    for (const [sha, d] of Object.entries(legacy)) { const item = readItem(JSON.stringify(d)); if (item) next[sha] = item; }
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(itemPrefix)) { const item = readItem(localStorage.getItem(key)); if (item) next[key.slice(itemPrefix.length)] = item; else delete next[key.slice(itemPrefix.length)]; }
+    }
+  } catch (e) {}
+  decisions = next;
+}
+function persistItem(sha) {
+  try {
+    if (decisions[sha]) localStorage.setItem(itemPrefix + sha, JSON.stringify(decisions[sha]));
+    else localStorage.setItem(itemPrefix + sha, "null");
+  } catch (e) {}
+}
+loadDecisions();
+window.addEventListener("storage", event => {
+  if (!event.key || !(event.key === storeKey || event.key.startsWith(itemPrefix))) return;
+  loadDecisions();
+  // Не перерисовываем список под курсором: несохранённая заметка не теряется.
+  const active = document.activeElement;
+  if (!(active && document.getElementById("list").contains(active))) render();
+});
+if (data.missing_results > 0) {
+  const note = document.getElementById("incomplete");
+  note.hidden = false;
+  note.textContent = "Пакет обработан не полностью: нет результатов для " + data.missing_results + " из " + data.unique_inputs + " входов. Отчёт не описывает весь корпус.";
+}
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
 document.getElementById("meta").textContent = data.batch_id + " · " + data.profile.id + " v" + data.profile.version + " · " + data.mode + " · " + data.rows.length + " записей";
 const reasonSelect = document.getElementById("reason");
@@ -1121,7 +1239,7 @@ function render() {
     const note = el("textarea"); note.placeholder = "заметка";
     const current = decisions[row.sha] || {};
     select.value = current.verdict || ""; note.value = current.note || "";
-    const save = () => { if (select.value) decisions[row.sha] = { verdict: select.value, note: note.value }; else delete decisions[row.sha]; persist(); };
+    const save = () => { if (select.value) decisions[row.sha] = { verdict: select.value, note: note.value }; else delete decisions[row.sha]; persistItem(row.sha); };
     select.addEventListener("change", save); note.addEventListener("change", save);
     verdict.appendChild(select); verdict.appendChild(note);
     card.appendChild(verdict);
@@ -1131,6 +1249,7 @@ function render() {
 }
 document.querySelectorAll(".filters input, .filters select").forEach(n => n.addEventListener("input", render));
 document.getElementById("export").addEventListener("click", () => {
+  loadDecisions();
   const payload = { schema_version: 1, kind: "normalizer_review_decisions", batch_id: data.batch_id, config_sha256: data.config_sha256,
     decisions: Object.entries(decisions).map(([sha, d]) => ({ input_sha256: sha, verdict: d.verdict, note: d.note || "" })) };
   const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));

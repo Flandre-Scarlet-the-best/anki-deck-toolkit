@@ -218,6 +218,13 @@ fn lifecycle_from_str(value: Option<&str>) -> Option<LifecycleState> {
     }
 }
 
+/// Можно ли импортом заменить текущую запись слота в состоянии `Verified`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifiedReplacement {
+    Allowed,
+    Forbidden,
+}
+
 /// Запрос на явный вызов `ingest` для одного указанного локального файла.
 #[derive(Debug, Clone)]
 pub struct IngestRequest {
@@ -1366,7 +1373,28 @@ impl AssetStore {
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         let source = open_source_file(&request.source_path)?;
-        self.ingest_source(request, source, Some(provenance), false)
+        self.ingest_source(
+            request,
+            source,
+            Some(provenance),
+            false,
+            VerifiedReplacement::Allowed,
+        )
+    }
+
+    /// Как [`Self::ingest_with_provenance`], но замена текущей записи в
+    /// состоянии `Verified` проверяется **под той же исключительной
+    /// блокировкой**, что и CAS по SHA: подтверждение человека, зафиксированное
+    /// между чтением состояния вызывающим кодом и импортом, не теряется.
+    pub(crate) fn ingest_with_provenance_guarded(
+        &self,
+        request: IngestRequest,
+        provenance: Provenance,
+        verified: VerifiedReplacement,
+    ) -> Result<IngestOutcome, AssetError> {
+        self.policy.validate_identity(&request.identity)?;
+        let source = open_source_file(&request.source_path)?;
+        self.ingest_source(request, source, Some(provenance), false, verified)
     }
 
     /// Явное обновление происхождения/метаданных даже при прежнем SHA. Требует
@@ -1379,7 +1407,13 @@ impl AssetStore {
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         let source = open_source_file(&request.source_path)?;
-        self.ingest_source(request, source, Some(provenance), true)
+        self.ingest_source(
+            request,
+            source,
+            Some(provenance),
+            true,
+            VerifiedReplacement::Allowed,
+        )
     }
 
     /// Импортирует уже открытый и проверенный дескриптор исходного файла через `CLI`.
@@ -1388,7 +1422,7 @@ impl AssetStore {
         request: IngestRequest,
         source: File,
     ) -> Result<IngestOutcome, AssetError> {
-        self.ingest_source(request, source, None, false)
+        self.ingest_source(request, source, None, false, VerifiedReplacement::Allowed)
     }
 
     fn ingest_source(
@@ -1397,6 +1431,7 @@ impl AssetStore {
         source: File,
         provenance: Option<Provenance>,
         refresh_metadata: bool,
+        verified: VerifiedReplacement,
     ) -> Result<IngestOutcome, AssetError> {
         self.policy.validate_identity(&request.identity)?;
         if let Some(expected) = &request.expected_source_sha256 {
@@ -1472,6 +1507,19 @@ impl AssetStore {
                         "identity": existing.identity,
                         "existing_sha256": existing.sha256,
                         "candidate_sha256": staged.sha256,
+                    }),
+                ));
+            }
+            if verified == VerifiedReplacement::Forbidden
+                && existing.lifecycle == LifecycleState::Verified
+            {
+                return Err(AssetError::with_details(
+                    ErrorCode::InvalidTransition,
+                    "текущая запись подтверждена человеком; замена требует явного разрешения и нового подтверждения",
+                    serde_json::json!({
+                        "blocker": "verified_replacement_forbidden",
+                        "identity": existing.identity,
+                        "existing_sha256": existing.sha256,
                     }),
                 ));
             }

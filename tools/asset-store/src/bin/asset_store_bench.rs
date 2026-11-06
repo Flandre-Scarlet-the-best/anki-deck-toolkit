@@ -75,9 +75,9 @@ enum Command {
         #[arg(long)]
         workdir: PathBuf,
         /// Сохранить кэш результатов (тёплый повторный запуск).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "remove")]
         keep_cache: bool,
-        /// Удалить рабочий каталог целиком.
+        /// Удалить рабочий каталог целиком; несовместим с --keep-cache.
         #[arg(long)]
         remove: bool,
     },

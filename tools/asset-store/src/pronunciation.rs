@@ -355,13 +355,16 @@ pub fn import_bytes(
     )
 }
 
-/// Производный вариант всегда заменяет текущую запись через CAS.
+/// Производный вариант всегда заменяет текущую запись через CAS. Запрет
+/// замены `Verified` без `allow_replace_verified` проверяется хранилищем
+/// под той же блокировкой, что и CAS.
 pub(crate) fn import_derived_bytes(
     store: &AssetStore,
     request: &Pronunciation,
     bytes: &[u8],
     derivation: &derivation::AudioDerivation,
     replace_expected: String,
+    allow_replace_verified: bool,
 ) -> Result<AssetRecord, AssetError> {
     import_source(
         store,
@@ -369,7 +372,7 @@ pub(crate) fn import_derived_bytes(
         bytes,
         &derivation::source_name(&derivation.source_sha256),
         Some(replace_expected),
-        Origin::Derived(derivation),
+        Origin::Derived(derivation, allow_replace_verified),
     )
 }
 
@@ -377,7 +380,7 @@ pub(crate) fn import_derived_bytes(
 enum Origin<'a> {
     Local,
     Forvo(&'a crate::forvo::ForvoEvidence),
-    Derived(&'a derivation::AudioDerivation),
+    Derived(&'a derivation::AudioDerivation, bool),
 }
 
 pub(crate) fn import_forvo_bytes(
@@ -430,10 +433,19 @@ fn import_source(
         .map_err(|e| AssetError::io("временный MP3", e))?;
     let snapshot = workspace.path().join("candidate.mp3");
     std::fs::write(&snapshot, bytes).map_err(|e| AssetError::io("снимок MP3", e))?;
-    let ingest = if forvo.is_some() && replace_expected.is_some() {
-        AssetStore::ingest_with_metadata_cas
-    } else {
-        AssetStore::ingest_with_provenance
+    let replacing = replace_expected.is_some();
+    let ingest = |store: &AssetStore, request: IngestRequest, provenance: Provenance| match origin {
+        Origin::Derived(_, allow) => store.ingest_with_provenance_guarded(
+            request,
+            provenance,
+            if allow {
+                crate::store::VerifiedReplacement::Allowed
+            } else {
+                crate::store::VerifiedReplacement::Forbidden
+            },
+        ),
+        Origin::Forvo(_) if replacing => store.ingest_with_metadata_cas(request, provenance),
+        _ => store.ingest_with_provenance(request, provenance),
     };
     let outcome = ingest(
         store,
@@ -445,7 +457,7 @@ fn import_source(
                 Origin::Forvo(evidence) => {
                     serde_json::json!({"surface":request.surface,"reading":request.reading,"forvo":evidence})
                 }
-                Origin::Derived(derivation) => {
+                Origin::Derived(derivation, _) => {
                     serde_json::json!({"surface":request.surface,"reading":request.reading,"derivation":derivation})
                 }
                 Origin::Local => serde_json::json!(request),
@@ -455,7 +467,7 @@ fn import_source(
         Provenance {
             source_kind: match origin {
                 Origin::Forvo(_) => "forvo_web",
-                Origin::Derived(_) => derivation::DERIVED_SOURCE_KIND,
+                Origin::Derived(..) => derivation::DERIVED_SOURCE_KIND,
                 Origin::Local => "local_import",
             }
             .into(),

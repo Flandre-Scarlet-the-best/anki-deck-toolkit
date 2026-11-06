@@ -336,11 +336,20 @@ pub enum Mode {
     Normalize,
 }
 
-/// Окружение, от которого зависят байты результата.
+/// Окружение, от которого зависят байты и решение результата: сборки
+/// `ffmpeg` и `ffprobe` с версиями библиотек, функциональный отпечаток
+/// кодировщика libmp3lame и версия собственного анализатора.
+///
+/// Поле `ffprobe` появилось позже остальных: в записях прежних версий его нет,
+/// оно читается пустым и не сериализуется, поэтому их отпечатки конфигурации
+/// не меняются. `detect` всегда заполняет его, и такая конфигурация с прежней
+/// не совпадает.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Toolchain {
     pub ffmpeg: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ffprobe: String,
     pub encoder: String,
     pub analyzer: String,
 }
@@ -349,14 +358,17 @@ impl Toolchain {
     pub fn detect() -> Result<Self, AssetError> {
         Ok(Self {
             ffmpeg: probe::ffmpeg_identity()?,
-            encoder: "libmp3lame".into(),
+            ffprobe: probe::ffprobe_identity()?,
+            encoder: probe::encoder_identity()?,
             analyzer: ANALYZER_VERSION.into(),
         })
     }
 }
 
 /// Версия собственных алгоритмов анализа, плана и QualityGate.
-pub const ANALYZER_VERSION: &str = "balanced-analyzer/1";
+/// `/2`: пост-QC не пропускает неразрешимые проверки, громкость проверяется
+/// в обе стороны от цели, выравнивание учитывает каналы по отдельности.
+pub const ANALYZER_VERSION: &str = "balanced-analyzer/2";
 
 /// Отпечаток всего, что определяет результат для данного входа.
 pub fn config_sha256(profile: &NormalizerProfile, mode: Mode, toolchain: &Toolchain) -> String {
@@ -968,15 +980,11 @@ fn plan_gain(
         }
         applied = 0.0;
     }
+    // `shortfall_db = desired − applied`: положительное значение — результат
+    // останется тише цели, отрицательное — громче (ослабление ограничено).
     let shortfall = desired - applied;
-    if shortfall > policy.review_shortfall_db {
-        reasons.push(reason(
-            "target_shortfall",
-            Severity::Review,
-            format!(
-                "цель недостижима без нарушения ограничений: останется тише на {shortfall:.1} dB"
-            ),
-        ));
+    if shortfall.abs() > policy.review_shortfall_db {
+        reasons.push(target_deviation_reason(shortfall, "по плану"));
     } else if !limited.is_empty() && !limited.contains(&GainLimit::Tolerance) {
         reasons.push(reason(
             "gain_limited",
@@ -992,6 +1000,29 @@ fn plan_gain(
         limited_by: limited,
         shortfall_db: Some(shortfall),
         confidence,
+    }
+}
+
+/// Отклонение громкости от цели больше допуска профиля в любую сторону.
+/// `deviation` — «цель минус результат»: больше нуля — тише цели.
+fn target_deviation_reason(deviation: f64, basis: &str) -> Reason {
+    if deviation > 0.0 {
+        reason(
+            "target_shortfall",
+            Severity::Review,
+            format!(
+                "цель недостижима без нарушения ограничений: {basis} результат тише цели на {deviation:.1} dB"
+            ),
+        )
+    } else {
+        reason(
+            "target_exceeded",
+            Severity::Review,
+            format!(
+                "ослабление ограничено профилем: {basis} результат громче цели на {:.1} dB",
+                -deviation
+            ),
+        )
     }
 }
 
@@ -1037,6 +1068,29 @@ fn source_reasons(
             Severity::Warning,
             "заметная постоянная составляющая; этап её не исправляет",
         ));
+    }
+}
+
+/// Наибольшая допустимая потеря энергии при сведении стерео в моно. У
+/// одинаковых каналов потеря 0 dB, у некоррелированных — около 3 dB, у
+/// противофазных сигнал исчезает.
+const MAX_DOWNMIX_LOSS_DB: f64 = 6.0;
+
+/// Средняя энергия канала источника относительно энергии сведённого моно, dB.
+fn downmix_loss_db(stereo: &Pcm, mono: &Pcm) -> f64 {
+    let source: f64 = stereo
+        .samples
+        .iter()
+        .map(|s| f64::from(*s).powi(2))
+        .sum::<f64>()
+        / stereo.channels.max(1) as f64;
+    let mixed: f64 = mono.samples.iter().map(|s| f64::from(*s).powi(2)).sum();
+    if source <= 0.0 {
+        0.0
+    } else if mixed <= 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (source / mixed).log10()
     }
 }
 
@@ -1096,15 +1150,28 @@ pub fn prepare(pcm: &Pcm, profile: &NormalizerProfile) -> Prepared {
     let end = pcm.frames() - trailing.trim_frames as usize;
     let mut channels_out = pcm.channels as u32;
     let mut working = pcm.slice_frames(start, end);
-    if pcm.channels == 2 {
+    if pcm.channels == 2 && !rejected {
         let identical = analysis
             .stereo_difference_db
             .is_some_and(|d| d <= profile.output.identical_channels_max_db);
         if profile.output.channels == ChannelPolicy::Mono
             || (profile.output.channels == ChannelPolicy::MonoIfIdentical && identical)
         {
-            working = downmix(&working);
-            channels_out = 1;
+            let mixed = downmix(&working);
+            // Сведение противофазных каналов уничтожило бы сигнал: это не
+            // обоснованная политика вывода, а потеря содержимого.
+            if downmix_loss_db(&working, &mixed) > MAX_DOWNMIX_LOSS_DB {
+                reasons.push(reason(
+                    "downmix_phase_cancellation",
+                    Severity::Review,
+                    format!(
+                        "сведение в моно ослабило бы сигнал больше чем на {MAX_DOWNMIX_LOSS_DB:.0} dB (каналы в противофазе): раскладка источника сохранена"
+                    ),
+                ));
+            } else {
+                working = mixed;
+                channels_out = 1;
+            }
         }
     }
     let trimmed_analysis = analyze_pcm(&working, profile);
@@ -1176,41 +1243,59 @@ fn check(id: &str, passed: bool, value: Option<f64>, limit: Option<f64>) -> Chec
     }
 }
 
-/// Пост-QC сравнивает фактически декодированный результат с подготовленным PCM.
+fn unresolved_check(id: &str, limit: Option<f64>) -> Check {
+    Check {
+        id: id.into(),
+        passed: false,
+        value: None,
+        limit,
+    }
+}
+
+/// Пост-QC сравнивает фактически декодированный результат с эталоном —
+/// тем PCM, который получил кодировщик (при фиксированной частоте вывода —
+/// уже пересэмплированным). Каждая обязательная проверка присутствует в
+/// `checks`: если величину нельзя корректно вычислить, проверка остаётся
+/// с `passed: false` и `value: null` и не даёт `ACCEPT`.
 pub fn post_qc(
-    prepared: &Prepared,
+    reference: &Pcm,
+    reference_analysis: &SignalAnalysis,
+    plan: &Plan,
     output: &[u8],
     profile: &NormalizerProfile,
 ) -> Result<(PostQc, Option<AudioProbe>), AssetError> {
     let gate = &profile.gate;
-    let reference = &prepared.processed;
+    let failed_probe = |id: &str| PostQc {
+        passed: false,
+        checks: vec![check(id, false, None, None)],
+        analysis: None,
+        alignment_lag_frames: None,
+        codec_snr_db: None,
+    };
     let probe = match probe::probe_mp3(output) {
         Ok(probe) => probe,
         Err(error) if is_infrastructure_failure(&error) => return Err(error),
-        Err(_) => {
-            return Ok((
-                PostQc {
-                    passed: false,
-                    checks: vec![check("output_technical_probe", false, None, None)],
-                    analysis: None,
-                    alignment_lag_frames: None,
-                    codec_snr_db: None,
-                },
-                None,
-            ));
-        }
+        Err(_) => return Ok((failed_probe("output_technical_probe"), None)),
+    };
+    let samples = match probe::decode_f32(output, &probe) {
+        Ok(samples) => samples,
+        Err(error) if is_infrastructure_failure(&error) => return Err(error),
+        Err(_) => return Ok((failed_probe("output_decode"), Some(probe))),
     };
     let decoded = Pcm {
         sample_rate: probe.sample_rate,
         channels: probe.channels as usize,
-        samples: probe::decode_f32(output, &probe)?,
+        samples,
     };
     let after = analyze_pcm(&decoded, profile);
     let mut checks = vec![check("output_technical_probe", true, None, None)];
+    let comparable =
+        decoded.sample_rate == reference.sample_rate && decoded.channels == reference.channels;
     checks.push(check(
         "output_layout",
-        probe.channels == prepared.plan.output_channels
-            && probe.sample_rate == prepared.plan.output_sample_rate,
+        probe.channels == plan.output_channels
+            && probe.sample_rate == plan.output_sample_rate
+            && comparable,
         None,
         None,
     ));
@@ -1224,8 +1309,7 @@ pub fn post_qc(
     ));
     let ceiling = profile.loudness.true_peak_ceiling_dbtp + gate.max_true_peak_overshoot_db;
     // Потолок обязателен, только если сами операции не начинались выше него.
-    let tp_limit =
-        ceiling.max(prepared.processed_analysis.true_peak_dbtp + gate.max_true_peak_overshoot_db);
+    let tp_limit = ceiling.max(reference_analysis.true_peak_dbtp + gate.max_true_peak_overshoot_db);
     checks.push(check(
         "true_peak_within_ceiling",
         after.true_peak_dbtp <= tp_limit,
@@ -1235,35 +1319,39 @@ pub fn post_qc(
     let new_clipped = after
         .clipping
         .near_full_scale_samples
-        .saturating_sub(prepared.processed_analysis.clipping.near_full_scale_samples);
+        .saturating_sub(reference_analysis.clipping.near_full_scale_samples);
     checks.push(check(
         "no_new_clipping",
         new_clipped <= gate.max_new_clipped_samples,
         Some(new_clipped as f64),
         Some(gate.max_new_clipped_samples as f64),
     ));
-    let planned = prepared
-        .plan
+    // Громкость сверяется с планом по фактически декодированному результату;
+    // если план громкость задал, а измерить её у результата нельзя, проверка
+    // неразрешима и не проходит.
+    let planned = plan
         .gain
         .measured_lufs
-        .map(|lufs| lufs + prepared.plan.gain.applied_db);
-    let actual = match prepared.plan.gain.method {
-        LoudnessMethod::Integrated => after.integrated_lufs.or(after.short_window_lufs),
-        _ => after.short_window_lufs,
-    };
-    if let (Some(planned), Some(actual)) = (planned, actual) {
-        let error = (actual - planned).abs();
-        checks.push(check(
-            "loudness_matches_plan",
-            error <= gate.max_loudness_error_db,
-            Some(error),
-            Some(gate.max_loudness_error_db),
-        ));
+        .map(|lufs| lufs + plan.gain.applied_db);
+    let actual = actual_loudness(&after, plan);
+    if let Some(planned) = planned {
+        checks.push(match actual {
+            Some(actual) => {
+                let error = (actual - planned).abs();
+                check(
+                    "loudness_matches_plan",
+                    error <= gate.max_loudness_error_db,
+                    Some(error),
+                    Some(gate.max_loudness_error_db),
+                )
+            }
+            None => unresolved_check("loudness_matches_plan", Some(gate.max_loudness_error_db)),
+        });
     }
     let threshold = profile.trim.silence_threshold_dbfs;
     let edge_frame = decoded.samples_for_ms(profile.analysis.frame_ms).max(1);
     let edge_levels = dsp::frame_levels(&decoded, edge_frame);
-    if prepared.plan.leading.trim_frames > 0 {
+    if plan.leading.trim_frames > 0 {
         let first = edge_levels.first().copied().unwrap_or(dsp::LEVEL_FLOOR_DB);
         checks.push(check(
             "leading_edge_quiet",
@@ -1272,7 +1360,7 @@ pub fn post_qc(
             Some(threshold),
         ));
     }
-    if prepared.plan.trailing.trim_frames > 0 {
+    if plan.trailing.trim_frames > 0 {
         let last = edge_levels.last().copied().unwrap_or(dsp::LEVEL_FLOOR_DB);
         checks.push(check(
             "trailing_edge_quiet",
@@ -1281,25 +1369,26 @@ pub fn post_qc(
             Some(threshold),
         ));
     }
-    // Активная часть сравнивается с подготовленным сигналом в том же масштабе,
+    // Активная часть сравнивается с эталоном в том же масштабе,
     // поэтому усиление само по себе не меняет её длительность.
-    let active_change = (after.active_ms - prepared.processed_analysis.active_ms).abs();
+    let active_change = (after.active_ms - reference_analysis.active_ms).abs();
     let active_limit = gate
         .max_active_change_ms
-        .max(prepared.processed_analysis.active_ms * gate.max_active_change_ratio);
+        .max(reference_analysis.active_ms * gate.max_active_change_ratio);
     checks.push(check(
         "active_duration_preserved",
         active_change <= active_limit,
         Some(active_change),
         Some(active_limit),
     ));
-    let mut lag = None;
-    let mut snr = None;
-    if decoded.sample_rate == reference.sample_rate && decoded.channels == reference.channels {
+    let alignment = if comparable {
         let max_lag = reference.samples_for_ms(gate.max_alignment_lag_ms.max(30.0));
-        if let Some(alignment) = dsp::aligned_snr(reference, &decoded, max_lag) {
-            lag = Some(alignment.lag_frames);
-            snr = Some(alignment.snr_db);
+        dsp::aligned_snr(reference, &decoded, max_lag)
+    } else {
+        None
+    };
+    let (lag, snr) = match alignment {
+        Some(alignment) => {
             let lag_ms = alignment.lag_frames.unsigned_abs() as f64 * 1000.0
                 / f64::from(reference.sample_rate);
             checks.push(check(
@@ -1314,8 +1403,17 @@ pub fn post_qc(
                 Some(alignment.snr_db),
                 Some(gate.min_codec_snr_db),
             ));
+            (Some(alignment.lag_frames), Some(alignment.snr_db))
         }
-    }
+        None => {
+            checks.push(unresolved_check(
+                "alignment_lag",
+                Some(gate.max_alignment_lag_ms),
+            ));
+            checks.push(unresolved_check("codec_snr", Some(gate.min_codec_snr_db)));
+            (None, None)
+        }
+    };
     let passed = checks.iter().all(|c| c.passed);
     Ok((
         PostQc {
@@ -1327,6 +1425,14 @@ pub fn post_qc(
         },
         Some(probe),
     ))
+}
+
+/// Громкость результата тем же методом, которым она измерена в плане.
+fn actual_loudness(after: &SignalAnalysis, plan: &Plan) -> Option<f64> {
+    match plan.gain.method {
+        LoudnessMethod::Integrated => after.integrated_lufs.or(after.short_window_lufs),
+        _ => after.short_window_lufs,
+    }
 }
 
 /// Полный путь одного входа. `Err` возвращается только при сбое среды;
@@ -1401,10 +1507,32 @@ pub fn process(
             });
         }
     };
+    // Повторное декодирование уже проверенного входа: отказ декодера — свойство
+    // файла (исход `REJECT`), а сбой среды — ошибка для повтора.
+    let samples = match probe::decode_f32(bytes, &probe) {
+        Ok(samples) => samples,
+        Err(error) if is_infrastructure_failure(&error) => return Err(error),
+        Err(error) => {
+            let mut result = base(InputRef {
+                probe: Some(probe),
+                error: Some(error.message.clone()),
+                ..input
+            });
+            result.gate.reasons.push(reason(
+                "source_invalid",
+                Severity::Reject,
+                format!("декодирование MP3 не выполнено: {}", error.message),
+            ));
+            return Ok(Processed {
+                result,
+                output_bytes: None,
+            });
+        }
+    };
     let pcm = Pcm {
         sample_rate: probe.sample_rate,
         channels: probe.channels as usize,
-        samples: probe::decode_f32(bytes, &probe)?,
+        samples,
     };
     let prepared = prepare(&pcm, profile);
     let mut result = base(InputRef {
@@ -1444,9 +1572,51 @@ pub fn process(
             (GateOutcome::Accept, Some(Variant::Processed))
         }
     } else {
+        // Частота вывода меняется явным шагом до кодирования: кодировщик и
+        // пост-QC получают один и тот же эталон на частоте вывода.
+        let resampled = if prepared.plan.output_sample_rate != prepared.processed.sample_rate {
+            match probe::resample_f32(
+                &prepared.processed.samples,
+                prepared.processed.sample_rate,
+                prepared.plan.output_channels,
+                prepared.plan.output_sample_rate,
+            ) {
+                Ok(samples) => {
+                    let pcm = Pcm {
+                        sample_rate: prepared.plan.output_sample_rate,
+                        channels: prepared.processed.channels,
+                        samples,
+                    };
+                    let analysis = analyze_pcm(&pcm, profile);
+                    Some(Ok((pcm, analysis)))
+                }
+                Err(error) if is_infrastructure_failure(&error) => return Err(error),
+                Err(error) => Some(Err(error)),
+            }
+        } else {
+            None
+        };
+        let (reference, reference_analysis) = match &resampled {
+            None => (&prepared.processed, &prepared.processed_analysis),
+            Some(Ok((pcm, analysis))) => (pcm, analysis),
+            Some(Err(error)) => {
+                reasons.push(reason(
+                    "encode_failed",
+                    Severity::Review,
+                    format!("пересэмплирование не выполнено: {}", error.message),
+                ));
+                result.gate.outcome = GateOutcome::ReviewRequired;
+                result.gate.proposed_variant = Some(Variant::Original);
+                result.gate.reasons = sorted(reasons);
+                return Ok(Processed {
+                    result,
+                    output_bytes: None,
+                });
+            }
+        };
         let encoded = probe::encode_mp3(
-            &prepared.processed.samples,
-            prepared.processed.sample_rate,
+            &reference.samples,
+            reference.sample_rate,
             prepared.plan.output_channels,
             prepared.plan.output_sample_rate,
             &profile.encoder_args(),
@@ -1469,7 +1639,25 @@ pub fn process(
                 });
             }
         };
-        let (qc, output_probe) = post_qc(&prepared, &encoded, profile)?;
+        let (qc, output_probe) = post_qc(
+            reference,
+            reference_analysis,
+            &prepared.plan,
+            &encoded,
+            profile,
+        )?;
+        // Фактическая громкость результата сверяется и с целью: план мог
+        // уложиться в допуск, а декодированный вывод — нет.
+        if let Some(actual) = qc
+            .analysis
+            .as_ref()
+            .and_then(|after| actual_loudness(after, &prepared.plan))
+        {
+            let deviation = profile.loudness.target_lufs - actual;
+            if deviation.abs() > profile.loudness.review_shortfall_db {
+                reasons.push(target_deviation_reason(deviation, "фактически"));
+            }
+        }
         result.output = Some(OutputRef {
             sha256: sha256_hex(&encoded),
             byte_length: encoded.len() as u64,
@@ -1482,7 +1670,11 @@ pub fn process(
             reasons.push(reason(
                 &format!("post_qc_{}", failed.id),
                 Severity::Review,
-                "фактический результат не прошёл проверку; предложен исходник",
+                if failed.value.is_none() && failed.limit.is_some() {
+                    "проверка фактического результата неразрешима (величину нельзя корректно вычислить); предложен исходник"
+                } else {
+                    "фактический результат не прошёл проверку; предложен исходник"
+                },
             ));
         }
         result.post_qc = Some(qc);
@@ -1570,9 +1762,36 @@ mod tests {
         base.validate().unwrap();
         let toolchain = Toolchain {
             ffmpeg: "ffmpeg test".into(),
-            encoder: "libmp3lame".into(),
+            ffprobe: "ffprobe test".into(),
+            encoder: "libmp3lame sha256:0000000000000000".into(),
             analyzer: ANALYZER_VERSION.into(),
         };
+        // Любая составляющая окружения меняет отпечаток.
+        for other in [
+            Toolchain {
+                ffprobe: "ffprobe other".into(),
+                ..toolchain.clone()
+            },
+            Toolchain {
+                encoder: "libmp3lame sha256:1111111111111111".into(),
+                ..toolchain.clone()
+            },
+        ] {
+            assert_ne!(
+                config_sha256(&base, Mode::Normalize, &toolchain),
+                config_sha256(&base, Mode::Normalize, &other)
+            );
+        }
+        // Запись прежней версии без `ffprobe` читается и сохраняет свой отпечаток.
+        let legacy: Toolchain = serde_json::from_value(serde_json::json!({
+            "ffmpeg": "ffmpeg test", "encoder": "libmp3lame", "analyzer": "balanced-analyzer/1"
+        }))
+        .unwrap();
+        assert!(legacy.ffprobe.is_empty());
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"ffmpeg": "ffmpeg test", "encoder": "libmp3lame", "analyzer": "balanced-analyzer/1"})
+        );
         let mut changed = base.clone();
         changed.trim.guard_leading_ms = 70.0;
         assert_ne!(
@@ -1848,5 +2067,199 @@ mod tests {
         let prepared = prepare(&stereo, &policy);
         assert_eq!(prepared.plan.output_channels, 1);
         assert!(prepared.plan.needs_processing);
+    }
+
+    /// Слишком громкий источник при пределе ослабления: отклонение вверх от
+    /// цели диагностируется так же, как недобор, с отрицательным `shortfall_db`.
+    #[test]
+    fn loud_source_beyond_attenuation_limit_requires_review() {
+        let pcm = signal(&[
+            (200.0, Kind::Silence, 0.0),
+            (1200.0, Kind::Tone, -3.0),
+            (200.0, Kind::Silence, 0.0),
+        ]);
+        let mut policy = profile();
+        policy.loudness.max_attenuation_db = 5.0;
+        let prepared = prepare(&pcm, &policy);
+        let gain = &prepared.plan.gain;
+        assert_eq!(gain.applied_db, -5.0);
+        assert!(gain.limited_by.contains(&GainLimit::MaxAttenuation));
+        let shortfall = gain.shortfall_db.unwrap();
+        assert!(shortfall < -6.0, "{shortfall}");
+        assert!(codes(&prepared).contains(&"target_exceeded"));
+        assert!(!codes(&prepared).contains(&"target_shortfall"));
+        // В пределах ослабления цель достигается без причины для прослушивания.
+        let prepared = prepare(&pcm, &profile());
+        assert!(prepared.plan.gain.shortfall_db.unwrap().abs() < 1e-9);
+        assert!(!codes(&prepared).contains(&"target_exceeded"));
+    }
+
+    /// Принудительное моно не уничтожает противофазное стерео.
+    #[test]
+    fn opposite_phase_stereo_is_not_destroyed_by_mono_policy() {
+        let mono = signal(&[
+            (200.0, Kind::Silence, 0.0),
+            (800.0, Kind::Tone, -20.0),
+            (200.0, Kind::Silence, 0.0),
+        ]);
+        let stereo = Pcm {
+            sample_rate: RATE,
+            channels: 2,
+            samples: mono.samples.iter().flat_map(|s| [*s, -*s]).collect(),
+        };
+        let mut policy = profile();
+        policy.output.channels = ChannelPolicy::Mono;
+        let prepared = prepare(&stereo, &policy);
+        assert_eq!(prepared.plan.output_channels, 2);
+        assert!(codes(&prepared).contains(&"downmix_phase_cancellation"));
+        // Обычное стерео сводится, как требует политика.
+        let normal = Pcm {
+            sample_rate: RATE,
+            channels: 2,
+            samples: mono.samples.iter().flat_map(|s| [*s, *s * 0.5]).collect(),
+        };
+        assert_eq!(prepare(&normal, &policy).plan.output_channels, 1);
+    }
+
+    /// Речеподобный сигнал: слабое начало-шум, два «слога» с внутренней паузой,
+    /// шумовой хвост, краевая тишина.
+    fn speech_like(channels: usize, opposite_phase: bool) -> Pcm {
+        let mono = signal(&[
+            (400.0, Kind::Silence, 0.0),
+            (40.0, Kind::Noise, -45.0),
+            (300.0, Kind::Tone, -20.0),
+            (120.0, Kind::Silence, 0.0),
+            (250.0, Kind::Tone, -24.0),
+            (60.0, Kind::Noise, -40.0),
+            (500.0, Kind::Silence, 0.0),
+        ]);
+        if channels == 1 {
+            return mono;
+        }
+        Pcm {
+            sample_rate: RATE,
+            channels: 2,
+            samples: mono
+                .samples
+                .iter()
+                .flat_map(|s| [*s, if opposite_phase { -*s } else { *s * 0.7 }])
+                .collect(),
+        }
+    }
+
+    fn mp3(pcm: &Pcm) -> Vec<u8> {
+        probe::encode_mp3(
+            &pcm.samples,
+            pcm.sample_rate,
+            pcm.channels as u32,
+            pcm.sample_rate,
+            &["-q:a".into(), "2".into()],
+        )
+        .expect("для теста нужен FFmpeg с libmp3lame")
+    }
+
+    fn check_of<'a>(result: &'a NormalizationResult, id: &str) -> &'a Check {
+        result
+            .post_qc
+            .as_ref()
+            .expect("пост-QC выполнен")
+            .checks
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("нет обязательной проверки {id}"))
+    }
+
+    /// Разрешённые частоты и раскладки вывода проходят полную сопоставимую
+    /// проверку: сдвиг и SNR вычислены по фактически декодированному выводу.
+    #[test]
+    fn allowed_rate_and_channel_policies_keep_alignment_and_snr_checks() {
+        let tools = Toolchain::detect().expect("для теста нужен FFmpeg");
+        let cases = [
+            (1, false, SampleRatePolicy::Source, ChannelPolicy::Source),
+            (
+                1,
+                false,
+                SampleRatePolicy::Fixed { hz: 48000 },
+                ChannelPolicy::Source,
+            ),
+            (
+                2,
+                false,
+                SampleRatePolicy::Fixed { hz: 22050 },
+                ChannelPolicy::Source,
+            ),
+            (2, false, SampleRatePolicy::Source, ChannelPolicy::Mono),
+            (2, true, SampleRatePolicy::Source, ChannelPolicy::Source),
+        ];
+        for (channels, opposite, rate, layout) in cases {
+            let bytes = mp3(&speech_like(channels, opposite));
+            let mut policy = profile();
+            policy.output.sample_rate = rate.clone();
+            policy.output.channels = layout;
+            let processed = process(&bytes, &policy, Mode::Normalize, &tools).unwrap();
+            let result = &processed.result;
+            let label = format!("{channels} {opposite} {rate:?} {layout:?}");
+            let qc = result.post_qc.as_ref().unwrap_or_else(|| panic!("{label}"));
+            for id in ["output_layout", "alignment_lag", "codec_snr"] {
+                let check = check_of(result, id);
+                assert!(check.passed, "{label}: {:#?}", qc.checks);
+                if id != "output_layout" {
+                    assert!(check.value.is_some_and(f64::is_finite), "{label}");
+                }
+            }
+            assert!(qc.passed, "{label}: {:#?}", qc.checks);
+            assert_eq!(
+                result.gate.outcome,
+                GateOutcome::Accept,
+                "{label}: {:#?}",
+                result.gate
+            );
+            let probe = result.output.as_ref().unwrap().probe.as_ref().unwrap();
+            let expected_rate = match rate {
+                SampleRatePolicy::Fixed { hz } => hz,
+                SampleRatePolicy::Source => RATE,
+            };
+            assert_eq!(probe.sample_rate, expected_rate, "{label}");
+            assert_eq!(
+                probe.channels,
+                result.plan.as_ref().unwrap().output_channels
+            );
+        }
+    }
+
+    /// Несопоставимый эталон: обязательные проверки остаются в списке как
+    /// неразрешимые, и пост-QC не пройден.
+    #[test]
+    fn incomparable_reference_leaves_mandatory_checks_unresolved() {
+        let pcm = speech_like(1, false);
+        let policy = profile();
+        let prepared = prepare(&pcm, &policy);
+        let encoded = mp3(&prepared.processed);
+        let mislabeled = Pcm {
+            sample_rate: 48000,
+            ..prepared.processed.clone()
+        };
+        let (qc, _) = post_qc(
+            &mislabeled,
+            &prepared.processed_analysis,
+            &prepared.plan,
+            &encoded,
+            &policy,
+        )
+        .unwrap();
+        assert!(!qc.passed);
+        for id in ["alignment_lag", "codec_snr"] {
+            let check = qc.checks.iter().find(|c| c.id == id).unwrap();
+            assert!(!check.passed && check.value.is_none() && check.limit.is_some());
+        }
+        assert!(
+            !qc.checks
+                .iter()
+                .find(|c| c.id == "output_layout")
+                .unwrap()
+                .passed
+        );
+        let text = serde_json::to_string(&qc).unwrap();
+        assert!(!text.contains("NaN"));
     }
 }

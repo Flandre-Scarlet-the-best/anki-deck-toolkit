@@ -703,6 +703,18 @@ impl SafeBatchRuntime {
         })
     }
 
+    /// Удаляет blob по проверенной ссылке (только имя в `candidates/`, без
+    /// перехода по ссылкам). Отсутствующий blob — не ошибка.
+    pub(crate) fn remove_blob(&self, blob: &RuntimeBlobRef) -> Result<(), AssetError> {
+        self.require_lock()?;
+        let name = validate_blob_ref(blob)?;
+        match rustix::fs::unlinkat(&self.blobs, name, rustix::fs::AtFlags::empty()) {
+            Ok(()) => Ok(()),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+            Err(error) => Err(boundary_io(error)),
+        }
+    }
+
     /// Возвращает байты только после проверки пути, обычного файла, размера и SHA.
     pub fn read_blob(&self, blob: &RuntimeBlobRef) -> Result<Vec<u8>, AssetError> {
         self.require_lock()?;

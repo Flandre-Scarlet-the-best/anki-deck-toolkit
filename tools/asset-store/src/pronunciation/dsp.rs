@@ -1,14 +1,15 @@
 //! Детерминированные акустические измерения декодированного PCM.
 //!
 //! Модуль не запускает внешних процессов и не знает о файлах: он получает
-//! interleaved `f32` и возвращает конечные числа либо `None`, если величина
-//! для сигнала не определена. Ни одна функция не возвращает NaN/бесконечность.
-//! Эвристики описывают уровень сигнала, а не японскую речь.
+//! чередующиеся по каналам (interleaved) отсчёты `f32` и возвращает конечные
+//! числа либо `None`, если величина для сигнала не определена. Ни одна
+//! функция не возвращает NaN/бесконечность. Эвристики описывают уровень
+//! сигнала, а не японскую речь.
 
 /// Нижняя граница уровней: цифровая тишина представляется этим числом, а не `-inf`.
 pub const LEVEL_FLOOR_DB: f64 = -120.0;
 
-/// Interleaved PCM с исходными частотой и числом каналов.
+/// PCM с чередованием каналов в кадре (interleaved), исходными частотой и числом каналов.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pcm {
     pub sample_rate: u32,
@@ -405,7 +406,20 @@ pub fn apply_gain_and_fades(pcm: &mut Pcm, gain: f64, fade_in: usize, fade_out: 
 
 /// Отношение сигнал/ошибка между эталоном и проверяемым сигналом одинаковой
 /// раскладки с подбором целочисленного сдвига в пределах `max_lag` кадров.
-/// Сдвиг ищется по окну наибольшей энергии, чтобы не перемножать весь файл.
+/// Сдвиг ищется по трём окнам, чтобы не перемножать весь файл: окну
+/// наибольшей энергии и окнам, захватывающим начало и конец звука.
+/// Квазипериодический сигнал (тон, гласная) внутри стационарного окна почти
+/// одинаково коррелирует при сдвигах, кратных периоду; переходы между тишиной
+/// и звуком на обоих краях штрафуют такой сдвиг в любую сторону и делают его
+/// однозначным.
+///
+/// Корреляция в каждом окне нормирована на энергии обоих сигналов.
+/// Взаимная корреляция складывается **по каналам**, а не по их среднему:
+/// у стерео с противоположной фазой (L ≈ −R) среднее каналов равно нулю, и
+/// выбор сдвига по нему был бы произвольным. При равных оценках выбирается
+/// наименьший по модулю сдвиг, поэтому вырожденный сигнал не даёт ложного
+/// граничного сдвига. `None` — сигнал эталона в окне не определяет сдвиг
+/// (нулевая энергия) либо раскладки различаются.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Alignment {
     pub lag_frames: i64,
@@ -415,55 +429,113 @@ pub struct Alignment {
 pub fn aligned_snr(reference: &Pcm, test: &Pcm, max_lag: usize) -> Option<Alignment> {
     if reference.channels != test.channels
         || reference.sample_rate != test.sample_rate
+        || reference.channels == 0
         || reference.frames() == 0
         || test.frames() == 0
     {
         return None;
     }
     let channels = reference.channels;
-    let mono = |pcm: &Pcm| -> Vec<f64> {
-        pcm.samples
-            .chunks_exact(channels)
-            .map(|frame| frame.iter().map(|s| f64::from(*s)).sum::<f64>() / channels as f64)
-            .collect()
+    let (r, t) = (&reference.samples, &test.samples);
+    let (reference_frames, test_frames) = (reference.frames(), test.frames());
+    let frame_energy = |frame: usize| -> f64 {
+        r[frame * channels..(frame + 1) * channels]
+            .iter()
+            .map(|s| f64::from(*s).powi(2))
+            .sum()
     };
-    let (r, t) = (mono(reference), mono(test));
-    let window = 4096.min(r.len());
+    let window = 4096.min(reference_frames);
     let mut best_start = 0;
     let mut best_energy = -1.0;
-    let mut energy: f64 = r[..window].iter().map(|v| v * v).sum();
-    for start in 0..=(r.len() - window) {
+    let mut energy: f64 = (0..window).map(frame_energy).sum();
+    for start in 0..=(reference_frames - window) {
         if start > 0 {
-            energy += r[start + window - 1].powi(2) - r[start - 1].powi(2);
+            energy += frame_energy(start + window - 1) - frame_energy(start - 1);
         }
         if energy > best_energy {
             best_energy = energy;
             best_start = start;
         }
     }
+    if best_energy <= 0.0 {
+        return None;
+    }
+    // Начало и конец звука: первый и последний кадр не тише −30 dB от самого
+    // громкого; окно выходит за переход на четверть своей длины.
+    let peak_frame = (0..reference_frames).map(frame_energy).fold(0.0, f64::max);
+    let audible = |frame: &usize| frame_energy(*frame) >= peak_frame * 1e-3;
+    let onset = (0..reference_frames).find(audible).unwrap_or(0);
+    let offset = (0..reference_frames).rev().find(audible).unwrap_or(0);
+    let last_start = reference_frames - window;
+    let onset_start = onset.saturating_sub(window / 4).min(last_start);
+    let offset_start = (offset + window / 4).saturating_sub(window).min(last_start);
+    let mut starts = vec![best_start, onset_start, offset_start];
+    starts.sort_unstable();
+    starts.dedup();
     let max_lag = max_lag as i64;
+    // Нормированная взаимная корреляция в каждом окне: сырая сумма r·t росла
+    // бы просто от сдвига окна проверяемого сигнала в более громкую часть, и
+    // нарастание громкости на краю давало бы ложный сдвиг. Сумма по окнам:
+    // истинный сдвиг даёт около 1 в каждом окне.
+    let mut test_prefix = Vec::with_capacity(test_frames + 1);
+    test_prefix.push(0.0f64);
+    let mut running = 0.0f64;
+    for frame in 0..test_frames {
+        running += t[frame * channels..(frame + 1) * channels]
+            .iter()
+            .map(|s| f64::from(*s).powi(2))
+            .sum::<f64>();
+        test_prefix.push(running);
+    }
+    let window_energy: Vec<f64> = starts
+        .iter()
+        .map(|&start| (start..start + window).map(frame_energy).sum())
+        .collect();
     let score = |lag: i64| -> f64 {
-        (best_start..best_start + window)
-            .filter_map(|i| {
-                let j = i as i64 + lag;
-                (j >= 0 && (j as usize) < t.len()).then(|| r[i] * t[j as usize])
+        starts
+            .iter()
+            .zip(&window_energy)
+            .map(|(&start, &reference_energy)| {
+                let from = (start as i64 + lag).clamp(0, test_frames as i64) as usize;
+                let to = (start as i64 + lag + window as i64).clamp(0, test_frames as i64) as usize;
+                let test_energy = test_prefix[to] - test_prefix[from];
+                if reference_energy <= 0.0 || test_energy <= 0.0 {
+                    return 0.0;
+                }
+                let cross: f64 = (start..start + window)
+                    .filter_map(|i| {
+                        let j = i as i64 + lag;
+                        (j >= 0 && (j as usize) < test_frames).then(|| {
+                            (0..channels)
+                                .map(|c| {
+                                    f64::from(r[i * channels + c])
+                                        * f64::from(t[j as usize * channels + c])
+                                })
+                                .sum::<f64>()
+                        })
+                    })
+                    .sum();
+                cross / (reference_energy * test_energy).sqrt()
             })
             .sum()
     };
     let lag = (-max_lag..=max_lag)
         .map(|lag| (lag, score(lag)))
-        .fold(
-            (0i64, f64::MIN),
-            |best, item| if item.1 > best.1 { item } else { best },
-        )
+        .fold((0i64, f64::NEG_INFINITY), |best, item| {
+            if item.1 > best.1 || (item.1 == best.1 && item.0.abs() < best.0.abs()) {
+                item
+            } else {
+                best
+            }
+        })
         .0;
     let (mut signal, mut noise) = (0.0f64, 0.0f64);
-    for frame in 0..reference.frames() {
+    for frame in 0..reference_frames {
         let other = frame as i64 + lag;
         for channel in 0..channels {
-            let a = f64::from(reference.samples[frame * channels + channel]);
-            let b = if other >= 0 && (other as usize) < test.frames() {
-                f64::from(test.samples[other as usize * channels + channel])
+            let a = f64::from(r[frame * channels + channel]);
+            let b = if other >= 0 && (other as usize) < test_frames {
+                f64::from(t[other as usize * channels + channel])
             } else {
                 0.0
             };
@@ -589,6 +661,144 @@ mod tests {
         assert!(alignment.snr_db > 30.0, "{}", alignment.snr_db);
         let identical = aligned_snr(&reference, &reference, 4).unwrap();
         assert_eq!(identical.snr_db, 120.0);
+    }
+
+    /// Стерео с противоположной фазой каналов и почти противофазное: сдвиг
+    /// определяется по каждому каналу, а не по взаимно уничтоженному среднему.
+    #[test]
+    fn alignment_handles_opposite_phase_stereo_and_true_shift() {
+        let mono = sine(16000, 1, 300.0, 0.5, 0.5);
+        let opposite = |scale: f32| Pcm {
+            sample_rate: 16000,
+            channels: 2,
+            samples: mono
+                .samples
+                .iter()
+                .flat_map(|s| [*s, -*s * scale])
+                .collect(),
+        };
+        for scale in [1.0, 0.98] {
+            let reference = opposite(scale);
+            let same = aligned_snr(&reference, &reference, 80).unwrap();
+            assert_eq!(same.lag_frames, 0, "{scale}");
+            assert_eq!(same.snr_db, 120.0);
+            let mut shifted = reference.clone();
+            shifted.samples.rotate_right(2 * 7);
+            let found = aligned_snr(&reference, &shifted, 80).unwrap();
+            assert_eq!(found.lag_frames, 7, "{scale}");
+            assert!(found.snr_db > 30.0, "{}", found.snr_db);
+        }
+        // Реальное повреждение содержимого не скрывается выравниванием.
+        let reference = opposite(1.0);
+        let mut damaged = reference.clone();
+        for value in damaged.samples.iter_mut().skip(4000).take(8000) {
+            *value = 0.0;
+        }
+        let damaged = aligned_snr(&reference, &damaged, 80).unwrap();
+        assert_eq!(damaged.lag_frames, 0);
+        assert!(damaged.snr_db < 4.0, "{}", damaged.snr_db);
+        // Нулевая энергия эталона не определяет сдвиг: результата нет.
+        let silent = Pcm {
+            sample_rate: 16000,
+            channels: 2,
+            samples: vec![0.0; 3200],
+        };
+        assert!(aligned_snr(&silent, &silent, 80).is_none());
+    }
+
+    /// Периодический сигнал с краевой тишиной и шумом, похожим на ошибку
+    /// кодека: сдвиг на целое число периодов не выдаётся за лучшее
+    /// совпадение, настоящий сдвиг находится точно.
+    #[test]
+    fn periodic_signal_is_not_aligned_to_a_whole_period_shift() {
+        let rate = 44100;
+        let tone = sine(rate, 1, 440.0, 0.3, 0.8);
+        let mut samples = vec![0.0f32; 2646];
+        samples.extend(&tone.samples);
+        samples.extend(vec![0.0f32; 2646]);
+        let reference = Pcm {
+            sample_rate: rate,
+            channels: 1,
+            samples,
+        };
+        let mut state = 0x9e37_79b9u32;
+        let mut noisy = reference.clone();
+        for value in &mut noisy.samples {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *value += ((state >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.02;
+        }
+        let found = aligned_snr(&reference, &noisy, 1323).unwrap();
+        assert_eq!(found.lag_frames, 0);
+        let mut shifted = noisy.clone();
+        shifted.samples.rotate_right(37);
+        assert_eq!(
+            aligned_snr(&reference, &shifted, 1323).unwrap().lag_frames,
+            37
+        );
+        shifted.samples.rotate_left(37 + 20);
+        assert_eq!(
+            aligned_snr(&reference, &shifted, 1323).unwrap().lag_frames,
+            -20
+        );
+    }
+
+    /// Нарастание громкости у края: сырая корреляция росла бы от сдвига окна
+    /// в более громкую часть и давала ложный сдвиг; нормированная — нет.
+    #[test]
+    fn crescendo_at_the_edge_does_not_shift_alignment() {
+        let rate = 44100;
+        let frames = rate as usize;
+        let mut state = 0x1234_abcdu32;
+        let samples: Vec<f32> = (0..frames)
+            .map(|i| {
+                let t = i as f64 / f64::from(rate);
+                let envelope = (t / 0.4).min(1.0) * (1.0 - (t - 0.7).max(0.0) / 0.3);
+                (0.4 * envelope * (2.0 * std::f64::consts::PI * 180.0 * t).sin()) as f32
+            })
+            .collect();
+        let reference = Pcm {
+            sample_rate: rate,
+            channels: 1,
+            samples,
+        };
+        let mut noisy = reference.clone();
+        for value in &mut noisy.samples {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *value += ((state >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.004;
+        }
+        let found = aligned_snr(&reference, &noisy, 1323).unwrap();
+        assert_eq!(found.lag_frames, 0);
+        assert!(found.snr_db > 25.0, "{}", found.snr_db);
+    }
+
+    /// Коэффициенты K-фильтра при 48 kHz совпадают с таблицами 1 и 2
+    /// ITU-R BS.1770-4: у RLB high-pass числитель ровно `[1, −2, 1]`, без
+    /// деления на `a0` (так же в FFmpeg `f_ebur128.c` и libebur128).
+    #[test]
+    fn k_weighting_matches_bs1770_tables_at_48k() {
+        let [shelf, high_pass] = k_weighting(48000);
+        let expected_shelf = (
+            [
+                1.535_124_859_586_97,
+                -2.691_696_189_406_38,
+                1.198_392_810_852_85,
+            ],
+            [1.0, -1.690_659_293_182_41, 0.732_480_774_215_85],
+        );
+        let expected_high_pass = (
+            [1.0, -2.0, 1.0],
+            [1.0, -1.990_047_454_833_98, 0.990_072_250_366_21],
+        );
+        for (actual, expected) in [(shelf, expected_shelf), (high_pass, expected_high_pass)] {
+            for (a, e) in actual
+                .b
+                .iter()
+                .zip(expected.0)
+                .chain(actual.a.iter().zip(expected.1))
+            {
+                assert!((a - e).abs() < 1e-8, "{a} != {e}");
+            }
+        }
     }
 
     #[test]
