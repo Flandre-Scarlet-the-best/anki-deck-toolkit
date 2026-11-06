@@ -545,16 +545,18 @@ fn model_dir_inside_input_or_protected_tree_is_a_boundary_violation() {
     let f = fixture("enhancer-boundary");
     let protected: std::collections::BTreeSet<PathBuf> = [f.root.join("decks")].into();
     fs::create_dir_all(f.root.join("decks/models")).unwrap();
-    for dir in [
-        f.input.join("models"),
-        f.root.join("decks/models"),
-        f.workspace.join("m"),
+    // В сообщении — метка случая, а не путь: путь временного каталога
+    // содержит идентификатор пользователя.
+    for (case, dir) in [
+        ("внутри входа", f.input.join("models")),
+        ("внутри decks", f.root.join("decks/models")),
+        ("внутри рабочего каталога", f.workspace.join("m")),
     ] {
         let error = ebatch::check_model_dir(&dir, &f.input, &f.workspace, &protected).unwrap_err();
         assert_eq!(
             error.code,
             asset_store::ErrorCode::BoundaryViolation,
-            "{dir:?}"
+            "{case}"
         );
     }
     assert!(ebatch::check_model_dir(&f.model_dir, &f.input, &f.workspace, &protected).is_ok());
