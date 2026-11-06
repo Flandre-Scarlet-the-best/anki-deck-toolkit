@@ -97,6 +97,18 @@ impl Store {
             }
             control
         };
+        let mut job_ids = std::collections::BTreeSet::new();
+        for (key, job) in &control.jobs {
+            if *key != job.key()
+                || !valid_key(&job.id)
+                || !valid_key(&job.profile_id)
+                || !job_ids.insert(&job.id)
+            {
+                return Err(corrupt(
+                    "индекс pending job повреждён; повторный export запрещён",
+                ));
+            }
+        }
         let exchange = if initialize {
             ExchangeStore::initialize(repository)?
         } else {
@@ -131,6 +143,9 @@ impl Store {
 
     pub fn save_job(&mut self, key: &str, job: PendingJob) -> Result<()> {
         self.verify_location()?;
+        if key != job.key() {
+            return Err(corrupt("ключ pending не соответствует источнику"));
+        }
         self.control.jobs.insert(key.into(), job);
         self.save_control()
     }

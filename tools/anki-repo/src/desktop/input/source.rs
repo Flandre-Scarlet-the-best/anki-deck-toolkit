@@ -19,6 +19,15 @@ pub(super) struct PendingJob {
     pub process: String,
 }
 
+impl PendingJob {
+    pub fn key(&self) -> String {
+        asset_store::hashing::sha256_hex(
+            serde_json::to_vec(&json!([self.profile_id, self.deck_id]))
+                .expect("сериализуемые идентификаторы job"),
+        )
+    }
+}
+
 /// Поля закрыты: production-путь создаёт его только по живому toolkitJob.
 pub(super) struct VerifiedExport {
     snapshot: Snapshot,

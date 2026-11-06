@@ -407,3 +407,28 @@ fn accidental_journal_corruption_never_becomes_a_confirmation() {
         1
     );
 }
+
+#[test]
+fn corrupted_pending_index_cannot_trigger_a_second_export() {
+    let tmp = TempDir::new("trusted-input-corrupt-pending");
+    let mut store = Store::open(tmp.path()).unwrap();
+    let job = PendingJob {
+        id: "a".repeat(64),
+        profile_id: "b".repeat(64),
+        profile: "Synthetic".into(),
+        deck_id: "1".into(),
+        deck: "Deck".into(),
+        deck_uuid: None,
+        process: "process".into(),
+    };
+    let key = job.key();
+    store.save_job(&key, job).unwrap();
+    let job = store.control.jobs.remove(&key).unwrap();
+    store.control.jobs.insert("c".repeat(64), job);
+    store.save_control().unwrap();
+    drop(store);
+    assert!(matches!(
+        Store::open(tmp.path()),
+        Err(ExchangeError::CorruptState(_))
+    ));
+}
