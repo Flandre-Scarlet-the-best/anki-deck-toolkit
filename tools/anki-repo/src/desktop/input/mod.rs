@@ -42,6 +42,11 @@ pub(super) fn run(
             "message":"Anki остановлена: список колод и идентичность будут проверены после запуска; записи не выполнялись",
             "consequences":"CrowdAnki может менять UUID и метаданные Anki; output не синхронизируется"}));
     }
+    let store = if apply {
+        Some(publish::Store::open(repository).map_err(publication_error)?)
+    } else {
+        None
+    };
     let target = ready_target(t, o, apply)?;
     let catalog = transport::patched(&target, o, "toolkitCatalog", json!({}))?;
     let selected = select(&catalog, requested, all)?;
@@ -56,7 +61,7 @@ pub(super) fn run(
     let catalog = transport::patched(&target, o, "toolkitBindProfile", json!({"approved":true}))?;
     // Повторяем выбор после привязки: текущие колоды могли измениться между HTTP-вызовами.
     let selected = select(&catalog, requested, all)?;
-    let mut store = publish::Store::open(repository).map_err(publication_error)?;
+    let mut store = store.expect("применение уже получило блокировку до запуска Anki");
     let recovered = store.recover().map_err(publication_error)?;
     let mut outcomes = Vec::new();
     for deck in selected {
@@ -413,6 +418,63 @@ fn publication_error(e: crate::exchange::ExchangeError) -> crate::error::DomainE
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn busy_input_refuses_apply_before_anki_setup_and_dry_run_never_opens_store() {
+        let (_spool, mut target, _job, _) = source::tests::live_fixture();
+        target.running = false;
+        let options = Options {
+            action: crate::desktop::Action::Doctor,
+            executable: Some(target.executable.clone()),
+            data_dir: Some(target.data.clone()),
+            profile: Some("Synthetic".into()),
+            endpoint: None,
+            api_key_env: "ANKI_TEST_UNUSED_API_KEY".into(),
+        };
+        let repository = crate::test_support::TempDir::new("busy-before-anki");
+        let _owner = publish::Store::open(repository.path()).unwrap();
+        let failure = run(
+            &target,
+            &options,
+            repository.path(),
+            &["Selected".into()],
+            false,
+            1,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(failure.details["reason"], "input_busy");
+        // Без ранней блокировки этот путь дошёл бы до export_setup_required.
+        let dry = crate::test_support::TempDir::new("input-plan-without-store");
+        let plan = run(
+            &target,
+            &options,
+            dry.path(),
+            &["Selected".into()],
+            false,
+            1,
+            false,
+        )
+        .unwrap();
+        assert_eq!(plan["state"], "input_plan");
+        assert!(!dry.path().join("decks").exists());
+        // Ветка работающей Anki тоже не открывает Store: даже ошибка
+        // разрешения отсутствующего тестового исполняемого файла не создаёт decks.
+        target.running = true;
+        assert!(
+            run(
+                &target,
+                &options,
+                dry.path(),
+                &["Selected".into()],
+                false,
+                1,
+                false
+            )
+            .is_err()
+        );
+        assert!(!dry.path().join("decks").exists());
+    }
+
     #[test]
     fn unrelated_names_do_not_block_selected_exports_but_descendants_are_checked() {
         let catalog = json!({"decks":[{"id":"1","name":"Good"},{"id":"2","name":"Что это?"},
