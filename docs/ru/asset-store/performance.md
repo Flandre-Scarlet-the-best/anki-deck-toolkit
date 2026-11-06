@@ -466,10 +466,10 @@ cargo run -p benchmark-runner -- run asset-store.audio-normalizer-batch --profil
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
 
-<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"warm","recorded_at":"2026-11-06T09:18:56Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":2915273.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
+<!-- benchmark-snapshot: {"scenario":"asset-store.audio-normalizer-batch","profile":"warm","recorded_at":"2026-11-06T11:27:30Z","environment":{"arch":"x86_64","cpu_model":"AMD Ryzen 7 5800X3D 8-Core Processor","logical_cpus":"16","memory_total_bytes":"16730972160","os":"linux","virtualization":"wsl2"},"workload":{"corpus":{"bytes":{"value":2915273.0,"unit":"byte"},"files":{"value":301.0,"unit":"count"}}},"parameters":{"jobs":"4","mode":"normalize"}} -->
 ### `asset-store.audio-normalizer-batch` · профиль `warm`
 
-Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 3 из 3, прогревов 0.
+Последнее подтверждённое измерение: 2026-11-06 UTC · `asset-store` 0.1.0 · hyperfine 2.0.0 · benchmark-runner 0.1.0 · r1 · warm · online · итог `success`: успешных прогонов 10 из 10, прогревов 0.
 
 | Факт окружения | Значение |
 |---|---|
@@ -493,14 +493,14 @@ cargo run -p benchmark-runner -- run asset-store.audio-normalizer-batch --profil
 
 | Метрика | Scope / источник | Среднее ± σ | Медиана | Мин–макс | n |
 |---|---|---|---|---|---|
-| `time_wall_clock@command` | command / hyperfine | 318.58 ms ± 11.19 ms | 320.54 ms | 306.54 ms – 328.67 ms | 3 |
-| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 145.11 ms ± 19.16 ms | 137.55 ms | 130.88 ms – 166.89 ms | 3 |
-| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 134.61 ms ± 14.89 ms | 136.93 ms | 118.69 ms – 148.21 ms | 3 |
-| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 47.91 MiB ± 208.19 KiB | 47.81 MiB | 47.79 MiB – 48.15 MiB | 3 |
-| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 284.33 ms ± 5.87 ms | 283.7 ms | 278.8 ms – 290.5 ms | 3 |
-| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 18.43 MiB ± 122.57 KiB | 18.48 MiB | 18.29 MiB – 18.52 MiB | 3 |
-| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.85 ядра ± 0.05 ядра | 0.86 ядра | 0.8 ядра – 0.89 ядра | 3 |
-| `disk_usage@path/workspace` | path / filesystem | 4.39 MiB ± 0 B | 4.39 MiB | 4.39 MiB – 4.39 MiB | 3 |
+| `time_wall_clock@command` | command / hyperfine | 182.03 ms ± 8.85 ms | 178.99 ms | 169.2 ms – 201.14 ms | 10 |
+| `time_user@process-tree-waited` | process-tree-waited / hyperfine | 86.85 ms ± 9.43 ms | 86.76 ms | 71.32 ms – 101.9 ms | 10 |
+| `time_system@process-tree-waited` | process-tree-waited / hyperfine | 73.45 ms ± 7.98 ms | 73.75 ms | 59.99 ms – 84.97 ms | 10 |
+| `memory_peak_resident@largest-process-in-tree` | largest-process-in-tree / hyperfine | 47.89 MiB ± 206.19 KiB | 47.87 MiB | 47.55 MiB – 48.19 MiB | 10 |
+| `cpu_time_cgroup@cgroup` | cgroup / cgroup-v2 | 164.03 ms ± 5.52 ms | 161.63 ms | 159.14 ms – 174.31 ms | 10 |
+| `memory_peak_cgroup@cgroup` | cgroup / cgroup-v2 | 17.79 MiB ± 259.8 KiB | 17.79 MiB | 17.4 MiB – 18.22 MiB | 10 |
+| `cpu_utilization_mean@cgroup` | cgroup / cgroup-v2 | 0.83 ядра ± 0.05 ядра | 0.85 ядра | 0.74 ядра – 0.88 ядра | 10 |
+| `disk_usage@path/workspace` | path / filesystem | 4.39 MiB ± 0 B | 4.39 MiB | 4.39 MiB – 4.39 MiB | 10 |
 
 ★ Эталонное окружение задают аппаратные и платформенные факты и факты сопоставимости сценария; при обновлении снимок из другого окружения или на другом оборудовании прежний молча не заменяет. Значения — наблюдение этого окружения, а не норматив для других систем и не порог CI.
 <!-- /benchmark-snapshot -->
