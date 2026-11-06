@@ -12,8 +12,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::normalizer::{
-    self, GateDecision, GateOutcome, Mode, NormalizationResult, NormalizerProfile, Plan, Toolchain,
-    Variant,
+    self, GateDecision, GateOutcome, LEGACY_RESULT_SCHEMA_VERSION, Mode, NormalizationResult,
+    NormalizerProfile, Plan, RESULT_SCHEMA_VERSION, Toolchain, Variant,
 };
 use super::{Pronunciation, technical_validator_identity};
 use crate::hashing::sha256_hex;
@@ -21,6 +21,22 @@ use crate::{AssetError, AssetRecord, AssetStore, ErrorCode, LifecycleState, Prov
 
 pub const DERIVED_SOURCE_KIND: &str = "audio_derivative";
 pub const DERIVATION_KIND: &str = "balanced_normalizer";
+
+/// Схема новых свидетельств: решение и отпечаток конфигурации — по схеме
+/// результата [`RESULT_SCHEMA_VERSION`], решение QualityGate строго согласовано.
+pub const DERIVATION_SCHEMA_VERSION: u32 = 2;
+/// Прежние свидетельства: отпечаток по схеме результата 1, допускается
+/// прежний `REVIEW_REQUIRED` с явным `gate_overridden`. Только чтение.
+pub const LEGACY_DERIVATION_SCHEMA_VERSION: u32 = 1;
+
+/// Схема результата, по правилам которой проверяется свидетельство версии.
+fn result_schema_of(derivation_schema: u32) -> Option<u32> {
+    match derivation_schema {
+        DERIVATION_SCHEMA_VERSION => Some(RESULT_SCHEMA_VERSION),
+        LEGACY_DERIVATION_SCHEMA_VERSION => Some(LEGACY_RESULT_SCHEMA_VERSION),
+        _ => None,
+    }
+}
 
 fn invalid(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::InvalidIdentity, message)
@@ -67,7 +83,32 @@ impl AudioDerivation {
         record_sha: &str,
         provenance: &Provenance,
     ) -> Result<(), AssetError> {
-        if self.schema_version != 1
+        let Some(result_schema) = result_schema_of(self.schema_version) else {
+            return Err(AssetError::new(
+                ErrorCode::UnsupportedSchemaVersion,
+                "неподдерживаемая версия свидетельства производного MP3",
+            ));
+        };
+        let gate_ok = match result_schema {
+            RESULT_SCHEMA_VERSION => {
+                self.gate.validate(result_schema, self.mode).is_ok()
+                    && !self.gate_overridden
+                    && self.gate.proposed_variant == Some(Variant::Processed)
+            }
+            _ => {
+                self.gate.validate(result_schema, self.mode).is_ok()
+                    && match self.gate.outcome {
+                        GateOutcome::Accept | GateOutcome::AcceptWithLimitations => {
+                            self.gate.proposed_variant == Some(Variant::Processed)
+                                && !self.gate_overridden
+                        }
+                        // Прежнее свидетельство: допускалось только с явным флагом.
+                        GateOutcome::ReviewRequired => self.gate_overridden,
+                        _ => false,
+                    }
+            }
+        };
+        if !gate_ok
             || self.kind != DERIVATION_KIND
             || self.mode != Mode::Normalize
             || !valid_sha(&self.source_sha256)
@@ -75,19 +116,14 @@ impl AudioDerivation {
             || self.source_sha256 == record_sha
             || provenance.source_kind != DERIVED_SOURCE_KIND
             || provenance.source_name != source_name(&self.source_sha256)
-            || normalizer::config_sha256(&self.profile, self.mode, &self.toolchain)
-                != self.config_sha256
+            || normalizer::config_sha256_for(
+                result_schema,
+                &self.profile,
+                self.mode,
+                &self.toolchain,
+            ) != self.config_sha256
             || self.profile.validate().is_err()
             || !self.gate.post_qc_verified
-            || self.gate.proposed_variant.is_none()
-            || !match self.gate.outcome {
-                GateOutcome::Accept | GateOutcome::AcceptWithLimitations => {
-                    self.gate.proposed_variant == Some(Variant::Processed) && !self.gate_overridden
-                }
-                // Прежнее свидетельство: допускалось только с явным флагом.
-                GateOutcome::ReviewRequired => self.gate_overridden,
-                _ => false,
-            }
         {
             return Err(invalid(
                 "неполное или противоречивое свидетельство производного MP3",
@@ -226,6 +262,9 @@ fn resume_publication(
 /// Как [`publish`], но сообщает, была ли публикация уже зафиксирована.
 pub fn publish_with_outcome(request: PublishRequest<'_>) -> Result<PublishOutcome, AssetError> {
     let result = request.result;
+    // Решение, собранное или изменённое вне штатного `process`, проверяется
+    // до любых действий с хранилищем.
+    result.validate()?;
     let output = result
         .output
         .as_ref()
@@ -266,6 +305,14 @@ pub fn publish_with_outcome(request: PublishRequest<'_>) -> Result<PublishOutcom
     if current.sha256 == output.sha256 {
         return resume_publication(&request, current);
     }
+    // Новая замена — только по результату текущей схемы: результат прежней
+    // схемы годится лишь для завершения уже зафиксированной публикации.
+    if result.schema_version != RESULT_SCHEMA_VERSION {
+        return Err(AssetError::new(
+            ErrorCode::InvalidTransition,
+            "результат прежней схемы не публикуется заново: выполните normalize текущей версией",
+        ));
+    }
     if current.sha256 != result.input.sha256 || current.sha256 != request.replace_expected_sha256 {
         return Err(AssetError::new(
             ErrorCode::IdentityConflict,
@@ -287,7 +334,7 @@ pub fn publish_with_outcome(request: PublishRequest<'_>) -> Result<PublishOutcom
         ));
     }
     let derivation = AudioDerivation {
-        schema_version: 1,
+        schema_version: DERIVATION_SCHEMA_VERSION,
         kind: DERIVATION_KIND.into(),
         source_sha256: result.input.sha256.clone(),
         source_provenance: current.provenance.clone(),
@@ -350,8 +397,12 @@ fn result_profile(
 ) -> Result<NormalizerProfile, AssetError> {
     if profile.id != result.profile.id
         || profile.version != result.profile.version
-        || normalizer::config_sha256(profile, result.mode, &result.toolchain)
-            != result.config_sha256
+        || normalizer::config_sha256_for(
+            result.schema_version,
+            profile,
+            result.mode,
+            &result.toolchain,
+        ) != result.config_sha256
     {
         return Err(invalid(
             "профиль не соответствует отпечатку конфигурации результата",
@@ -487,5 +538,190 @@ mod tests {
         let verified = publish(false).unwrap();
         assert!(verified.already_published);
         assert_eq!(verified.record.lifecycle, LifecycleState::Verified);
+    }
+
+    /// Исторический отпечаток, зафиксированный при выпуске схемы 1 для
+    /// профиля Balanced v1 и `balanced-analyzer/2` (см. тест отпечатков
+    /// нормализатора): не пересчитывается новым кодом.
+    const LEGACY_CONFIG_SHA256: &str =
+        "02012b1f1e1aa825e510d9f938147ed78d9340647fbda43c962c4e4d6020da6f";
+
+    fn legacy_derivation(request: &Pronunciation) -> (AudioDerivation, String, Provenance) {
+        let source = "a".repeat(64);
+        let output = "b".repeat(64);
+        let profile = NormalizerProfile::balanced();
+        let plan = crate::pronunciation::normalizer::prepare(
+            &Pcm {
+                sample_rate: 44100,
+                channels: 1,
+                samples: vec![0.1; 44100],
+            },
+            &profile,
+        )
+        .plan;
+        let derivation: AudioDerivation = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "kind": DERIVATION_KIND,
+            "source_sha256": source,
+            "source_provenance": {"source_kind": "local_import", "source_name": "こいつ.mp3"},
+            "source_metadata": request,
+            "output_sha256": output,
+            "mode": "normalize",
+            "profile": profile,
+            "toolchain": {
+                "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5",
+                "encoder": "libmp3lame sha256:0123456789abcdef",
+                "analyzer": "balanced-analyzer/2"
+            },
+            "config_sha256": LEGACY_CONFIG_SHA256,
+            "plan": plan,
+            "gate": {
+                "outcome": "REVIEW_REQUIRED",
+                "proposed_variant": "processed",
+                "post_qc_verified": true,
+                "reasons": [{"code": "uncertain_leading_boundary", "severity": "review", "message": "…"}],
+                "unresolved": []
+            },
+            "gate_overridden": true
+        }))
+        .unwrap();
+        let provenance = Provenance {
+            source_kind: DERIVED_SOURCE_KIND.into(),
+            source_name: source_name(&source),
+        };
+        (derivation, output, provenance)
+    }
+
+    /// Свидетельство схемы 1 с прежним ручным override читается и
+    /// проверяется по своим правилам, а те же данные под новой схемой или
+    /// без флага override отвергаются.
+    #[test]
+    fn legacy_derivation_keeps_historic_verification() {
+        let request = Pronunciation::new("こいつ", "こいつ").unwrap();
+        let (legacy, output, provenance) = legacy_derivation(&request);
+        legacy.validate(&request, &output, &provenance).unwrap();
+        let mut not_overridden = legacy.clone();
+        not_overridden.gate_overridden = false;
+        assert!(
+            not_overridden
+                .validate(&request, &output, &provenance)
+                .is_err()
+        );
+        let mut as_current = legacy.clone();
+        as_current.schema_version = DERIVATION_SCHEMA_VERSION;
+        assert!(as_current.validate(&request, &output, &provenance).is_err());
+        let mut tampered = legacy.clone();
+        tampered.profile.trim.guard_leading_ms = 70.0;
+        assert!(tampered.validate(&request, &output, &provenance).is_err());
+        let mut unknown = legacy;
+        unknown.schema_version = 3;
+        assert_eq!(
+            unknown
+                .validate(&request, &output, &provenance)
+                .unwrap_err()
+                .code,
+            ErrorCode::UnsupportedSchemaVersion
+        );
+    }
+
+    /// Публикуется только согласованное решение текущей схемы, выбравшее
+    /// обработанный вариант после пройденного пост-QC; противоречивое,
+    /// отброшенное пост-QC, прогнозное и прежнее решения отвергаются до
+    /// изменения хранилища.
+    #[test]
+    fn publication_refuses_inconsistent_discarded_and_legacy_results() {
+        use crate::pronunciation::normalizer::{
+            NextAction, PostQcOutcome, conclude_post_qc, config_sha256_for,
+        };
+        let ws = TempWorkspace::create("derivation-gate").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(ws.path().join("store")),
+            PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let request = Pronunciation::new("こいつ", "こいつ").unwrap();
+        let bytes = source_mp3();
+        let original = import_bytes(&store, &request, &bytes, "こいつ.mp3", None).unwrap();
+        let profile = NormalizerProfile::balanced();
+        let tools = Toolchain::detect().unwrap();
+        let processed = process(&bytes, &profile, Mode::Normalize, &tools).unwrap();
+        assert_eq!(processed.result.gate.outcome, GateOutcome::Accept);
+        let output = processed.output_bytes.clone().unwrap();
+        let publish = |result: &NormalizationResult| {
+            publish_with_outcome(PublishRequest {
+                store: &store,
+                request: &request,
+                result,
+                profile: &profile,
+                output_bytes: &output,
+                source_bytes: &bytes,
+                replace_expected_sha256: &original.sha256,
+                allow_replace_verified: false,
+            })
+        };
+        let mut contradictory = processed.result.clone();
+        contradictory.gate.next_action = Some(NextAction::DiscardInput);
+        let discarded = {
+            let mut pending = processed.result.clone();
+            pending.output = None;
+            pending.post_qc = None;
+            pending.gate.post_qc_verified = false;
+            let mut qc = processed.result.post_qc.clone().unwrap();
+            qc.checks[0].passed = false;
+            qc.passed = false;
+            conclude_post_qc(
+                pending,
+                processed.result.gate.reasons.clone(),
+                PostQcOutcome {
+                    qc,
+                    output_probe: None,
+                    encoded: output.clone(),
+                    source_analysis: processed.result.analysis.as_ref().unwrap(),
+                },
+                &profile,
+            )
+            .result
+        };
+        assert_eq!(discarded.gate.proposed_variant, Some(Variant::Original));
+        // Даже подменённый выбор варианта не обходит проваленный пост-QC.
+        let mut forged_discarded = discarded.clone();
+        forged_discarded.gate.outcome = GateOutcome::Accept;
+        forged_discarded.gate.proposed_variant = Some(Variant::Processed);
+        forged_discarded.gate.next_action = Some(NextAction::UseProcessed);
+        forged_discarded
+            .gate
+            .reasons
+            .retain(|r| !r.code.starts_with("post_qc_"));
+        let mut legacy = processed.result.clone();
+        legacy.schema_version = LEGACY_RESULT_SCHEMA_VERSION;
+        legacy.config_sha256 = config_sha256_for(
+            LEGACY_RESULT_SCHEMA_VERSION,
+            &profile,
+            Mode::Normalize,
+            &tools,
+        );
+        let forecast = process(&bytes, &profile, Mode::Analyze, &tools)
+            .unwrap()
+            .result;
+        for (label, result, code) in [
+            ("contradictory", &contradictory, ErrorCode::InvalidIdentity),
+            ("discarded", &discarded, ErrorCode::InvalidTransition),
+            (
+                "forged_discarded",
+                &forged_discarded,
+                ErrorCode::InvalidIdentity,
+            ),
+            ("legacy", &legacy, ErrorCode::InvalidTransition),
+            ("forecast", &forecast, ErrorCode::InvalidIdentity),
+        ] {
+            assert_eq!(publish(result).unwrap_err().code, code, "{label}");
+            let current = current_record(&store, &request).unwrap().unwrap();
+            assert_eq!(current.sha256, original.sha256, "{label}");
+        }
+        let published = publish(&processed.result).unwrap();
+        let derivation = &published.record.domain_metadata.as_ref().unwrap()["derivation"];
+        assert_eq!(derivation["schema_version"], DERIVATION_SCHEMA_VERSION);
+        assert_eq!(derivation["gate"]["next_action"], "use_processed");
+        assert_eq!(derivation["config_sha256"], processed.result.config_sha256);
     }
 }

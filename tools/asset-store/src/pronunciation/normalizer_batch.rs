@@ -140,6 +140,11 @@ pub struct NormalizerBatch {
     pub mode: RunMode,
     pub profile: NormalizerProfile,
     pub toolchain: Toolchain,
+    /// Схема результатов пакета: по ней вычислен `config_sha256`. В
+    /// состояниях прежних версий поля нет — это схема 1; такие пакеты
+    /// читаются (статус, отчёт), но не продолжаются.
+    #[serde(default = "legacy_result_schema")]
+    pub result_schema_version: u32,
     pub config_sha256: String,
     /// Канонический абсолютный корень входа; хранится только в приватном рабочем каталоге.
     pub input_root: String,
@@ -163,8 +168,17 @@ impl RuntimeBatchState for NormalizerBatch {
             return Err(corrupt("неподдерживаемая схема пакета нормализации"));
         }
         self.profile.validate()?;
-        if normalizer::config_sha256(&self.profile, self.mode, &self.toolchain)
-            != self.config_sha256
+        if ![
+            normalizer::RESULT_SCHEMA_VERSION,
+            normalizer::LEGACY_RESULT_SCHEMA_VERSION,
+        ]
+        .contains(&self.result_schema_version)
+            || normalizer::config_sha256_for(
+                self.result_schema_version,
+                &self.profile,
+                self.mode,
+                &self.toolchain,
+            ) != self.config_sha256
             || !valid_sha(&self.inventory_sha256)
             || !Path::new(&self.input_root).is_absolute()
             || self.limits.jobs == 0
@@ -179,6 +193,10 @@ impl RuntimeBatchState for NormalizerBatch {
         }
         Ok(())
     }
+}
+
+fn legacy_result_schema() -> u32 {
+    normalizer::LEGACY_RESULT_SCHEMA_VERSION
 }
 
 fn valid_sha(sha: &str) -> bool {
@@ -796,6 +814,7 @@ pub fn start(request: StartRequest<'_>) -> Result<NormalizerBatch, AssetError> {
         mode: request.mode,
         profile: request.profile,
         toolchain,
+        result_schema_version: normalizer::RESULT_SCHEMA_VERSION,
         config_sha256,
         input_root: request
             .input_root
@@ -910,6 +929,12 @@ impl ResultCache {
                 "результат кэша не соответствует своему ключу".into(),
             ));
         }
+        if let Err(error) = result.validate() {
+            return Ok(CacheLookup::Stale(format!(
+                "результат кэша противоречив: {}",
+                error.message
+            )));
+        }
         if let Some(output) = &result.output {
             match self.variant_bytes(output) {
                 Ok(bytes) if bytes.len() as u64 == output.byte_length => {}
@@ -944,6 +969,7 @@ impl ResultCache {
         mut result: NormalizationResult,
         output: Option<&[u8]>,
     ) -> Result<NormalizationResult, AssetError> {
+        result.validate()?;
         if let (Some(bytes), Some(reference)) = (output, result.output.as_mut()) {
             let existing = RuntimeBlobRef {
                 sha256: sha256_hex(bytes),
@@ -1088,6 +1114,11 @@ fn resume_with(
         .ok_or_else(|| invalid("пакет нормализации отсутствует"))?;
     if batch.cancelled {
         return Err(invalid("пакет нормализации отменён"));
+    }
+    if batch.result_schema_version != normalizer::RESULT_SCHEMA_VERSION {
+        return Err(invalid(
+            "пакет создан с прежней схемой результатов: его можно читать, но не продолжать; начните новый пакет",
+        ));
     }
     let _lease = runtime.execution_lease()?;
     // Снимок файлов инструментов до определения окружения: каждый результат
@@ -1449,6 +1480,59 @@ pub fn open_input_root(batch: &NormalizerBatch) -> Result<File, AssetError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Состояние пакета прежней версии без `result_schema_version` читается
+    /// как схема 1 и проверяется её отпечатком; с отпечатком другой схемы оно
+    /// противоречиво.
+    #[test]
+    fn legacy_batch_state_is_verified_by_its_result_schema() {
+        let profile = NormalizerProfile::balanced();
+        let toolchain = Toolchain {
+            ffmpeg: "ffmpeg test".into(),
+            ffprobe: String::new(),
+            encoder: "libmp3lame sha256:0000000000000000".into(),
+            analyzer: "balanced-analyzer/2".into(),
+        };
+        let legacy_config = normalizer::config_sha256_for(
+            normalizer::LEGACY_RESULT_SCHEMA_VERSION,
+            &profile,
+            RunMode::Normalize,
+            &toolchain,
+        );
+        let mut value = serde_json::json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "batch_id": "old",
+            "revision": 3,
+            "cancelled": false,
+            "mode": "normalize",
+            "profile": profile,
+            "toolchain": toolchain,
+            "config_sha256": legacy_config,
+            "input_root": "/corpus",
+            "inventory_sha256": "c".repeat(64),
+            "limits": {"jobs": 1, "max_files": 10, "max_total_bytes": 1024},
+            "progress": Progress::default(),
+        });
+        let batch: NormalizerBatch = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            batch.result_schema_version,
+            normalizer::LEGACY_RESULT_SCHEMA_VERSION
+        );
+        batch.validate().unwrap();
+        value["config_sha256"] = serde_json::json!(normalizer::config_sha256(
+            &profile,
+            RunMode::Normalize,
+            &toolchain
+        ));
+        let mismatched: NormalizerBatch = serde_json::from_value(value.clone()).unwrap();
+        assert!(mismatched.validate().is_err());
+        value["result_schema_version"] = serde_json::json!(normalizer::RESULT_SCHEMA_VERSION);
+        let current: NormalizerBatch = serde_json::from_value(value.clone()).unwrap();
+        current.validate().unwrap();
+        value["result_schema_version"] = serde_json::json!(7);
+        let unknown: NormalizerBatch = serde_json::from_value(value).unwrap();
+        assert!(unknown.validate().is_err());
+    }
 
     /// Файл, растущий во время инвентаризации, не читается до конца: чтение
     /// прекращается, как только превышен остаток `--max-total-bytes`.

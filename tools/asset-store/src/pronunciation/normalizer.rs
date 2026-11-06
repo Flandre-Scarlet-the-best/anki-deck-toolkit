@@ -22,7 +22,25 @@ use crate::hashing::sha256_hex;
 use crate::{AssetError, ErrorCode};
 
 pub const PROFILE_SCHEMA_VERSION: u32 = 1;
-pub const RESULT_SCHEMA_VERSION: u32 = 1;
+/// Схема новых результатов. `2`: исходы с ограничениями, прогноз
+/// `PROCESSING_PLANNED` режима analyze и обязательный `next_action`,
+/// однозначно согласованный с исходом и выбранным вариантом.
+pub const RESULT_SCHEMA_VERSION: u32 = 2;
+/// Прежняя схема (`REVIEW_REQUIRED`, `next_action` мог отсутствовать):
+/// результаты и свидетельства этой версии только читаются и проверяются по
+/// своим правилам, новые не создаются.
+pub const LEGACY_RESULT_SCHEMA_VERSION: u32 = 1;
+
+fn unsupported_result_schema() -> AssetError {
+    AssetError::new(
+        ErrorCode::UnsupportedSchemaVersion,
+        "неподдерживаемая версия схемы результата нормализации",
+    )
+}
+
+fn inconsistent_gate(message: impl Into<String>) -> AssetError {
+    AssetError::new(ErrorCode::InvalidIdentity, message)
+}
 
 fn invalid_profile(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::InvalidIdentity, message)
@@ -380,11 +398,24 @@ impl Toolchain {
 /// версии 2 со структурным gapless-тегом.
 pub const ANALYZER_VERSION: &str = "balanced-analyzer/3";
 
-/// Отпечаток всего, что определяет результат для данного входа.
+/// Отпечаток всего, что определяет новый результат для данного входа.
 pub fn config_sha256(profile: &NormalizerProfile, mode: Mode, toolchain: &Toolchain) -> String {
+    config_sha256_for(RESULT_SCHEMA_VERSION, profile, mode, toolchain)
+}
+
+/// Отпечаток по правилам указанной версии схемы результата. Версия входит в
+/// хешируемые данные, поэтому сохранённые результаты и свидетельства
+/// проверяются по своей версии: отпечатки прежней схемы не пересчитываются
+/// новыми правилами и не теряют проверяемость.
+pub fn config_sha256_for(
+    schema_version: u32,
+    profile: &NormalizerProfile,
+    mode: Mode,
+    toolchain: &Toolchain,
+) -> String {
     sha256_hex(
         serde_json::to_vec(&serde_json::json!({
-            "schema_version": RESULT_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "mode": mode,
             "profile": profile,
             "toolchain": toolchain,
@@ -671,6 +702,10 @@ pub enum GateOutcome {
     OriginalWithLimitations,
     /// Сигнал технически непригоден: MP3 не прошёл проверку, нет сигнала.
     Reject,
+    /// Прогноз режима analyze: исходнику нужна обработка, но обработанного
+    /// MP3 ещё нет и пост-QC не выполнялся. Это не решение о байтах:
+    /// вариант не выбран, следующий шаг — `normalize`.
+    ProcessingPlanned,
     /// Только чтение прежних результатов и свидетельств (`balanced-analyzer/2`
     /// и раньше): новые результаты этот исход не выдают.
     ReviewRequired,
@@ -678,12 +713,13 @@ pub enum GateOutcome {
 
 impl GateOutcome {
     /// Исходы, которые выдаёт текущая версия QualityGate.
-    pub const ALL: [GateOutcome; 5] = [
+    pub const ALL: [GateOutcome; 6] = [
         GateOutcome::Accept,
         GateOutcome::AcceptWithLimitations,
         GateOutcome::KeepOriginal,
         GateOutcome::OriginalWithLimitations,
         GateOutcome::Reject,
+        GateOutcome::ProcessingPlanned,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -692,6 +728,7 @@ impl GateOutcome {
             Self::KeepOriginal => "KEEP_ORIGINAL",
             Self::OriginalWithLimitations => "ORIGINAL_WITH_LIMITATIONS",
             Self::Reject => "REJECT",
+            Self::ProcessingPlanned => "PROCESSING_PLANNED",
             Self::ReviewRequired => "REVIEW_REQUIRED",
         }
     }
@@ -711,14 +748,18 @@ pub enum NextAction {
     DeferredAutomaticProcessing,
     /// Вход технически непригоден и в дальнейшую обработку не идёт.
     DiscardInput,
+    /// Прогноз analyze: выбор байтов возможен только после `normalize` с
+    /// пост-QC фактического результата.
+    RunNormalize,
 }
 
 impl NextAction {
-    pub const ALL: [NextAction; 4] = [
+    pub const ALL: [NextAction; 5] = [
         NextAction::UseProcessed,
         NextAction::UseOriginal,
         NextAction::DeferredAutomaticProcessing,
         NextAction::DiscardInput,
+        NextAction::RunNormalize,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -726,6 +767,7 @@ impl NextAction {
             Self::UseOriginal => "use_original",
             Self::DeferredAutomaticProcessing => "deferred_automatic_processing",
             Self::DiscardInput => "discard_input",
+            Self::RunNormalize => "run_normalize",
         }
     }
 }
@@ -801,12 +843,14 @@ fn rejection(code: &str, origin: ReasonOrigin, message: impl Into<String>) -> Re
 #[serde(deny_unknown_fields)]
 pub struct GateDecision {
     pub outcome: GateOutcome,
-    /// Какие байты использовать дальше; `None` только у `REJECT`.
+    /// Какие байты использовать дальше; `None` у `REJECT` и у прогноза
+    /// `PROCESSING_PLANNED`, где байты ещё не выбраны.
     pub proposed_variant: Option<Variant>,
-    /// Следующий автоматический шаг. У прежних результатов отсутствует.
+    /// Следующий автоматический шаг. У результатов схемы 1 мог отсутствовать.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_action: Option<NextAction>,
-    /// `false` в режиме analyze: исход — план без проверки фактического результата.
+    /// Пост-QC фактически декодированного результата выполнялся (пройден он
+    /// или нет — см. `post_qc.passed`). `false` в режиме analyze.
     pub post_qc_verified: bool,
     pub reasons: Vec<Reason>,
     /// Что этот этап принципиально не проверяет.
@@ -879,6 +923,114 @@ pub struct NormalizationResult {
 pub struct Processed {
     pub result: NormalizationResult,
     pub output_bytes: Option<Vec<u8>>,
+}
+
+impl GateDecision {
+    /// Согласованность решения по правилам версии схемы результата: исход,
+    /// выбранный вариант, следующее действие, состояние пост-QC и важность
+    /// причин. Граница доверия для решений, созданных не штатным
+    /// [`process`]: прочитанных, изменённых или собранных программно.
+    pub fn validate(&self, schema_version: u32, mode: Mode) -> Result<(), AssetError> {
+        match schema_version {
+            RESULT_SCHEMA_VERSION => self.validate_current(mode),
+            LEGACY_RESULT_SCHEMA_VERSION => self.validate_legacy(),
+            _ => Err(unsupported_result_schema()),
+        }
+    }
+
+    fn has(&self, severity: Severity) -> bool {
+        self.reasons.iter().any(|r| r.severity == severity)
+    }
+
+    fn validate_current(&self, mode: Mode) -> Result<(), AssetError> {
+        let limited = self.has(Severity::Limitation);
+        let verified_normalize = mode == Mode::Normalize && self.post_qc_verified;
+        let (variant, consistent) = match self.outcome {
+            GateOutcome::Accept => (Some(Variant::Processed), !limited && verified_normalize),
+            GateOutcome::AcceptWithLimitations => {
+                (Some(Variant::Processed), limited && verified_normalize)
+            }
+            GateOutcome::KeepOriginal => {
+                (Some(Variant::Original), !limited && !self.post_qc_verified)
+            }
+            GateOutcome::OriginalWithLimitations => (Some(Variant::Original), limited),
+            GateOutcome::Reject => (None, !self.post_qc_verified),
+            GateOutcome::ProcessingPlanned => {
+                (None, mode == Mode::Analyze && !self.post_qc_verified)
+            }
+            GateOutcome::ReviewRequired => {
+                return Err(inconsistent_gate(
+                    "REVIEW_REQUIRED допустим только в результатах прежней схемы",
+                ));
+            }
+        };
+        if !consistent
+            || self.proposed_variant != variant
+            || self.next_action != next_action_for(self.outcome)
+            || self.has(Severity::Review)
+            || self.has(Severity::Reject) != (self.outcome == GateOutcome::Reject)
+        {
+            return Err(inconsistent_gate(format!(
+                "решение QualityGate противоречиво: исход {}, вариант {:?}, действие {:?}, пост-QC {}",
+                self.outcome.as_str(),
+                self.proposed_variant,
+                self.next_action.map(NextAction::as_str),
+                self.post_qc_verified
+            )));
+        }
+        Ok(())
+    }
+
+    /// Схема 1: `REVIEW_REQUIRED` и отсутствующий `next_action` допустимы,
+    /// но выбранный вариант всё равно обязан соответствовать исходу.
+    fn validate_legacy(&self) -> Result<(), AssetError> {
+        let variant_ok = match self.outcome {
+            GateOutcome::Accept | GateOutcome::AcceptWithLimitations => {
+                self.proposed_variant == Some(Variant::Processed)
+            }
+            GateOutcome::KeepOriginal | GateOutcome::OriginalWithLimitations => {
+                self.proposed_variant == Some(Variant::Original)
+            }
+            GateOutcome::Reject => self.proposed_variant.is_none(),
+            GateOutcome::ReviewRequired => self.proposed_variant.is_some(),
+            GateOutcome::ProcessingPlanned => false,
+        };
+        let action_ok =
+            self.next_action.is_none() || self.next_action == next_action_for(self.outcome);
+        if !variant_ok || !action_ok {
+            return Err(inconsistent_gate(
+                "решение QualityGate прежней схемы противоречиво",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl NormalizationResult {
+    /// Граница доверия для прочитанного, изменённого или собранного
+    /// результата: поддерживаемая версия схемы, согласованность решения и,
+    /// в текущей схеме, наличие фактических данных, на которые оно ссылается.
+    pub fn validate(&self) -> Result<(), AssetError> {
+        self.gate.validate(self.schema_version, self.mode)?;
+        if self.schema_version != RESULT_SCHEMA_VERSION {
+            return Ok(());
+        }
+        let qc_passed = self.post_qc.as_ref().is_some_and(|q| q.passed);
+        let consistent = self.gate.post_qc_verified == self.post_qc.is_some()
+            && match self.gate.outcome {
+                GateOutcome::Accept | GateOutcome::AcceptWithLimitations => {
+                    self.output.is_some() && qc_passed
+                }
+                GateOutcome::OriginalWithLimitations => !qc_passed,
+                _ => self.output.is_none() && self.post_qc.is_none(),
+            };
+        if !consistent {
+            return Err(inconsistent_gate(
+                "решение QualityGate не соответствует фактическому результату и пост-QC",
+            ));
+        }
+        Ok(())
+    }
 }
 
 const INFRASTRUCTURE_BLOCKERS: [&str; 4] = [
@@ -1210,7 +1362,7 @@ fn source_reasons(
     }
     if analysis.true_peak_dbtp > profile.loudness.true_peak_ceiling_dbtp {
         reasons.push(reason(
-            "source_true_peak_above_ceiling",
+            SOURCE_PEAK_CODE,
             Severity::Warning,
             "true peak исходника выше потолка профиля",
         ));
@@ -1227,6 +1379,46 @@ fn source_reasons(
             "dc_offset",
             Severity::Warning,
             "заметная постоянная составляющая; этап её не исправляет",
+        ));
+    }
+}
+
+const SOURCE_PEAK_CODE: &str = "source_true_peak_above_ceiling";
+
+/// Сохраняемый исходник выше потолка true peak профиля профилю не
+/// соответствует: диагностическое предупреждение становится ограничением.
+/// Ослаблять запись только ради потолка этап не обязан, поэтому исход —
+/// исходник с ограничением, а не принудительное перекодирование.
+fn original_ceiling_limitation(
+    analysis: &SignalAnalysis,
+    profile: &NormalizerProfile,
+    reasons: &mut Vec<Reason>,
+) {
+    if analysis.true_peak_dbtp > profile.loudness.true_peak_ceiling_dbtp {
+        reasons.retain(|r| r.code != SOURCE_PEAK_CODE);
+        reasons.push(limitation(
+            SOURCE_PEAK_CODE,
+            ReasonOrigin::SourceSignal,
+            "сохраняемый исходник выше потолка true peak профиля; ослабление только ради потолка не выполняется",
+        ));
+    }
+}
+
+/// Обработанный вариант, унаследовавший превышение потолка (пост-QC
+/// допускает его, если операции начинались выше потолка), тоже профилю не
+/// соответствует. Вариант в пределах применимого потолка ограничения не
+/// получает, даже если исходник был выше.
+fn processed_ceiling_limitation(
+    true_peak_dbtp: f64,
+    profile: &NormalizerProfile,
+    reasons: &mut Vec<Reason>,
+) {
+    let limit = profile.loudness.true_peak_ceiling_dbtp + profile.gate.max_true_peak_overshoot_db;
+    if true_peak_dbtp > limit {
+        reasons.push(limitation(
+            "output_true_peak_above_ceiling",
+            ReasonOrigin::SourceSignal,
+            "обработанный вариант выше потолка true peak: исходник уже был выше, ослабление только ради потолка не выполняется",
         ));
     }
 }
@@ -1743,17 +1935,20 @@ pub fn process(
     result.analysis = Some(prepared.analysis.clone());
     result.plan = Some(prepared.plan.clone());
     let mut reasons = prepared.reasons.clone();
-    let mut output_bytes = None;
     let (outcome, variant) = if prepared.rejected {
         route(&reasons, Route::Rejected)
     } else if !prepared.plan.needs_processing {
-        reasons.push(reason(
-            "already_within_profile",
-            Severity::Info,
-            "исходник уже в допусках профиля: перекодирование не нужно",
-        ));
+        original_ceiling_limitation(&prepared.analysis, profile, &mut reasons);
+        if !has_limitation(&reasons) {
+            reasons.push(reason(
+                "already_within_profile",
+                Severity::Info,
+                "исходник уже в допусках профиля: перекодирование не нужно",
+            ));
+        }
         route(&reasons, Route::Unchanged)
     } else if mode == Mode::Analyze {
+        processed_ceiling_limitation(prepared.plan.expected.true_peak_dbtp, profile, &mut reasons);
         route(&reasons, Route::Forecast)
     } else {
         // Частота вывода меняется явным шагом до кодирования: кодировщик и
@@ -1792,6 +1987,7 @@ pub fn process(
                         error.message
                     ),
                 ));
+                original_ceiling_limitation(&prepared.analysis, profile, &mut reasons);
                 let (outcome, variant) = route(&reasons, Route::VariantDiscarded);
                 set_gate(&mut result.gate, outcome, variant);
                 result.gate.reasons = sorted(reasons);
@@ -1820,6 +2016,7 @@ pub fn process(
                         error.message
                     ),
                 ));
+                original_ceiling_limitation(&prepared.analysis, profile, &mut reasons);
                 let (outcome, variant) = route(&reasons, Route::VariantDiscarded);
                 set_gate(&mut result.gate, outcome, variant);
                 result.gate.reasons = sorted(reasons);
@@ -1836,46 +2033,92 @@ pub fn process(
             &encoded,
             profile,
         )?;
-        // Фактическая громкость результата сверяется и с целью: план мог
-        // уложиться в допуск, а декодированный вывод — нет.
-        if let Some(actual) = qc
-            .analysis
-            .as_ref()
-            .and_then(|after| actual_loudness(after, &prepared.plan))
-        {
-            let deviation = profile.loudness.target_lufs - actual;
-            if deviation.abs() > profile.loudness.review_shortfall_db {
-                reasons.push(target_deviation_reason(deviation, "фактически"));
-            }
-        }
-        result.output = Some(OutputRef {
-            sha256: sha256_hex(&encoded),
-            byte_length: encoded.len() as u64,
-            probe: output_probe,
-            storage_path: None,
-        });
-        result.gate.post_qc_verified = true;
-        let passed = qc.passed;
-        reasons.extend(post_qc_reasons(&qc));
-        result.post_qc = Some(qc);
-        // Вариант с проваленным пост-QC остаётся только диагностикой
-        // (сравнение в отчёте): он не предлагается и не публикуется.
-        output_bytes = Some(encoded);
-        route(
-            &reasons,
-            if passed {
-                Route::Verified
-            } else {
-                Route::VariantDiscarded
+        return Ok(conclude_post_qc(
+            result,
+            reasons,
+            PostQcOutcome {
+                qc,
+                output_probe,
+                encoded,
+                source_analysis: &prepared.analysis,
             },
-        )
+            profile,
+        ));
     };
     set_gate(&mut result.gate, outcome, variant);
     result.gate.reasons = sorted(reasons);
     Ok(Processed {
         result,
-        output_bytes,
+        output_bytes: None,
     })
+}
+
+/// Фактический результат кодирования и его пост-QC.
+pub(crate) struct PostQcOutcome<'a> {
+    pub qc: PostQc,
+    pub output_probe: Option<AudioProbe>,
+    pub encoded: Vec<u8>,
+    pub source_analysis: &'a SignalAnalysis,
+}
+
+/// Решение после пост-QC: единственное место, где итог обязательных
+/// проверок выбирает вариант. Вариант с проваленным пост-QC остаётся только
+/// диагностикой (сравнение в отчёте): он не предлагается и не публикуется,
+/// сохраняется исходник с ограничением.
+pub(crate) fn conclude_post_qc(
+    mut result: NormalizationResult,
+    mut reasons: Vec<Reason>,
+    outcome: PostQcOutcome<'_>,
+    profile: &NormalizerProfile,
+) -> Processed {
+    let PostQcOutcome {
+        qc,
+        output_probe,
+        encoded,
+        source_analysis,
+    } = outcome;
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("план есть у закодированного варианта");
+    // Фактическая громкость результата сверяется и с целью: план мог
+    // уложиться в допуск, а декодированный вывод — нет.
+    if let Some(actual) = qc
+        .analysis
+        .as_ref()
+        .and_then(|after| actual_loudness(after, plan))
+    {
+        let deviation = profile.loudness.target_lufs - actual;
+        if deviation.abs() > profile.loudness.review_shortfall_db {
+            reasons.push(target_deviation_reason(deviation, "фактически"));
+        }
+    }
+    let passed = qc.passed;
+    reasons.extend(post_qc_reasons(&qc));
+    let state = if passed {
+        if let Some(after) = &qc.analysis {
+            processed_ceiling_limitation(after.true_peak_dbtp, profile, &mut reasons);
+        }
+        Route::Verified
+    } else {
+        original_ceiling_limitation(source_analysis, profile, &mut reasons);
+        Route::VariantDiscarded
+    };
+    result.output = Some(OutputRef {
+        sha256: sha256_hex(&encoded),
+        byte_length: encoded.len() as u64,
+        probe: output_probe,
+        storage_path: None,
+    });
+    result.gate.post_qc_verified = true;
+    result.post_qc = Some(qc);
+    let (outcome, variant) = route(&reasons, state);
+    set_gate(&mut result.gate, outcome, variant);
+    result.gate.reasons = sorted(reasons);
+    Processed {
+        result,
+        output_bytes: Some(encoded),
+    }
 }
 
 /// Каждая непройденная или неразрешимая обязательная проверка — отдельное
@@ -1909,7 +2152,8 @@ pub enum Route {
     Rejected,
     /// Обработка не нужна: план ничего не меняет.
     Unchanged,
-    /// Режим `analyze`: план без фактического результата.
+    /// Режим `analyze`: план без фактического результата. Даёт прогноз
+    /// `PROCESSING_PLANNED`, а не решение о байтах.
     Forecast,
     /// Вариант получен и прошёл весь обязательный пост-QC.
     Verified,
@@ -1919,8 +2163,9 @@ pub enum Route {
 }
 
 /// Решение QualityGate: исход и выбранные байты. Ограничение никогда не
-/// превращается в `ACCEPT`/`KEEP_ORIGINAL`, а отброшенный вариант — в
-/// выбранный; человек ни в одном исходе не нужен.
+/// превращается в `ACCEPT`/`KEEP_ORIGINAL`, отброшенный вариант — в
+/// выбранный, а прогноз analyze — в решение о несуществующих байтах;
+/// человек ни в одном исходе не нужен.
 pub fn route(reasons: &[Reason], state: Route) -> (GateOutcome, Option<Variant>) {
     let limited = has_limitation(reasons);
     match state {
@@ -1930,10 +2175,11 @@ pub fn route(reasons: &[Reason], state: Route) -> (GateOutcome, Option<Variant>)
             GateOutcome::OriginalWithLimitations,
             Some(Variant::Original),
         ),
-        Route::Forecast | Route::Verified if limited => {
+        Route::Forecast => (GateOutcome::ProcessingPlanned, None),
+        Route::Verified if limited => {
             (GateOutcome::AcceptWithLimitations, Some(Variant::Processed))
         }
-        Route::Forecast | Route::Verified => (GateOutcome::Accept, Some(Variant::Processed)),
+        Route::Verified => (GateOutcome::Accept, Some(Variant::Processed)),
     }
 }
 
@@ -1946,6 +2192,7 @@ pub fn next_action_for(outcome: GateOutcome) -> Option<NextAction> {
             Some(NextAction::DeferredAutomaticProcessing)
         }
         GateOutcome::Reject => Some(NextAction::DiscardInput),
+        GateOutcome::ProcessingPlanned => Some(NextAction::RunNormalize),
         GateOutcome::ReviewRequired => None,
     }
 }
@@ -2800,43 +3047,86 @@ mod tests {
     }
 
     /// Провал или неразрешимость каждой обязательной проверки пост-QC даёт
-    /// отдельное ограничение `post_qc_<проверка>`: вариант отброшен,
-    /// сохраняется исходник, `ACCEPT` невозможен.
+    /// отдельное ограничение `post_qc_<проверка>`, и решение принимает та же
+    /// функция [`conclude_post_qc`], которую вызывает [`process`]: вариант
+    /// отброшен, сохраняется исходник, `ACCEPT` невозможен. Тест падает, если
+    /// связь `qc.passed` → маршрут заменить безусловным `Route::Verified`.
     #[test]
     fn each_failed_mandatory_post_qc_check_discards_the_variant() {
-        let pcm = speech_like(1, false);
+        let tools = Toolchain::detect().expect("для теста нужен FFmpeg");
         let policy = profile();
-        let prepared = prepare(&pcm, &policy);
-        let encoded = mp3(&prepared.processed);
-        let (measured, _) = post_qc(
-            &prepared.processed,
-            &prepared.processed_analysis,
-            &prepared.plan,
-            &encoded,
+        let verified = process(
+            &mp3(&speech_like(1, false)),
             &policy,
+            Mode::Normalize,
+            &tools,
         )
         .unwrap();
+        let measured = verified.result.post_qc.clone().unwrap();
         assert!(measured.passed, "{:#?}", measured.checks);
+        assert_eq!(
+            verified.result.gate.proposed_variant,
+            Some(Variant::Processed)
+        );
+        let encoded = verified.output_bytes.clone().unwrap();
+        let source = verified.result.analysis.clone().unwrap();
+        let output_probe = verified.result.output.as_ref().unwrap().probe.clone();
+        // Состояние результата до решения пост-QC: тот же план и причины.
+        let pending = || {
+            let mut result = verified.result.clone();
+            result.output = None;
+            result.post_qc = None;
+            result.gate.post_qc_verified = false;
+            result
+        };
+        let conclude = |qc: PostQc| {
+            conclude_post_qc(
+                pending(),
+                verified.result.gate.reasons.clone(),
+                PostQcOutcome {
+                    qc,
+                    output_probe: output_probe.clone(),
+                    encoded: encoded.clone(),
+                    source_analysis: &source,
+                },
+                &policy,
+            )
+        };
+        // Контроль: неизменённый пост-QC воспроизводит решение `process`.
+        assert_eq!(conclude(measured.clone()).result, verified.result);
         for index in 0..measured.checks.len() {
             let mut qc = measured.clone();
             qc.checks[index].passed = false;
             qc.passed = false;
             let reasons = post_qc_reasons(&qc);
             assert_eq!(reasons.len(), 1);
-            assert_eq!(reasons[0].code, format!("post_qc_{}", qc.checks[index].id));
+            let code = format!("post_qc_{}", qc.checks[index].id);
+            assert_eq!(reasons[0].code, code);
             assert_eq!(reasons[0].origin, Some(ReasonOrigin::PostQc));
-            let mut all = prepared.reasons.clone();
-            all.extend(reasons);
+            let failed = conclude(qc);
+            let gate = &failed.result.gate;
             assert_eq!(
-                decision(&all, Route::VariantDiscarded),
+                (gate.outcome, gate.proposed_variant, gate.next_action),
                 (
                     GateOutcome::OriginalWithLimitations,
                     Some(Variant::Original),
-                    NextAction::DeferredAutomaticProcessing
-                )
+                    Some(NextAction::DeferredAutomaticProcessing)
+                ),
+                "{code}"
             );
+            assert!(
+                gate.reasons
+                    .iter()
+                    .any(|r| r.code == code && r.severity == Severity::Limitation),
+                "{code}"
+            );
+            assert!(gate.post_qc_verified);
+            failed.result.validate().unwrap();
+            // Байты остаются только диагностикой для отчёта.
+            assert!(failed.output_bytes.is_some());
         }
         // Нечитаемый результат: все проверки неразрешимы, каждая — ограничение.
+        let prepared = prepare(&speech_like(1, false), &policy);
         let (broken, _) = post_qc(
             &prepared.processed,
             &prepared.processed_analysis,
@@ -2848,6 +3138,304 @@ mod tests {
         let reasons = post_qc_reasons(&broken);
         assert_eq!(reasons.len(), broken.checks.len());
         assert!(reasons.iter().all(|r| r.severity == Severity::Limitation));
+        assert_eq!(
+            conclude(broken).result.gate.outcome,
+            GateOutcome::OriginalWithLimitations
+        );
+    }
+
+    /// Прогноз analyze — не решение о байтах: варианта нет, следующий шаг —
+    /// normalize, а исполнительные исходы для него противоречивы.
+    #[test]
+    fn analyze_forecast_never_claims_processed_bytes() {
+        let tools = Toolchain::detect().expect("для теста нужен FFmpeg");
+        let forecast = process(
+            &mp3(&speech_like(1, false)),
+            &profile(),
+            Mode::Analyze,
+            &tools,
+        )
+        .unwrap();
+        let result = &forecast.result;
+        assert!(forecast.output_bytes.is_none() && result.output.is_none());
+        assert!(result.post_qc.is_none() && !result.gate.post_qc_verified);
+        assert_eq!(
+            (
+                result.gate.outcome,
+                result.gate.proposed_variant,
+                result.gate.next_action
+            ),
+            (
+                GateOutcome::ProcessingPlanned,
+                None,
+                Some(NextAction::RunNormalize)
+            )
+        );
+        result.validate().unwrap();
+        for (outcome, variant) in [
+            (GateOutcome::Accept, Some(Variant::Processed)),
+            (GateOutcome::AcceptWithLimitations, Some(Variant::Processed)),
+        ] {
+            let mut forged = result.clone();
+            set_gate(&mut forged.gate, outcome, variant);
+            assert!(forged.validate().is_err(), "{outcome:?}");
+        }
+        // Прогноз в режиме normalize тоже противоречив.
+        let mut normalize = result.clone();
+        normalize.mode = Mode::Normalize;
+        assert!(normalize.validate().is_err());
+    }
+
+    /// Решение из публичных десериализуемых полей проверяется целиком:
+    /// исход, вариант, действие, пост-QC и важность причин.
+    #[test]
+    fn inconsistent_gate_combinations_are_rejected() {
+        let tools = Toolchain::detect().expect("для теста нужен FFmpeg");
+        let verified = process(
+            &mp3(&speech_like(1, false)),
+            &profile(),
+            Mode::Normalize,
+            &tools,
+        )
+        .unwrap()
+        .result;
+        verified.validate().unwrap();
+        type Forge = Box<dyn Fn(&mut NormalizationResult)>;
+        let forged: Vec<(&str, Forge)> = vec![
+            (
+                "discard_input",
+                Box::new(|r| r.gate.next_action = Some(NextAction::DiscardInput)),
+            ),
+            (
+                "use_original",
+                Box::new(|r| r.gate.next_action = Some(NextAction::UseOriginal)),
+            ),
+            ("no_action", Box::new(|r| r.gate.next_action = None)),
+            (
+                "original_variant",
+                Box::new(|r| r.gate.proposed_variant = Some(Variant::Original)),
+            ),
+            ("no_variant", Box::new(|r| r.gate.proposed_variant = None)),
+            (
+                "not_verified",
+                Box::new(|r| r.gate.post_qc_verified = false),
+            ),
+            (
+                "qc_failed",
+                Box::new(|r| r.post_qc.as_mut().unwrap().passed = false),
+            ),
+            ("no_output", Box::new(|r| r.output = None)),
+            (
+                "review_outcome",
+                Box::new(|r| {
+                    set_gate(
+                        &mut r.gate,
+                        GateOutcome::ReviewRequired,
+                        Some(Variant::Processed),
+                    )
+                }),
+            ),
+            (
+                "keep_original",
+                Box::new(|r| {
+                    set_gate(
+                        &mut r.gate,
+                        GateOutcome::KeepOriginal,
+                        Some(Variant::Original),
+                    )
+                }),
+            ),
+            (
+                "reject_reason",
+                Box::new(|r| {
+                    r.gate
+                        .reasons
+                        .push(rejection("no_signal", ReasonOrigin::SourceSignal, "…"))
+                }),
+            ),
+            (
+                "hidden_limitation",
+                Box::new(|r| {
+                    r.gate
+                        .reasons
+                        .push(limitation("encode_failed", ReasonOrigin::Encoder, "…"))
+                }),
+            ),
+            ("unsupported_schema", Box::new(|r| r.schema_version = 3)),
+        ];
+        for (label, forge) in forged {
+            let mut result = verified.clone();
+            forge(&mut result);
+            assert!(result.validate().is_err(), "{label}");
+        }
+    }
+
+    /// Отпечаток схемы 1 воспроизводится побайтно: сравнение — с
+    /// зафиксированным историческим значением, а не с пересчётом тем же
+    /// новым кодом. Новая схема даёт другой отпечаток.
+    #[test]
+    fn legacy_result_fingerprints_stay_reproducible() {
+        // Профиль Balanced v1 в точности как при выпуске схемы 1: значения
+        // заморожены, чтобы будущие изменения профиля по умолчанию не
+        // подменяли историческую проверку.
+        let frozen: NormalizerProfile = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "id": "balanced", "version": 1,
+            "analysis": {"frame_ms": 10.0, "signal_floor_dbfs": -70.0, "min_duration_ms": 120.0,
+                "internal_pause_report_ms": 150.0, "long_internal_pause_ms": 1200.0, "dc_offset_warning": 0.02},
+            "trim": {"enabled": true, "silence_threshold_dbfs": -50.0, "weak_sound_margin_db": 10.0,
+                "min_edge_silence_ms": 150.0, "guard_leading_ms": 60.0, "guard_trailing_ms": 80.0,
+                "fade_ms": 5.0, "uncertain_floor_margin_db": 6.0, "min_speech_margin_db": 15.0},
+            "loudness": {"target_lufs": -23.0, "gain_tolerance_db": 1.0, "max_gain_db": 12.0,
+                "max_attenuation_db": 20.0, "true_peak_ceiling_dbtp": -2.0, "encode_headroom_db": 0.5,
+                "max_noise_floor_after_dbfs": -55.0, "review_shortfall_db": 6.0, "min_integrated_blocks": 3},
+            "output": {"sample_rate": {"mode": "source"}, "channels": "source",
+                "identical_channels_max_db": -60.0, "encoder": {"mode": "vbr", "quality": 2}},
+            "gate": {"max_true_peak_overshoot_db": 0.5, "max_duration_error_ms": 10.0,
+                "max_active_change_ms": 30.0, "max_active_change_ratio": 0.05, "min_codec_snr_db": 15.0,
+                "max_loudness_error_db": 1.0, "max_new_clipped_samples": 0, "review_clip_ratio": 0.0005,
+                "max_alignment_lag_ms": 5.0}
+        }))
+        .unwrap();
+        let analyzer2: Toolchain = serde_json::from_value(serde_json::json!({
+            "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5",
+            "encoder": "libmp3lame sha256:0123456789abcdef",
+            "analyzer": "balanced-analyzer/2"
+        }))
+        .unwrap();
+        let analyzer3 = Toolchain {
+            ffprobe: "ffprobe version 6.1.1-3ubuntu5".into(),
+            analyzer: "balanced-analyzer/3".into(),
+            ..analyzer2.clone()
+        };
+        assert_eq!(
+            config_sha256_for(
+                LEGACY_RESULT_SCHEMA_VERSION,
+                &frozen,
+                Mode::Normalize,
+                &analyzer2
+            ),
+            "02012b1f1e1aa825e510d9f938147ed78d9340647fbda43c962c4e4d6020da6f"
+        );
+        assert_eq!(
+            config_sha256_for(
+                LEGACY_RESULT_SCHEMA_VERSION,
+                &frozen,
+                Mode::Normalize,
+                &analyzer3
+            ),
+            "48999c7c10ad28a44d39bfd34768560ef6b9b8894eda8edb0a03eadb24c9e286"
+        );
+        assert_ne!(
+            config_sha256(&frozen, Mode::Normalize, &analyzer3),
+            "48999c7c10ad28a44d39bfd34768560ef6b9b8894eda8edb0a03eadb24c9e286"
+        );
+        assert_eq!(
+            config_sha256(&frozen, Mode::Normalize, &analyzer3),
+            config_sha256_for(RESULT_SCHEMA_VERSION, &frozen, Mode::Normalize, &analyzer3)
+        );
+    }
+
+    /// Сохраняемый исходник выше потолка true peak — исходник с
+    /// ограничением, а не `KEEP_ORIGINAL`; исходник в допусках остаётся
+    /// `KEEP_ORIGINAL`, а обработанный вариант в пределах потолка не
+    /// наследует ограничение за превышение на входе.
+    #[test]
+    fn true_peak_ceiling_follows_the_selected_variant() {
+        let tools = Toolchain::detect().expect("для теста нужен FFmpeg");
+        let tone = signal(&[(1500.0, Kind::Tone, -20.0)]);
+        let mut peaky = tone.clone();
+        for i in (4410..tone.samples.len()).step_by(4410) {
+            peaky.samples[i] = 0.95;
+        }
+        let run = |pcm: &Pcm, policy: &NormalizerProfile| {
+            process(&mp3(pcm), policy, Mode::Normalize, &tools)
+                .unwrap()
+                .result
+        };
+        // Цель — фактическая громкость самого сигнала: усиление не нужно.
+        let target = |pcm: &Pcm| {
+            let mut policy = profile();
+            policy.loudness.target_lufs = analyze_pcm(pcm, &policy).integrated_lufs.unwrap();
+            policy
+        };
+        let within = run(&tone, &target(&tone));
+        assert_eq!(
+            within.gate.outcome,
+            GateOutcome::KeepOriginal,
+            "{:#?}",
+            within.gate
+        );
+        assert_eq!(within.gate.next_action, Some(NextAction::UseOriginal));
+
+        let policy = target(&peaky);
+        let above = run(&peaky, &policy);
+        assert!(
+            !above.plan.as_ref().unwrap().needs_processing,
+            "{:#?}",
+            above.plan
+        );
+        assert!(
+            above.analysis.as_ref().unwrap().true_peak_dbtp
+                > policy.loudness.true_peak_ceiling_dbtp
+        );
+        assert_eq!(
+            (
+                above.gate.outcome,
+                above.gate.proposed_variant,
+                above.gate.next_action
+            ),
+            (
+                GateOutcome::OriginalWithLimitations,
+                Some(Variant::Original),
+                Some(NextAction::DeferredAutomaticProcessing)
+            ),
+            "{:#?}",
+            above.gate
+        );
+        let peak = above
+            .gate
+            .reasons
+            .iter()
+            .find(|r| r.code == SOURCE_PEAK_CODE)
+            .unwrap();
+        assert_eq!(peak.severity, Severity::Limitation);
+        assert!(
+            above
+                .gate
+                .reasons
+                .iter()
+                .all(|r| r.code != "already_within_profile")
+        );
+        above.validate().unwrap();
+
+        // Громкий исходник выше потолка ослабляется ради цели громкости:
+        // результат ниже потолка — `ACCEPT`, превышение входа — лишь диагностика.
+        let loud = signal(&[
+            (200.0, Kind::Silence, 0.0),
+            (1200.0, Kind::Tone, -1.0),
+            (200.0, Kind::Silence, 0.0),
+        ]);
+        let attenuated = run(&loud, &profile());
+        assert_eq!(
+            attenuated.gate.outcome,
+            GateOutcome::Accept,
+            "{:#?}",
+            attenuated.gate
+        );
+        let warning = attenuated
+            .gate
+            .reasons
+            .iter()
+            .find(|r| r.code == SOURCE_PEAK_CODE)
+            .unwrap();
+        assert_eq!(warning.severity, Severity::Warning);
+        assert!(
+            attenuated
+                .gate
+                .reasons
+                .iter()
+                .all(|r| r.code != "output_true_peak_above_ceiling")
+        );
     }
 
     /// Прежний результат с `REVIEW_REQUIRED` и причиной `review` читается, а
@@ -2865,6 +3453,14 @@ mod tests {
         assert_eq!(gate.outcome, GateOutcome::ReviewRequired);
         assert_eq!(gate.next_action, None);
         assert_eq!(gate.reasons[0].severity, Severity::Review);
+        // Допустим только по правилам схемы 1, а не как форма нового решения.
+        gate.validate(LEGACY_RESULT_SCHEMA_VERSION, Mode::Normalize)
+            .unwrap();
+        assert!(
+            gate.validate(RESULT_SCHEMA_VERSION, Mode::Normalize)
+                .is_err()
+        );
+        assert!(gate.validate(3, Mode::Normalize).is_err());
         assert!(!GateOutcome::ALL.contains(&GateOutcome::ReviewRequired));
         for outcome in GateOutcome::ALL {
             assert!(next_action_for(outcome).is_some(), "{outcome:?}");

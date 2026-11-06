@@ -174,15 +174,26 @@ pub struct Summary {
     pub config_sha256: String,
     pub inventory_sha256: String,
     pub inventory: InventorySummary,
+    /// `true`, только если у каждого уникального входа есть результат.
+    pub complete: bool,
+    /// Уникальные входы с результатом и без него:
+    /// `results + missing_results = inventory.unique_sha256`.
     pub results: usize,
     pub missing_results: usize,
-    /// Исходы по уникальным входам (SHA-256).
+    /// Читаемые физические файлы, SHA которых уже имеет результат, и файлы,
+    /// ожидающие обработки (дубли считаются по файлу):
+    /// `results_files + missing_results_files = inventory.readable_files`.
+    pub results_files: usize,
+    pub missing_results_files: usize,
+    /// Исходы по уникальным входам (SHA-256); сумма равна `results`.
     pub outcomes: BTreeMap<String, usize>,
     /// Те же исходы по физическим файлам: дубли байтов получают решение
-    /// своего SHA, поэтому сумма равна `inventory.readable_files`.
+    /// своего SHA. Сумма равна `results_files`, а у полного пакета —
+    /// `inventory.readable_files`; ожидающие файлы сюда не входят.
     pub outcomes_by_files: BTreeMap<String, usize>,
     pub proposed_variants: BTreeMap<String, usize>,
-    /// Следующее автоматическое действие по уникальным входам и по файлам.
+    /// Следующее автоматическое действие по уникальным входам и по файлам;
+    /// суммы те же, что у `outcomes` и `outcomes_by_files`.
     pub next_actions: BTreeMap<String, usize>,
     pub next_actions_by_files: BTreeMap<String, usize>,
     pub reasons: BTreeMap<String, usize>,
@@ -328,8 +339,17 @@ pub fn summarize(
         })
         .collect();
     let unique = groups.len();
+    let readable_files: usize = groups.values().map(Vec::len).sum();
+    let results_files: usize = results
+        .iter()
+        .map(|r| r.input.sha256.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|sha| groups.get(sha).map_or(0, Vec::len))
+        .sum();
+    let missing_results = unique.saturating_sub(results.len());
     Summary {
-        schema_version: 2,
+        schema_version: 3,
         batch_id: batch.batch_id.clone(),
         mode: batch.mode,
         profile: batch.profile.clone(),
@@ -338,11 +358,7 @@ pub fn summarize(
         inventory_sha256: batch.inventory_sha256.clone(),
         inventory: InventorySummary {
             mp3_files: inventory.entries.len(),
-            readable_files: inventory
-                .entries
-                .iter()
-                .filter(|e| e.sha256.is_some())
-                .count(),
+            readable_files,
             unreadable_files: inventory
                 .entries
                 .iter()
@@ -354,8 +370,11 @@ pub fn summarize(
             total_bytes: inventory.entries.iter().map(|e| e.byte_length).sum(),
             skipped,
         },
+        complete: missing_results == 0,
         results: results.len(),
-        missing_results: unique.saturating_sub(results.len()),
+        missing_results,
+        results_files,
+        missing_results_files: readable_files.saturating_sub(results_files),
         outcomes,
         outcomes_by_files,
         proposed_variants: variants,
@@ -1160,6 +1179,8 @@ fn write_contents(
             "mode": batch.mode,
             "outcomes": summary.outcomes,
             "missing_results": summary.missing_results,
+            "missing_results_files": summary.missing_results_files,
+            "readable_files": summary.inventory.readable_files,
             "unique_inputs": summary.inventory.unique_sha256,
             "rows": rows,
         });
@@ -1199,7 +1220,7 @@ button { font:inherit; padding:4px 10px; border-radius:6px; border:1px solid var
 .row { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
 .top { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
 .badge { font-weight:600; padding:1px 8px; border-radius:10px; color:#fff; font-size:12px; }
-.ACCEPT { background:var(--accept);} .KEEP_ORIGINAL { background:var(--keep);} .ACCEPT_WITH_LIMITATIONS, .ORIGINAL_WITH_LIMITATIONS { background:var(--limited);} .REVIEW_REQUIRED { background:var(--review);} .REJECT { background:var(--reject);}
+.ACCEPT { background:var(--accept);} .KEEP_ORIGINAL { background:var(--keep);} .ACCEPT_WITH_LIMITATIONS, .ORIGINAL_WITH_LIMITATIONS { background:var(--limited);} .REVIEW_REQUIRED, .PROCESSING_PLANNED { background:var(--review);} .REJECT { background:var(--reject);}
 .name { font-weight:600; overflow-wrap:anywhere; }
 .players { display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap:8px; margin:8px 0; }
 .players audio { width:100%; }
@@ -1226,6 +1247,7 @@ button { font:inherit; padding:4px 10px; border-radius:6px; border:1px solid var
   <label><input type="checkbox" value="ORIGINAL_WITH_LIMITATIONS" checked> ORIGINAL_WITH_LIMITATIONS</label>
   <label><input type="checkbox" value="REVIEW_REQUIRED" checked> REVIEW_REQUIRED (прежние версии)</label>
   <label><input type="checkbox" value="REJECT" checked> REJECT</label>
+  <label><input type="checkbox" value="PROCESSING_PLANNED" checked> PROCESSING_PLANNED (прогноз analyze)</label>
   <select id="reason"><option value="">любая причина</option></select>
   <input type="search" id="search" placeholder="поиск по имени">
   <label><input type="checkbox" id="unrated"> без оценки</label>
@@ -1272,7 +1294,7 @@ window.addEventListener("storage", event => {
 if (data.missing_results > 0) {
   const note = document.getElementById("incomplete");
   note.hidden = false;
-  note.textContent = "Пакет обработан не полностью: нет результатов для " + data.missing_results + " из " + data.unique_inputs + " входов. Отчёт не описывает весь корпус.";
+  note.textContent = "Пакет обработан не полностью: нет результатов для " + data.missing_results + " из " + data.unique_inputs + " уникальных входов (" + data.missing_results_files + " из " + data.readable_files + " файлов ожидают обработки). Отчёт не описывает весь корпус.";
 }
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
 document.getElementById("meta").textContent = data.batch_id + " · " + data.profile.id + " v" + data.profile.version + " · " + data.mode + " · " + data.rows.length + " записей";
