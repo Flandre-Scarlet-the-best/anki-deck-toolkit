@@ -219,6 +219,17 @@ fn analyze_mode_plans_without_encoding_and_marks_unverified() {
     assert!(processed.output_bytes.is_none());
     assert!(!processed.result.gate.post_qc_verified);
     assert!(processed.result.post_qc.is_none());
+    assert!(processed.result.output.is_none());
+    assert_eq!(
+        processed.result.gate.outcome,
+        GateOutcome::ProcessingPlanned
+    );
+    assert_eq!(processed.result.gate.proposed_variant, None);
+    assert_eq!(
+        processed.result.gate.next_action,
+        Some(asset_store::pronunciation::normalizer::NextAction::RunNormalize)
+    );
+    processed.result.validate().unwrap();
     assert!(processed.result.plan.unwrap().needs_processing);
 }
 
@@ -234,8 +245,13 @@ fn cli_analyze_and_trial_never_write_next_to_the_source() {
     let before = snapshot(&input);
     let analyzed = cli(ws.path(), &["analyze", "--file", source.to_str().unwrap()]);
     assert!(analyzed.status.success());
-    assert_eq!(json(&analyzed)["result"]["gate"]["outcome"], "ACCEPT");
-    assert_eq!(json(&analyzed)["result"]["gate"]["post_qc_verified"], false);
+    // Прогноз, а не решение о несуществующих байтах.
+    let gate = &json(&analyzed)["result"]["gate"];
+    assert_eq!(gate["outcome"], "PROCESSING_PLANNED");
+    assert_eq!(gate["next_action"], "run_normalize");
+    assert!(gate["proposed_variant"].is_null());
+    assert_eq!(gate["post_qc_verified"], false);
+    assert_eq!(json(&analyzed)["result"]["schema_version"], 2);
     let beside = input.join("padded.normalized.mp3");
     let refused = cli(
         ws.path(),
@@ -393,6 +409,23 @@ fn batch_processes_directory_once_with_duplicates_unicode_and_failures() {
     assert_eq!(summary["inventory"]["skipped"]["symlink"], 1);
     assert_eq!(summary["inventory"]["skipped"]["unsupported_extension"], 1);
     assert_eq!(summary["missing_results"], 0);
+    // Полный пакет: файлы с результатом — весь читаемый инвентарь.
+    assert_eq!(summary["complete"], true);
+    assert_eq!(summary["missing_results_files"], 0);
+    assert_eq!(
+        summary["results_files"],
+        summary["inventory"]["readable_files"]
+    );
+    let by_files: u64 = summary["outcomes_by_files"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|v| v.as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        Some(by_files),
+        summary["inventory"]["readable_files"].as_u64()
+    );
     assert!(summary["metrics"]["duration_ms"]["quantiles"]["p50"].is_number());
     let html = fs::read_to_string(report_dir.join("report.html")).unwrap();
     assert!(!html.contains("<img src=x"));
@@ -1578,7 +1611,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
             source_bytes: padded(),
             replace_expected_sha256: replace,
             allow_replace_verified: allow,
-            override_gate: false,
         })
     };
     // Подтверждённый ресурс не заменяется без явного флага; превью его не трогает.
@@ -1652,7 +1684,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         source_bytes: &output,
         replace_expected_sha256: &derived.sha256,
         allow_replace_verified: true,
-        override_gate: false,
     })
     .unwrap_err();
     assert_eq!(refused.code, ErrorCode::InvalidTransition);
@@ -1669,7 +1700,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         source_bytes: good(),
         replace_expected_sha256: &derived.sha256,
         allow_replace_verified: true,
-        override_gate: false,
     })
     .unwrap_err();
     assert_eq!(kept_refused.code, ErrorCode::InvalidIdentity);
@@ -1684,7 +1714,6 @@ fn publish_requires_cas_keeps_provenance_and_never_inherits_approval() {
         source_bytes: padded(),
         replace_expected_sha256: &original.sha256,
         allow_replace_verified: true,
-        override_gate: false,
     })
     .unwrap_err();
     assert_eq!(unknown_refused.code, ErrorCode::InvalidTransition);
@@ -1731,7 +1760,6 @@ fn derived_record_keeps_forvo_provenance_of_the_source() {
         source_bytes: padded(),
         replace_expected_sha256: &source.sha256,
         allow_replace_verified: false,
-        override_gate: false,
     })
     .unwrap();
     let derivation = &derived.domain_metadata.as_ref().unwrap()["derivation"];
@@ -1845,4 +1873,72 @@ fn sample_strata_count_only_selectable_items() {
     assert!(report::review_summary(&batch, &results, &decisions, Some(&sample)).is_ok());
     let refused = report::review_summary(&batch, &results, &decisions, Some(&foreign)).unwrap_err();
     assert!(refused.message.contains("инвентаризации"), "{refused:?}");
+}
+
+/// Неполный пакет не выдаёт частичные результаты за полный учёт: на каждом
+/// шаге файлы с результатом и ожидающие файлы вместе дают весь читаемый
+/// инвентарь, дубли считаются по файлам, а уникальные входы — отдельно.
+#[test]
+fn incomplete_batch_summary_separates_counted_and_pending_files() {
+    let ws = TempWorkspace::create("normalizer-partial-summary").unwrap();
+    let input = corpus(ws.path());
+    let workspace = ws.path().join("work");
+    fs::create_dir(&workspace).unwrap();
+    nbatch::start(nbatch::StartRequest {
+        batch_id: "p",
+        workspace: &workspace,
+        input_root: &fs::canonicalize(&input).unwrap(),
+        mode: Mode::Analyze,
+        profile: NormalizerProfile::balanced(),
+        limits: nbatch::Limits {
+            jobs: 1,
+            max_files: 20,
+            max_total_bytes: 1 << 22,
+        },
+    })
+    .unwrap();
+    let stop = AtomicBool::new(false);
+    let total = |map: &serde_json::Value| -> u64 {
+        map.as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_u64().unwrap())
+            .sum()
+    };
+    let mut steps = 0;
+    loop {
+        let (batch, inventory) = nbatch::load(&workspace, "p").unwrap();
+        let cache = nbatch::ResultCache::open(&workspace).unwrap();
+        let results = nbatch::collect_results(&cache, &batch, &inventory).unwrap();
+        drop(cache);
+        let summary = serde_json::to_value(
+            asset_store::pronunciation::normalizer_report::summarize(&batch, &inventory, &results),
+        )
+        .unwrap();
+        let n = |key: &str| summary[key].as_u64().unwrap();
+        let readable = summary["inventory"]["readable_files"].as_u64().unwrap();
+        let unique = summary["inventory"]["unique_sha256"].as_u64().unwrap();
+        // В корпусе одна пара дублей: лишний файл приходится либо на учтённые,
+        // либо на ожидающие, но никогда не теряется и не считается дважды.
+        assert_eq!(readable, unique + 1);
+        assert_eq!(n("results") + n("missing_results"), unique);
+        assert_eq!(n("results_files") + n("missing_results_files"), readable);
+        assert_eq!(
+            (n("results_files") - n("results"))
+                + (n("missing_results_files") - n("missing_results")),
+            1
+        );
+        assert_eq!(total(&summary["outcomes"]), n("results"));
+        assert_eq!(total(&summary["outcomes_by_files"]), n("results_files"));
+        assert_eq!(total(&summary["next_actions_by_files"]), n("results_files"));
+        assert_eq!(summary["complete"], n("missing_results") == 0);
+        if n("missing_results") == 0 {
+            assert_eq!(n("results_files"), readable);
+            assert!(steps > 1, "пакет должен пройти через неполные состояния");
+            break;
+        }
+        steps += 1;
+        assert!(steps <= unique, "пакет не завершается");
+        nbatch::resume(&workspace, "p", None, Some(1), &stop).unwrap();
+    }
 }

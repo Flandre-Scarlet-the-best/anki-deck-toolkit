@@ -1,5 +1,5 @@
 //! Подкоманды `pronunciation-assets normalizer`: анализ, пробная и пакетная
-//! нормализация, отчёты, выборка для прослушивания и явная публикация.
+//! нормализация, отчёты, необязательная выборка для сравнения и явная публикация.
 //!
 //! Ни одна подкоманда не обращается к Forvo, браузеру или сети. Каталог входа
 //! только читается; всё вывод пишется в явно заданные пользователем места.
@@ -125,7 +125,7 @@ pub(crate) enum NormalizerAction {
         #[arg(long, default_value_t = 400)]
         media_limit: usize,
     },
-    /// Воспроизводимая стратифицированная выборка для прослушивания.
+    /// Воспроизводимая стратифицированная выборка для необязательного сравнения.
     BatchSample {
         #[arg(long)]
         batch_id: String,
@@ -173,9 +173,6 @@ pub(crate) enum NormalizerAction {
         replace_expected_sha256: String,
         #[arg(long)]
         allow_replace_verified: bool,
-        /// Разрешает вариант с исходом REVIEW_REQUIRED после прослушивания.
-        #[arg(long)]
-        override_gate: bool,
     },
 }
 
@@ -548,7 +545,6 @@ pub(crate) fn execute(
             reading,
             replace_expected_sha256,
             allow_replace_verified,
-            override_gate,
         } => {
             let (workspace, batch, inventory) = open_batch(workspace, batch_id, protected)?;
             let request = Pronunciation::new(surface, reading)?;
@@ -591,7 +587,6 @@ pub(crate) fn execute(
                 source_bytes: &source_bytes,
                 replace_expected_sha256,
                 allow_replace_verified: *allow_replace_verified,
-                override_gate: *override_gate,
             })?;
             let record = published.record;
             // Источник истины — запись хранилища и его журнал; файл

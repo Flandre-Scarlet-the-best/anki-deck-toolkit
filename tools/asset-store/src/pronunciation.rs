@@ -21,7 +21,7 @@ use crate::*;
 
 #[cfg(test)]
 pub(crate) use probe::FULL_PROBES;
-pub use probe::{AudioProbe, probe_mp3};
+pub use probe::{AudioProbe, GaplessEvidence, PROBE_SCHEMA_VERSION, probe_mp3};
 pub const MAX_AUDIO_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_DURATION_SECONDS: f64 = 30.0;
 
@@ -92,9 +92,17 @@ impl Pronunciation {
     }
 }
 
+/// Текущая версия технической проверки MP3. Версия 2 принимает gapless-MP3,
+/// чьё расхождение кадровой и декодированной длины точно объясняет
+/// структурно проверенный тег Xing/Info/LAME. Свидетельство версии 1 остаётся
+/// допустимыми данными, но доверия не даёт: запись снова проверяется
+/// штатным `validate` той же пары/SHA без изменения решения человека.
 pub fn technical_validator_identity() -> ValidatorIdentity {
-    ValidatorIdentity::new("pronunciation-mp3-technical", "1").expect("постоянная версия")
+    ValidatorIdentity::new("pronunciation-mp3-technical", "2").expect("постоянная версия")
 }
+
+/// Вид свидетельства текущей версии технической проверки.
+pub const TECHNICAL_EVIDENCE_KIND: &str = "mp3_technical_v2";
 
 #[derive(Debug, Clone, Copy)]
 pub struct PronunciationDomainPolicy;
@@ -232,7 +240,7 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
                     serde_json::from_value::<AudioProbe>(details["probe"].clone()).ok()
                 })
                 .filter(|probe| {
-                    probe.schema_version == 1
+                    probe.schema_version == PROBE_SCHEMA_VERSION
                         && probe.codec == "mp3"
                         && probe.sha256 == record.sha256
                         && probe.byte_length == record.byte_length
@@ -250,6 +258,12 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
                             - probe.decoded_samples as f64 / probe.sample_rate as f64)
                             .abs()
                             < 0.000_001
+                        && probe.gapless.as_ref().is_none_or(|tag| {
+                            tag.xing_frames.checked_add(1) == Some(probe.frames)
+                                && tag.expected_decoded_samples(probe::samples_per_frame(
+                                    probe.sample_rate,
+                                )) == Some(probe.decoded_samples)
+                        })
                 });
             if probe.is_none() {
                 return Err(AssetError::new(
@@ -264,7 +278,7 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
                 SemanticStatus::Uncertain | SemanticStatus::Corrupt
             ) || !validation.is_valid_for_sha(&record.sha256)
                 || validation.evidence.len() != 1
-                || validation.evidence[0].kind != "mp3_technical_v1"
+                || validation.evidence[0].kind != TECHNICAL_EVIDENCE_KIND
                 || validation.evidence[0]
                     .details
                     .as_ref()
@@ -319,7 +333,7 @@ impl SemanticValidator for AudioTechnicalValidator {
             Ok(SemanticDecision::new(
                 SemanticStatus::Uncertain,
                 vec![ValidationEvidence {
-                    kind: "mp3_technical_v1".into(),
+                    kind: TECHNICAL_EVIDENCE_KIND.into(),
                     summary:
                         "MP3 декодирован; фонетическое соответствие требует прослушивания человеком"
                             .into(),
