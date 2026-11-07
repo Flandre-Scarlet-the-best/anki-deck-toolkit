@@ -293,11 +293,14 @@ def validate_coderabbit(content: str) -> list[str]:
         completed = True
     if not completed:
         errors.append("В разделе CodeRabbit отсутствует строка завершённой итерации")
-    # Строка итерации после разрыва уже не входит в накопительную таблицу GFM.
+    # После разрыва отклоняем вероятные продолжения таблицы, включая строки
+    # без внешних «|» и повреждённый reviewed HEAD. Обычный текст с одиночным
+    # разделителем вне таблицы сам по себе продолжением таблицы не является.
     for line in lines[end:]:
         row = table_row(line)
-        if row and ITERATION_CELL.match(row[0]):
-            errors.append(f"Строка итерации CodeRabbit оторвана от накопительной таблицы: {line.strip()}")
+        if row and (line.lstrip().startswith("|") or len(row) == len(CODERABBIT_HEADER)
+                    or re.match(r"^[1-9]\d*\s*·", row[0])):
+            errors.append(f"Строка CodeRabbit оторвана от накопительной таблицы: {line.strip()}")
     return errors
 
 
@@ -392,12 +395,6 @@ def validate(body: str) -> list[str]:
             errors.append(f"Раздел содержит только заглушку: ## {name}")
         elif name == PERFORMANCE and content.strip() and names.count(PERFORMANCE) == 1:
             errors.extend(validate_performance(content))
-    if CODERABBIT in names:
-        if names.count(CODERABBIT) > 1:
-            errors.append("Раздел CodeRabbit повторяется")
-        for name, content in blocks:
-            if name == CODERABBIT:
-                errors.extend(validate_coderabbit(content))
     return errors
 
 

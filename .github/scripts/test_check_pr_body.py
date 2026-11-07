@@ -9,7 +9,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_pr_body import is_automation_pr, validate
+from check_pr_body import is_automation_pr, validate, validate_coderabbit
+from check_coderabbit_comment import visible_comment
+
+
+def validate_comment_table(content):
+    return validate_coderabbit(visible_comment(content))
 
 HEADINGS = (
     "Цель",
@@ -128,7 +133,8 @@ class PrBodyContractTests(unittest.TestCase):
 
     def test_coderabbit_table_in_fence_is_not_accepted(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\n```markdown\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| 1 · x | — | — | 0 | clean | x |\n```"
-        self.assertTrue(any("таблицы" in e for e in validate(body)))
+        self.assertEqual(validate(body), [])
+        self.assertTrue(any("таблицы" in e for e in validate_comment_table(body)))
 
     def test_duplicate_and_reordered_headings(self):
         body = valid_body() + "\n\n## Цель\nПовторный раздел."
@@ -142,19 +148,21 @@ class PrBodyContractTests(unittest.TestCase):
 
     def test_conditional_coderabbit_table(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\nПроверено."
-        self.assertTrue(any("таблицы" in e for e in validate(body)))
-        body += "\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 замечаний | clean | `def` |"
         self.assertEqual(validate(body), [])
+        self.assertTrue(any("таблицы" in e for e in validate_comment_table(body)))
+        body += "\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 · `abcdef0` | — | — | 0 замечаний | clean | `def` |"
+        self.assertEqual(validate_comment_table(body), [])
 
     def test_coderabbit_row_requires_reviewed_sha(self):
         body = valid_body() + "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n| 1 | — | — | 0 замечаний | clean | unknown |"
-        self.assertTrue(any("строка" in e for e in validate(body)))
+        self.assertTrue(any("строка" in e for e in validate_comment_table(body)))
+        self.assertEqual(validate(body), [])
 
     def test_coderabbit_row_requires_filled_cells(self):
         # Строка из одних разделителей не является записью disposition.
         table = "\n\n## CodeRabbit review и disposition\n| Итерация / reviewed HEAD | Уровень | Путь | Влияние | Решение | Исправление |\n| --- | --- | --- | --- | --- | --- |\n"
-        self.assertTrue(any("строка" in e for e in validate(valid_body() + table + "| 1 · `abcdef0` | | | | | |")))
-        self.assertEqual(validate(valid_body() + table + "| 1 · `abcdef0` | — | — | 0 замечаний | clean | `abcdef0` |"), [])
+        self.assertTrue(any("строка" in e for e in validate_comment_table(table + "| 1 · `abcdef0` | | | | | |")))
+        self.assertEqual(validate_comment_table(table + "| 1 · `abcdef0` | — | — | 0 замечаний | clean | `abcdef0` |"), [])
 
     def test_nested_list_fences_do_not_supply_evidence(self):
         # Пример внутри пункта списка — код, а не разделы и не таблица body.
@@ -164,13 +172,26 @@ class PrBodyContractTests(unittest.TestCase):
             for indent in ("    ", "     ", "\t"):
                 with self.subTest(marker=marker, indent=indent):
                     rows = "\n".join(indent + line for line in (CR_HEADER, CR_DELIMITER, CR_ROW))
-                    errors = validate(coderabbit("- нет таблицы", f"{indent}{marker}md", f"{indent}<!-- `пример`", rows, f"{indent}{marker}"))
+                    errors = validate_comment_table(coderabbit("- нет таблицы", f"{indent}{marker}md", f"{indent}<!-- `пример`", rows, f"{indent}{marker}"))
                     self.assertTrue(any("заголовок" in e for e in errors), errors)
 
     def test_coderabbit_row_after_gap_is_rejected(self):
         later = "| 2 · `abcdef1` | minor | `a.rs` | эффект | confirmed | `abcdef2` |"
-        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", later))
+        errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", later))
         self.assertTrue(any("оторвана" in e for e in errors), errors)
+
+    def test_coderabbit_prose_with_pipe_after_table_is_not_a_row(self):
+        for prose in ("Итог: см. `a|b`", "Команда: a | b"):
+            with self.subTest(prose=prose):
+                self.assertEqual(validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", prose)), [])
+
+    def test_coderabbit_bare_and_broken_rows_after_gap_are_rejected(self):
+        for row in ("2 · `abcdef1` | minor | path | effect | confirmed | fix",
+                    "2 · `bad` | minor | path | effect | confirmed | fix",
+                    "2 · `bad` | обрыв"):
+            with self.subTest(row=row):
+                errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", row))
+                self.assertTrue(any("оторвана" in error for error in errors), errors)
 
     def test_performance_limits_include_heading(self):
         heading = len("## Производительность\n")
@@ -186,52 +207,52 @@ class PrBodyContractTests(unittest.TestCase):
     def test_coderabbit_every_row_is_checked(self):
         # Некорректная строка не прячется за соседней корректной.
         for bad in ("| 2 | major | `a.rs` | x | confirmed | `abcdef0` |", "| 2 · `abcdef0` | major | | | | |"):
-            errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, bad))
+            errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, bad))
             self.assertTrue(any("не связана" in e for e in errors), (bad, errors))
 
     def test_coderabbit_table_requires_delimiter_row(self):
         # Без строки-разделителя GitHub показывает две строки текста, а не таблицу.
-        errors = validate(coderabbit(CR_HEADER, CR_ROW))
+        errors = validate_comment_table(coderabbit(CR_HEADER, CR_ROW))
         self.assertTrue(any("разделителя" in e for e in errors), errors)
-        errors = validate(coderabbit(CR_HEADER, "Пояснение.", CR_DELIMITER, CR_ROW))
+        errors = validate_comment_table(coderabbit(CR_HEADER, "Пояснение.", CR_DELIMITER, CR_ROW))
         self.assertTrue(any("разделителя" in e for e in errors), errors)
 
     def test_coderabbit_delimiter_must_match_header_columns(self):
         for delimiter in ("| --- | --- | --- | --- | --- |", "| --- | --- | --- | --- | --- | --- | --- |", "| --- | --- | x | --- | --- | --- |"):
-            errors = validate(coderabbit(CR_HEADER, delimiter, CR_ROW))
+            errors = validate_comment_table(coderabbit(CR_HEADER, delimiter, CR_ROW))
             self.assertTrue(any("разделителя" in e for e in errors), (delimiter, errors))
 
     def test_coderabbit_rows_must_have_all_columns(self):
         short = "| 1 · `abcdef0` | — | — | clean | `abcdef0` |"
-        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, short))
+        errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, short))
         self.assertTrue(any("5 столбцов" in e for e in errors), errors)
         # Неполная строка не прячется за соседней корректной.
-        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, short))
+        errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, short))
         self.assertTrue(any("5 столбцов" in e for e in errors), errors)
 
     def test_coderabbit_row_must_belong_to_the_table(self):
         # Пустая строка или абзац завершают таблицу: строка итерации после них
         # уже не связана с заголовком.
         for gap in ("", "Отдельный абзац без разделителей"):
-            errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, gap, CR_ROW))
+            errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, gap, CR_ROW))
             self.assertTrue(any("строка завершённой итерации" in e for e in errors), (gap, errors))
         # Отступ в четыре пробела делает строки код-блоком, а не таблицей.
-        errors = validate(coderabbit("    " + CR_HEADER, "    " + CR_DELIMITER, "    " + CR_ROW))
+        errors = validate_comment_table(coderabbit("    " + CR_HEADER, "    " + CR_DELIMITER, "    " + CR_ROW))
         self.assertTrue(any("заголовок" in e for e in errors), errors)
 
     def test_coderabbit_single_cumulative_table(self):
-        errors = validate(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", CR_HEADER, CR_DELIMITER, CR_ROW))
+        errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", CR_HEADER, CR_DELIMITER, CR_ROW))
         self.assertTrue(any("повторяется" in e for e in errors), errors)
 
     def test_coderabbit_valid_gfm_variants_are_accepted(self):
         second = "| 2 · `0123456789abcdef0123456789abcdef01234567` | major | `src/a.rs` | потеря данных | confirmed | исправлено `1234567` |"
-        self.assertEqual(validate(coderabbit("Накопительный журнал ревью.", CR_HEADER, CR_DELIMITER, CR_ROW, second, "", "Итог: блокирующих нет.")), [])
+        self.assertEqual(validate_comment_table(coderabbit("Накопительный журнал ревью.", CR_HEADER, CR_DELIMITER, CR_ROW, second, "", "Итог: блокирующих нет.")), [])
         aligned = "|:---|:---:|---:|---|---|---|"
-        self.assertEqual(validate(coderabbit(CR_HEADER, aligned, CR_ROW)), [])
+        self.assertEqual(validate_comment_table(coderabbit(CR_HEADER, aligned, CR_ROW)), [])
         bare = [line.strip().strip("|").strip() for line in (CR_HEADER, CR_DELIMITER, CR_ROW)]
-        self.assertEqual(validate(coderabbit(*bare)), [])
+        self.assertEqual(validate_comment_table(coderabbit(*bare)), [])
         escaped = "| 1 · `abcdef0` | minor | `a\\|b.md` | разметка | false positive | — |"
-        self.assertEqual(validate(coderabbit(CR_HEADER, CR_DELIMITER, escaped)), [])
+        self.assertEqual(validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, escaped)), [])
 
     def test_coderabbit_section_stays_conditional(self):
         self.assertEqual(validate(valid_body()), [])
@@ -361,38 +382,134 @@ class TrustedWorkflowTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", self.yaml)
 
     def test_no_head_code_secrets_or_write_access(self):
-        for forbidden in ("head.sha", "head.ref", "head.repo", "merge_commit_sha", "refs/pull", "secrets.", "github.token", "GITHUB_TOKEN", ": write", "write-all"):
+        for forbidden in ("head.sha", "head.ref", "head.repo", "merge_commit_sha", "refs/pull", "secrets.", ": write", "write-all"):
             self.assertNotIn(forbidden, self.yaml, forbidden)
         permissions = re.search(r"(?m)^permissions:\n((?:[ \t]+.*\n)+)", self.yaml + "\n").group(1)
-        self.assertEqual(permissions.split(), ["contents:", "read"])
+        self.assertEqual(permissions.split(), ["contents:", "read", "pull-requests:", "read"])
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", self.yaml)
+        self.assertIn("PR_NUMBER: ${{ github.event.pull_request.number }}", self.yaml)
 
     def test_runs_validator_from_checked_out_base(self):
         runs = re.findall(r"(?m)^\s+run: (.+)$", self.yaml)
-        self.assertEqual(runs, ['python3 .github/scripts/check_pr_body.py --event-path "$GITHUB_EVENT_PATH"'])
+        self.assertEqual(runs, ['python3 .github/scripts/check_coderabbit_comment.py'])
         self.assertIn("name: Доверенная структура PR", self.yaml)
 
     def test_validator_replaced_in_pr_does_not_change_trusted_result(self):
-        # PR заменяет валидатор безусловным успехом. Доверенный шаг исполняет
-        # команду workflow в рабочей копии base SHA, поэтому невалидное описание
-        # по-прежнему отклоняется; та же команда в рабочей копии head доказывает,
-        # что подмена сработала бы, если бы источником был сам PR.
-        command = re.findall(r"(?m)^\s+run: (.+)$", self.yaml)[0]
-        source = Path(__file__).with_name("check_pr_body.py")
+        # Запускаем ту же точку входа, что workflow, с API в памяти процесса.
+        # Подменённый head также присутствует в PYTHONPATH, но не должен импортироваться.
         with tempfile.TemporaryDirectory() as tmp:
-            base, head = Path(tmp) / "base", Path(tmp) / "head"
-            for root in (base, head):
-                (root / ".github" / "scripts").mkdir(parents=True)
-            shutil.copy(source, base / ".github" / "scripts" / "check_pr_body.py")
-            (head / ".github" / "scripts" / "check_pr_body.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
-            event = Path(tmp) / "event.json"
-            event.write_text(json.dumps({"action": "edited", "pull_request": {"body": "## Цель\nТолько цель.", "user": {"login": "someone"}, "head": {"ref": "feat/x"}}}), encoding="utf-8")
-            env = {"GITHUB_EVENT_PATH": str(event), "PATH": "/usr/bin:/bin"}
-            command = command.replace("python3", shutil.which("python3") or sys.executable, 1)
-            trusted = subprocess.run(command, shell=True, cwd=base, env=env, capture_output=True, text=True)
-            tampered = subprocess.run(command, shell=True, cwd=head, env=env, capture_output=True, text=True)
-        self.assertEqual(trusted.returncode, 1, trusted.stderr)
-        self.assertIn("Отсутствует обязательный заголовок", trusted.stderr)
-        self.assertEqual(tampered.returncode, 0)
+            root = Path(tmp)
+            base_scripts = root / "base" / ".github" / "scripts"
+            head_scripts = root / "head" / ".github" / "scripts"
+            shim = root / "shim"
+            for directory in (base_scripts, head_scripts, shim):
+                directory.mkdir(parents=True)
+            for name in ("check_coderabbit_comment.py", "check_pr_body.py"):
+                for directory in (base_scripts, head_scripts):
+                    shutil.copy(Path(__file__).with_name(name), directory / name)
+
+            # sitecustomize подменяет только транспорт и записывает происхождение
+            # модулей; любой случайный выход в сеть завершается ошибкой.
+            (shim / "sitecustomize.py").write_text('''\
+import atexit
+import io
+import json
+import os
+import socket
+import sys
+import urllib.request
+from pathlib import Path
+
+def no_network(*args, **kwargs):
+    raise AssertionError("network access forbidden")
+socket.socket.connect = no_network
+socket.socket.connect_ex = no_network
+socket.create_connection = no_network
+socket.getaddrinfo = no_network
+
+fixture = json.loads(Path(os.environ["API_FIXTURE"]).read_text(encoding="utf-8"))
+requests = []
+provenance = {}
+class Response(io.BytesIO):
+    status = 200
+    headers = {}
+class Opener:
+    def open(self, request, timeout):
+        provenance["entry"] = getattr(sys.modules["__main__"], "__file__", None)
+        provenance["validator"] = getattr(sys.modules.get("check_pr_body"), "__file__", None)
+        url = request.full_url
+        requests.append(url)
+        if request.get_header("Authorization") != "Bearer test-token" or timeout != 30:
+            raise AssertionError("unexpected request")
+        if url.endswith("/pulls/17"):
+            data = fixture["pr"]
+        elif url.endswith("/issues/17/comments?per_page=100&page=1"):
+            data = fixture["comments"]
+        else:
+            raise AssertionError("unexpected API URL: " + url)
+        return Response(json.dumps(data).encode("utf-8"))
+urllib.request.build_opener = lambda *args: Opener()
+
+def record():
+    Path(os.environ["TRACE_PATH"]).write_text(json.dumps({
+        **provenance, "requests": requests,
+    }), encoding="utf-8")
+atexit.register(record)
+''', encoding="utf-8")
+            sha = "a" * 40
+            event = root / "event.json"
+            event.write_text(json.dumps({"repository": {"full_name": "owner/repo"}, "pull_request": {"number": 17, "head": {"sha": sha}}}), encoding="utf-8")
+            fixture = root / "api.json"
+            trace = root / "trace.json"
+            env = {
+                "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(shim) + ":" + str(head_scripts),
+                "GITHUB_REPOSITORY": "owner/repo", "PR_NUMBER": "17", "GITHUB_TOKEN": "test-token",
+                "GITHUB_EVENT_PATH": str(event), "API_FIXTURE": str(fixture), "TRACE_PATH": str(trace),
+            }
+            pr = {"number": 17, "user": {"id": 1, "login": "someone"}, "head": {"ref": "feat/x", "sha": sha}, "body": valid_body()}
+            comment = {"id": 1, "user": {"id": 1}, "body": "<!-- coderabbit-disposition -->\n## CodeRabbit review и disposition\n" + "\n".join((CR_HEADER, CR_DELIMITER, CR_ROW))}
+            cases = (
+                ("valid", valid_body(), comment, 0, ""),
+                ("invalid_body", "## Цель\nТолько цель.", comment, 1, "Отсутствует обязательный заголовок"),
+                ("invalid_comment", valid_body(), {**comment, "body": "<!-- coderabbit-disposition -->\nнет таблицы"}, 1, "заголовок накопительной таблицы"),
+            )
+            expected_requests = [
+                "https://api.github.com/repos/owner/repo/pulls/17",
+                "https://api.github.com/repos/owner/repo/issues/17/comments?per_page=100&page=1",
+                "https://api.github.com/repos/owner/repo/pulls/17",
+            ]
+
+            def run_case(body, current_comment):
+                fixture.write_text(json.dumps({"pr": {**pr, "body": body}, "comments": [current_comment]}), encoding="utf-8")
+                result = subprocess.run([sys.executable, ".github/scripts/check_coderabbit_comment.py"], cwd=root / "base", env=env, capture_output=True, text=True)
+                provenance = json.loads(trace.read_text(encoding="utf-8"))
+                self.assertIsNotNone(provenance["entry"], result.stderr)
+                self.assertIsNotNone(provenance["validator"], result.stderr)
+                self.assertEqual(Path(provenance["entry"]).resolve(), base_scripts / "check_coderabbit_comment.py")
+                self.assertEqual(Path(provenance["validator"]).resolve(), base_scripts / "check_pr_body.py")
+                self.assertEqual(provenance["requests"], expected_requests)
+                return result
+
+            baseline = {}
+            for name, body, current_comment, status, diagnostic in cases:
+                with self.subTest(case=name, head="original"):
+                    result = run_case(body, current_comment)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
+                    baseline[name] = (result.returncode, result.stdout, result.stderr)
+
+            (head_scripts / "check_coderabbit_comment.py").write_text("print('HEAD ENTRY EXECUTED')\n", encoding="utf-8")
+            (head_scripts / "check_pr_body.py").write_text("raise RuntimeError('HEAD VALIDATOR IMPORTED')\n", encoding="utf-8")
+            for name, body, current_comment, _, _ in cases:
+                with self.subTest(case=name, head="replaced"):
+                    result = run_case(body, current_comment)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), baseline[name])
+
+            # Контроль: запуск из head действительно исполняет подменённый entry point.
+            head_result = subprocess.run([sys.executable, ".github/scripts/check_coderabbit_comment.py"], cwd=root / "head", env=env, capture_output=True, text=True)
+            self.assertEqual(head_result.returncode, 0, head_result.stderr)
+            self.assertIn("HEAD ENTRY EXECUTED", head_result.stdout)
 
 
 if __name__ == "__main__":
