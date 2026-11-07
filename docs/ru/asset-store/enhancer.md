@@ -81,7 +81,7 @@
 ## Команды
 
 ```bash
-cargo build --release -p asset-store --bin pronunciation-assets -p speech-enhance
+cargo build --release -p asset-store --bin pronunciation-assets -p speech-enhance --bin speech-enhance-dfn
 B=target/release/pronunciation-assets
 # Явная установка весов без сети (одно из трёх):
 $B enhancer model-install --source /path/DeepFilterNet3_onnx.tar.gz

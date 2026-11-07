@@ -673,6 +673,17 @@ pub fn enhance(
             "диагностика воркера не согласована с запросом (задержка, кадры, каналы)",
         ));
     }
+    // Устройство входит в ключ кэша через отчёт `identify`; воркер, сам
+    // выбирающий его в каждом процессе, не должен молча сменить его посреди
+    // пакета. Воркеры без поля `device` (DeepFilterNet3) не затрагиваются.
+    if let Some(device) = diagnostics.get("device")
+        && *device != identity.report["runtime"]["device"]
+    {
+        return Err(protocol(format!(
+            "воркер исполнялся на устройстве {device}, а не на {} из identify",
+            identity.report["runtime"]["device"]
+        )));
+    }
     let enhanced: Vec<f32> = bytes
         .as_chunks::<4>()
         .0

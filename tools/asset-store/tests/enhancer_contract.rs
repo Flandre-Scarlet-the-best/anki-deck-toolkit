@@ -175,6 +175,12 @@ esac
 /// Поддельный воркер Resemble Enhance (denoiser): своя идентичность, нет
 /// параметров DeepFilterNet3 — их появление в вызове роняет процесс.
 fn fake_resemble_worker(root: &Path, name: &str, process: &str) -> PathBuf {
+    fake_resemble_worker_on(root, name, process, "cpu")
+}
+
+/// `device` — устройство, о котором воркер отчитывается в `process`;
+/// `identify` всегда сообщает `cpu`.
+fn fake_resemble_worker_on(root: &Path, name: &str, process: &str, device: &str) -> PathBuf {
     let path = root.join(name);
     let script = format!(
         r#"#!/bin/bash
@@ -197,7 +203,7 @@ process)
   {process}
   frames=$(( $(stat -c %s "$in") / 4 / ch ))
   sha=$(sha256sum "$out" | cut -d' ' -f1)
-  echo "{{\"schema_version\":1,\"kind\":\"speech_enhance_result\",\"model_manifest_sha256\":\"{RESEMBLE_DENOISE_MANIFEST_SHA256}\",\"params\":{{}},\"diagnostics\":{{\"channels\":$ch,\"input_frames\":$frames,\"output_frames\":$frames,\"delay_samples\":0,\"flush_samples\":0,\"identical_channels\":false,\"per_channel\":[{{}}]}},\"output_sha256\":\"$sha\"}}"
+  echo "{{\"schema_version\":1,\"kind\":\"speech_enhance_result\",\"model_manifest_sha256\":\"{RESEMBLE_DENOISE_MANIFEST_SHA256}\",\"params\":{{}},\"diagnostics\":{{\"channels\":$ch,\"input_frames\":$frames,\"output_frames\":$frames,\"delay_samples\":0,\"flush_samples\":0,\"identical_channels\":false,\"device\":\"{device}\",\"per_channel\":[{{}}]}},\"output_sha256\":\"$sha\"}}"
   ;;
 esac
 "#
@@ -620,6 +626,22 @@ fn resemble_profile_keeps_df3_fingerprint_and_rejects_foreign_params() {
     // Тот же gate и triage, другой backend.
     assert_eq!(resemble.gate, EnhancementProfile::conservative().gate);
     assert_eq!(resemble.triage, EnhancementProfile::conservative().triage);
+}
+
+#[test]
+fn resemble_device_drift_is_infrastructure_failure_and_never_cached() {
+    let f = fixture("enhancer-resemble-device");
+    base_batch(&f);
+    let drifted = fake_resemble_worker_on(
+        &f.root,
+        "resemble-drift",
+        &format!(r#"cp "{}" "$out""#, f.clean_f32.display()),
+        "cuda",
+    );
+    let run = start(&f, "res", &drifted, EnhancementProfile::resemble_denoise()).unwrap();
+    assert_eq!(run.outcome, "paused", "{run:?}");
+    assert_eq!(run.infrastructure_failed_now, 1);
+    assert!(!results(&f, "res").contains_key("noisy.mp3"));
 }
 
 #[test]
