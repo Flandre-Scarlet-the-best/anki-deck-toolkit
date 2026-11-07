@@ -1,15 +1,14 @@
 name: Доверенный контракт описания PR
-# Независимая проверка опубликованного описания PR. На `pull_request_target`
-# GitHub берёт этот workflow из base, а валидатор скачивается из точного base SHA:
-# head PR не скачивается и не исполняется, поэтому PR не может подменить правила,
-# по которым проверяется его собственное описание. Body и метаданные PR читаются
-# из файла события только как данные. Секреты, запись и токен в рабочей копии не
-# нужны. Изменение валидатора в PR действует на эту проверку только после merge.
+# На pull_request_target workflow и валидаторы берутся из доверенного base SHA;
+# head PR не скачивается и не исполняется. API-данные обрабатываются как данные.
+# Токен используется только для чтения и не сохраняется в рабочей копии.
+# Изменение валидаторов в PR действует на эту проверку только после merge.
 on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   pr-body-trusted:
@@ -24,5 +23,8 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
-      - name: Проверить опубликованное описание PR валидатором base
-        run: python3 .github/scripts/check_pr_body.py --event-path "$GITHUB_EVENT_PATH"
+      - name: Проверить опубликованные описание и комментарий валидатором base
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/check_coderabbit_comment.py
