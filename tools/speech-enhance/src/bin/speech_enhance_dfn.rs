@@ -204,7 +204,10 @@ fn run(command: Command) -> Result<(), Failure> {
                     failure(
                         protocol::EXIT_MODEL,
                         "model_missing",
-                        "в локальном реестре Cargo нет проверяемой копии deep-filter-rt 0.1.1",
+                        format!(
+                            "в локальном реестре Cargo нет проверяемой копии deep-filter-rt {}",
+                            protocol::DEEP_FILTER_RT_VERSION
+                        ),
                     )
                 })?,
                 None => unreachable!("clap требует --source или --from-cargo-registry"),
