@@ -487,7 +487,17 @@ fn timeout_and_wrong_length_are_infrastructure_failures() {
         let worker = fake_worker(&f.root, name, "deepfilternet3", process);
         let mut profile = EnhancementProfile::conservative();
         profile.backend.timeout_seconds = timeout;
+        let begun = std::time::Instant::now();
         let run = start(&f, "enh", &worker, profile).unwrap();
+        if name == "slow-worker" {
+            // Потомок воркера (`sleep`) завершается вместе с группой и не
+            // держит каналы до конца собственного сна.
+            assert!(
+                begun.elapsed() < std::time::Duration::from_secs(4),
+                "таймаут не завершил группу воркера: {:?}",
+                begun.elapsed()
+            );
+        }
         assert_eq!(run.outcome, "paused", "{name}");
         assert_eq!(run.infrastructure_failed_now, 1, "{name}");
         let r = results(&f, "enh");

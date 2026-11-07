@@ -311,14 +311,16 @@ struct Finished {
 }
 
 /// Запуск воркера через prlimit с пределом времени. Таймаут и завершение
-/// сигналом — сбои среды с собственными кодами.
+/// сигналом — сбои среды с собственными кодами. Воркер живёт в собственной
+/// группе процессов: при таймауте завершается вся группа, иначе потомок,
+/// унаследовавший каналы, держал бы чтение stdout/stderr после таймаута.
 fn run_worker(
     worker: &Path,
     kind: BackendKind,
     args: &[&std::ffi::OsStr],
     timeout: Duration,
 ) -> Result<Finished, AssetError> {
-    use std::os::unix::process::ExitStatusExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
     let cpu = timeout.as_secs().max(1).to_string();
     let mut child = Command::new("prlimit")
         .arg(format!("--as={}", kind.address_space_limit()))
@@ -326,6 +328,7 @@ fn run_worker(
         .args(["--nofile=64", "--"])
         .arg(worker)
         .args(args)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -347,6 +350,12 @@ fn run_worker(
             Ok(Some(status)) => break Ok(status),
             Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(5)),
             result => {
+                // Группа завершается до сбора лидера: пока он не собран, его
+                // PID не может достаться чужой группе.
+                if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+                    let _ =
+                        rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 break Err(if result.is_err() {

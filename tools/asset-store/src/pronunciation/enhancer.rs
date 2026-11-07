@@ -1061,6 +1061,23 @@ fn is_audio_infrastructure(error: &AssetError) -> bool {
     normalizer::is_infrastructure_failure(error) || backend::is_backend_failure(error)
 }
 
+/// Ресэмплинг здесь получает уже декодированный и проверенный PCM этапа, а не
+/// файл пользователя, поэтому любой его отказ — сбой среды для повтора, а не
+/// свойство записи и не причина останавливать весь пакет.
+fn resample_failure(error: AssetError) -> AssetError {
+    if is_audio_infrastructure(&error) {
+        return error;
+    }
+    AssetError::with_details(
+        error.code,
+        format!(
+            "ресэмплинг подготовленного PCM не выполнен: {}",
+            error.message
+        ),
+        serde_json::json!({"blocker": "audio_tool_runtime_failed"}),
+    )
+}
+
 /// Сбой среды (FFmpeg или backend) — ошибка для повтора.
 pub fn is_infrastructure_failure(error: &AssetError) -> bool {
     is_audio_infrastructure(error)
@@ -1238,7 +1255,8 @@ pub fn process_item(
             pcm.sample_rate,
             pcm.channels as u32,
             backend::BACKEND_SAMPLE_RATE,
-        )?
+        )
+        .map_err(resample_failure)?
     } else {
         pcm.samples.clone()
     };
@@ -1256,7 +1274,8 @@ pub fn process_item(
             backend::BACKEND_SAMPLE_RATE,
             pcm.channels as u32,
             pcm.sample_rate,
-        )?
+        )
+        .map_err(resample_failure)?
     } else {
         enhanced_48k
     };
@@ -1359,6 +1378,24 @@ pub fn process_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resample_failure_is_retryable_environment_failure() {
+        let plain = AssetError::new(ErrorCode::ValidatorFailure, "ffmpeg: ошибка");
+        assert!(!is_infrastructure_failure(&plain));
+        let mapped = resample_failure(plain);
+        assert!(is_infrastructure_failure(&mapped), "{mapped:?}");
+        assert_eq!(mapped.code, ErrorCode::ValidatorFailure);
+        let infra = AssetError::with_details(
+            ErrorCode::ValidatorFailure,
+            "нет ffmpeg",
+            serde_json::json!({"blocker": "audio_tool_missing"}),
+        );
+        assert_eq!(
+            resample_failure(infra).details["blocker"],
+            "audio_tool_missing"
+        );
+    }
 
     const SR: u32 = 44_100;
 
