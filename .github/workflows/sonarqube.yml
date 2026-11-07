@@ -3,6 +3,8 @@ name: SonarQube Cloud
 # Включите SONAR_CLOUD_ENABLED=true только после сохранения GitHub Secret
 # SONAR_TOKEN и отключения Automatic analysis в SonarQube Cloud.
 # PR из внешних форков не получают SONAR_TOKEN.
+# GitHub Settings → Actions → General: разрешите точный SonarSource action
+# (полный SHA ниже); политика Actions блокирует workflow до запуска job.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
