@@ -1,13 +1,12 @@
 name: Контракт описания PR
-# Кандидатная проверка: на `pull_request` workflow и валидатор берутся из самого
-# PR, поэтому результат показывает, принимает ли описание валидатор этого PR, но
-# не является независимым доказательством. Независимую проверку тем же
-# валидатором из base SHA выполняет `pr-body-trusted.yml`.
+# Кандидатная проверка использует код PR и не является независимым
+# доказательством. Независимую проверку кодом base выполняет pr-body-trusted.yml.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   pr-body:
@@ -17,8 +16,11 @@ jobs:
     steps:
       - name: Получить валидатор
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Тесты скриптов и метаданные Agent Skills проверяет job «Форматирование и
-      # Clippy» в ci.yml: он покрывает и push в default branch. Здесь остаётся
-      # только проверка, которой нужно событие PR, — описание самого PR.
-      - name: Проверить реальное описание PR
-        run: python3 .github/scripts/check_pr_body.py --event-path "$GITHUB_EVENT_PATH"
+        with:
+          persist-credentials: false
+      # API возвращает опубликованные body и Conversation; событие задаёт HEAD.
+      - name: Проверить опубликованные описание и комментарий PR
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/check_coderabbit_comment.py
