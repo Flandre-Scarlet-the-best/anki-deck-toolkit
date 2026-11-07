@@ -421,7 +421,7 @@ import urllib.request
 from pathlib import Path
 
 def no_network(*args, **kwargs):
-    raise AssertionError("network access forbidden")
+    raise AssertionError("Доступ к сети запрещён")
 socket.socket.connect = no_network
 socket.socket.connect_ex = no_network
 socket.create_connection = no_network
@@ -440,13 +440,13 @@ class Opener:
         url = request.full_url
         requests.append(url)
         if request.get_header("Authorization") != "Bearer test-token" or timeout != 30:
-            raise AssertionError("unexpected request")
+            raise AssertionError("Неожиданный запрос")
         if url.endswith("/pulls/17"):
             data = fixture["pr"]
         elif url.endswith("/issues/17/comments?per_page=100&page=1"):
             data = fixture["comments"]
         else:
-            raise AssertionError("unexpected API URL: " + url)
+            raise AssertionError("Неожиданный URL API: " + url)
         return Response(json.dumps(data).encode("utf-8"))
 urllib.request.build_opener = lambda *args: Opener()
 
@@ -499,17 +499,17 @@ atexit.register(record)
                     self.assertIn(diagnostic, result.stderr)
                     baseline[name] = (result.returncode, result.stdout, result.stderr)
 
-            (head_scripts / "check_coderabbit_comment.py").write_text("print('HEAD ENTRY EXECUTED')\n", encoding="utf-8")
-            (head_scripts / "check_pr_body.py").write_text("raise RuntimeError('HEAD VALIDATOR IMPORTED')\n", encoding="utf-8")
+            (head_scripts / "check_coderabbit_comment.py").write_text("print('ТОЧКА ВХОДА HEAD ВЫПОЛНЕНА')\n", encoding="utf-8")
+            (head_scripts / "check_pr_body.py").write_text("raise RuntimeError('ВАЛИДАТОР HEAD ИМПОРТИРОВАН')\n", encoding="utf-8")
             for name, body, current_comment, _, _ in cases:
                 with self.subTest(case=name, head="replaced"):
                     result = run_case(body, current_comment)
                     self.assertEqual((result.returncode, result.stdout, result.stderr), baseline[name])
 
-            # Контроль: запуск из head действительно исполняет подменённый entry point.
+            # Контроль: запуск из head действительно исполняет подменённую точку входа.
             head_result = subprocess.run([sys.executable, ".github/scripts/check_coderabbit_comment.py"], cwd=root / "head", env=env, capture_output=True, text=True)
             self.assertEqual(head_result.returncode, 0, head_result.stderr)
-            self.assertIn("HEAD ENTRY EXECUTED", head_result.stdout)
+            self.assertIn("ТОЧКА ВХОДА HEAD ВЫПОЛНЕНА", head_result.stdout)
 
 
 if __name__ == "__main__":

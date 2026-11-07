@@ -1,6 +1,7 @@
 """Проверки опубликованных данных PR, пагинации и недоверенного Markdown."""
 
 import copy
+import http.client
 import io
 import json
 import tempfile
@@ -51,6 +52,13 @@ class CommentTests(unittest.TestCase):
         self.assertTrue(check.validate_comments([comment(1, author=2)], 1))
         self.assertTrue(check.validate_comments([comment(1), comment(2, author=2)], 1))
 
+    def test_marked_comment_requires_valid_author_id(self):
+        for user in (None, {}, {"id": True}, {"id": 0}, {"id": "1"}, {"id": 2}):
+            marked = comment(1)
+            marked["user"] = user
+            with self.subTest(user=user):
+                self.assertTrue(check.validate_comments([marked], 1))
+
     def test_bad_marker_and_invisible_table(self):
         for body in (MARKED + "\n" + check.MARKER,
                      "```\n" + MARKED + "\n```",
@@ -75,6 +83,28 @@ class CommentTests(unittest.TestCase):
 
 class PaginationTests(unittest.TestCase):
     @patch.object(check, "get_json")
+    def test_unrelated_null_user_on_same_or_different_pages(self, get):
+        ordinary = {"id": 2, "user": None, "body": "Обычный комментарий"}
+        for pages in (([ordinary, comment(1)],), ([ordinary], [comment(1)]),
+                      ([comment(1)], [ordinary])):
+            with self.subTest(pages=pages):
+                get.reset_mock()
+                get.side_effect = [(page, link(index + 2) if index + 1 < len(pages) else None)
+                                   for index, page in enumerate(pages)]
+                comments = check.list_comments(REPO, NUMBER, "token")
+                self.assertEqual(len(comments), 2)
+                self.assertEqual(check.validate_comments(comments, 1), [])
+                self.assertEqual(get.call_count, len(pages))
+
+    @patch.object(check, "get_json")
+    def test_duplicates_on_different_pages_rejected_before_author_check(self, get):
+        other = comment(2, author=2)
+        get.side_effect = [([comment(1)], link(2)), ([other], None)]
+        comments = check.list_comments(REPO, NUMBER, "token")
+        self.assertEqual(check.validate_comments(comments, 1),
+                         ["Найдено несколько служебных комментариев CodeRabbit"])
+
+    @patch.object(check, "get_json")
     def test_follows_next_even_short_page_and_finds_duplicate(self, get):
         get.side_effect = [([comment(1)], link(2)), ([comment(2)], None)]
         comments = check.list_comments(REPO, NUMBER, "token")
@@ -98,7 +128,7 @@ class PaginationTests(unittest.TestCase):
     @patch.object(check, "get_json")
     def test_malformed_and_duplicate_comment_fail_closed(self, get):
         for response in [({}, None), ([{"id": 1}], None), ([comment(1), comment(1)], None),
-                         ([comment(1, author=True)], None), ([comment(1, body=None)], None)]:
+                         ([comment(1, body=None)], None)]:
             with self.subTest(response=response):
                 get.return_value = response
                 with self.assertRaises(check.CheckError):
@@ -113,7 +143,7 @@ class PaginationTests(unittest.TestCase):
                 get.return_value = ([comment(1)], value)
                 with self.assertRaises(check.CheckError):
                     check.list_comments(REPO, NUMBER, "token")
-        get.side_effect = check.CheckError("API failure")
+        get.side_effect = check.CheckError("Ошибка API")
         with self.assertRaises(check.CheckError):
             check.list_comments(REPO, NUMBER, "token")
 
@@ -151,6 +181,41 @@ class RequestTests(unittest.TestCase):
                 sleep.assert_called_once_with(0.1)
                 if isinstance(failure, urllib.error.HTTPError):
                     self.assertTrue(failure.closed)
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_http_protocol_failures_retry_without_exposing_response(self, opener, sleep):
+        for failure in (http.client.IncompleteRead(b"secret"),
+                        http.client.BadStatusLine("secret"), http.client.LineTooLong("secret")):
+            with self.subTest(failure=type(failure).__name__):
+                opener.return_value.open.reset_mock(side_effect=True)
+                sleep.reset_mock()
+                opener.return_value.open.side_effect = [failure, self.Response(b'{}')]
+                self.assertEqual(check.get_json("/test", "token"), ({}, None))
+                self.assertEqual(opener.return_value.open.call_count, 2)
+                sleep.assert_called_once_with(0.1)
+                opener.return_value.open.reset_mock(side_effect=True)
+                sleep.reset_mock()
+                opener.return_value.open.side_effect = [failure, failure, failure]
+                with self.assertRaises(check.CheckError) as caught:
+                    check.get_json("/test", "token")
+                self.assertNotIn("secret", "".join(traceback.format_exception(caught.exception)))
+                self.assertEqual(opener.return_value.open.call_count, 3)
+                self.assertEqual([call.args for call in sleep.call_args_list], [(0.1,), (0.2,)])
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_incomplete_http_response_read_retries_and_closes(self, opener, sleep):
+        class IncompleteResponse(self.Response):
+            def read(self, *args):
+                raise http.client.IncompleteRead(b"secret")
+
+        response = IncompleteResponse(b'')
+        opener.return_value.open.side_effect = [response, self.Response(b'{}')]
+        self.assertEqual(check.get_json("/test", "token"), ({}, None))
+        self.assertTrue(response.closed)
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        sleep.assert_called_once_with(0.1)
 
     @patch.object(check.time, "sleep")
     @patch("urllib.request.build_opener")
@@ -281,10 +346,28 @@ class PublishedPrTests(unittest.TestCase):
 
     def test_comment_and_api_failure_propagate(self):
         self.assertTrue(self.execute(pr(), [comment(1, author=2)]))
+        marked_without_user = comment(1)
+        marked_without_user["user"] = None
+        self.assertTrue(self.execute(pr(), [marked_without_user]))
+        ordinary_without_user = {"id": 2, "user": None, "body": "Обычный комментарий"}
+        self.assertEqual(self.execute(pr(), [ordinary_without_user, comment(1)]), [])
+        self.assertEqual(self.execute(pr(), [ordinary_without_user]), [])
         self.assertEqual(self.execute(pr(), [comment(1)]), [])
         with patch.object(check, "get_json", side_effect=[(pr(), None), check.CheckError("API")]):
             with self.assertRaises(check.CheckError):
                 check.run(self.env)
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_protocol_failure_main_returns_sanitized_error(self, opener, sleep):
+        opener.return_value.open.side_effect = http.client.BadStatusLine("secret")
+        stderr = io.StringIO()
+        with patch.dict(check.os.environ, self.env, clear=True), patch("sys.stderr", stderr):
+            self.assertEqual(check.main(), 2)
+        self.assertEqual(opener.return_value.open.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertNotIn("secret", stderr.getvalue())
+        self.assertIn("Не удалось проверить PR", stderr.getvalue())
 
     def test_pr_changes_during_pagination_are_rejected(self):
         changed = pr()

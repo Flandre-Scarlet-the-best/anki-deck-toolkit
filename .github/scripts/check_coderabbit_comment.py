@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Проверить опубликованные PR body и комментарий CodeRabbit через GitHub API."""
 
+import http.client
 import json
 import os
 import re
@@ -48,7 +49,7 @@ def get_json(path, token):
                 if 500 <= response.status <= 599:
                     retry = True
                 elif response.status != 200:
-                    raise CheckError("GitHub API вернул неожиданный HTTP status")
+                    raise CheckError("GitHub API вернул неожиданный HTTP-статус")
                 else:
                     return json.load(response), response.headers.get("Link")
         except urllib.error.HTTPError as exc:
@@ -56,8 +57,8 @@ def get_json(path, token):
             retry = 500 <= exc.code <= 599
             exc.close()
             if not retry:
-                raise CheckError("GitHub API вернул неожиданный HTTP status") from None
-        except (OSError, urllib.error.URLError):
+                raise CheckError("GitHub API вернул неожиданный HTTP-статус") from None
+        except (OSError, urllib.error.URLError, http.client.HTTPException):
             retry = True
         except (ValueError, UnicodeError):
             raise CheckError("Некорректный JSON GitHub API") from None
@@ -115,9 +116,8 @@ def list_comments(repository, number, token):
             if comment["id"] in ids:
                 raise CheckError("Повторный ID комментария при пагинации")
             ids.add(comment["id"])
-            user = comment.get("user")
-            if not isinstance(user, dict) or not positive_id(user.get("id")) or not isinstance(comment.get("body"), str):
-                raise CheckError("Некорректные автор или тело комментария GitHub API")
+            if not isinstance(comment.get("body"), str):
+                raise CheckError("Некорректное тело комментария GitHub API")
             comments.append(comment)
         following = next_page(link, path, page)
         if following is None:
@@ -178,7 +178,8 @@ def validate_comments(comments, author_id):
     if not marked:
         return []
     comment = marked[0]
-    if comment["user"]["id"] != author_id:
+    user = comment.get("user")
+    if not isinstance(user, dict) or not positive_id(user.get("id")) or user["id"] != author_id:
         return ["Автор служебного комментария CodeRabbit не является автором PR"]
     body = comment["body"].replace("\r\n", "\n").replace("\r", "\n")
     if body.count(MARKER) != 1 or MARKER not in body.split("\n"):
@@ -249,7 +250,7 @@ def run(env):
 
 
 def safe_message(message):
-    # Не позволять данным из PR сформировать workflow command или управляющие строки.
+    # Не позволять данным из PR сформировать команду workflow или управляющие строки.
     return "".join(c if ord(c) >= 32 and ord(c) != 127 else " " for c in str(message))
 
 
