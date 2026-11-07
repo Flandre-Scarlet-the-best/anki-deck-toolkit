@@ -38,7 +38,7 @@
 | Решение | Причина |
 |---|---|
 | Отдельный процесс | `prlimit` (адресное пространство 4 GiB, CPU, дескрипторы) и предел времени отделяют аварию, нехватку памяти и зависание модели от пакета; `asset-store` не связывается с `tract` |
-| `deep-filter-rt` 0.1.1 | инференсная часть upstream `libDF` с веса́ми DeepFilterNet3; версия на crates.io `deep_filter` 0.2.5 (2022) инференса не содержит, а upstream CLI по умолчанию берёт DeepFilterNet2 |
+| `deep-filter-rt` 0.2.0 | инференсная часть upstream `libDF` с веса́ми DeepFilterNet3; версия на crates.io `deep_filter` 0.2.5 (2022) инференса не содержит, а upstream CLI по умолчанию берёт DeepFilterNet2 |
 | CPU, один поток | инференс клипа 1–3 с занимает десятки миллисекунд, а время процесса — запуск, загрузка модели и FFmpeg; детерминированный CPU-путь стабилизирует ключ кэша. Пакет параллелится по входам (`--jobs`) |
 
 ## Модель и её идентичность
@@ -47,7 +47,7 @@
 репозитория [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)
 на коммите `d375b2d8309e0935d165700c91da9de862a99c31` (SHA-256 архива
 `c94d91f7…3616`). Те же байты лежат в каталоге `models/DeepFilterNet3` crate
-`deep-filter-rt` 0.1.1. Отпечаток манифеста —
+`deep-filter-rt` 0.2.0. Отпечаток манифеста —
 `8b378da4a759b6a244bb6bc9786e7ffd74c67f3f878dbd40e53c2f6565d05e5d`.
 
 | Файл | Байт | SHA-256 |
