@@ -293,10 +293,13 @@ def validate_coderabbit(content: str) -> list[str]:
         completed = True
     if not completed:
         errors.append("В разделе CodeRabbit отсутствует строка завершённой итерации")
-    # После разрыва любая табличная строка оторвана от накопительной таблицы,
-    # в том числе повреждённая строка с некорректным номером или обрезанным SHA.
+    # После разрыва отклоняем вероятные продолжения таблицы, включая строки
+    # без внешних «|» и повреждённый reviewed HEAD. Обычный текст с одиночным
+    # разделителем вне таблицы сам по себе продолжением таблицы не является.
     for line in lines[end:]:
-        if table_row(line):
+        row = table_row(line)
+        if row and (line.lstrip().startswith("|") or len(row) == len(CODERABBIT_HEADER)
+                    or re.match(r"^[1-9]\d*\s*·", row[0])):
             errors.append(f"Строка CodeRabbit оторвана от накопительной таблицы: {line.strip()}")
     return errors
 

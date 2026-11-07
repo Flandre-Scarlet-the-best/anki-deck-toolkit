@@ -180,6 +180,19 @@ class PrBodyContractTests(unittest.TestCase):
         errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", later))
         self.assertTrue(any("оторвана" in e for e in errors), errors)
 
+    def test_coderabbit_prose_with_pipe_after_table_is_not_a_row(self):
+        for prose in ("Итог: см. `a|b`", "Команда: a | b"):
+            with self.subTest(prose=prose):
+                self.assertEqual(validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", prose)), [])
+
+    def test_coderabbit_bare_and_broken_rows_after_gap_are_rejected(self):
+        for row in ("2 · `abcdef1` | minor | path | effect | confirmed | fix",
+                    "2 · `bad` | minor | path | effect | confirmed | fix",
+                    "2 · `bad` | обрыв"):
+            with self.subTest(row=row):
+                errors = validate_comment_table(coderabbit(CR_HEADER, CR_DELIMITER, CR_ROW, "", row))
+                self.assertTrue(any("оторвана" in error for error in errors), errors)
+
     def test_performance_limits_include_heading(self):
         heading = len("## Производительность\n")
         base = NOT_APPLICABLE + "\n"
