@@ -70,7 +70,12 @@ def next_page(link, path, current):
         params = urllib.parse.parse_qs(url.query, strict_parsing=True)
     except ValueError as exc:
         raise CheckError("Некорректная ссылка следующей страницы") from exc
-    if (url.scheme != "https" or url.netloc != "api.github.com" or url.path != path
+    resource = re.fullmatch(r"/repos/[^/]+/[^/]+(/issues/[1-9][0-9]*/comments)", path)
+    # GitHub может вернуть каноническую ссылку /repositories/{id}/... вместо
+    # /repos/{owner}/{repo}/.... По ссылке не переходим: следующий запрос всё
+    # равно строится из проверенного исходного path.
+    canonical = resource and re.fullmatch(r"/repositories/[1-9][0-9]*" + re.escape(resource.group(1)), url.path)
+    if (url.scheme != "https" or url.netloc != "api.github.com" or (url.path != path and not canonical)
             or url.fragment or set(params) != {"page", "per_page"}
             or params["page"] != [str(current + 1)] or params["per_page"] != ["100"]):
         raise CheckError("Недопустимая ссылка следующей страницы")

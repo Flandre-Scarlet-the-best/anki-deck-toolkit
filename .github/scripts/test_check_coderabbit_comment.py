@@ -82,6 +82,13 @@ class PaginationTests(unittest.TestCase):
         self.assertIn("page=2", get.call_args_list[1].args[0])
 
     @patch.object(check, "get_json")
+    def test_canonical_repository_id_link_fetches_original_repository(self, get):
+        get.side_effect = [([comment(1)], link(2, path=f"/repositories/123/issues/{NUMBER}/comments")),
+                           ([comment(2, body="другой комментарий")], None)]
+        self.assertEqual(len(check.list_comments(REPO, NUMBER, "token")), 2)
+        self.assertEqual(get.call_args_list[1].args[0], f"/repos/{REPO}/issues/{NUMBER}/comments?per_page=100&page=2")
+
+    @patch.object(check, "get_json")
     def test_full_page_without_link_fetches_next(self, get):
         get.side_effect = [([comment(i, body="other") for i in range(1, 101)], None), ([comment(101)], None)]
         self.assertEqual(len(check.list_comments(REPO, NUMBER, "token")), 101)
@@ -98,7 +105,9 @@ class PaginationTests(unittest.TestCase):
 
     @patch.object(check, "get_json")
     def test_untrusted_links_and_errors_fail_closed(self, get):
-        for value in (link(2, host="attacker.invalid"), link(3), link(2, path="/wrong"), "bad", link(2) + ", " + link(2)):
+        for value in (link(2, host="attacker.invalid"), link(3), link(2, path="/wrong"),
+                      link(2, path="/repositories/0/issues/7/comments"),
+                      link(2, path="/repositories/123/issues/8/comments"), "bad", link(2) + ", " + link(2)):
             with self.subTest(link=value):
                 get.return_value = ([comment(1)], value)
                 with self.assertRaises(check.CheckError):
