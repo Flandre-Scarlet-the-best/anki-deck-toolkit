@@ -48,6 +48,7 @@ pub mod pronunciation;
 pub mod pronunciation_cli;
 mod pronunciation_enhancer_cli;
 mod pronunciation_normalizer_cli;
+mod pronunciation_recognizer_cli;
 mod review_snapshot;
 pub mod selection;
 pub mod store;

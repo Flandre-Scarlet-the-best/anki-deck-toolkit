@@ -1,0 +1,44 @@
+[package]
+name = "speech-recognize"
+version = "0.1.0"
+# `edition` и MSRV наследуются из корневого `[workspace.package]`.
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Изолированный локальный CPU-воркер японских акустических CTC-моделей (HuBERT/wav2vec2) для распознавания произношений"
+publish = false
+autotests = false
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+# Матричное умножение f32 через безопасный API ndarray без системного BLAS.
+# Прямая зависимость от matrixmultiply только включает его потоки (до четырёх —
+# ограничение crate); их число задаётся явно и входит в отчёт воркера.
+matrixmultiply = { version = "0.3.11", features = ["threading"] }
+ndarray = "0.17"
+rustix = { version = "1.1", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
+
+[lib]
+name = "speech_recognize"
+path = "src/lib.rs"
+doctest = false
+
+# Процесс-воркер: asset-store запускает его через prlimit с пределами времени и
+# памяти и обменивается с ним файлами PCM f32 и JSON. Python не нужен.
+[[bin]]
+name = "speech-recognize-ctc"
+path = "src/bin/speech_recognize_ctc.rs"
+test = false
+
+[[test]]
+name = "engine"
+path = "tests/engine.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

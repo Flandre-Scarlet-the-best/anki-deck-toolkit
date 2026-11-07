@@ -568,6 +568,20 @@ pub fn triage(
     base: &NormalizationResult,
     profile: &EnhancementProfile,
 ) -> Triage {
+    let noise_limited_gain = base
+        .plan
+        .as_ref()
+        .is_some_and(|p| p.gain.limited_by.contains(&GainLimit::NoiseFloor));
+    triage_signals(analysis, noise_limited_gain, profile)
+}
+
+/// Триаж по измерениям и признаку «усиление Balanced ограничено шумом».
+/// Этап распознавания применяет его к извлекаемому фрагменту.
+pub(crate) fn triage_signals(
+    analysis: &normalizer::SignalAnalysis,
+    noise_limited_gain: bool,
+    profile: &EnhancementProfile,
+) -> Triage {
     let t = &profile.triage;
     let snr = analysis.speech_level_dbfs - analysis.noise_floor_dbfs;
     let mut signals = Vec::new();
@@ -583,10 +597,6 @@ pub fn triage(
             analysis.noise_floor_dbfs, t.min_noise_floor_dbfs
         ));
     }
-    let noise_limited_gain = base
-        .plan
-        .as_ref()
-        .is_some_and(|p| p.gain.limited_by.contains(&GainLimit::NoiseFloor));
     if noise_limited_gain {
         signals.push("balanced_gain_limited_by_noise_floor".into());
     }
@@ -640,11 +650,11 @@ fn median(values: &[f64]) -> Option<f64> {
     dsp::percentile(values, 0.5)
 }
 
-struct QcInput<'a> {
-    original: &'a Pcm,
-    enhanced: &'a Pcm,
-    original_analysis: &'a normalizer::SignalAnalysis,
-    enhanced_analysis: &'a normalizer::SignalAnalysis,
+pub(crate) struct QcInput<'a> {
+    pub(crate) original: &'a Pcm,
+    pub(crate) enhanced: &'a Pcm,
+    pub(crate) original_analysis: &'a normalizer::SignalAnalysis,
+    pub(crate) enhanced_analysis: &'a normalizer::SignalAnalysis,
 }
 
 fn check(
@@ -741,7 +751,7 @@ const STRONG_SPEECH_CHECKS: [&str; 4] = [
 /// отдельно. Поканальная проверка только ужесточает решение: значение —
 /// худшее из всего сигнала и каналов, а пройдена проверка, лишь если она
 /// пройдена и разрешима везде.
-fn enhancement_qc(input: &QcInput<'_>, profile: &EnhancementProfile) -> EnhancementQc {
+pub(crate) fn enhancement_qc(input: &QcInput<'_>, profile: &EnhancementProfile) -> EnhancementQc {
     let mut qc = mixed_enhancement_qc(input, profile);
     let (orig, enh) = (input.original, input.enhanced);
     let comparable = orig.sample_rate == enh.sample_rate
@@ -1095,7 +1105,7 @@ fn mixed_enhancement_qc(input: &QcInput<'_>, profile: &EnhancementProfile) -> En
     }
 }
 
-fn qc_reasons(qc: &EnhancementQc) -> Vec<Reason> {
+pub(crate) fn qc_reasons(qc: &EnhancementQc) -> Vec<Reason> {
     qc.checks
         .iter()
         .filter(|c| !c.passed || !c.resolved)

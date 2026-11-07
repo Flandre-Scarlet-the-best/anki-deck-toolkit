@@ -43,14 +43,18 @@ AGPL-3.0 и не вводит для программного кода допо�
 ## Веса нейросетевых моделей
 
 Веса моделей улучшения речи (DeepFilterNet3 и опциональный Resemble Enhance)
+и распознавания произношения (HuBERT phoneme CTC и XLSR hiragana)
 не входят в репозиторий и не распространяются вместе с ним: их явно
 устанавливает пользователь в каталог вне рабочей копии, а программа читает их
 оттуда и сверяет по закреплённым SHA-256. На веса распространяются условия их
 правообладателей (для DeepFilterNet — MIT OR Apache-2.0 по уведомлению
 upstream, для Resemble Enhance — MIT по карточке модели), а не AGPL-3.0
 проекта. То же относится к Python-окружению опционального воркера Resemble
-Enhance: его пакеты пользователь ставит сам, в репозитории их нет. Сторонние уведомления —
-[tools/speech-enhance/THIRD-PARTY-NOTICES.md](../../../tools/speech-enhance/THIRD-PARTY-NOTICES.md).
+Enhance: его пакеты пользователь ставит сам, в репозитории их нет. Обе модели
+распознавания — Apache-2.0 по карточкам; условия наборов данных, на которых
+они обучены, задают их правообладатели. Сторонние уведомления —
+[tools/speech-enhance/THIRD-PARTY-NOTICES.md](../../../tools/speech-enhance/THIRD-PARTY-NOTICES.md)
+и [tools/speech-recognize/THIRD-PARTY-NOTICES.md](../../../tools/speech-recognize/THIRD-PARTY-NOTICES.md).
 
 ## Пользовательские данные и файлы, создаваемые программой
 
