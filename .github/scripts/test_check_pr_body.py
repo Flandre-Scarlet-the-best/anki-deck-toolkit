@@ -382,25 +382,121 @@ class TrustedWorkflowTests(unittest.TestCase):
         self.assertIn("name: Доверенная структура PR", self.yaml)
 
     def test_validator_replaced_in_pr_does_not_change_trusted_result(self):
-        # Вызов общей проверки body из base не зависит от подмены файла в head.
-        # Выбор исходного checkout и вызываемого CLI проверяется отдельно выше.
-        command = 'python3 .github/scripts/check_pr_body.py --event-path "$GITHUB_EVENT_PATH"'
-        source = Path(__file__).with_name("check_pr_body.py")
+        # Запускаем ту же точку входа, что workflow, с API в памяти процесса.
+        # Подменённый head также присутствует в PYTHONPATH, но не должен импортироваться.
         with tempfile.TemporaryDirectory() as tmp:
-            base, head = Path(tmp) / "base", Path(tmp) / "head"
-            for root in (base, head):
-                (root / ".github" / "scripts").mkdir(parents=True)
-            shutil.copy(source, base / ".github" / "scripts" / "check_pr_body.py")
-            (head / ".github" / "scripts" / "check_pr_body.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
-            event = Path(tmp) / "event.json"
-            event.write_text(json.dumps({"action": "edited", "pull_request": {"body": "## Цель\nТолько цель.", "user": {"login": "someone"}, "head": {"ref": "feat/x"}}}), encoding="utf-8")
-            env = {"GITHUB_EVENT_PATH": str(event), "PATH": "/usr/bin:/bin"}
-            command = command.replace("python3", shutil.which("python3") or sys.executable, 1)
-            trusted = subprocess.run(command, shell=True, cwd=base, env=env, capture_output=True, text=True)
-            tampered = subprocess.run(command, shell=True, cwd=head, env=env, capture_output=True, text=True)
-        self.assertEqual(trusted.returncode, 1, trusted.stderr)
-        self.assertIn("Отсутствует обязательный заголовок", trusted.stderr)
-        self.assertEqual(tampered.returncode, 0)
+            root = Path(tmp)
+            base_scripts = root / "base" / ".github" / "scripts"
+            head_scripts = root / "head" / ".github" / "scripts"
+            shim = root / "shim"
+            for directory in (base_scripts, head_scripts, shim):
+                directory.mkdir(parents=True)
+            for name in ("check_coderabbit_comment.py", "check_pr_body.py"):
+                for directory in (base_scripts, head_scripts):
+                    shutil.copy(Path(__file__).with_name(name), directory / name)
+
+            # sitecustomize подменяет только транспорт и записывает происхождение
+            # модулей; любой случайный выход в сеть завершается ошибкой.
+            (shim / "sitecustomize.py").write_text('''\
+import atexit
+import io
+import json
+import os
+import socket
+import sys
+import urllib.request
+from pathlib import Path
+
+def no_network(*args, **kwargs):
+    raise AssertionError("network access forbidden")
+socket.socket.connect = no_network
+socket.socket.connect_ex = no_network
+socket.create_connection = no_network
+socket.getaddrinfo = no_network
+
+fixture = json.loads(Path(os.environ["API_FIXTURE"]).read_text(encoding="utf-8"))
+requests = []
+provenance = {}
+class Response(io.BytesIO):
+    status = 200
+    headers = {}
+class Opener:
+    def open(self, request, timeout):
+        provenance["entry"] = getattr(sys.modules["__main__"], "__file__", None)
+        provenance["validator"] = getattr(sys.modules.get("check_pr_body"), "__file__", None)
+        url = request.full_url
+        requests.append(url)
+        if request.get_header("Authorization") != "Bearer test-token" or timeout != 30:
+            raise AssertionError("unexpected request")
+        if url.endswith("/pulls/17"):
+            data = fixture["pr"]
+        elif url.endswith("/issues/17/comments?per_page=100&page=1"):
+            data = fixture["comments"]
+        else:
+            raise AssertionError("unexpected API URL: " + url)
+        return Response(json.dumps(data).encode("utf-8"))
+urllib.request.build_opener = lambda *args: Opener()
+
+def record():
+    Path(os.environ["TRACE_PATH"]).write_text(json.dumps({
+        **provenance, "requests": requests,
+    }), encoding="utf-8")
+atexit.register(record)
+''', encoding="utf-8")
+            sha = "a" * 40
+            event = root / "event.json"
+            event.write_text(json.dumps({"repository": {"full_name": "owner/repo"}, "pull_request": {"number": 17, "head": {"sha": sha}}}), encoding="utf-8")
+            fixture = root / "api.json"
+            trace = root / "trace.json"
+            env = {
+                "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(shim) + ":" + str(head_scripts),
+                "GITHUB_REPOSITORY": "owner/repo", "PR_NUMBER": "17", "GITHUB_TOKEN": "test-token",
+                "GITHUB_EVENT_PATH": str(event), "API_FIXTURE": str(fixture), "TRACE_PATH": str(trace),
+            }
+            pr = {"number": 17, "user": {"id": 1, "login": "someone"}, "head": {"ref": "feat/x", "sha": sha}, "body": valid_body()}
+            comment = {"id": 1, "user": {"id": 1}, "body": "<!-- coderabbit-disposition -->\n## CodeRabbit review и disposition\n" + "\n".join((CR_HEADER, CR_DELIMITER, CR_ROW))}
+            cases = (
+                ("valid", valid_body(), comment, 0, ""),
+                ("invalid_body", "## Цель\nТолько цель.", comment, 1, "Отсутствует обязательный заголовок"),
+                ("invalid_comment", valid_body(), {**comment, "body": "<!-- coderabbit-disposition -->\nнет таблицы"}, 1, "заголовок накопительной таблицы"),
+            )
+            expected_requests = [
+                "https://api.github.com/repos/owner/repo/pulls/17",
+                "https://api.github.com/repos/owner/repo/issues/17/comments?per_page=100&page=1",
+                "https://api.github.com/repos/owner/repo/pulls/17",
+            ]
+
+            def run_case(body, current_comment):
+                fixture.write_text(json.dumps({"pr": {**pr, "body": body}, "comments": [current_comment]}), encoding="utf-8")
+                result = subprocess.run([sys.executable, ".github/scripts/check_coderabbit_comment.py"], cwd=root / "base", env=env, capture_output=True, text=True)
+                provenance = json.loads(trace.read_text(encoding="utf-8"))
+                self.assertIsNotNone(provenance["entry"], result.stderr)
+                self.assertIsNotNone(provenance["validator"], result.stderr)
+                self.assertEqual(Path(provenance["entry"]).resolve(), base_scripts / "check_coderabbit_comment.py")
+                self.assertEqual(Path(provenance["validator"]).resolve(), base_scripts / "check_pr_body.py")
+                self.assertEqual(provenance["requests"], expected_requests)
+                return result
+
+            baseline = {}
+            for name, body, current_comment, status, diagnostic in cases:
+                with self.subTest(case=name, head="original"):
+                    result = run_case(body, current_comment)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
+                    baseline[name] = (result.returncode, result.stdout, result.stderr)
+
+            (head_scripts / "check_coderabbit_comment.py").write_text("print('HEAD ENTRY EXECUTED')\n", encoding="utf-8")
+            (head_scripts / "check_pr_body.py").write_text("raise RuntimeError('HEAD VALIDATOR IMPORTED')\n", encoding="utf-8")
+            for name, body, current_comment, _, _ in cases:
+                with self.subTest(case=name, head="replaced"):
+                    result = run_case(body, current_comment)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), baseline[name])
+
+            # Контроль: запуск из head действительно исполняет подменённый entry point.
+            head_result = subprocess.run([sys.executable, ".github/scripts/check_coderabbit_comment.py"], cwd=root / "head", env=env, capture_output=True, text=True)
+            self.assertEqual(head_result.returncode, 0, head_result.stderr)
+            self.assertIn("HEAD ENTRY EXECUTED", head_result.stdout)
 
 
 if __name__ == "__main__":
