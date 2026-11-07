@@ -1,16 +1,24 @@
 //! Японское произношение: идентичность, локальный импорт и доверенное чтение.
 
 pub mod batch;
+pub mod ctc;
 pub mod derivation;
 pub mod dsp;
 pub mod enhancer;
 pub mod enhancer_backend;
 pub mod enhancer_batch;
 pub mod enhancer_report;
+pub mod kana;
 pub mod normalizer;
 pub mod normalizer_batch;
 pub mod normalizer_report;
 mod probe;
+pub mod recognizer;
+pub mod recognizer_backend;
+pub mod recognizer_batch;
+pub mod recognizer_eval;
+pub mod recognizer_pipeline;
+pub mod recognizer_report;
 
 use std::io::Read;
 use std::path::Path;

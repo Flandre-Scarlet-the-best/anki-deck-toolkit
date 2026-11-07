@@ -148,7 +148,11 @@ pub fn is_backend_failure(error: &AssetError) -> bool {
         .is_some_and(|code| INFRASTRUCTURE_BLOCKERS.contains(&code))
 }
 
-fn backend_failure(code: &str, message: impl Into<String>, extra: serde_json::Value) -> AssetError {
+pub(crate) fn backend_failure(
+    code: &str,
+    message: impl Into<String>,
+    extra: serde_json::Value,
+) -> AssetError {
     let mut details = serde_json::json!({"blocker": code});
     if let (Some(map), serde_json::Value::Object(extra)) = (details.as_object_mut(), extra) {
         map.extend(extra);
@@ -363,7 +367,7 @@ pub fn locate_worker(explicit: Option<&Path>, kind: BackendKind) -> Result<PathB
     })
 }
 
-fn read_capped(mut reader: impl Read, cap: u64) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_capped(mut reader: impl Read, cap: u64) -> std::io::Result<Vec<u8>> {
     let mut data = Vec::new();
     (&mut reader).take(cap).read_to_end(&mut data)?;
     std::io::copy(&mut reader, &mut std::io::sink())?;
@@ -371,9 +375,9 @@ fn read_capped(mut reader: impl Read, cap: u64) -> std::io::Result<Vec<u8>> {
 }
 
 /// Результат завершившегося процесса воркера.
-struct Finished {
-    code: Option<i32>,
-    stdout: Vec<u8>,
+pub(crate) struct Finished {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: Vec<u8>,
 }
 
 /// Запуск воркера через prlimit с пределом времени. Таймаут и завершение
@@ -386,10 +390,34 @@ fn run_worker(
     args: &[&std::ffi::OsStr],
     timeout: Duration,
 ) -> Result<Finished, AssetError> {
+    run_limited(
+        worker,
+        kind.address_space_limit(),
+        &[],
+        args,
+        timeout,
+        "enhancer",
+    )
+}
+
+/// Общий ограниченный запуск воркера инференса (улучшение речи и
+/// распознавание): `prlimit` с пределами адресного пространства, CPU и
+/// дескрипторов, собственная группа процессов, предел времени. Коды сбоев
+/// среды — `<prefix>_backend_{unavailable,failed,timeout,crashed,protocol}`.
+pub(crate) fn run_limited(
+    worker: &Path,
+    address_space: u64,
+    env: &[(&str, &str)],
+    args: &[&std::ffi::OsStr],
+    timeout: Duration,
+    prefix: &str,
+) -> Result<Finished, AssetError> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let code = |suffix: &str| format!("{prefix}_backend_{suffix}");
     let cpu = timeout.as_secs().max(1).to_string();
     let mut child = Command::new("prlimit")
-        .arg(format!("--as={}", kind.address_space_limit()))
+        .envs(env.iter().copied())
+        .arg(format!("--as={address_space}"))
         .arg(format!("--cpu={cpu}"))
         .args(["--nofile=64", "--"])
         .arg(worker)
@@ -401,7 +429,7 @@ fn run_worker(
         .spawn()
         .map_err(|e| {
             backend_failure(
-                "enhancer_backend_unavailable",
+                &code("unavailable"),
                 format!("не удалось запустить воркер через prlimit: {e}"),
                 serde_json::json!({}),
             )
@@ -429,13 +457,13 @@ fn run_worker(
                 let _ = child.wait();
                 break Err(if result.is_err() {
                     backend_failure(
-                        "enhancer_backend_failed",
+                        &code("failed"),
                         "ошибка ожидания воркера",
                         serde_json::json!({}),
                     )
                 } else {
                     backend_failure(
-                        "enhancer_backend_timeout",
+                        &code("timeout"),
                         format!("воркер превысил {} с", timeout.as_secs_f64()),
                         serde_json::json!({"timeout_seconds": timeout.as_secs_f64()}),
                     )
@@ -462,7 +490,7 @@ fn run_worker(
         // ждёт чужих каналов.
         status?;
         return Err(backend_failure(
-            "enhancer_backend_timeout",
+            &code("timeout"),
             "потомки воркера удерживали каналы вывода дольше предела времени",
             serde_json::json!({"timeout_seconds": timeout.as_secs_f64()}),
         ));
@@ -472,27 +500,27 @@ fn run_worker(
     let status = status?;
     if matches!(status.code(), Some(126 | 127)) {
         return Err(backend_failure(
-            "enhancer_backend_unavailable",
+            &code("unavailable"),
             "prlimit не смог выполнить воркер",
             serde_json::json!({}),
         ));
     }
     if let Some(signal) = status.signal() {
         // SIGXCPU/SIGKILL по пределу CPU — тот же класс, что таймаут.
-        let code = if matches!(signal, 9 | 24) {
-            "enhancer_backend_timeout"
+        let failure = if matches!(signal, 9 | 24) {
+            code("timeout")
         } else {
-            "enhancer_backend_crashed"
+            code("crashed")
         };
         return Err(backend_failure(
-            code,
+            &failure,
             format!("воркер завершён сигналом {signal} (авария, нехватка памяти или предел CPU)"),
             serde_json::json!({"signal": signal}),
         ));
     }
     if stdout.len() as u64 > STDOUT_LIMIT {
         return Err(backend_failure(
-            "enhancer_backend_protocol",
+            &code("protocol"),
             "воркер превысил предел stdout",
             serde_json::json!({}),
         ));

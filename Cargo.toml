@@ -15,6 +15,7 @@ members = [
     "tools/benchmark-runner",
     "tools/repository-maintenance",
     "tools/speech-enhance",
+    "tools/speech-recognize",
 ]
 resolver = "3"
 
@@ -71,6 +72,15 @@ opt-level = 3
 [profile.dev.package.realfft]
 opt-level = 3
 [profile.dev.package.rustfft]
+opt-level = 3
+# Инференс CTC-моделей распознавания (speech-recognize) без оптимизации
+# медленнее на порядок: тесты с настоящими весами и `cargo run` получают
+# оптимизированное матричное умножение и собственный код инференса.
+[profile.dev.package.speech-recognize]
+opt-level = 3
+[profile.dev.package.matrixmultiply]
+opt-level = 3
+[profile.dev.package.thread-tree]
 opt-level = 3
 
 # CI на выделенных исполнителях использует один профиль и для тестового стенда,

@@ -807,6 +807,11 @@ pub enum ReasonOrigin {
     EnhancementQc,
     /// Этап улучшения речи: модель к записи сейчас не применяется.
     EnhancementPolicy,
+    /// Этап распознавания: свободная гипотеза, сопоставление с целью,
+    /// границы и повторная проверка. Нормализатор этот источник не выдаёт.
+    Recognition,
+    /// Этап распознавания: цель неизвестна или не представима.
+    TargetIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

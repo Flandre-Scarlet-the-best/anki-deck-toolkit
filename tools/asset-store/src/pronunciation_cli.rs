@@ -58,6 +58,13 @@ enum Action {
         #[command(subcommand)]
         action: crate::pronunciation_enhancer_cli::EnhancerAction,
     },
+    /// Локальное распознавание японского произношения (фонемный CTC HuBERT и
+    /// независимая вторая модель на CPU): поиск целевого чтения, осведомлённая
+    /// о цели обработка, извлечение и повторная проверка, без сети.
+    Recognizer {
+        #[command(subcommand)]
+        action: crate::pronunciation_recognizer_cli::RecognizerAction,
+    },
     Init,
     Inspect,
     Verify,
@@ -664,6 +671,9 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     if let Action::Enhancer { action } = &cli.command {
         return crate::pronunciation_enhancer_cli::execute(action, &protected);
     }
+    if let Action::Recognizer { action } = &cli.command {
+        return crate::pronunciation_recognizer_cli::execute(action, &protected);
+    }
     if let Action::Probe { file } = &cli.command {
         return Ok(
             serde_json::json!({"schema_version":1,"outcome":"ok","result":audio::probe_mp3(&read_local(file,&protected,audio::MAX_AUDIO_BYTES)?)?}),
@@ -687,6 +697,9 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
         Action::Forvo { .. } => unreachable!("Forvo обработан до открытия хранилища"),
         Action::Normalizer { .. } => unreachable!("нормализатор обработан до открытия хранилища"),
         Action::Enhancer { .. } => unreachable!("улучшение обработано до открытия хранилища"),
+        Action::Recognizer { .. } => {
+            unreachable!("распознавание обработано до открытия хранилища")
+        }
         Action::Init => {
             serde_json::json!({"store_id":store.store_id(),"initialized":store.initialized_on_open()})
         }
