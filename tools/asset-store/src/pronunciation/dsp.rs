@@ -40,6 +40,21 @@ impl Pcm {
             samples: self.samples[start * self.channels..end * self.channels].to_vec(),
         }
     }
+
+    /// Один канал как моно-сигнал той же частоты.
+    pub fn channel(&self, channel: usize) -> Pcm {
+        Pcm {
+            sample_rate: self.sample_rate,
+            channels: 1,
+            samples: self
+                .samples
+                .iter()
+                .skip(channel)
+                .step_by(self.channels.max(1))
+                .copied()
+                .collect(),
+        }
+    }
 }
 
 /// Амплитуда → dBFS с нижней границей вместо `-inf`.

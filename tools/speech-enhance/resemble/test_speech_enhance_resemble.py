@@ -34,6 +34,26 @@ class Evil:
         return (os.system, ("true",))
 
 
+class InterpreterTest(unittest.TestCase):
+    def test_expected_interpreter_version(self):
+        # CI задаёт целевую версию; локальный запуск без переменной её не требует.
+        expected = os.environ.get("RESEMBLE_EXPECT_PYTHON")
+        if expected:
+            self.assertEqual(sys.version.split()[0], expected)
+
+
+class SourceIdentityTest(unittest.TestCase):
+    def test_worker_reports_sha_of_its_own_source(self):
+        import hashlib
+
+        info = worker.worker_info()
+        self.assertEqual(info["source_path"], str(WORKER))
+        self.assertEqual(
+            info["source_sha256"], hashlib.sha256(WORKER.read_bytes()).hexdigest()
+        )
+        self.assertTrue(Path(info["source_path"]).is_absolute())
+
+
 class ManifestTest(unittest.TestCase):
     def test_manifest_matches_pinned_value_of_rust_side(self):
         expected = os.environ.get("RESEMBLE_DENOISE_MANIFEST_SHA256")
@@ -110,6 +130,63 @@ class ModelFilesTest(unittest.TestCase):
         path.symlink_to(target)
         self.expect("model_not_regular_file")
 
+    def test_symlink_in_intermediate_directory_is_not_followed(self):
+        # Настоящие файлы с верной длиной лежат за ссылкой на промежуточный
+        # каталог: отказ приходит по ссылке, а не по содержимому.
+        name = worker.FILES[0][0]
+        outside = self.root.parent / (self.root.name + "-outside")
+        real = outside / "default"
+        real.mkdir(parents=True)
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside, ignore_errors=True))
+        with open(real / Path(name).name, "wb") as f:
+            f.truncate(worker.FILES[0][1])
+        link_parent = (self.root / name).parent
+        link_parent.parent.mkdir(parents=True)
+        link_parent.symlink_to(real, target_is_directory=True)
+        self.expect("model_not_regular_file")
+
+    def test_symlinked_top_level_directory_is_not_followed(self):
+        name = worker.FILES[1][0]
+        outside = self.root.parent / (self.root.name + "-top")
+        (outside).mkdir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside, ignore_errors=True))
+        (self.root / Path(name).parts[0]).symlink_to(outside, target_is_directory=True)
+        self.expect("model_not_regular_file")
+
+    def test_fifo_is_refused_without_blocking(self):
+        name = worker.FILES[1][0]
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(path)
+        with self.assertRaises(worker.WorkerError) as caught:
+            worker.read_regular(os.open(self.root, os.O_RDONLY | os.O_DIRECTORY), name, 717)
+        self.assertEqual(caught.exception.code, "model_not_regular_file")
+
+    def test_install_refuses_source_with_intermediate_symlink(self):
+        source = self.root / "src"
+        source.mkdir()
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (source / "enhancer_stage2").symlink_to(elsewhere, target_is_directory=True)
+        models = self.root / "models"
+        code, report = run("install-model", "--source", str(source), "--models-root", str(models))
+        self.assertEqual(code, worker.EXIT_MODEL)
+        self.assertEqual(report["code"], "model_not_regular_file")
+        self.assertFalse((models / worker.BACKEND).exists())
+
+    def test_write_tree_creates_only_new_regular_files(self):
+        staging = self.root / "staging"
+        staging.mkdir()
+        files = {name: b"x" * 3 for name, _, _ in worker.FILES}
+        worker.write_tree(staging, files)
+        for name in files:
+            path = staging / name
+            self.assertTrue(path.is_file() and not path.is_symlink())
+            self.assertEqual(path.read_bytes(), b"xxx")
+        # Повторная запись в тот же каталог не перезаписывает файлы.
+        with self.assertRaises(FileExistsError):
+            worker.write_tree(staging, files)
+
     def test_install_from_corrupt_source_refuses_without_target(self):
         source = self.root / "src"
         for name, _, _ in worker.FILES:
@@ -121,6 +198,49 @@ class ModelFilesTest(unittest.TestCase):
         self.assertEqual(code, worker.EXIT_MODEL)
         self.assertEqual(report["code"], "model_corrupt")
         self.assertFalse((models / worker.BACKEND).exists())
+
+
+def torch_available() -> bool:
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        if os.environ.get("RESEMBLE_REQUIRE_TORCH"):
+            raise
+        return False
+    return True
+
+
+@unittest.skipUnless(torch_available(), "нет torch: проверка настоящего torch.load пропущена")
+class TorchLoadTest(unittest.TestCase):
+    """Настоящий `torch.load` идёт через ограниченный unpickler воркера."""
+
+    def save(self, obj) -> bytes:
+        import torch
+
+        buf = io.BytesIO()
+        torch.save(obj, buf)
+        return buf.getvalue()
+
+    def load(self, data: bytes):
+        import torch
+
+        return torch.load(
+            io.BytesIO(data),
+            map_location="cpu",
+            pickle_module=worker.RestrictedPickle,
+            weights_only=False,
+        )
+
+    def test_half_tensors_and_sets_load(self):
+        import torch
+
+        value = {"module": collections.OrderedDict(w=torch.ones(3, dtype=torch.half)), "s": {1}}
+        loaded = self.load(self.save(value))
+        self.assertTrue(torch.equal(loaded["module"]["w"], value["module"]["w"]))
+
+    def test_code_execution_payload_is_refused(self):
+        with self.assertRaises(pickle.UnpicklingError):
+            self.load(self.save({"x": Evil()}))
 
 
 class ProtocolTest(unittest.TestCase):

@@ -44,9 +44,7 @@ pub const RESULT_SCHEMA_VERSION: u32 = 1;
 /// Версия собственных алгоритмов триажа, Enhancement QC и маршрутизации.
 /// Входит в ключ кэша: любое изменение их логики обязано менять версию,
 /// иначе прежние результаты будут ложно переиспользованы под новым кодом.
-pub const ALGORITHM_VERSION: &str = "speech-enhancement-gate/1";
-/// Режим исполнения инференса: влияет на байты, поэтому входит в отпечаток.
-pub const EXECUTION_MODE: &str = "cpu-tract-single-thread";
+pub const ALGORITHM_VERSION: &str = "speech-enhancement-gate/2";
 
 fn invalid(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::InvalidTransition, message)
@@ -175,7 +173,7 @@ impl EnhancementProfile {
         }
     }
 
-    /// Экспериментальный профиль с denoiser Resemble Enhance: тот же triage
+    /// Экспериментальный профиль с denoiser Resemble Enhance: тот же триаж
     /// и тот же Enhancement QualityGate, что у DeepFilterNet3; у backend нет
     /// параметров инференса. Предел времени шире: процесс каждый раз
     /// загружает PyTorch и чекпойнт, а без CUDA считает на CPU.
@@ -240,8 +238,9 @@ impl EnhancementProfile {
 
 /// Отпечаток всего, что определяет результат входа: схема, алгоритмы,
 /// профиль, идентичность backend (SHA воркера, веса, параметры), режим
-/// исполнения и отпечаток конфигурации Balanced (его профиль, FFmpeg,
-/// ffprobe, кодировщик и анализатор).
+/// исполнения из подтверждённой идентичности backend
+/// ([`BackendIdentity::execution_mode`]) и отпечаток конфигурации Balanced
+/// (его профиль, FFmpeg, ffprobe, кодировщик и анализатор).
 pub fn config_sha256(
     profile: &EnhancementProfile,
     backend: &BackendIdentity,
@@ -251,7 +250,7 @@ pub fn config_sha256(
         serde_json::to_vec(&serde_json::json!({
             "schema_version": RESULT_SCHEMA_VERSION,
             "algorithm": ALGORITHM_VERSION,
-            "execution": EXECUTION_MODE,
+            "execution": backend.execution_mode(),
             "profile": profile,
             "backend": backend,
             "base_config_sha256": base_config_sha256,
@@ -278,13 +277,6 @@ pub enum EnhancementOutcome {
 }
 
 impl EnhancementOutcome {
-    pub const ALL: [Self; 5] = [
-        Self::NotNeeded,
-        Self::Enhanced,
-        Self::EnhancementRejected,
-        Self::Deferred,
-        Self::InputRejected,
-    ];
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NotNeeded => "NOT_NEEDED",
@@ -718,7 +710,93 @@ pub const QC_CHECKS: [&str; 13] = [
     "no_new_clipping",
 ];
 
+/// Проверки сохранности звука, которые обязаны выполняться в каждом канале.
+/// Уровни окон всего сигнала — максимум по каналам, поэтому тихая речь
+/// одного канала за громким другим в них не видна: её потерю ловит только
+/// оценка канала отдельно. Польза, длина, сдвиг, громкость и перегрузка
+/// остаются свойствами всего сигнала.
+const PER_CHANNEL_CHECKS: [&str; 8] = [
+    "strong_speech_preserved",
+    "strong_speech_p90",
+    "no_segment_loss",
+    "weak_sounds_preserved",
+    "edges_preserved",
+    "separated_activity_preserved",
+    "no_added_energy",
+    "spectral_balance",
+];
+
+/// Проверки, которые без сильной речи в канале неразрешимы. Канал, где ни
+/// одно окно не выше собственного шума на `weak_window_above_noise_db`,
+/// различимой речи не несёт: для него эти проверки не применяются, а
+/// остальные (потеря сегментов, добавленная энергия и т. д.) — применяются.
+const STRONG_SPEECH_CHECKS: [&str; 4] = [
+    "strong_speech_preserved",
+    "strong_speech_p90",
+    "edges_preserved",
+    "spectral_balance",
+];
+
+/// Enhancement QC всего сигнала и, для многоканального входа, каждого канала
+/// отдельно. Поканальная проверка только ужесточает решение: значение —
+/// худшее из всего сигнала и каналов, а пройдена проверка, лишь если она
+/// пройдена и разрешима везде.
 fn enhancement_qc(input: &QcInput<'_>, profile: &EnhancementProfile) -> EnhancementQc {
+    let mut qc = mixed_enhancement_qc(input, profile);
+    let (orig, enh) = (input.original, input.enhanced);
+    let comparable = orig.sample_rate == enh.sample_rate
+        && orig.channels == enh.channels
+        && orig.frames() == enh.frames()
+        && orig.frames() > 0;
+    if orig.channels < 2 || !comparable {
+        return qc;
+    }
+    let per_channel: Vec<EnhancementQc> = (0..orig.channels)
+        .map(|c| {
+            let (o, e) = (orig.channel(c), enh.channel(c));
+            mixed_enhancement_qc(
+                &QcInput {
+                    original: &o,
+                    enhanced: &e,
+                    ..*input
+                },
+                profile,
+            )
+        })
+        .collect();
+    for check in qc
+        .checks
+        .iter_mut()
+        .filter(|c| PER_CHANNEL_CHECKS.contains(&c.id.as_str()))
+    {
+        let parts: Vec<&EnhancementCheck> = per_channel
+            .iter()
+            .filter(|channel| {
+                !STRONG_SPEECH_CHECKS.contains(&check.id.as_str())
+                    || channel
+                        .checks
+                        .iter()
+                        .find(|c| c.id == "strong_speech_preserved")
+                        .is_some_and(|c| c.samples > 0)
+            })
+            .filter_map(|channel| channel.checks.iter().find(|c| c.id == check.id))
+            .collect();
+        for part in parts {
+            check.resolved &= part.resolved;
+            check.passed &= part.passed;
+            check.value = match (check.value, part.value) {
+                (Some(x), Some(y)) => Some(x.max(y)),
+                (x, y) => x.or(y),
+            };
+            check.samples += part.samples;
+        }
+        check.passed &= check.resolved;
+    }
+    qc.passed = qc.checks.iter().all(|c| c.passed && c.resolved);
+    qc
+}
+
+fn mixed_enhancement_qc(input: &QcInput<'_>, profile: &EnhancementProfile) -> EnhancementQc {
     let g = &profile.gate;
     let (orig, enh) = (input.original, input.enhanced);
     let comparable = orig.sample_rate == enh.sample_rate
@@ -1626,6 +1704,90 @@ mod tests {
         assert!(!qc.passed);
         assert!(qc.checks.iter().all(|c| !c.resolved));
         assert_eq!(qc.checks.len(), QC_CHECKS.len());
+    }
+
+    fn stereo(left: &[f32], right: &[f32]) -> Pcm {
+        Pcm {
+            sample_rate: SR,
+            channels: 2,
+            samples: left.iter().zip(right).flat_map(|(l, r)| [*l, *r]).collect(),
+        }
+    }
+
+    fn run_stereo_qc(original: &Pcm, enhanced: &Pcm, only_mixed: bool) -> EnhancementQc {
+        let profile = EnhancementProfile::conservative();
+        let base = NormalizerProfile::balanced();
+        let (oa, ea) = (
+            normalizer::analyze_pcm(original, &base),
+            normalizer::analyze_pcm(enhanced, &base),
+        );
+        let input = QcInput {
+            original,
+            enhanced,
+            original_analysis: &oa,
+            enhanced_analysis: &ea,
+        };
+        if only_mixed {
+            mixed_enhancement_qc(&input, &profile)
+        } else {
+            enhancement_qc(&input, &profile)
+        }
+    }
+
+    /// Громкое слово в левом канале и тихий (−30 dB) речевой сегмент в
+    /// правом — одновременно со словом или отдельно от него. Уровни всего
+    /// сигнала (максимум по каналам) потерю правого сегмента не видят; её
+    /// обязана поймать поканальная проверка.
+    #[test]
+    fn quiet_speech_lost_in_one_stereo_channel_is_rejected() {
+        let left = word();
+        let n = left.len();
+        let quiet = |segments: &[(f64, Seg)]| -> Vec<f32> {
+            let mut v: Vec<f32> = clean(segments).iter().map(|s| s * 0.03).collect();
+            v.resize(n, 0.0);
+            v
+        };
+        for (case, right) in [
+            (
+                "одновременно со словом",
+                quiet(&[(320.0, Seg::Silence), (150.0, Seg::Vowel)]),
+            ),
+            (
+                "отдельно от слова",
+                quiet(&[(950.0, Seg::Silence), (150.0, Seg::Vowel)]),
+            ),
+        ] {
+            let noisy = stereo(
+                &add(&left, &noise(n, 3, 0.0006)),
+                &add(&right, &noise(n, 4, 0.0006)),
+            );
+            let lost = stereo(&left, &vec![0.0; n]);
+            // Риск воспроизводится: проверка всего сигнала потерю пропускает.
+            let mixed = run_stereo_qc(&noisy, &lost, true);
+            assert!(mixed.passed, "{case}: {:?}", failed(&mixed));
+            let qc = run_stereo_qc(&noisy, &lost, false);
+            assert!(!qc.passed, "{case}: потеря правого канала принята");
+            assert!(
+                failed(&qc).contains(&"strong_speech_preserved"),
+                "{case}: {:?}",
+                failed(&qc)
+            );
+            assert_eq!(qc.checks.len(), QC_CHECKS.len());
+            // Оба канала сохранены — новая логика не даёт ложного отказа.
+            let kept = run_stereo_qc(&noisy, &stereo(&left, &right), false);
+            assert!(kept.passed, "{case}: {:?}", failed(&kept));
+        }
+    }
+
+    /// Канал без различимой речи (только шум) не делает неразрешимыми
+    /// проверки сильной речи: их подтверждает другой канал.
+    #[test]
+    fn noise_only_stereo_channel_does_not_block_acceptance() {
+        let left = word();
+        let n = left.len();
+        let noisy = stereo(&add(&left, &noise(n, 3, 0.0006)), &noise(n, 4, 0.0006));
+        let qc = run_stereo_qc(&noisy, &stereo(&left, &vec![0.0; n]), false);
+        assert!(qc.passed, "{:?}", failed(&qc));
     }
 
     #[test]

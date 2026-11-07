@@ -360,6 +360,13 @@ Docker, Anki и Hyperfine для этого не нужны. Тесты `benchma
 Серии сценариев настоящего каталога `benchmarks/` в `cargo test` и CI не входят;
 интерфейс и коды возврата — `docs/ru/benchmark-runner/README.md`.
 
+Воркер Resemble Enhance проверяется в `cargo test` stdlib-тестами без torch и
+весов (`cargo test -p speech-enhance --test resemble`), исполняемыми `python3`;
+CI на github-hosted ставит для этого CPython 3.15.2 и подтверждает версию
+переменной `RESEMBLE_EXPECT_PYTHON`. Приёмка на закреплённых весах (CPU и CUDA,
+без сети) — opt-in тест `--ignored` того же файла; запуск и переменные —
+`docs/ru/asset-store/enhancer.md`.
+
 ## Проверки CI
 
 Библиотечный контракт обмена проверяется синтетическими сценариями

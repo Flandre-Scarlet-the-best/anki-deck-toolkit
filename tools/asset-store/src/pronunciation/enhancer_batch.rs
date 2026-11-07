@@ -406,12 +406,19 @@ pub struct RunSummary {
 struct Snapshots {
     tools: super::probe::ToolFiles,
     worker: backend::WorkerSnapshot,
+    /// Исходник Python-воркера: запускатель не меняется, когда меняется
+    /// исполняемый им код.
+    source: Option<backend::WorkerSnapshot>,
 }
 
-fn snapshots(worker: &Path) -> Result<Snapshots, AssetError> {
+fn snapshots(worker: &Path, identity: &BackendIdentity) -> Result<Snapshots, AssetError> {
     Ok(Snapshots {
         tools: super::probe::tool_files()?,
         worker: backend::worker_snapshot(worker)?,
+        source: identity
+            .worker_source()
+            .map(|source| backend::worker_snapshot(&source))
+            .transpose()?,
     })
 }
 
@@ -444,7 +451,9 @@ pub fn resume(
     }
     let worker = PathBuf::from(&batch.worker_path);
     let model_dir = PathBuf::from(&batch.model_dir);
-    let snap = snapshots(&worker)?;
+    // Снимок до `identify`: исходник, изменённый между снимком и чтением
+    // в `identify`, даст расхождение снимков после первого же входа.
+    let snap = snapshots(&worker, &batch.backend)?;
     let toolchain = Toolchain::detect()?;
     if toolchain != base.toolchain {
         return Err(invalid(
@@ -562,8 +571,14 @@ pub fn resume(
                     ItemError::Fatal(error)
                 }
             })?;
-        match snapshots(&worker) {
-            Ok(now) if now.tools == snap.tools && now.worker == snap.worker => Ok(outcome),
+        match snapshots(&worker, &backend_identity) {
+            Ok(now)
+                if now.tools == snap.tools
+                    && now.worker == snap.worker
+                    && now.source == snap.source =>
+            {
+                Ok(outcome)
+            }
             Ok(now) if now.tools != snap.tools => {
                 Err(ItemError::Fatal(super::probe::toolchain_changed()))
             }

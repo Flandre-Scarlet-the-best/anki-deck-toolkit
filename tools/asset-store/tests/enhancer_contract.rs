@@ -133,14 +133,16 @@ fn fixture(name: &str) -> Fixture {
     }
 }
 
-/// Поддельный воркер по протоколу `speech-enhance-dfn`. `process` задаёт
-/// поведение обработки; файл `fail-flag` рядом со скриптом включает аварию
-/// (тот же исполняемый файл, поэтому идентичность не меняется).
-fn fake_worker(root: &Path, name: &str, variant: &str, process: &str) -> PathBuf {
-    let path = root.join(name);
-    let flag = root.join("fail-flag");
-    let script = format!(
-        r#"#!/bin/bash
+/// Общая часть поддельных воркеров: только POSIX `sh` и FFmpeg, который
+/// тестам этапа нужен в любом случае. Длина файла — `wc -c`, SHA-256 —
+/// мультиплексор `hash` FFmpeg над сырыми байтами (`-f data`). Без
+/// `df3_params` параметры DeepFilterNet3 в вызове роняют процесс.
+fn prelude(df3_params: bool) -> String {
+    let df3 = if df3_params { "shift 2" } else { "exit 9" };
+    format!(
+        r#"#!/bin/sh
+sha() {{ ffmpeg -nostdin -v error -f data -i "$1" -map 0:0 -c copy -f hash -hash sha256 - | sed 's/^SHA256=//'; }}
+size() {{ wc -c < "$1" | tr -d ' '; }}
 cmd=$1; shift
 while [ $# -gt 0 ]; do
   case $1 in
@@ -148,23 +150,37 @@ while [ $# -gt 0 ]; do
     --input) in=$2; shift 2;;
     --output) out=$2; shift 2;;
     --channels) ch=$2; shift 2;;
+    --atten-lim-db|--post-filter-beta|--context-ms) {df3};;
     *) shift;;
   esac
 done
+"#
+    )
+}
+
+/// Поддельный воркер по протоколу `speech-enhance-dfn`. `process` задаёт
+/// поведение обработки; файл `fail-flag` рядом со скриптом включает аварию
+/// (тот же исполняемый файл, поэтому идентичность не меняется).
+fn fake_worker(root: &Path, name: &str, variant: &str, process: &str) -> PathBuf {
+    let path = root.join(name);
+    let flag = root.join("fail-flag");
+    let script = format!(
+        r#"{prelude}
 if [ ! -d "$md" ]; then echo '{{"schema_version":1,"kind":"speech_enhance_error","code":"model_missing","message":"нет"}}'; exit 3; fi
 case $cmd in
 identify)
-  echo '{{"schema_version":1,"kind":"speech_enhance_identity","backend":"deepfilternet3","worker":{{"name":"fake","version":"0","protocol":1}},"runtime":{{"device":"cpu"}},"model":{{"name":"DeepFilterNet3","variant":"{variant}","manifest_sha256":"{DEEPFILTERNET3_MANIFEST_SHA256}","source":{{}},"license":"MIT OR Apache-2.0"}},"stream":{{"sample_rate":48000,"hop_samples":480,"delay_samples":1440,"max_channels":2}}}}'
+  echo '{{"schema_version":1,"kind":"speech_enhance_identity","backend":"deepfilternet3","worker":{{"name":"fake","version":"0","protocol":1}},"runtime":{{"device":"cpu","inference":"tract","threads":1}},"model":{{"name":"DeepFilterNet3","variant":"{variant}","manifest_sha256":"{DEEPFILTERNET3_MANIFEST_SHA256}","source":{{}},"license":"MIT OR Apache-2.0"}},"stream":{{"sample_rate":48000,"hop_samples":480,"delay_samples":1440,"max_channels":2}}}}'
   ;;
 process)
   if [ -e "{flag}" ]; then kill -SEGV $$; fi
   {process}
-  frames=$(( $(stat -c %s "$in") / 4 / ch ))
-  sha=$(sha256sum "$out" | cut -d' ' -f1)
+  frames=$(( $(size "$in") / 4 / ch ))
+  sha=${{reported_output_sha:-$(sha "$out")}}
   echo "{{\"schema_version\":1,\"kind\":\"speech_enhance_result\",\"model_manifest_sha256\":\"{DEEPFILTERNET3_MANIFEST_SHA256}\",\"params\":{{}},\"diagnostics\":{{\"channels\":$ch,\"input_frames\":$frames,\"output_frames\":$frames,\"delay_samples\":1440,\"flush_samples\":1500,\"identical_channels\":true,\"per_channel\":[{{\"lsnr_mean_db\":10.0}}]}},\"output_sha256\":\"$sha\"}}"
   ;;
 esac
 "#,
+        prelude = prelude(true),
         flag = flag.display()
     );
     fs::write(&path, script).unwrap();
@@ -178,35 +194,42 @@ fn fake_resemble_worker(root: &Path, name: &str, process: &str) -> PathBuf {
     fake_resemble_worker_on(root, name, process, "cpu")
 }
 
+/// Исходник, который «исполняет» поддельный запускатель Resemble: как у
+/// настоящего, его SHA-256 сообщают и `identify`, и каждый `process`.
+fn fake_resemble_source(root: &Path, name: &str) -> PathBuf {
+    root.join(format!("{name}.py"))
+}
+
 /// `device` — устройство, о котором воркер отчитывается в `process`;
-/// `identify` всегда сообщает `cpu`.
+/// `identify` всегда сообщает `cpu`. `process` выполняется до вычисления
+/// SHA-256 исходника для отчёта.
 fn fake_resemble_worker_on(root: &Path, name: &str, process: &str, device: &str) -> PathBuf {
     let path = root.join(name);
+    let source = fake_resemble_source(root, name);
+    fs::write(&source, b"# fake resemble worker source\n").unwrap();
+    let runtime = r#"{"library":"resemble-enhance","torch":"0-fake","device":"cpu"}"#;
     let script = format!(
-        r#"#!/bin/bash
-cmd=$1; shift
-while [ $# -gt 0 ]; do
-  case $1 in
-    --model-dir) md=$2; shift 2;;
-    --input) in=$2; shift 2;;
-    --output) out=$2; shift 2;;
-    --channels) ch=$2; shift 2;;
-    --atten-lim-db|--post-filter-beta|--context-ms) exit 9;;
-    *) shift;;
-  esac
-done
+        r#"{prelude}
+src="{source}"
+worker() {{ printf '{{"name":"fake","version":"0","protocol":1,"source_sha256":"%s","source_path":"%s"}}' "$1" "$src"; }}
 case $cmd in
 identify)
-  echo '{{"schema_version":1,"kind":"speech_enhance_identity","backend":"resemble-enhance-denoise","worker":{{"name":"fake","version":"0","protocol":1}},"runtime":{{"device":"cpu"}},"model":{{"name":"Resemble Enhance","variant":"denoiser","manifest_sha256":"{RESEMBLE_DENOISE_MANIFEST_SHA256}","source":{{}},"license":"MIT"}},"stream":{{"sample_rate":48000,"hop_samples":1,"delay_samples":0,"max_channels":2}}}}'
+  echo "{{\"schema_version\":1,\"kind\":\"speech_enhance_identity\",\"backend\":\"resemble-enhance-denoise\",\"worker\":$(worker "$(sha "$src")"),\"runtime\":{runtime},\"model\":{{\"name\":\"Resemble Enhance\",\"variant\":\"denoiser\",\"manifest_sha256\":\"{RESEMBLE_DENOISE_MANIFEST_SHA256}\",\"source\":{{}},\"license\":\"MIT\"}},\"stream\":{{\"sample_rate\":48000,\"hop_samples\":1,\"delay_samples\":0,\"max_channels\":2}}}}"
   ;;
 process)
   {process}
-  frames=$(( $(stat -c %s "$in") / 4 / ch ))
-  sha=$(sha256sum "$out" | cut -d' ' -f1)
-  echo "{{\"schema_version\":1,\"kind\":\"speech_enhance_result\",\"model_manifest_sha256\":\"{RESEMBLE_DENOISE_MANIFEST_SHA256}\",\"params\":{{}},\"diagnostics\":{{\"channels\":$ch,\"input_frames\":$frames,\"output_frames\":$frames,\"delay_samples\":0,\"flush_samples\":0,\"identical_channels\":false,\"device\":\"{device}\",\"per_channel\":[{{}}]}},\"output_sha256\":\"$sha\"}}"
+  frames=$(( $(size "$in") / 4 / ch ))
+  sha=${{reported_output_sha:-$(sha "$out")}}
+  echo "{{\"schema_version\":1,\"kind\":\"speech_enhance_result\",\"model_manifest_sha256\":\"{RESEMBLE_DENOISE_MANIFEST_SHA256}\",\"worker\":$(worker "${{reported_source_sha:-$(sha "$src")}}"),\"runtime\":{runtime_device},\"params\":{{}},\"diagnostics\":{{\"channels\":$ch,\"input_frames\":$frames,\"output_frames\":$frames,\"delay_samples\":0,\"flush_samples\":0,\"identical_channels\":false,\"device\":\"{device}\",\"per_channel\":[{{}}]}},\"output_sha256\":\"$sha\"}}"
   ;;
 esac
-"#
+"#,
+        prelude = prelude(false),
+        source = source.display(),
+        runtime = runtime.replace('"', "\\\""),
+        runtime_device = runtime
+            .replace(r#""device":"cpu""#, &format!(r#""device":"{device}""#))
+            .replace('"', "\\\""),
     );
     fs::write(&path, script).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -348,6 +371,13 @@ fn copy_backend_routes_every_input_and_keeps_exact_selected_bytes() {
     assert_eq!(summary.counts.outcomes["ENHANCEMENT_REJECTED"], 1);
     assert_eq!(summary.counts.outcomes_by_files["ENHANCEMENT_REJECTED"], 2);
     assert_eq!(summary.model["model_variant"], "deepfilternet3");
+    assert_eq!(summary.model["execution_mode"], "cpu-tract-single-thread");
+    // Все распределения сводки на месте, а отказ проверки без распределения
+    // по-прежнему считается в `qc_failures`.
+    for id in ereport::DISTRIBUTION_CHECKS {
+        assert!(summary.metrics.contains_key(&format!("qc_{id}")), "{id}");
+    }
+    assert_eq!(summary.counts.qc_failures["noise_reduction"], 1);
     let report = f.root.join("report");
     ereport::write_report(&batch, &inventory, &all, &report).unwrap();
     assert!(report.join("summary.json").is_file() && report.join("items.tsv").is_file());
@@ -513,6 +543,93 @@ fn timeout_and_wrong_length_are_infrastructure_failures() {
     }
 }
 
+/// Вывод воркера, который нельзя принять, — сбой протокола: вход не
+/// получает исхода и не попадает в кэш. Длинный разреженный вывод (8 GiB)
+/// отвергается по размеру до чтения: родитель не выделяет под него память.
+#[test]
+fn oversized_foreign_or_mismatched_output_is_refused_before_caching() {
+    for (name, process) in [
+        (
+            "sparse-worker",
+            r#"cp "$in" "$out"; reported_output_sha=$(sha "$out"); dd if=/dev/null of="$out" bs=1 seek=8589934592 2>/dev/null"#,
+        ),
+        (
+            "long-worker",
+            r#"cp "$in" "$out"; head -c 4 "$in" >> "$out""#,
+        ),
+        ("symlink-worker", r#"ln -s "$in" "$out""#),
+        (
+            "sha-worker",
+            r#"cp "$in" "$out"; reported_output_sha=0000000000000000000000000000000000000000000000000000000000000000"#,
+        ),
+    ] {
+        let f = fixture(&format!("enhancer-{name}"));
+        base_batch(&f);
+        let worker = fake_worker(&f.root, name, "deepfilternet3", process);
+        let begun = std::time::Instant::now();
+        let run = start(&f, "enh", &worker, EnhancementProfile::conservative()).unwrap();
+        assert!(
+            begun.elapsed() < std::time::Duration::from_secs(30),
+            "{name}: {:?}",
+            begun.elapsed()
+        );
+        assert_eq!(run.outcome, "paused", "{name}");
+        assert_eq!(run.infrastructure_failed_now, 1, "{name}");
+        assert!(!results(&f, "enh").contains_key("noisy.mp3"), "{name}");
+    }
+}
+
+/// Запускатель Python-воркера не меняется, когда меняется исполняемый им
+/// исходник. Смена исходника посреди пакета не даёт принять результат,
+/// рассчитанный под прежней идентичностью: ни когда процесс честно сообщает
+/// новый SHA-256, ни когда сообщает прежний (снимок файла исходника).
+#[test]
+fn resemble_source_change_during_batch_is_never_cached() {
+    for (name, process, blocker) in [
+        (
+            "resemble-honest",
+            r#"echo '# changed' >> "$src"; cp "{clean}" "$out""#,
+            None,
+        ),
+        (
+            "resemble-stale",
+            r#"reported_source_sha=$(sha "$src"); echo '# changed' >> "$src"; cp "{clean}" "$out""#,
+            Some(()),
+        ),
+    ] {
+        let f = fixture(&format!("enhancer-{name}"));
+        base_batch(&f);
+        let process = process.replace("{clean}", &f.clean_f32.display().to_string());
+        let worker = fake_resemble_worker(&f.root, name, &process);
+        let launcher = fs::read(&worker).unwrap();
+        let run = start(&f, "res", &worker, EnhancementProfile::resemble_denoise());
+        match (blocker, run) {
+            // Процесс сообщил новый SHA-256: сбой протокола у этого входа
+            // либо остановка по снимку исходника у соседнего входа пакета.
+            (None, Ok(run)) => {
+                assert_eq!(run.outcome, "paused", "{name}: {run:?}");
+                assert_eq!(run.infrastructure_failed_now, 1, "{name}");
+            }
+            (_, Err(error)) => {
+                assert_eq!(
+                    error.details["blocker"], "enhancer_backend_changed",
+                    "{name}: {error:?}"
+                );
+            }
+            (Some(_), Ok(run)) => panic!("{name}: смена исходника не замечена: {run:?}"),
+        }
+        assert_eq!(fs::read(&worker).unwrap(), launcher, "{name}");
+        assert!(!results(&f, "res").contains_key("noisy.mp3"), "{name}");
+        // Продолжение под изменённым исходником — другая идентичность.
+        let error =
+            ebatch::resume(&f.workspace, "res", None, None, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(
+            error.details["blocker"], "enhancer_backend_changed",
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn wrong_model_missing_model_and_missing_worker_fail_before_state() {
     let f = fixture("enhancer-identity");
@@ -623,7 +740,7 @@ fn resemble_profile_keeps_df3_fingerprint_and_rejects_foreign_params() {
     let mut foreign = EnhancementProfile::resemble_denoise();
     foreign.backend.inference.atten_lim_db = 18.0;
     assert!(foreign.validate().is_err());
-    // Тот же gate и triage, другой backend.
+    // Тот же gate и триаж, другой backend.
     assert_eq!(resemble.gate, EnhancementProfile::conservative().gate);
     assert_eq!(resemble.triage, EnhancementProfile::conservative().triage);
 }
@@ -682,6 +799,12 @@ fn resemble_backend_goes_through_the_same_gate_with_own_identity_and_cache() {
             .iter()
             .any(|x| x.code == "enhanced_by_deepfilternet3")
     );
+    // Режим исполнения — фактический PyTorch на устройстве из identify, а не
+    // режим DeepFilterNet3.
+    let (batch, _, inventory) = ebatch::load(&f.workspace, "res").unwrap();
+    assert_eq!(batch.backend.execution_mode(), "cpu-pytorch");
+    let summary = ereport::summarize(&batch, &inventory, &[]);
+    assert_eq!(summary.model["execution_mode"], "cpu-pytorch");
     // LSNR сообщает только DeepFilterNet3: у Resemble метрики нет, а не ноль.
     assert_eq!(noisy.inference.as_ref().unwrap().run.lsnr_mean_db, None);
     // Тот же вход под DF3 — другой ключ кэша: результаты Resemble не переиспользуются.

@@ -16,6 +16,8 @@ use rustix::fs::{Mode, OFlags, open};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::protocol::DEEP_FILTER_RT_VERSION;
+
 pub const MODEL_NAME: &str = "DeepFilterNet3";
 /// Значение `[train] model` в `config.ini` модели третьей версии.
 pub const MODEL_VARIANT: &str = "deepfilternet3";
@@ -38,7 +40,8 @@ pub struct PinnedFile {
 }
 
 /// Закреплённые файлы DeepFilterNet3 (совпадают с содержимым upstream-архива
-/// и с каталогом `models/DeepFilterNet3` crate `deep-filter-rt` 0.1.1).
+/// и с каталогом `models/DeepFilterNet3` crate `deep-filter-rt` версии
+/// [`DEEP_FILTER_RT_VERSION`]).
 pub const FILES: [PinnedFile; 4] = [
     PinnedFile {
         name: "config.ini",
@@ -376,7 +379,8 @@ fn read_archive(path: &Path) -> Result<ModelFiles, ModelError> {
     })
 }
 
-/// Копия тех же весов в исходниках crate `deep-filter-rt` 0.1.1, которые Cargo
+/// Копия тех же весов в исходниках crate `deep-filter-rt` версии
+/// [`DEEP_FILTER_RT_VERSION`] (закреплена в Cargo.toml), которые Cargo
 /// уже распаковал в локальный реестр при сборке (без сети). Годится как
 /// источник [`install`]; сама обработка из реестра не читает.
 pub fn cargo_registry_copy() -> Option<PathBuf> {
@@ -389,7 +393,7 @@ pub fn cargo_registry_copy() -> Option<PathBuf> {
         .filter_map(Result::ok)
         .map(|e| {
             e.path()
-                .join("deep-filter-rt-0.1.1")
+                .join(format!("deep-filter-rt-{DEEP_FILTER_RT_VERSION}"))
                 .join("models")
                 .join(MODEL_NAME)
         })
@@ -419,7 +423,10 @@ pub fn install(source: &Path, models_root: &Path) -> Result<(PathBuf, ModelIdent
             format!("источник модели {} не найден", source.display()),
         ));
     };
-    let identity = verify_bytes(&files)?;
+    // Установка — ровно четыре закреплённых файла: идентичность каждый
+    // запуск выводит из их байтов, отдельный файл метаданных был бы вторым
+    // источником истины.
+    verify_bytes(&files)?;
     let target = installed_dir(models_root);
     if target.exists() {
         return load_dir(&target)
@@ -459,12 +466,6 @@ pub fn install(source: &Path, models_root: &Path) -> Result<(PathBuf, ModelIdent
             file.write_all(bytes)?;
             file.sync_all()?;
         }
-        let mut meta = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(staging.join("model.json"))?;
-        meta.write_all(&serde_json::to_vec_pretty(&identity).expect("идентичность сериализуема"))?;
-        meta.sync_all()?;
         File::open(&staging)?.sync_all()?;
         std::fs::rename(&staging, &target)?;
         File::open(parent)?.sync_all()
@@ -506,9 +507,48 @@ mod tests {
         assert!(err.message.contains("deepfilternet2"));
     }
 
+    /// Отпечаток манифеста сверяется с закреплённым значением (и с ожиданием
+    /// `asset-store`), а не с самим собой: изменение файла, длины или SHA
+    /// в [`FILES`] обязано быть осознанным.
     #[test]
-    fn manifest_fingerprint_is_stable() {
-        assert_eq!(manifest_sha256(), manifest_sha256());
+    fn manifest_fingerprint_matches_pinned_value() {
+        const PINNED: &str = "8b378da4a759b6a244bb6bc9786e7ffd74c67f3f878dbd40e53c2f6565d05e5d";
+        assert_eq!(manifest_sha256(), PINNED);
+        assert_eq!(
+            PINNED,
+            asset_store::pronunciation::enhancer_backend::DEEPFILTERNET3_MANIFEST_SHA256
+        );
         assert_eq!(pinned_identity().files.len(), 4);
+    }
+
+    /// Объявленная версия `deep-filter-rt`, точный пин Cargo.toml и версия,
+    /// фактически разрешённая в Cargo.lock рабочего пространства, совпадают:
+    /// от неё зависят `runtime.library_version` и путь копии весов в реестре.
+    #[test]
+    fn declared_deep_filter_rt_version_is_the_resolved_dependency() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        let pin = manifest
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("deep-filter-rt = \"="))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("в Cargo.toml есть точный пин deep-filter-rt");
+        assert_eq!(pin, DEEP_FILTER_RT_VERSION);
+        let lock = std::fs::read_to_string(root.join("../../Cargo.lock")).unwrap();
+        let resolved: Vec<&str> = lock
+            .split("[[package]]")
+            .filter(|block| block.contains("\nname = \"deep-filter-rt\"\n"))
+            .filter_map(|block| {
+                block
+                    .lines()
+                    .find_map(|l| l.strip_prefix("version = \""))
+                    .and_then(|v| v.strip_suffix('"'))
+            })
+            .collect();
+        assert_eq!(resolved, [DEEP_FILTER_RT_VERSION]);
+        assert_eq!(
+            crate::protocol::runtime_info().library_version,
+            DEEP_FILTER_RT_VERSION
+        );
     }
 }

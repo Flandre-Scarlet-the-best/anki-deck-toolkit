@@ -209,8 +209,74 @@ pub struct BackendIdentity {
     pub params: InferenceParams,
 }
 
-/// Снимок исполняемого файла воркера: замена во время пакета останавливает
-/// его (как у FFmpeg).
+impl BackendIdentity {
+    /// Режим исполнения инференса по подтверждённому отчёту `identify`:
+    /// DeepFilterNet3 — `tract` на CPU в один поток, Resemble — PyTorch на
+    /// фактическом устройстве (`cpu` или `cuda`). Влияет на байты результата,
+    /// поэтому входит в отпечаток конфигурации и в отчёт пакета.
+    pub fn execution_mode(&self) -> String {
+        let runtime = &self.report["runtime"];
+        let text = |key: &str| runtime[key].as_str().unwrap_or("unknown");
+        match BackendKind::from_id(&self.backend) {
+            Some(BackendKind::DeepFilterNet3) => {
+                let threads = match runtime["threads"].as_u64() {
+                    Some(1) => "single-thread".to_owned(),
+                    Some(n) => format!("{n}-threads"),
+                    None => "unknown-threads".to_owned(),
+                };
+                format!("{}-{}-{threads}", text("device"), text("inference"))
+            }
+            Some(BackendKind::ResembleEnhanceDenoise) => format!("{}-pytorch", text("device")),
+            None => format!("unknown-backend-{}", self.backend),
+        }
+    }
+}
+
+impl BackendIdentity {
+    /// Исходник, который исполняет запускатель Python-воркера (из
+    /// подтверждённого `identify`). У воркера-исполняемого файла его нет:
+    /// код покрывает снимок самого исполняемого файла.
+    pub fn worker_source(&self) -> Option<PathBuf> {
+        if self.backend != BACKEND_RESEMBLE_DENOISE {
+            return None;
+        }
+        self.report["worker"]["source_path"]
+            .as_str()
+            .map(PathBuf::from)
+    }
+}
+
+/// Поля среды исполнения, которые обязан подтвердить `identify`: без них
+/// режим исполнения в отпечатке и отчёте был бы догадкой.
+fn check_runtime(kind: BackendKind, report: &serde_json::Value) -> Result<(), AssetError> {
+    let runtime = &report["runtime"];
+    let valid = match kind {
+        BackendKind::DeepFilterNet3 => {
+            runtime["device"] == "cpu" && runtime["inference"] == "tract" && runtime["threads"] == 1
+        }
+        BackendKind::ResembleEnhanceDenoise => {
+            matches!(runtime["device"].as_str(), Some("cpu" | "cuda"))
+                && runtime["torch"].is_string()
+                && report["worker"]["source_sha256"]
+                    .as_str()
+                    .is_some_and(|sha| sha.len() == 64)
+                && report["worker"]["source_path"]
+                    .as_str()
+                    .is_some_and(|path| Path::new(path).is_absolute())
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(identity_mismatch(format!(
+            "отчёт identify не подтверждает среду исполнения backend {}: {runtime}",
+            kind.id()
+        )))
+    }
+}
+
+/// Снимок файла воркера (исполняемого файла или исходника Python-воркера):
+/// замена во время пакета останавливает его (как у FFmpeg).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSnapshot(PathBuf, [i64; 7]);
 
@@ -247,7 +313,7 @@ pub fn worker_snapshot(path: &Path) -> Result<WorkerSnapshot, AssetError> {
 pub fn worker_changed() -> AssetError {
     AssetError::with_details(
         ErrorCode::ValidatorFailure,
-        "исполняемый файл воркера улучшения речи заменён во время пакета: результат не сохранён",
+        "исполняемый файл или исходник воркера улучшения речи заменён во время пакета: результат не сохранён",
         serde_json::json!({"blocker": "enhancer_backend_changed"}),
     )
 }
@@ -553,6 +619,7 @@ pub fn identify(
         "манифест весов",
     )?;
     expect("/stream/sample_rate", BACKEND_SAMPLE_RATE.into(), "частота")?;
+    check_runtime(kind, &report)?;
     let delay = field("/stream/delay_samples")
         .as_u64()
         .ok_or_else(|| protocol("в отчёте нет задержки модели"))?;
@@ -581,6 +648,41 @@ pub struct InferenceRun {
     pub lsnr_mean_db: Option<f64>,
     /// Время процесса воркера (стена), мс. Диагностика, не детерминирована.
     pub wall_ms: f64,
+}
+
+/// Читает вывод воркера ровно ожидаемой длины. Файл другой длины, не
+/// обычный файл или ссылка отвергаются до чтения, а само чтение ограничено
+/// ожидаемым объёмом + 1 байт: неисправный воркер не исчерпает память
+/// родителя длинным (в том числе разреженным) выводом.
+fn read_output(path: &Path, expected: u64) -> Result<Vec<u8>, AssetError> {
+    use rustix::fs::{Mode, OFlags};
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| protocol("воркер не создал файл вывода или это не обычный файл"))?;
+    let file = std::fs::File::from(fd);
+    let meta = file
+        .metadata()
+        .map_err(|_| protocol("файл вывода воркера не читается"))?;
+    if !meta.is_file() || meta.len() != expected {
+        return Err(protocol(format!(
+            "длина вывода воркера {} байт вместо {expected}: добавленная задержка, тишина или обрезка недопустимы",
+            meta.len()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(expected as usize);
+    file.take(expected + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| protocol("файл вывода воркера не читается"))?;
+    if bytes.len() as u64 != expected {
+        return Err(protocol(format!(
+            "вывод воркера изменился при чтении: {} байт вместо {expected}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Улучшает PCM 48 kHz. Длина результата обязана совпасть со входом;
@@ -652,14 +754,7 @@ pub fn enhance(
             "воркер отчитался о другой модели или в неизвестном формате",
         ));
     }
-    let bytes = std::fs::read(&output).map_err(|_| protocol("воркер не создал файл вывода"))?;
-    if bytes.len() != samples.len() * 4 {
-        return Err(protocol(format!(
-            "длина вывода воркера {} байт вместо {}: добавленная задержка, тишина или обрезка недопустимы",
-            bytes.len(),
-            samples.len() * 4
-        )));
-    }
+    let bytes = read_output(&output, samples.len() as u64 * 4)?;
     if report["output_sha256"] != sha256_hex(&bytes).as_str() {
         return Err(protocol("SHA-256 вывода не совпал с отчётом воркера"));
     }
@@ -671,6 +766,17 @@ pub fn enhance(
     {
         return Err(protocol(
             "диагностика воркера не согласована с запросом (задержка, кадры, каналы)",
+        ));
+    }
+    // Python-воркер исполняет исходник, который запускатель не фиксирует:
+    // каждый процесс сообщает SHA-256 своего исходника и версии среды, и
+    // они обязаны совпасть с `identify`, по которому рассчитан ключ кэша.
+    if kind == BackendKind::ResembleEnhanceDenoise
+        && (report["worker"] != identity.report["worker"]
+            || report["runtime"] != identity.report["runtime"])
+    {
+        return Err(protocol(
+            "воркер исполнил другой исходник или другую среду, чем подтвердил identify",
         ));
     }
     // Устройство входит в ключ кэша через отчёт `identify`; воркер, сам
@@ -758,4 +864,71 @@ pub fn default_models_root() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .map(|base| base.join("anki-deck-toolkit").join("speech-models"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(kind: BackendKind, runtime: serde_json::Value) -> BackendIdentity {
+        BackendIdentity {
+            backend: kind.id().into(),
+            worker_sha256: "a".repeat(64),
+            worker_byte_length: 1,
+            report: serde_json::json!({"runtime": runtime}),
+            model_name: kind.model_name().into(),
+            model_variant: kind.model_variant().into(),
+            model_manifest_sha256: kind.manifest_sha256().into(),
+            delay_samples: 0,
+            params: InferenceParams::default(),
+        }
+    }
+
+    /// Режим исполнения берётся из подтверждённой идентичности: Resemble не
+    /// выдаёт себя за `tract`, а CPU и CUDA различаются в отпечатке.
+    #[test]
+    fn execution_mode_follows_confirmed_runtime() {
+        let df3 = identity(
+            BackendKind::DeepFilterNet3,
+            serde_json::json!({"device": "cpu", "inference": "tract", "threads": 1}),
+        );
+        assert_eq!(df3.execution_mode(), "cpu-tract-single-thread");
+        let cpu = identity(
+            BackendKind::ResembleEnhanceDenoise,
+            serde_json::json!({"device": "cpu", "torch": "x"}),
+        );
+        let cuda = identity(
+            BackendKind::ResembleEnhanceDenoise,
+            serde_json::json!({"device": "cuda", "torch": "x"}),
+        );
+        assert_eq!(cpu.execution_mode(), "cpu-pytorch");
+        assert_eq!(cuda.execution_mode(), "cuda-pytorch");
+        let profile = crate::pronunciation::enhancer::EnhancementProfile::resemble_denoise();
+        let key = |id: &BackendIdentity| {
+            crate::pronunciation::enhancer::config_sha256(&profile, id, &"b".repeat(64))
+        };
+        assert_ne!(key(&cpu), key(&cuda));
+        assert_ne!(key(&cpu), key(&df3));
+    }
+
+    #[test]
+    fn identify_must_confirm_runtime_of_each_backend() {
+        let resemble = serde_json::json!({
+            "runtime": {"device": "cuda", "torch": "2"},
+            "worker": {"source_sha256": "c".repeat(64), "source_path": "/opt/w.py"},
+        });
+        assert!(check_runtime(BackendKind::ResembleEnhanceDenoise, &resemble).is_ok());
+        for broken in [
+            serde_json::json!({"runtime": {"device": "tpu", "torch": "2"}, "worker": resemble["worker"]}),
+            serde_json::json!({"runtime": resemble["runtime"], "worker": {"source_sha256": "c".repeat(64)}}),
+            serde_json::json!({"runtime": resemble["runtime"], "worker": {"source_path": "w.py", "source_sha256": "c".repeat(64)}}),
+        ] {
+            let error = check_runtime(BackendKind::ResembleEnhanceDenoise, &broken).unwrap_err();
+            assert_eq!(error.details["blocker"], "enhancer_identity_mismatch");
+        }
+        let df3 =
+            serde_json::json!({"runtime": {"device": "cpu", "inference": "tract", "threads": 1}});
+        assert!(check_runtime(BackendKind::DeepFilterNet3, &df3).is_ok());
+        assert!(check_runtime(BackendKind::DeepFilterNet3, &resemble).is_err());
+    }
 }

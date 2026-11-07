@@ -91,6 +91,30 @@ fn bump(map: &mut BTreeMap<String, usize>, key: impl Into<String>, by: usize) {
     *map.entry(key.into()).or_default() += by;
 }
 
+/// Проверки Enhancement QC с числовым распределением в сводке: величины,
+/// по которым видна польза и цена улучшения. Остальные проверки (длина,
+/// сдвиг, сегменты, перегрузка) участвуют в решении и в счётчике
+/// `qc_failures`, но их значение — бинарное или почти всегда нулевое.
+/// Каждый ID обязан быть в [`QC_CHECKS`]: иначе распределение молча пропало
+/// бы из отчёта после переименования проверки.
+pub const DISTRIBUTION_CHECKS: [&str; 8] = [
+    "noise_reduction",
+    "strong_speech_preserved",
+    "strong_speech_p90",
+    "weak_sounds_preserved",
+    "edges_preserved",
+    "no_added_energy",
+    "spectral_balance",
+    "loudness_preserved",
+];
+
+/// Проверки, значения которых выводятся столбцами `items.tsv`.
+const TSV_CHECKS: [&str; 3] = [
+    "noise_reduction",
+    "strong_speech_preserved",
+    "weak_sounds_preserved",
+];
+
 fn qc_value(result: &EnhancementResult, id: &str) -> Option<f64> {
     result
         .qc
@@ -187,16 +211,7 @@ pub fn summarize(
         "triage_noise_floor_dbfs".into(),
         metric(&|r| r.triage.as_ref().map(|t| t.noise_floor_dbfs)),
     );
-    for id in [
-        "noise_reduction",
-        "strong_speech_preserved",
-        "strong_speech_p90",
-        "weak_sounds_preserved",
-        "edges_preserved",
-        "no_added_energy",
-        "spectral_balance",
-        "loudness_preserved",
-    ] {
+    for id in DISTRIBUTION_CHECKS {
         let values: Vec<Option<f64>> = inferred.iter().map(|r| qc_value(r, id)).collect();
         metrics.insert(format!("qc_{id}"), nreport::distribution(&values));
     }
@@ -251,6 +266,7 @@ pub fn summarize(
         },
         model: serde_json::json!({
             "backend": batch.backend.backend,
+            "execution_mode": batch.backend.execution_mode(),
             "model_name": batch.backend.model_name,
             "model_variant": batch.backend.model_variant,
             "model_manifest_sha256": batch.backend.model_manifest_sha256,
@@ -313,9 +329,9 @@ pub fn tsv(inventory: &Inventory, results: &[EnhancementResult]) -> String {
             selected_sha.unwrap_or_default(),
             number(r.triage.as_ref().map(|t| t.estimated_snr_db)),
             number(r.triage.as_ref().map(|t| t.noise_floor_dbfs)),
-            number(qc_value(r, "noise_reduction")),
-            number(qc_value(r, "strong_speech_preserved")),
-            number(qc_value(r, "weak_sounds_preserved")),
+            number(qc_value(r, TSV_CHECKS[0])),
+            number(qc_value(r, TSV_CHECKS[1])),
+            number(qc_value(r, TSV_CHECKS[2])),
             number(r.inference.as_ref().and_then(|i| i.run.lsnr_mean_db)),
             r.gate
                 .reasons
@@ -395,4 +411,19 @@ pub fn write_report(
         summary,
         files,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pronunciation::enhancer::QC_CHECKS;
+
+    #[test]
+    fn reported_check_ids_belong_to_the_qc_contract() {
+        for id in DISTRIBUTION_CHECKS.iter().chain(&TSV_CHECKS) {
+            assert!(QC_CHECKS.contains(id), "{id} нет среди проверок QC");
+        }
+        let unique: std::collections::BTreeSet<_> = DISTRIBUTION_CHECKS.iter().collect();
+        assert_eq!(unique.len(), DISTRIBUTION_CHECKS.len());
+    }
 }
