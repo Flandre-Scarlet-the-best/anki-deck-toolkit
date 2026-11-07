@@ -315,7 +315,19 @@ jobs:
           echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/$name/hyperfine" --version
 
+      # Целевая среда воркера Resemble Enhance (tools/speech-enhance/resemble):
+      # его stdlib-тесты внутри `cargo test` запускаются этим `python3`, а
+      # `RESEMBLE_EXPECT_PYTHON` ниже подтверждает версию. На self-hosted
+      # используется `python3` окружения раннера без проверки версии.
+      - name: Установить Python 3.15.2 для проверок воркера Resemble
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15.2'
+
       - name: Собрать и выполнить тесты
+        env:
+          RESEMBLE_EXPECT_PYTHON: ${{ runner.environment == 'github-hosted' && '3.15.2' || '' }}
         # Шаг собирает тесты без дополнительных возможностей Cargo. `reference-generator`
         # включает resvg только для двух служебных исполняемых файлов генератора; тесты
         # их общего модуля публикации входят в интеграционную цель asset-store и

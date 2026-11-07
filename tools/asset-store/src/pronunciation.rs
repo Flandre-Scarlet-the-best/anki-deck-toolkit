@@ -3,6 +3,10 @@
 pub mod batch;
 pub mod derivation;
 pub mod dsp;
+pub mod enhancer;
+pub mod enhancer_backend;
+pub mod enhancer_batch;
+pub mod enhancer_report;
 pub mod normalizer;
 pub mod normalizer_batch;
 pub mod normalizer_report;

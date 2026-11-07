@@ -14,6 +14,7 @@ members = [
     "tools/benchmark-history",
     "tools/benchmark-runner",
     "tools/repository-maintenance",
+    "tools/speech-enhance",
 ]
 resolver = "3"
 
@@ -40,6 +41,37 @@ debug = 0
 # переводя всю рабочую область на более дорогую компиляцию, похожую на `release`.
 [profile.test.package.asset-store]
 opt-level = 1
+
+# Инференс DeepFilterNet3 (tract) в неоптимизированной сборке примерно в
+# десять раз медленнее: тесты speech-enhance с настоящей моделью и `cargo run`
+# получают оптимизированные зависимости инференса, собственный код остаётся
+# отлаживаемым. Профили `test` и `ci` наследуют эти настройки от `dev`.
+[profile.dev.package.deep-filter-rt]
+opt-level = 3
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.tract-data]
+opt-level = 3
+[profile.dev.package.tract-hir]
+opt-level = 3
+[profile.dev.package.tract-onnx]
+opt-level = 3
+[profile.dev.package.tract-onnx-opl]
+opt-level = 3
+[profile.dev.package.tract-pulse]
+opt-level = 3
+[profile.dev.package.tract-pulse-opl]
+opt-level = 3
+[profile.dev.package.tract-nnef]
+opt-level = 3
+[profile.dev.package.ndarray]
+opt-level = 3
+[profile.dev.package.realfft]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
 
 # CI на выделенных исполнителях использует один профиль и для тестового стенда,
 # и для последующих проверок CLI на уровне репозитория. Это позволяет повторно

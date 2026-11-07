@@ -13,7 +13,7 @@
 Самостоятельный домен `pronunciation_audio` и CLI `pronunciation-assets` импортируют локальные
 MP3 японских произношений, получают их через [Forvo Web](forvo.md), сохраняют
 техническую проверку и требуют явного подтверждения человеком. Полный контракт, команды и ограничения — [японские MP3](pronunciation.md);
-локальная нормализация громкости, обрезка краевой тишины и технический QualityGate — [Balanced Normalizer](normalizer.md). Корпус
+локальная нормализация громкости, обрезка краевой тишины и технический QualityGate — [Balanced Normalizer](normalizer.md); локальное нейросетевое улучшение речи DeepFilterNet3 на CPU поверх него — [Speech Enhancement](enhancer.md). Корпус
 `.asset-store/pronunciation-audio/` независим от изображений; интеграция в колоды ещё не
 включена.
 

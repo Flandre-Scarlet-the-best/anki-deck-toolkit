@@ -58,8 +58,18 @@ name = "benchmark-runner"
 allow = ["AGPL-3.0-only"]
 
 [[licenses.exceptions]]
+name = "speech-enhance"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
 name = "repository-maintenance"
 allow = ["AGPL-3.0-only"]
+
+# Транзитивно через deep-filter-rt → rust-ini → const-random-macro (proc-macro
+# времени сборки). CC0-1.0 разрешена только этому crate, не всему графу.
+[[licenses.exceptions]]
+name = "tiny-keccak"
+allow = ["CC0-1.0"]
 
 [bans]
 # Несколько версий одного crate в графе — обычное следствие экосистемы, а не дефект.

@@ -1,0 +1,15 @@
+# Прямые зависимости headless-denoiser Resemble Enhance для CPython 3.15.2.
+# Импорт воркера тянет только resemble_enhance.{hparams, enhancer.hparams,
+# denoiser, melspec, inference}: torch, torchaudio (resample, MelSpectrogram),
+# numpy, omegaconf, rich, tqdm и PyYAML. Пакет resemble-enhance==0.0.1
+# ставится без зависимостей (его метаданные требуют torch==2.1.1, deepspeed,
+# gradio и прочее для обучения и UI), поэтому в этот файл он не входит, а
+# дописывается в requirements.txt с хешем колеса PyPI.
+# Пересборка: docs/ru/asset-store/enhancer.md, раздел об установке Resemble.
+torch==2.15.0
+torchaudio==2.11.1
+numpy==2.5.4
+omegaconf==2.4.0
+pyyaml==6.0.3
+rich==15.0.0
+tqdm==4.70.1

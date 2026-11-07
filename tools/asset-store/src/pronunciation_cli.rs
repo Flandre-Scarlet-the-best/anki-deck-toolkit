@@ -52,6 +52,12 @@ enum Action {
         #[command(subcommand)]
         action: crate::pronunciation_normalizer_cli::NormalizerAction,
     },
+    /// Локальное улучшение речи (DeepFilterNet3 на CPU) поверх Balanced:
+    /// триаж, Enhancement QC и автоматическая маршрутизация, без сети.
+    Enhancer {
+        #[command(subcommand)]
+        action: crate::pronunciation_enhancer_cli::EnhancerAction,
+    },
     Init,
     Inspect,
     Verify,
@@ -655,6 +661,9 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     if let Action::Normalizer { action } = &cli.command {
         return crate::pronunciation_normalizer_cli::execute(action, &root, &protected);
     }
+    if let Action::Enhancer { action } = &cli.command {
+        return crate::pronunciation_enhancer_cli::execute(action, &protected);
+    }
     if let Action::Probe { file } = &cli.command {
         return Ok(
             serde_json::json!({"schema_version":1,"outcome":"ok","result":audio::probe_mp3(&read_local(file,&protected,audio::MAX_AUDIO_BYTES)?)?}),
@@ -677,6 +686,7 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
     let result = match &cli.command {
         Action::Forvo { .. } => unreachable!("Forvo обработан до открытия хранилища"),
         Action::Normalizer { .. } => unreachable!("нормализатор обработан до открытия хранилища"),
+        Action::Enhancer { .. } => unreachable!("улучшение обработано до открытия хранилища"),
         Action::Init => {
             serde_json::json!({"store_id":store.store_id(),"initialized":store.initialized_on_open()})
         }
