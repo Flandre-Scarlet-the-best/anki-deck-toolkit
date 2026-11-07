@@ -15,7 +15,7 @@
   явно устанавливает пользователь (`enhancer model-install`), воркер читает их
   из каталога и сверяет по закреплённым SHA-256 (`src/model.rs`).
 
-## deep-filter-rt 0.1.1
+## deep-filter-rt 0.2.0
 
 - Источник: crates.io, crate `deep-filter-rt` (инференсная часть `deep_filter`
   из DeepFilterNet, сопровождение Thomas Heck; `NOTICE.md` crate описывает

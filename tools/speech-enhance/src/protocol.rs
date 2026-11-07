@@ -16,7 +16,7 @@ pub const WORKER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Точная версия crate инференса — единственный источник в коде. Её
 /// совпадение с пином Cargo.toml и с версией в Cargo.lock проверяет тест
 /// `model::tests::declared_deep_filter_rt_version_is_the_resolved_dependency`.
-pub const DEEP_FILTER_RT_VERSION: &str = "0.1.1";
+pub const DEEP_FILTER_RT_VERSION: &str = "0.2.0";
 /// Предел файла входа: 30 с, 48 kHz, стерео, f32.
 pub const MAX_INPUT_BYTES: u64 = 30 * 48_000 * 2 * 4;
 

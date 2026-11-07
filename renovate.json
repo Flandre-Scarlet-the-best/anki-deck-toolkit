@@ -25,6 +25,14 @@
   "rebaseWhen": "behind-base-branch",
   "packageRules": [
     {
+      "description": "Resemble: обновлять вход и сгенерированные зависимости только совместно с повторным разрешением и проверкой окружения",
+      "matchFileNames": [
+        "tools/speech-enhance/resemble/requirements.in",
+        "tools/speech-enhance/resemble/requirements.txt"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Обе версии Rust должны обновляться совместно, без beta/nightly и без захвата crates",
       "matchManagers": [
         "rust-toolchain",
