@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,16 +41,31 @@ def get_json(path, token):
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "pr-disposition-validator",
     })
-    try:
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
-            if response.status != 200:
-                raise CheckError("GitHub API вернул неожиданный HTTP status")
-            data = json.load(response)
-            link = response.headers.get("Link")
-    except (OSError, ValueError, UnicodeError) as exc:
-        # Не выводить URL ответа, тела и токен из исключений.
-        raise CheckError("Ошибка запроса или JSON GitHub API") from exc
-    return data, link
+    opener = urllib.request.build_opener(NoRedirect)
+    for attempt in range(3):
+        try:
+            with opener.open(request, timeout=30) as response:
+                if 500 <= response.status <= 599:
+                    retry = True
+                elif response.status != 200:
+                    raise CheckError("GitHub API вернул неожиданный HTTP status")
+                else:
+                    return json.load(response), response.headers.get("Link")
+        except urllib.error.HTTPError as exc:
+            # HTTPError также содержит открытый ответ; закрыть до повтора или отказа.
+            retry = 500 <= exc.code <= 599
+            exc.close()
+            if not retry:
+                raise CheckError("GitHub API вернул неожиданный HTTP status") from None
+        except (OSError, urllib.error.URLError):
+            retry = True
+        except (ValueError, UnicodeError):
+            raise CheckError("Некорректный JSON GitHub API") from None
+        if retry and attempt < 2:
+            time.sleep(0.1 * (attempt + 1))
+            continue
+        # Исключения могут содержать URL, тело ответа или токен.
+        raise CheckError("Не удалось получить ответ GitHub API после повторов") from None
 
 
 def next_page(link, path, current):

@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import tempfile
+import traceback
 import unittest
 import urllib.error
 from pathlib import Path
@@ -132,18 +133,109 @@ class RequestTests(unittest.TestCase):
         self.assertIs(opener.call_args.args[0], check.NoRedirect)
         self.assertIsNone(check.NoRedirect().redirect_request(None, None, 302, "", {}, "https://attacker.invalid"))
 
+    @staticmethod
+    def http_error(code):
+        return urllib.error.HTTPError("https://example.invalid/secret", code, "secret", {}, io.BytesIO(b"secret"))
+
+    @patch.object(check.time, "sleep")
     @patch("urllib.request.build_opener")
-    def test_http_network_and_invalid_json_fail_closed(self, opener):
-        for failure in (urllib.error.URLError("unavailable"), urllib.error.HTTPError("url", 403, "denied", {}, None), TimeoutError()):
-            opener.return_value.open.side_effect = failure
-            with self.subTest(failure=failure), self.assertRaises(check.CheckError):
-                check.get_json("/test", "secret")
-            if isinstance(failure, urllib.error.HTTPError):
-                failure.close()
-        opener.return_value.open.side_effect = None
-        opener.return_value.open.return_value = self.Response(b'bad-json')
+    def test_transient_failures_then_success(self, opener, sleep):
+        for failure in (self.http_error(500), self.http_error(503),
+                        urllib.error.URLError("unavailable"), TimeoutError(), OSError("network")):
+            with self.subTest(failure=failure):
+                opener.return_value.open.reset_mock(side_effect=True)
+                sleep.reset_mock()
+                opener.return_value.open.side_effect = [failure, self.Response(b'{"ok": true}')]
+                self.assertEqual(check.get_json("/test", "secret"), ({"ok": True}, None))
+                self.assertEqual(opener.return_value.open.call_count, 2)
+                sleep.assert_called_once_with(0.1)
+                if isinstance(failure, urllib.error.HTTPError):
+                    self.assertTrue(failure.closed)
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_transport_failure_while_reading_retries_and_closes_response(self, opener, sleep):
+        class BrokenResponse(self.Response):
+            def read(self, *args):
+                raise TimeoutError("secret")
+
+        response = BrokenResponse(b'')
+        opener.return_value.open.side_effect = [response, self.Response(b'{}')]
+        self.assertEqual(check.get_json("/test", "secret"), ({}, None))
+        self.assertTrue(response.closed)
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_persistent_failures_are_bounded_and_safe(self, opener, sleep):
+        for failures in ([self.http_error(503) for _ in range(3)],
+                         [urllib.error.URLError("secret") for _ in range(3)],
+                         [TimeoutError("secret") for _ in range(3)],
+                         [OSError("secret") for _ in range(3)]):
+            with self.subTest(failure=type(failures[0]).__name__):
+                opener.return_value.open.reset_mock(side_effect=True)
+                sleep.reset_mock()
+                opener.return_value.open.side_effect = failures
+                with self.assertRaises(check.CheckError) as caught:
+                    check.get_json("/test", "secret")
+                self.assertNotIn("secret", "".join(traceback.format_exception(caught.exception)))
+                self.assertEqual(opener.return_value.open.call_count, 3)
+                self.assertEqual([call.args for call in sleep.call_args_list], [(0.1,), (0.2,)])
+                for failure in failures:
+                    if isinstance(failure, urllib.error.HTTPError):
+                        self.assertTrue(failure.closed)
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_http_4xx_and_redirect_fail_without_retry(self, opener, sleep):
+        for code in (302, 400, 403, 404, 429):
+            with self.subTest(code=code):
+                opener.return_value.open.reset_mock(side_effect=True)
+                error = self.http_error(code)
+                opener.return_value.open.side_effect = error
+                with self.assertRaises(check.CheckError) as caught:
+                    check.get_json("/test", "secret")
+                self.assertNotIn("secret", "".join(traceback.format_exception(caught.exception)))
+                self.assertTrue(error.closed)
+                self.assertEqual(opener.return_value.open.call_count, 1)
+        sleep.assert_not_called()
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_invalid_json_and_unicode_fail_without_retry(self, opener, sleep):
+        for body in (b'bad-json secret', b'"\xff secret"'):
+            with self.subTest(body=body):
+                opener.return_value.open.reset_mock(side_effect=True)
+                response = self.Response(body)
+                opener.return_value.open.return_value = response
+                with self.assertRaises(check.CheckError) as caught:
+                    check.get_json("/test", "secret")
+                self.assertNotIn("secret", "".join(traceback.format_exception(caught.exception)))
+                self.assertTrue(response.closed)
+                self.assertEqual(opener.return_value.open.call_count, 1)
+        sleep.assert_not_called()
+
+    @patch.object(check.time, "sleep")
+    @patch("urllib.request.build_opener")
+    def test_non_200_response_statuses(self, opener, sleep):
+        response = self.Response(b'')
+        response.status = 503
+        opener.return_value.open.side_effect = [response, self.Response(b'{}')]
+        self.assertEqual(check.get_json("/test", "secret"), ({}, None))
+        self.assertTrue(response.closed)
+        self.assertEqual(opener.return_value.open.call_count, 2)
+        sleep.assert_called_once_with(0.1)
+        opener.return_value.open.reset_mock(side_effect=True)
+        sleep.reset_mock()
+        response = self.Response(b'')
+        response.status = 302
+        opener.return_value.open.return_value = response
         with self.assertRaises(check.CheckError):
             check.get_json("/test", "secret")
+        self.assertTrue(response.closed)
+        self.assertEqual(opener.return_value.open.call_count, 1)
+        sleep.assert_not_called()
 
 
 class PublishedPrTests(unittest.TestCase):
