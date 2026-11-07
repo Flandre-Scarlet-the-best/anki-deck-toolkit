@@ -1,7 +1,8 @@
 name: SonarQube Cloud
 
-# Анализируйте код только после настройки проекта и секретов в GitHub.
-# Внешние fork-PR не получают SONAR_TOKEN.
+# Включите SONAR_CLOUD_ENABLED=true только после сохранения GitHub Secret
+# SONAR_TOKEN и отключения Automatic analysis в SonarQube Cloud.
+# PR из внешних форков не получают SONAR_TOKEN.
 on:
   pull_request:
   push:
@@ -18,8 +19,7 @@ jobs:
   analyze:
     name: Анализ SonarQube
     if: >-
-      vars.SONAR_ORGANIZATION != ''
-      && vars.SONAR_PROJECT_KEY != ''
+      vars.SONAR_CLOUD_ENABLED == 'true'
       && (github.event_name != 'push' || github.ref_name == github.event.repository.default_branch)
       && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
@@ -52,7 +52,3 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          args: >-
-            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
-            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
