@@ -209,7 +209,9 @@ fn resemble_runtime_on_pinned_weights() {
             EnhancementOutcome::Enhanced => assert!(item.output_bytes.is_some()),
             EnhancementOutcome::EnhancementRejected => {
                 assert_eq!(item.result.gate.selected, Some(Selection::Input));
-                assert!(item.output_bytes.is_none());
+                // Отказ пост-QC Balanced сохраняет закодированный вариант как
+                // диагностику; отказ Enhancement QC вариант не кодирует.
+                assert_eq!(item.output_bytes.is_some(), item.result.output.is_some());
             }
             other => panic!("{device}: неожиданный исход {other:?}"),
         }
