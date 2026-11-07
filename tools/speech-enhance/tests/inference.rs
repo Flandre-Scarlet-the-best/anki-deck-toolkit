@@ -8,7 +8,7 @@ use std::f32::consts::{PI, TAU};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use speech_enhance::enhance::{Enhancer, InferenceParams};
+use speech_enhance::enhance::{EnhanceErrorKind, Enhancer, InferenceParams};
 use speech_enhance::model::{self, ModelErrorKind};
 
 const SR: f32 = 48_000.0;
@@ -244,10 +244,16 @@ fn stereo_channels_are_independent_and_antiphase_is_not_cancelled() {
 #[test]
 fn invalid_input_is_rejected() {
     let e = enhancer();
-    assert!(e.enhance(1, &[]).is_err());
-    assert!(e.enhance(2, &[0.0; 3]).is_err());
-    assert!(e.enhance(3, &[0.0; 3]).is_err());
-    assert!(e.enhance(1, &[0.0, f32::NAN]).is_err());
+    // Отказ от входа — категория `Input` (выход 4), а не сбой инференса.
+    for (channels, samples) in [
+        (1, &[][..]),
+        (2, &[0.0; 3][..]),
+        (3, &[0.0; 3][..]),
+        (1, &[0.0, f32::NAN][..]),
+    ] {
+        let error = e.enhance(channels, samples).unwrap_err();
+        assert_eq!(error.kind, EnhanceErrorKind::Input, "{error}");
+    }
 }
 
 fn copy_model(target: &Path) {

@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
-use speech_enhance::enhance::{Enhancer, InferenceParams};
+use speech_enhance::enhance::{EnhanceErrorKind, Enhancer, InferenceParams};
 use speech_enhance::model::{self, ModelError};
 use speech_enhance::protocol::{self, ErrorReport, Identity, ProcessResult, StreamInfo};
 
@@ -121,7 +121,7 @@ fn run(command: Command) -> Result<(), Failure> {
         Command::Identify { model_dir } => {
             let (identity, files) = model::load_dir(&model_dir).map_err(model_failure)?;
             let enhancer = Enhancer::new(&files, &InferenceParams::default())
-                .map_err(|e| failure(protocol::EXIT_MODEL, "model_load_failed", e.0))?;
+                .map_err(|e| failure(protocol::EXIT_MODEL, "model_load_failed", e.message))?;
             print(&Identity {
                 schema_version: 1,
                 kind: "speech_enhance_identity".into(),
@@ -162,10 +162,20 @@ fn run(command: Command) -> Result<(), Failure> {
             };
             let samples = read_input(&input)?;
             let enhancer = Enhancer::new(&files, &params)
-                .map_err(|e| failure(protocol::EXIT_MODEL, "model_load_failed", e.0))?;
-            let (enhanced, diagnostics) = enhancer
-                .enhance(channels, &samples)
-                .map_err(|e| failure(protocol::EXIT_INPUT, "input_invalid", e.0))?;
+                .map_err(|e| failure(protocol::EXIT_MODEL, "model_load_failed", e.message))?;
+            let (enhanced, diagnostics) =
+                enhancer
+                    .enhance(channels, &samples)
+                    .map_err(|e| match e.kind {
+                        EnhanceErrorKind::Input => {
+                            failure(protocol::EXIT_INPUT, "input_invalid", e.message)
+                        }
+                        // Сбой инференса — не свойство входа: хост повторяет его
+                        // как сбой среды.
+                        EnhanceErrorKind::Runtime => {
+                            failure(protocol::EXIT_RUNTIME, "inference_failed", e.message)
+                        }
+                    })?;
             let bytes: Vec<u8> = enhanced.iter().flat_map(|s| s.to_le_bytes()).collect();
             std::fs::OpenOptions::new()
                 .write(true)

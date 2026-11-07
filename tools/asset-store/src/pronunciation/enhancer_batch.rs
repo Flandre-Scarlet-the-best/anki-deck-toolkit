@@ -507,23 +507,14 @@ pub fn resume(
     }
     let unique_count = unique.len() as u64;
     pending.truncate(max_items.unwrap_or(usize::MAX));
-    // Результаты Balanced и выбранные им байты читаются в вызывающем потоке
-    // до запуска: кэш Balanced держит собственную блокировку.
-    let mut prepared: Vec<Option<(normalizer::NormalizationResult, Option<Vec<u8>>)>> =
+    // Результаты Balanced читаются до запуска, а байты выбранного ими
+    // варианта — лениво в `work`: предзагрузка всех вариантов держала бы в
+    // памяти весь пакет. Кэш Balanced остаётся открытым до конца прогона,
+    // потому что его блобы читаются только под его исключительной блокировкой.
+    let mut prepared: Vec<Option<normalizer::NormalizationResult>> =
         Vec::with_capacity(pending.len());
     for (sha, path) in &pending {
-        let entry = match base_cache.get(sha, &base.config_sha256)? {
-            Some(result) => {
-                let selected = match (&result.gate.proposed_variant, &result.output) {
-                    (Some(Variant::Processed), Some(output)) => {
-                        Some(base_cache.variant_bytes(output)?)
-                    }
-                    _ => None,
-                };
-                Some((result, selected))
-            }
-            None => None,
-        };
+        let entry = base_cache.get(sha, &base.config_sha256)?;
         if entry.is_none() && source_errors.len() < MAX_RECORDED_ERRORS {
             source_errors.insert(path.clone(), "нет годного результата Balanced".into());
         }
@@ -547,11 +538,17 @@ pub fn resume(
         .map(|(i, (sha, _))| (sha.as_str(), i))
         .collect();
     let work = |sha: &str, path: &str| {
-        let Some((base_result, processed_bytes)) = &prepared[index_of[sha]] else {
+        let Some(base_result) = &prepared[index_of[sha]] else {
             return Err(ItemError::Source("нет годного результата Balanced".into()));
         };
         let original = nbatch::read_input(&root, path, sha)
             .map_err(|error| ItemError::Source(error.message))?;
+        let processed_bytes = match (&base_result.gate.proposed_variant, &base_result.output) {
+            (Some(Variant::Processed), Some(output)) => {
+                Some(base_cache.variant_bytes(output).map_err(ItemError::Fatal)?)
+            }
+            _ => None,
+        };
         let selected = match base_result.gate.proposed_variant {
             Some(Variant::Processed) => processed_bytes.as_deref(),
             Some(Variant::Original) => Some(original.as_slice()),

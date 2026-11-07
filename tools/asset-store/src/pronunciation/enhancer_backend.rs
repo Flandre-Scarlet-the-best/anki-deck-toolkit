@@ -344,6 +344,12 @@ fn run_worker(
     let err = child.stderr.take().expect("stderr открыт как канал");
     let stdout = thread::spawn(move || read_capped(out, STDOUT_LIMIT + 1));
     let stderr = thread::spawn(move || read_capped(err, STDERR_LIMIT));
+    let group = rustix::process::Pid::from_raw(child.id() as i32);
+    let kill_group = || {
+        if let Some(group) = group {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+    };
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -352,10 +358,7 @@ fn run_worker(
             result => {
                 // Группа завершается до сбора лидера: пока он не собран, его
                 // PID не может достаться чужой группе.
-                if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
-                    let _ =
-                        rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-                }
+                kill_group();
                 let _ = child.kill();
                 let _ = child.wait();
                 break Err(if result.is_err() {
@@ -374,6 +377,30 @@ fn run_worker(
             }
         }
     };
+    // Лидер мог выйти, оставив потомка с унаследованными каналами: чтение
+    // ждёт не дольше общего предела, затем группа завершается. Пока каналы
+    // кем-то удерживаются, группа не пуста и её PGID не переиспользуется.
+    let readers_done = || stdout.is_finished() && stderr.is_finished();
+    let wait_readers = |until: Instant| {
+        while !readers_done() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // Короткая отсрочка даёт дочитать конец канала воркеру, вышедшему у самой
+    // границы предела: без потомков EOF приходит сразу после выхода.
+    wait_readers((start + timeout).max(Instant::now() + Duration::from_millis(200)));
+    if !readers_done() {
+        kill_group();
+        wait_readers(Instant::now() + Duration::from_secs(1));
+        // Если чтение так и не завершилось, его потоки оставлены: возврат не
+        // ждёт чужих каналов.
+        status?;
+        return Err(backend_failure(
+            "enhancer_backend_timeout",
+            "потомки воркера удерживали каналы вывода дольше предела времени",
+            serde_json::json!({"timeout_seconds": timeout.as_secs_f64()}),
+        ));
+    }
     let stdout = stdout.join().ok().and_then(Result::ok).unwrap_or_default();
     let _ = stderr.join();
     let status = status?;

@@ -475,6 +475,8 @@ fn backend_crash_is_retried_after_recovery_and_never_cached() {
 fn timeout_and_wrong_length_are_infrastructure_failures() {
     for (name, process, timeout) in [
         ("slow-worker", "sleep 5; cp \"$in\" \"$out\"", 1),
+        // Лидер выходит успешно, но фоновый потомок держит stdout.
+        ("orphan-worker", "(sleep 5) & cp \"$in\" \"$out\"", 1),
         ("short-worker", "head -c 400 \"$in\" > \"$out\"", 60),
         (
             "garbage-worker",
@@ -489,12 +491,12 @@ fn timeout_and_wrong_length_are_infrastructure_failures() {
         profile.backend.timeout_seconds = timeout;
         let begun = std::time::Instant::now();
         let run = start(&f, "enh", &worker, profile).unwrap();
-        if name == "slow-worker" {
+        if timeout == 1 {
             // Потомок воркера (`sleep`) завершается вместе с группой и не
             // держит каналы до конца собственного сна.
             assert!(
                 begun.elapsed() < std::time::Duration::from_secs(4),
-                "таймаут не завершил группу воркера: {:?}",
+                "{name}: предел времени не завершил группу воркера: {:?}",
                 begun.elapsed()
             );
         }

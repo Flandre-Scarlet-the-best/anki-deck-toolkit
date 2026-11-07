@@ -87,12 +87,39 @@ pub struct Diagnostics {
     pub per_channel: Vec<ChannelStats>,
 }
 
+/// Категория отказа: вход не соответствует контракту или сам инференс не
+/// выдал годный результат. Воркер выбирает по ней код выхода.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnhanceErrorKind {
+    Input,
+    Runtime,
+}
+
 #[derive(Debug)]
-pub struct EnhanceError(pub String);
+pub struct EnhanceError {
+    pub kind: EnhanceErrorKind,
+    pub message: String,
+}
+
+impl EnhanceError {
+    fn input(message: impl Into<String>) -> Self {
+        Self {
+            kind: EnhanceErrorKind::Input,
+            message: message.into(),
+        }
+    }
+
+    fn runtime(message: impl Into<String>) -> Self {
+        Self {
+            kind: EnhanceErrorKind::Runtime,
+            message: message.into(),
+        }
+    }
+}
 
 impl std::fmt::Display for EnhanceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -109,8 +136,8 @@ impl Enhancer {
         if !(params.atten_lim_db.is_finite() && params.atten_lim_db >= 0.0)
             || !(params.post_filter_beta.is_finite() && params.post_filter_beta >= 0.0)
         {
-            return Err(EnhanceError(
-                "параметры инференса должны быть конечными и неотрицательными".into(),
+            return Err(EnhanceError::input(
+                "параметры инференса должны быть конечными и неотрицательными",
             ));
         }
         let dfp = DfParams::from_bytes(
@@ -119,14 +146,14 @@ impl Enhancer {
             files.erb_dec.clone(),
             files.df_dec.clone(),
         )
-        .map_err(|e| EnhanceError(format!("конфигурация модели: {e:#}")))?;
+        .map_err(|e| EnhanceError::runtime(format!("конфигурация модели: {e:#}")))?;
         let rp = RuntimeParams::default_with_ch(1)
             .with_atten_lim(params.atten_lim_db)
             .with_post_filter(params.post_filter_beta);
-        let template =
-            DfTract::new(dfp, &rp).map_err(|e| EnhanceError(format!("загрузка модели: {e:#}")))?;
+        let template = DfTract::new(dfp, &rp)
+            .map_err(|e| EnhanceError::runtime(format!("загрузка модели: {e:#}")))?;
         if template.sr != SAMPLE_RATE as usize {
-            return Err(EnhanceError(format!(
+            return Err(EnhanceError::runtime(format!(
                 "модель работает на {} Hz, ожидалось {SAMPLE_RATE}",
                 template.sr
             )));
@@ -163,7 +190,7 @@ impl Enhancer {
                 Array2::from_shape_vec((1, hop), frame.to_vec()).expect("форма кадра согласована");
             let lsnr = df
                 .process(noisy.view(), enh.view_mut())
-                .map_err(|e| EnhanceError(format!("инференс: {e:#}")))?;
+                .map_err(|e| EnhanceError::runtime(format!("инференс: {e:#}")))?;
             min = min.min(lsnr);
             max = max.max(lsnr);
             sum += f64::from(lsnr);
@@ -172,7 +199,7 @@ impl Enhancer {
         }
         let result: Vec<f32> = output[delay + ctx..delay + ctx + input.len()].to_vec();
         if result.iter().any(|s| !s.is_finite()) {
-            return Err(EnhanceError("модель выдала неконечные отсчёты".into()));
+            return Err(EnhanceError::runtime("модель выдала неконечные отсчёты"));
         }
         Ok((
             result,
@@ -197,13 +224,13 @@ impl Enhancer {
         interleaved: &[f32],
     ) -> Result<(Vec<f32>, Diagnostics), EnhanceError> {
         if channels == 0 || channels > 2 {
-            return Err(EnhanceError("поддерживаются 1 или 2 канала".into()));
+            return Err(EnhanceError::input("поддерживаются 1 или 2 канала"));
         }
         if interleaved.is_empty() || !interleaved.len().is_multiple_of(channels) {
-            return Err(EnhanceError("пустой или неполный поток PCM".into()));
+            return Err(EnhanceError::input("пустой или неполный поток PCM"));
         }
         if interleaved.iter().any(|s| !s.is_finite()) {
-            return Err(EnhanceError("вход содержит неконечные отсчёты".into()));
+            return Err(EnhanceError::input("вход содержит неконечные отсчёты"));
         }
         let frames = interleaved.len() / channels;
         let split: Vec<Vec<f32>> = (0..channels)

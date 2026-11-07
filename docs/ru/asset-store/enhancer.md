@@ -223,9 +223,9 @@ Balanced над улучшенным сигналом, вывод) провер�
 |---|---|
 | `enhancer_backend_unavailable` | воркер не найден, не исполняемый, prlimit не смог его запустить |
 | `enhancer_model_unavailable` | веса пропали или повреждены во время пакета (выход воркера 3) |
-| `enhancer_backend_timeout` | предел времени (`timeout_seconds`) или CPU |
+| `enhancer_backend_timeout` | предел времени (`timeout_seconds`) или CPU; потомки воркера держат его каналы вывода дольше предела. Завершается вся группа процессов воркера |
 | `enhancer_backend_crashed` | завершение сигналом (авария, нехватка памяти) |
-| `enhancer_backend_failed` | иной ненулевой код выхода |
+| `enhancer_backend_failed` | иной ненулевой код выхода, в том числе сбой инференса (выход воркера 5) |
 | `enhancer_backend_protocol` | неразбираемый отчёт, другая модель, другая длина или SHA вывода |
 | `interrupted` | результат получен после Ctrl+C/SIGTERM |
 
