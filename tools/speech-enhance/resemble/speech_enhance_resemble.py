@@ -78,8 +78,10 @@ def manifest_sha256() -> str:
     return sha256_bytes(text.encode())
 
 
-def read_regular(path: Path) -> bytes:
-    """Читает обычный файл без следования символическим ссылкам."""
+def read_regular(path: Path, length: int) -> bytes:
+    """Читает обычный файл закреплённой длины без следования символическим
+    ссылкам. Файл другой длины отвергается до чтения, а чтение ограничено
+    длиной + 1 байт: подменённый большой файл не загружается в память."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
@@ -87,9 +89,16 @@ def read_regular(path: Path) -> bytes:
     except OSError as e:
         fail("model_not_regular_file", f"{path.name}: {e.strerror}", EXIT_MODEL)
     with os.fdopen(fd, "rb") as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode):
             fail("model_not_regular_file", f"{path.name} не обычный файл", EXIT_MODEL)
-        return f.read()
+        if info.st_size != length:
+            fail(
+                "model_corrupt",
+                f"{path.name}: длина не совпала с закреплённым манифестом",
+                EXIT_MODEL,
+            )
+        return f.read(length + 1)
 
 
 def load_files(model_dir: Path) -> dict[str, bytes]:
@@ -97,7 +106,7 @@ def load_files(model_dir: Path) -> dict[str, bytes]:
         fail("model_missing", "каталог весов не найден", EXIT_MODEL)
     out = {}
     for name, length, digest in FILES:
-        data = read_regular(model_dir / name)
+        data = read_regular(model_dir / name, length)
         if len(data) != length or sha256_bytes(data) != digest:
             fail(
                 "model_corrupt",

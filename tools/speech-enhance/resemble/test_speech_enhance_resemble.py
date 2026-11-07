@@ -91,6 +91,16 @@ class ModelFilesTest(unittest.TestCase):
             path.write_bytes(b"not the pinned weights")
         self.expect("model_corrupt")
 
+    def test_oversized_file_is_corrupt_without_full_read(self):
+        # Разреженный файл 16 GiB: отказ по размеру приходит до чтения,
+        # иначе тест упёрся бы в память.
+        name = worker.FILES[0][0]
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            f.truncate(1 << 34)
+        self.expect("model_corrupt")
+
     def test_symlink_is_not_followed(self):
         name = worker.FILES[0][0]
         path = self.root / name
