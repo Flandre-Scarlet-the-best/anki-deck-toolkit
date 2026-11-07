@@ -1,0 +1,64 @@
+name: SonarQube Cloud
+
+# Включите SONAR_CLOUD_ENABLED=true только после сохранения секрета GitHub Actions
+# SONAR_TOKEN и отключения Automatic analysis в SonarQube Cloud.
+# Анализ PR разрешён только для веток этого репозитория; внешние форки не получают секрет.
+# В GitHub Settings → Actions → General разрешите действие SonarSource по полному SHA ниже.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Анализ SonarQube
+    if: >-
+      ${{ vars.SONAR_CLOUD_ENABLED == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Получить полный Git-репозиторий для корректного blame и анализа PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Установить Rust, Cargo и Clippy из rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+          cargo clippy --version
+
+      - name: Восстановить кэш Cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Кэшировать загрузки SonarScanner
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Проверить наличие токена SonarQube
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo '::error::Создайте секрет SONAR_TOKEN в настройках GitHub Actions.'
+            exit 1
+          fi
+
+      - name: Запустить анализ SonarQube Cloud
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
