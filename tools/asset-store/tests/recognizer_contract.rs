@@ -856,6 +856,177 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
     ));
     assert_eq!(read["outcome"], "ok", "{read}");
     assert_eq!(read["result"]["assets"][0]["consumer_filename"], "生.mp3");
+    // Явная связь без распознавания и локальная экспертиза на фейковом воркере
+    // (нулевые эмиссии): вердикт не «поддерживает», цель ждёт пользователя.
+    let sha = candidate["source_sha256"].as_str().unwrap();
+    let linked = json(&selection(
+        &f,
+        &[
+            "link-target",
+            "--batch-id",
+            "sel",
+            "--source-sha256",
+            sha,
+            "--surface",
+            "生",
+            "--reading",
+            "しょう",
+        ],
+    ));
+    assert_eq!(linked["outcome"], "ok", "{linked}");
+    let manual = linked["result"]["link"]["candidates"][0]["candidate_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut audio: Vec<String> = [
+        "audio-review",
+        "--batch-id",
+        "sel",
+        "--candidate-id",
+        &manual,
+        "--enhancer",
+        "none",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    audio.extend(models_args(&f));
+    let refs: Vec<&str> = audio.iter().map(String::as_str).collect();
+    let reviewed = json(&selection(&f, &refs));
+    assert_eq!(reviewed["outcome"], "ok", "{reviewed}");
+    assert_ne!(reviewed["result"]["audio_review"]["verdict"], "supports");
+    assert_eq!(reviewed["result"]["audio_review"]["local"], true);
+    let decide = |extra: &[&str]| {
+        let mut args = vec![
+            "decide",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "しょう",
+            "--agent-id",
+            "codex-agent",
+            "--reason",
+            "проверка",
+        ];
+        args.extend_from_slice(extra);
+        json(&selection(&f, &args))
+    };
+    let missing_review = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--authority",
+        "agent-audio",
+    ]);
+    assert_eq!(missing_review["outcome"], "error", "{missing_review}");
+    let no_statement = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--authority",
+        "user-via-agent",
+        "--channel",
+        "agent-dialog",
+    ]);
+    assert_eq!(no_statement["outcome"], "error", "{no_statement}");
+    let review_id = reviewed["result"]["audio_review"]["review_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let unsupported = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--authority",
+        "agent-audio",
+        "--audio-review-id",
+        &review_id,
+    ]);
+    assert_eq!(
+        unsupported["outcome"], "error",
+        "неподдержанная экспертиза не даёт права выбора"
+    );
+    let rejected = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--reject",
+        "--authority",
+        "user-via-agent",
+        "--channel",
+        "agent-dialog",
+        "--statement",
+        "это не しょう",
+    ]);
+    assert_eq!(
+        rejected["result"]["decision"]["action"]["kind"], "reject_candidate",
+        "{rejected}"
+    );
+    let deferred = decide(&[
+        "--defer",
+        "--authority",
+        "user-via-agent",
+        "--channel",
+        "agent-dialog",
+        "--statement",
+        "не знаю, отложите",
+    ]);
+    assert_eq!(
+        deferred["result"]["decision"]["action"]["kind"], "defer",
+        "{deferred}"
+    );
+
+    // Пустой файл решений применяется без изменений.
+    let review_id = export["result"]["review_id"].as_str().unwrap();
+    let applied = json(&selection(
+        &f,
+        &[
+            "review-apply",
+            "--batch-id",
+            "sel",
+            "--review-id",
+            review_id,
+        ],
+    ));
+    assert_eq!(applied["outcome"], "ok", "{applied}");
+    assert_eq!(applied["result"]["changed"], false);
+    // Явная публикация исходника без заявленного прослушивания: не Verified.
+    let promoted = json(&selection(
+        &f,
+        &[
+            "promote",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "なま",
+        ],
+    ));
+    assert_eq!(promoted["outcome"], "ok", "{promoted}");
+    assert_eq!(promoted["result"]["human_attestation_created"], false);
+    assert_ne!(promoted["result"]["asset"]["lifecycle"], "verified");
+    let refused = json(&selection(
+        &f,
+        &[
+            "promote",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "なま",
+            "--attest-heard-decision",
+        ],
+    ));
+    assert_eq!(refused["outcome"], "error");
+
     // Политика потребителя обязательна: значения по умолчанию нет.
     let missing = selection(
         &f,

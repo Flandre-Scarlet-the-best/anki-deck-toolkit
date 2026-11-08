@@ -590,6 +590,34 @@ fn build_link(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn build_link_for_test(
+    runtime: &SafeBatchRuntime,
+    cache: &ResultCache,
+    recognizer_batch_id: &str,
+    source: &AudioSource,
+    result: &RecognitionResult,
+) -> Result<TargetLink, AssetError> {
+    let target = result.target.clone().unwrap_or_else(|| TargetIdentity {
+        surface: "生".into(),
+        reading: "なま".into(),
+        source: TargetSource {
+            kind: TargetSourceKind::Request,
+            key: "test".into(),
+        },
+        competing_readings: Vec::new(),
+    });
+    build_link(
+        runtime,
+        cache,
+        recognizer_batch_id,
+        source,
+        &target,
+        result,
+        Vec::new(),
+    )
+}
+
 /// Чтение исходника входа распознавания (с границами вызывающего CLI).
 pub type SourceReader<'a> = dyn FnMut(&Path) -> Result<Vec<u8>, AssetError> + 'a;
 
@@ -1233,7 +1261,7 @@ pub(crate) fn candidate_bytes(
 
 /// Конкуренты экспертизы: явные чтения связи, переданные агентом и формы,
 /// которые услышала вторая модель (если это кана, отличная от цели).
-fn expert_competitors(link: &TargetLink, extra: &[String]) -> Vec<String> {
+pub(crate) fn expert_competitors(link: &TargetLink, extra: &[String]) -> Vec<String> {
     let target = super::phonetic::hiragana_only(&link.reading);
     let mut seen = BTreeSet::new();
     let heard = link

@@ -71,7 +71,7 @@ fn forvo_evidence(surface: &str, sha: &str, votes: i64) -> ForvoEvidence {
         }],
         attempts: vec![Attempt {
             record_id: "123".into(),
-            code: "imported".into(),
+            code: "downloaded".into(),
         }],
     }
 }
@@ -1429,4 +1429,287 @@ fn unresolved_filter_and_pagination_select_only_disputed_targets() {
     assert_eq!(all.review_id, first.review_id);
     let second = review::export(store, "sel", GroupFilter::All, 1, 1).unwrap();
     assert_ne!(second.review_id, first.review_id);
+}
+
+// ---------------------------------------------------------------------------
+// Приём из Forvo-пакета, построение связи и вердикт экспертизы
+// ---------------------------------------------------------------------------
+
+#[test]
+fn forvo_batch_sources_keep_plan_reading_as_hint_and_promote_with_forvo_evidence() {
+    use crate::forvo::batch::{ForvoBatch, Item, StoredAcquisition, Transport};
+    let (_workspace, store) = store();
+    let bytes = mp3(440);
+    let sha = sha256_hex(&bytes);
+    let request = Pronunciation::new("生", "なま").unwrap();
+    {
+        let mut runtime = SafeBatchRuntime::open(store.root(), "forvo").unwrap();
+        let blob = runtime
+            .persist_blob_with_limit(&bytes, "mp3", crate::pronunciation::MAX_AUDIO_BYTES)
+            .unwrap();
+        runtime
+            .save(&ForvoBatch {
+                schema_version: 2,
+                provider: "forvo_web".into(),
+                transport: Some(Transport::CdpChromium),
+                browser: None,
+                target: None,
+                batch_id: "forvo".into(),
+                revision: 0,
+                cancelled: false,
+                paused: None,
+                items: vec![Item {
+                    request: request.clone(),
+                    replace_expected_sha256: None,
+                    acquisition: Some(StoredAcquisition {
+                        blob,
+                        evidence: forvo_evidence("生", &sha, 4),
+                    }),
+                    outcome: None,
+                }],
+            })
+            .unwrap();
+    }
+    assert!(intake_forvo_batch(&store, "forvo", "forvo").is_err());
+    let report = intake_forvo_batch(&store, "sel", "forvo").unwrap();
+    assert_eq!(report.added, vec![sha.clone()]);
+    let batch = load(&store, "sel");
+    let source = batch.source(&sha).unwrap();
+    assert_eq!(source.surface_hint.as_deref(), Some("生"));
+    assert_eq!(source.forvo_votes(), Some(4));
+    assert!(matches!(
+        &source.origins[0],
+        SourceOrigin::ForvoBatch { plan_reading, .. } if plan_reading == "なま"
+    ));
+    // Чтение плана — подсказка: без связи целей нет.
+    assert_eq!(engine::recommend_all(&batch).len(), 0);
+    let link = link_target(&store, "sel", &sha, "生", "なま", vec![], vec![]).unwrap();
+    decide(
+        &store,
+        "sel",
+        DecideRequest {
+            surface: "生".into(),
+            reading: "なま".into(),
+            action: DecideAction::Select {
+                candidate_id: link.candidates[0].candidate_id.clone(),
+                expected_sha256: sha.clone(),
+            },
+            authority: user("я прослушал, это なま", true),
+            reason: "ответ пользователя".into(),
+            expected_fingerprint: None,
+        },
+    )
+    .unwrap();
+    let promoted = promote(&store, "sel", "生", "なま", None, true).unwrap();
+    assert_eq!(promoted.asset.provenance.source_kind, "forvo_web");
+    assert_eq!(promoted.asset.lifecycle, LifecycleState::Verified);
+}
+
+fn recognizer_occurrence(
+    index: usize,
+    evidence: Evidence,
+    window: (u64, u64),
+) -> crate::pronunciation::recognizer::Occurrence {
+    use crate::pronunciation::recognizer::SampleSpan;
+    let span = SampleSpan {
+        start: window.0,
+        end: window.1,
+    };
+    crate::pronunciation::recognizer::Occurrence {
+        index,
+        phonemes: "n a m a".into(),
+        frames: (1, 5),
+        core: span,
+        start_uncertainty: SampleSpan {
+            start: window.0.saturating_sub(100),
+            end: window.0,
+        },
+        end_uncertainty: SampleSpan {
+            start: window.1,
+            end: window.1 + 100,
+        },
+        score: -0.5,
+        score_per_token: -0.1,
+        free_phonemes: "n a m a".into(),
+        free_distance: 0,
+        best_competitor: None,
+        competitor_margin: Some(3.0),
+        verifier_text: Some("なま".into()),
+        verifier_distance: Some(0),
+        snr_db: Some(25.0),
+        evidence,
+        reasons: Vec::new(),
+    }
+}
+
+fn recognition_result(
+    outcome: RecognitionOutcome,
+    occurrences: Vec<crate::pronunciation::recognizer::Occurrence>,
+) -> crate::pronunciation::recognizer_pipeline::RecognitionResult {
+    use crate::pronunciation::normalizer::{InputRef, ProfileRef};
+    use crate::pronunciation::recognizer::{
+        self, Level, Matching, TargetIdentity, TargetSource, Uncertainty,
+    };
+    let target = TargetIdentity {
+        surface: "生".into(),
+        reading: "なま".into(),
+        source: TargetSource {
+            kind: TargetSourceKind::Manifest,
+            key: "manifest:test".into(),
+        },
+        competing_readings: vec!["せい".into()],
+    };
+    let has = !occurrences.is_empty();
+    crate::pronunciation::recognizer_pipeline::RecognitionResult {
+        schema_version: recognizer::RESULT_SCHEMA_VERSION,
+        algorithm_version: recognizer::ALGORITHM_VERSION.into(),
+        config_sha256: sha(1),
+        profile: ProfileRef {
+            id: "test".into(),
+            version: 1,
+        },
+        models: Vec::new(),
+        input: InputRef {
+            sha256: sha(2),
+            byte_length: 1,
+            probe: None,
+            error: None,
+        },
+        target_key: Some(target.matching_key()),
+        target: Some(target),
+        pre_analysis: None,
+        matching: Some(Matching {
+            target_variants: vec!["n a m a".into()],
+            competitors: 1,
+            occurrences,
+        }),
+        selected_occurrence: None,
+        extraction: None,
+        fallback: None,
+        full_record: None,
+        processing: None,
+        post_validation: None,
+        output: None,
+        outcome,
+        next_action: action_for(outcome, has),
+        reasons: Vec::new(),
+        uncertainty: Uncertainty {
+            reading_match: Level::Uncertain,
+            segmentation: Level::Uncertain,
+            signal: Level::Confirmed,
+            pitch_accent: Level::NotAssessed,
+            lexical_identity: Level::NotAssessed,
+            provenance: Level::Confirmed,
+            confidence: "uncalibrated".into(),
+        },
+    }
+}
+
+#[test]
+fn recognizer_occurrences_become_interval_candidates_without_inventing_bytes() {
+    let workspace = TempWorkspace::create("selection-build-link").unwrap();
+    let cache =
+        crate::pronunciation::recognizer_batch::ResultCache::open(workspace.path()).unwrap();
+    let (_store_ws, store) = self::store();
+    let runtime = SafeBatchRuntime::open(store.root(), "sel").unwrap();
+    let source = fake_source(2, "生", false);
+    let result = recognition_result(
+        RecognitionOutcome::MultipleOccurrences,
+        vec![
+            recognizer_occurrence(0, Evidence::Match, (4410, 8820)),
+            recognizer_occurrence(1, Evidence::Match, (13230, 17640)),
+        ],
+    );
+    let link = ops::build_link_for_test(&runtime, &cache, "rb", &source, &result).unwrap();
+    assert_eq!(link.occurrences.len(), 2);
+    let kinds: Vec<_> = link.candidates.iter().map(|c| c.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            CandidateKind::SourceOriginal,
+            CandidateKind::OccurrenceInterval,
+            CandidateKind::OccurrenceInterval
+        ]
+    );
+    assert!(link.candidates[1].audio.is_none());
+    assert_eq!(link.recognition.as_ref().unwrap().occurrences, 2);
+    // Границы не разрешены: интервалы не создаются.
+    let unresolved = recognition_result(
+        RecognitionOutcome::BoundariesUnresolved,
+        vec![recognizer_occurrence(0, Evidence::Match, (4410, 8820))],
+    );
+    let link = ops::build_link_for_test(&runtime, &cache, "rb", &source, &unresolved).unwrap();
+    assert!(
+        link.candidates
+            .iter()
+            .all(|c| c.kind != CandidateKind::OccurrenceInterval)
+    );
+    // Технически отвергнутый исходник хранится, но не пригоден.
+    let rejected = recognition_result(RecognitionOutcome::SourceRejected, Vec::new());
+    let link = ops::build_link_for_test(&runtime, &cache, "rb", &source, &rejected).unwrap();
+    assert!(!link.candidates[0].technical.usable);
+}
+
+#[test]
+fn expert_verdict_follows_targeted_reanalysis() {
+    let supports = recognition_result(
+        RecognitionOutcome::TargetWhole,
+        vec![recognizer_occurrence(0, Evidence::Match, (4410, 8820))],
+    );
+    assert_eq!(
+        ops::verdict_of(&supports, None, 44100).0,
+        AudioVerdict::Supports
+    );
+    // Интервал без пересечения с подтверждённым вхождением не поддержан.
+    let far = span(1000.0, 1200.0);
+    assert_eq!(
+        ops::verdict_of(&supports, Some(&far), 44100).0,
+        AudioVerdict::Inconclusive
+    );
+    let near = span(120.0, 180.0);
+    assert_eq!(
+        ops::verdict_of(&supports, Some(&near), 44100).0,
+        AudioVerdict::Supports
+    );
+    let conflict = recognition_result(
+        RecognitionOutcome::Ambiguous,
+        vec![recognizer_occurrence(0, Evidence::Conflict, (4410, 8820))],
+    );
+    assert_eq!(
+        ops::verdict_of(&conflict, None, 44100).0,
+        AudioVerdict::Contradicts
+    );
+    let mut competitor = supports.clone();
+    let occurrence = &mut competitor.matching.as_mut().unwrap().occurrences[0];
+    occurrence.best_competitor = Some(CompetitorScore {
+        phonemes: "s e i".into(),
+        origin: "explicit:せい".into(),
+        score: 0.0,
+    });
+    occurrence.competitor_margin = Some(-1.0);
+    assert_eq!(
+        ops::verdict_of(&competitor, None, 44100).0,
+        AudioVerdict::Contradicts
+    );
+    let absent = recognition_result(RecognitionOutcome::TargetAbsent, Vec::new());
+    assert_eq!(
+        ops::verdict_of(&absent, None, 44100).0,
+        AudioVerdict::Contradicts
+    );
+    let silence = recognition_result(RecognitionOutcome::NoSpeech, Vec::new());
+    let (verdict, reasons) = ops::verdict_of(&silence, None, 44100);
+    assert_eq!(verdict, AudioVerdict::Inconclusive);
+    assert!(reasons.contains(&"expert_inconclusive".to_string()));
+}
+
+#[test]
+fn expert_competitors_include_heard_forms_but_never_the_target() {
+    let source = fake_source(1, "橋", true);
+    let mut link = whole_link(&source, "橋", "はし", "はち");
+    link.competing_readings = vec!["きょう".into()];
+    let competitors = ops::expert_competitors(&link, &["ハシ".into(), "はさ".into(), "abc".into()]);
+    assert_eq!(
+        competitors,
+        vec!["きょう".to_string(), "はさ".into(), "はち".into()]
+    );
 }
