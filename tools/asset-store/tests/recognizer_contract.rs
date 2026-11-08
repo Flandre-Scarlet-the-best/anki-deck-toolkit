@@ -476,6 +476,13 @@ fn analyze_without_target_records_free_analysis_only() {
     assert_eq!(result["outcome"], "TARGET_IDENTITY_UNAVAILABLE", "{result}");
     assert!(result["matching"].is_null());
     assert!(result["pre_analysis"].is_object());
+
+    // Конкурирующее чтение без цели не отбрасывается молча, а отвергается.
+    args.extend(["--competing-reading".into(), "せい".into()]);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let refused = cli(&f, &refs);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--surface"));
 }
 
 /// Разметка рядом с копиями входов (каталог отчёта — вне её каталога).
@@ -616,22 +623,52 @@ fn eval_stops_on_backend_failure_instead_of_scoring_a_partial_set() {
 }
 
 #[test]
-fn eval_refuses_ambiguous_ids_and_invalid_word_intervals() {
+fn eval_refuses_invalid_labels_before_creating_the_report() {
     let f = fixture();
     let labels = labels(&f);
     let original: serde_json::Value = serde_json::from_slice(&fs::read(&labels).unwrap()).unwrap();
     type Mutation = fn(&mut serde_json::Value);
-    let broken: [(&str, Mutation); 4] = [
-        ("duplicate", |v| v["cases"][1]["id"] = "nama".into()),
-        ("empty", |v| v["cases"][0]["id"] = "".into()),
-        ("reversed", |v| {
-            v["cases"][0]["words"][0]["end_ms"] = 300.0.into();
-        }),
-        ("negative", |v| {
-            v["cases"][0]["words"][0]["start_ms"] = (-1.0).into();
-        }),
+    let broken: [(&str, Mutation, &str); 7] = [
+        (
+            "duplicate",
+            |v| v["cases"][1]["id"] = "nama".into(),
+            "invalid_transition",
+        ),
+        (
+            "empty",
+            |v| v["cases"][0]["id"] = "".into(),
+            "invalid_transition",
+        ),
+        (
+            "reversed",
+            |v| v["cases"][0]["words"][0]["end_ms"] = 300.0.into(),
+            "invalid_transition",
+        ),
+        (
+            "negative",
+            |v| v["cases"][0]["words"][0]["start_ms"] = (-1.0).into(),
+            "invalid_transition",
+        ),
+        // Конкурирующее чтение совпадает с целью: цель отвергается при
+        // чтении разметки, а не после прогрева моделей.
+        (
+            "competing",
+            |v| v["cases"][0]["target"]["competing_readings"] = serde_json::json!(["なま"]),
+            "invalid_identity",
+        ),
+        (
+            "non-nfc",
+            |v| v["cases"][1]["target"]["surface"] = "\u{30DB}\u{309A}".into(),
+            "invalid_identity",
+        ),
+        // Файл записи не читается: ошибка входа не оставляет каталога отчёта.
+        (
+            "missing-file",
+            |v| v["cases"][2]["file"] = "нет-такого.mp3".into(),
+            "",
+        ),
     ];
-    for (name, mutate) in broken {
+    for (name, mutate, code) in broken {
         let mut value = original.clone();
         mutate(&mut value);
         fs::write(&labels, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -639,13 +676,11 @@ fn eval_refuses_ambiguous_ids_and_invalid_word_intervals() {
         let args = eval_args(&f, &labels, &out);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let refused = cli(&f, &refs);
-        assert_eq!(refused.status.code(), Some(3), "{name}");
-        assert_eq!(
-            json(&refused)["error"]["code"],
-            "invalid_transition",
-            "{name}"
-        );
-        // Отказ до оценки: каталог отчёта не создаётся.
+        assert!(!refused.status.success(), "{name}");
+        if !code.is_empty() {
+            assert_eq!(refused.status.code(), Some(3), "{name}");
+            assert_eq!(json(&refused)["error"]["code"], code, "{name}");
+        }
         assert!(!out.exists(), "{name}");
     }
 }

@@ -224,6 +224,9 @@ fn read_labels(path: &Path, protected: &BTreeSet<PathBuf>) -> Result<Labels, Ass
                 format!("разметка: пустой или повторяющийся id записи «{}»", case.id),
             ));
         }
+        if let Some(target) = label_target(case) {
+            target.validate()?;
+        }
         for (index, word) in case.words.iter().enumerate() {
             let valid = word.start_ms.is_finite()
                 && word.end_ms.is_finite()
@@ -242,6 +245,19 @@ fn read_labels(path: &Path, protected: &BTreeSet<PathBuf>) -> Result<Labels, Ass
         }
     }
     Ok(labels)
+}
+
+/// Цель записи разметки с ключом происхождения `labels:<id>`.
+fn label_target(case: &LabelCase) -> Option<TargetIdentity> {
+    case.target.as_ref().map(|t| TargetIdentity {
+        surface: t.surface.clone(),
+        reading: t.reading.clone(),
+        source: TargetSource {
+            kind: TargetSourceKind::Manifest,
+            key: format!("labels:{}", case.id),
+        },
+        competing_readings: t.competing_readings.clone(),
+    })
 }
 
 fn same_reading(a: &str, b: &str) -> bool {
@@ -339,7 +355,6 @@ pub(crate) fn evaluate(
 ) -> Result<EvalSummary, AssetError> {
     let labels = read_labels(labels_path, protected)?;
     let base_dir = labels_path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir(out).map_err(|e| AssetError::io("каталог оценки", e))?;
     let source = MemoryEmissions::new(setup.direct());
     let ctx = setup.context(&source);
     let mut cases = Vec::new();
@@ -350,17 +365,12 @@ pub(crate) fn evaluate(
             protected,
             crate::pronunciation::MAX_AUDIO_BYTES,
         )?;
-        let target = case.target.as_ref().map(|t| TargetIdentity {
-            surface: t.surface.clone(),
-            reading: t.reading.clone(),
-            source: TargetSource {
-                kind: TargetSourceKind::Manifest,
-                key: format!("labels:{}", case.id),
-            },
-            competing_readings: t.competing_readings.clone(),
-        });
+        let target = label_target(case);
         cases.push((case.clone(), bytes, target));
     }
+    // Каталог создаётся только после чтения всех входов: ошибка входа не
+    // оставляет пустого каталога, мешающего повтору.
+    std::fs::create_dir(out).map_err(|e| AssetError::io("каталог оценки", e))?;
     // Эмиссии всех исходников — группами по `call_items`.
     let analyses: Vec<Vec<f32>> = cases
         .iter()

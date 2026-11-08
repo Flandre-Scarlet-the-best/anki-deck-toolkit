@@ -80,8 +80,8 @@ pub(crate) struct TargetArgs {
     /// Конкретное чтение цели каной.
     #[arg(long, requires = "surface")]
     reading: Option<String>,
-    /// Явно известные другие чтения той же записи (повторяемый).
-    #[arg(long = "competing-reading")]
+    /// Явно известные другие чтения той же записи (повторяемый; только с целью).
+    #[arg(long = "competing-reading", requires = "surface")]
     competing: Vec<String>,
 }
 

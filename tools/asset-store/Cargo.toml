@@ -41,6 +41,8 @@ session-rotation-acceptance = []
 
 [dev-dependencies]
 gif = "=0.14.2"
+# Только для сверки закреплённых моделей с воркером распознавания.
+speech-recognize = { path = "../speech-recognize" }
 
 [lib]
 name = "asset_store"

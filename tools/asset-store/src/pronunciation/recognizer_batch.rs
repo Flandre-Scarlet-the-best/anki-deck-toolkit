@@ -1687,6 +1687,38 @@ mod tests {
     }
 
     #[test]
+    fn legacy_whole_record_outcomes_are_counted_once_per_input() {
+        let with_enhancement = |key: &str| {
+            let mut r = recognized(pair(key), Variant::Processed, b"full").result;
+            r.processing = Some(pipeline::ProcessingRecord {
+                mode: pipeline::ProcessingMode::WholeRecord,
+                extraction: None,
+                context: None,
+                enhancement: None,
+                legacy_enhancement_outcome: Some("enhanced".into()),
+                balanced: None,
+                trim_preserves_core: true,
+                expected_core: None,
+                output_span: None,
+            });
+            r
+        };
+        // Три цели одного SHA: у первой пары обработки всей записи нет.
+        let results = vec![
+            (
+                item(pair("a")),
+                recognized(pair("a"), Variant::Processed, b"full").result,
+            ),
+            (item(pair("b")), with_enhancement("b")),
+            (item(pair("c")), with_enhancement("c")),
+        ];
+        let (balanced, enhancement) =
+            crate::pronunciation::recognizer_report::legacy_outcomes(&results);
+        assert_eq!(balanced.values().sum::<u64>(), 1);
+        assert_eq!(enhancement.get("enhanced"), Some(&1));
+    }
+
+    #[test]
     fn missing_path_is_unresolved_even_when_sha_is_known() {
         let mut m = manifest();
         m.entries[1].sha256 = Some(sha('a'));

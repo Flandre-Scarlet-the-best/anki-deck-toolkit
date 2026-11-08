@@ -393,11 +393,22 @@ fn run_worker(
     run_limited(
         worker,
         kind.address_space_limit(),
+        1,
         &[],
         args,
         timeout,
         "enhancer",
     )
+}
+
+/// Предел процессорного времени для `prlimit --cpu`: `RLIMIT_CPU` суммирует
+/// время всех потоков процесса, поэтому воркер в `cpu_threads` потоках
+/// получает `timeout × cpu_threads`; реальное время ограничено отдельно.
+pub(crate) fn cpu_limit_seconds(timeout: Duration, cpu_threads: u32) -> u64 {
+    timeout
+        .as_secs()
+        .max(1)
+        .saturating_mul(u64::from(cpu_threads.max(1)))
 }
 
 /// Общий ограниченный запуск воркера инференса (улучшение речи и
@@ -407,6 +418,7 @@ fn run_worker(
 pub(crate) fn run_limited(
     worker: &Path,
     address_space: u64,
+    cpu_threads: u32,
     env: &[(&str, &str)],
     args: &[&std::ffi::OsStr],
     timeout: Duration,
@@ -414,7 +426,7 @@ pub(crate) fn run_limited(
 ) -> Result<Finished, AssetError> {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     let code = |suffix: &str| format!("{prefix}_backend_{suffix}");
-    let cpu = timeout.as_secs().max(1).to_string();
+    let cpu = cpu_limit_seconds(timeout, cpu_threads).to_string();
     let mut child = Command::new("prlimit")
         .envs(env.iter().copied())
         .arg(format!("--as={address_space}"))
@@ -914,6 +926,16 @@ mod tests {
 
     /// Режим исполнения берётся из подтверждённой идентичности: Resemble не
     /// выдаёт себя за `tract`, а CPU и CUDA различаются в отпечатке.
+    #[test]
+    fn cpu_limit_covers_every_worker_thread() {
+        let timeout = Duration::from_secs(600);
+        assert_eq!(cpu_limit_seconds(timeout, 1), 600);
+        assert_eq!(cpu_limit_seconds(timeout, 4), 2400);
+        // Нулевые значения не дают предела 0, при котором воркер сразу
+        // получил бы SIGXCPU.
+        assert_eq!(cpu_limit_seconds(Duration::ZERO, 0), 1);
+    }
+
     #[test]
     fn execution_mode_follows_confirmed_runtime() {
         let df3 = identity(

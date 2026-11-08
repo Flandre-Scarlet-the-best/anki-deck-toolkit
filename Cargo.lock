@@ -155,6 +155,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "skrifa 0.49.0",
+ "speech-recognize",
  "thiserror",
  "tokio",
  "toml",

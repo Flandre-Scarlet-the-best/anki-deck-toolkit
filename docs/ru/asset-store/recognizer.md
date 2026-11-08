@@ -74,7 +74,9 @@ DeepFilterNet3). Источник проверяется целиком до з�
 Воркер запускается через `prlimit` (адресное пространство 6 GiB для HuBERT и
 12 GiB для XLSR, предел времени), веса загружаются один раз на вызов, вызов
 обрабатывает группу входов (`call_items`). Число потоков матричного умножения
-(`MATMUL_NUM_THREADS`, 1–4) задаётся явно и входит в идентичность.
+(`MATMUL_NUM_THREADS`, 1–4) задаётся явно и входит в идентичность. Предел
+процессорного времени `prlimit --cpu` суммирует все потоки процесса, поэтому
+равен пределу времени вызова, умноженному на это число потоков.
 
 ## Команды
 
@@ -94,7 +96,7 @@ $B recognizer analyze --file rec.mp3 --surface 一夜 --reading ひとよ \
 # Пакет с манифестом целей:
 $B recognizer batch-start --batch-id b1 --input <каталог MP3> --workspace <ws> \
    [--targets targets.json] [--max-items N] [--jobs 4]
-$B recognizer batch-resume --batch-id b1 --workspace <ws>
+$B recognizer batch-resume --batch-id b1 --workspace <ws> [--max-items N] [--jobs 4]
 $B recognizer batch-status|batch-cancel|batch-verify-sources --batch-id b1 --workspace <ws>
 $B recognizer batch-report --batch-id b1 --workspace <ws> --out <новый каталог>
 
@@ -102,10 +104,16 @@ $B recognizer batch-report --batch-id b1 --workspace <ws> --out <новый ка
 $B recognizer eval --labels labels.json --out <новый каталог> [--jobs 2]
 ```
 
-Общие параметры моделей: `--recognizer-bin`, `--models-root`, `--profile`
-(профиль распознавания JSON), `--normalizer-profile`, `--enhancer
-deepfilternet3|none`, `--enhancer-bin`. Встроенный профиль печатает
-`recognizer profile`.
+Параметры моделей `model-identify`, `analyze`, `batch-start` и `eval`:
+`--recognizer-bin`, `--models-root`, `--profile` (профиль распознавания
+JSON), `--normalizer-profile`, `--enhancer deepfilternet3|none`,
+`--enhancer-bin`. Профили и режим улучшения пакета фиксируются при
+`batch-start`, поэтому `batch-resume` принимает только `--jobs`,
+`--max-items`, `--recognizer-bin`, `--enhancer-bin` и `--models-root`.
+`model-install` принимает `--model`, `--source`, `--models-root` и
+`--recognizer-bin`. В `analyze` цель задаётся парой `--surface` и
+`--reading`; `--competing-reading` без неё отвергается. Встроенный профиль
+печатает `recognizer profile`.
 
 ## Конвейер одной пары «вход × цель»
 
@@ -154,6 +162,9 @@ deepfilternet3|none`, `--enhancer-bin`. Встроенный профиль пе
    всей записи. Для `TARGET_EXTRACTED` — DeepFilterNet3 на контексте
    вокруг фрагмента (`context_ms`), вырезание, Enhancement QC на фрагменте,
    Balanced и **одно** кодирование; обрезка тишины обязана сохранить ядро.
+   Если прежний Balanced не выбрал байтов всей записи (`REJECT`), кандидата
+   для `TARGET_WHOLE` нет: исход `POST_VALIDATION_FAILED` с причиной
+   `whole_record_candidate_unavailable`.
    `processing.output_span` — интервал исходника (его отсчёты), который несёт
    итоговый кандидат после всех обрезок; через него шкала выдаваемого MP3
    связана со шкалой исходника.
@@ -163,7 +174,8 @@ deepfilternet3|none`, `--enhancer-bin`. Встроенный профиль пе
    становятся `matching` результата, переведёнными на шкалу исходника (срез
    Balanced и частота улучшенной записи учтены), и `selected_occurrence`
    указывает в этот же список; `fallback.matching` хранит их в отсчётах
-   улучшенной записи. Если вся
+   улучшенной записи. Причины исхода — причины повторного анализа вместе с
+   `pre_analysis_failed_before_enhancement`. Если вся
    улучшенная запись — цель, вхождение найдено на самом выдаваемом файле,
    поэтому ожидаемое ядро для повторной проверки — его собственное, без
    повторного сдвига на обрезку Balanced.
@@ -302,7 +314,10 @@ Balanced для тех же входов), `items.jsonl`, `items.tsv` и `occurr
 
 Пути — относительно файла разметки. `id` записей непусты и уникальны, а у
 каждого слова `0 <= start_ms < end_ms`; иначе оценка отвергает разметку
-(`invalid_transition`, код выхода 3) до оценки записей. Сводка: принятые, верные принятия,
+(`invalid_transition`, код выхода 3). Цель записи проверяется по тем же
+правилам, что цель манифеста (`invalid_identity`, код выхода 3). Обе проверки
+и чтение файлов записей выполняются до создания каталога `--out` и запуска
+моделей. Сводка: принятые, верные принятия,
 ложные срабатывания (принят кандидат без цели или не на той цели), пропуски,
 precision/recall, вырезания, задевшие слово цели, извлечения с чужим словом,
 распределения погрешности границ, исходы по категориям и сравнение с прежним

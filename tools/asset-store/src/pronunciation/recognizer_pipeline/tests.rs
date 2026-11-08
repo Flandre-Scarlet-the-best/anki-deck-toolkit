@@ -346,6 +346,33 @@ fn fallback_matching_keeps_order_and_moves_every_span_to_source() {
 }
 
 #[test]
+fn whole_target_without_balanced_candidate_ends_without_panic() {
+    // Balanced отвергает запись как слишком тихую и не выбирает байтов, а
+    // модель слышит цель: итогового кандидата нет, этап 2 не нужен.
+    let mut f = fixture();
+    f.base_profile.analysis.signal_floor_dbfs = -20.0;
+    f.base_profile.trim.silence_threshold_dbfs = -40.0;
+    let (bytes, _) = scene(&[Seg::Sil(400.0), Seg::Word(1, -30.0), Seg::Sil(400.0)]);
+    let r = run(&f, &model(), &bytes, Some(&target(1, &[0, 2]))).unwrap();
+    let res = &r.result;
+    res.validate().unwrap();
+    assert!(res.full_record.as_ref().unwrap().proposed_variant.is_none());
+    assert_eq!(
+        res.outcome,
+        RecognitionOutcome::PostValidationFailed,
+        "{:?}",
+        res.reasons.iter().map(|r| &r.code).collect::<Vec<_>>()
+    );
+    assert_eq!(res.next_action, RecognitionAction::KeepFullRecord);
+    assert!(res.output.is_none() && r.output_bytes.is_none());
+    assert!(
+        res.reasons
+            .iter()
+            .any(|r| r.code == "whole_record_candidate_unavailable")
+    );
+}
+
+#[test]
 fn single_target_is_accepted_and_post_validated_on_decoded_output() {
     let f = fixture();
     let (bytes, truth) = scene(&[Seg::Sil(400.0), Seg::Word(1, -14.0), Seg::Sil(400.0)]);

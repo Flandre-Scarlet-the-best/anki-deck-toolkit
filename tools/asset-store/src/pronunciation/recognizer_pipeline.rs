@@ -828,6 +828,9 @@ pub fn stage_one(
                 fallback.outcome_after = Some(s2.outcome);
                 fallback.pre_analysis = Some(pre2.clone());
                 fallback.matching = Some(m2.clone());
+                // Решение принимается по повторному анализу: причины исходного
+                // выбора (речь не распознана) им заменяются.
+                reasons = s2.reasons.clone();
                 reasons.push(recognition_reason(
                     "pre_analysis_failed_before_enhancement",
                     Severity::Warning,
@@ -928,6 +931,22 @@ pub fn stage_one(
             record.trim_preserves_core = occurrence.as_ref().is_none_or(|o| kept.contains(&o.core));
             result.output = output.as_ref().map(|(r, _)| r.clone());
             result.processing = Some(record);
+            if output.is_none() {
+                // Balanced не выбрал байтов всей записи (REJECT): проверять
+                // на этапе 2 нечего.
+                reasons.push(recognition_reason(
+                    "whole_record_candidate_unavailable",
+                    Severity::Limitation,
+                    "прежний Balanced не выбрал байты всей записи: итогового кандидата нет",
+                ));
+                result.reasons = reasons.clone();
+                return Ok(done(
+                    result,
+                    RecognitionOutcome::PostValidationFailed,
+                    reasons,
+                    full_bytes,
+                ));
+            }
             result.reasons = reasons;
             Ok(StageOne {
                 result,

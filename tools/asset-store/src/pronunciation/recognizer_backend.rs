@@ -248,8 +248,13 @@ fn worker_error(code: Option<i32>, stdout: &[u8]) -> AssetError {
     }
 }
 
+/// Число потоков воркера: оно же в `MATMUL_NUM_THREADS` и в пределе CPU.
+fn worker_threads(threads: u32) -> u32 {
+    threads.clamp(1, 4)
+}
+
 fn threads_env(threads: u32) -> String {
-    threads.clamp(1, 4).to_string()
+    worker_threads(threads).to_string()
 }
 
 /// Проверяет установку и возвращает готовую к вызовам модель.
@@ -270,6 +275,7 @@ pub fn identify(
     let finished = run_limited(
         worker,
         model.address_space,
+        worker_threads(threads),
         &[("MATMUL_NUM_THREADS", &threads_text)],
         &[
             "identify".as_ref(),
@@ -464,6 +470,7 @@ pub fn emissions(
     let finished = run_limited(
         &handle.worker,
         handle.address_space,
+        worker_threads(handle.identity.threads),
         &[("MATMUL_NUM_THREADS", &threads)],
         &args,
         timeout,
@@ -553,6 +560,7 @@ pub fn install_model(
     let finished = run_limited(
         worker,
         model.address_space,
+        1,
         &[],
         &[
             "install-model".as_ref(),
@@ -580,6 +588,34 @@ pub fn install_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_models_match_the_recognition_worker() {
+        // Отпечаток манифеста считается из закреплённых файлов воркера без
+        // загрузки весов: расхождение крейтов видно в CI, а не при запуске.
+        let pairs = [
+            (PRIMARY_PHONEME, &speech_recognize::model::HUBERT_PHONEME_V4),
+            (VERIFIER_HIRAGANA, &speech_recognize::model::XLSR_HIRAGANA),
+        ];
+        for (expected, pinned) in pairs {
+            assert_eq!(expected.id, pinned.id);
+            assert_eq!(expected.revision, pinned.revision, "{}", expected.id);
+            assert_eq!(
+                expected.manifest_sha256,
+                pinned.manifest_sha256(),
+                "{}",
+                expected.id
+            );
+            assert_eq!(expected.vocab, pinned.vocab, "{}", expected.id);
+            assert_eq!(
+                serde_json::to_value(pinned.output).unwrap(),
+                expected.output,
+                "{}",
+                expected.id
+            );
+        }
+        assert_eq!(MODELS.len(), speech_recognize::model::MODELS.len());
+    }
 
     #[test]
     fn frame_count_matches_the_convolution_stack() {

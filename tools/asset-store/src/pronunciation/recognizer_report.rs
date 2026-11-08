@@ -68,7 +68,8 @@ pub struct Summary {
     pub fallback_used: usize,
     pub extraction_enhanced: usize,
     pub post_validation_failed_checks: BTreeMap<String, u64>,
-    /// Решения прежнего Balanced по всей записи для тех же входов.
+    /// Решения прежних Balanced и улучшения по всей записи для тех же входов
+    /// (уникальные SHA).
     pub legacy_balanced_outcomes: BTreeMap<String, u64>,
     pub legacy_enhancement_outcomes: BTreeMap<String, u64>,
     pub models: Vec<serde_json::Value>,
@@ -81,6 +82,36 @@ pub struct Summary {
 
 fn tsv(value: &str) -> String {
     value.replace(['\t', '\n', '\r'], " ")
+}
+
+/// Решения прежних Balanced и улучшения по всей записи — по одному на
+/// уникальный SHA, независимо от числа целей этого входа.
+pub(crate) fn legacy_outcomes(
+    results: &[(WorkItem, RecognitionResult)],
+) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+    let mut balanced = BTreeMap::new();
+    let mut enhancement = BTreeMap::new();
+    let mut seen_balanced = std::collections::BTreeSet::new();
+    // Отдельный учёт: у первой пары SHA обработки всей записи может не быть.
+    let mut seen_enhancement = std::collections::BTreeSet::new();
+    for (item, result) in results {
+        if let Some(full) = &result.full_record
+            && seen_balanced.insert(item.sha256.as_str())
+        {
+            *balanced
+                .entry(full.balanced_outcome.clone())
+                .or_insert(0u64) += 1;
+        }
+        if let Some(o) = result
+            .processing
+            .as_ref()
+            .and_then(|p| p.legacy_enhancement_outcome.as_ref())
+            && seen_enhancement.insert(item.sha256.as_str())
+        {
+            *enhancement.entry(o.clone()).or_insert(0u64) += 1;
+        }
+    }
+    (balanced, enhancement)
 }
 
 pub fn write_report(
@@ -98,8 +129,7 @@ pub fn write_report(
     let mut scores = Vec::new();
     let mut margins = Vec::new();
     let mut failed_checks = BTreeMap::new();
-    let mut legacy_balanced = BTreeMap::new();
-    let mut legacy_enhancement = BTreeMap::new();
+    let (legacy_balanced, legacy_enhancement) = legacy_outcomes(results);
     let mut fallback = 0;
     let mut enhanced = 0;
     let mut occurrences_total = 0;
@@ -119,21 +149,11 @@ pub fn write_report(
             .entry(result.next_action.as_str().to_string())
             .or_insert(0u64) += 1;
         let pre = result.pre_analysis.as_ref();
-        if seen_inputs.insert(item.sha256.clone()) {
-            if let Some(pre) = pre {
-                *events.entry(pre.events.len()).or_insert(0u64) += 1;
-                durations.push(pre.timeline.ms(pre.timeline.frames));
-            }
-            if let Some(full) = &result.full_record {
-                *legacy_balanced
-                    .entry(full.balanced_outcome.clone())
-                    .or_insert(0u64) += 1;
-            }
-        }
-        if let Some(p) = &result.processing
-            && let Some(o) = &p.legacy_enhancement_outcome
+        if seen_inputs.insert(item.sha256.clone())
+            && let Some(pre) = pre
         {
-            *legacy_enhancement.entry(o.clone()).or_insert(0u64) += 1;
+            *events.entry(pre.events.len()).or_insert(0u64) += 1;
+            durations.push(pre.timeline.ms(pre.timeline.frames));
         }
         if result.fallback.is_some() {
             fallback += 1;
