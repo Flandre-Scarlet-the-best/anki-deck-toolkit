@@ -39,6 +39,10 @@ fn invalid(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::InvalidTransition, message)
 }
 
+fn identity_invalid(message: impl Into<String>) -> AssetError {
+    AssetError::new(ErrorCode::InvalidIdentity, message)
+}
+
 // ---------------------------------------------------------------------------
 // Профиль
 // ---------------------------------------------------------------------------
@@ -295,10 +299,10 @@ impl TargetIdentity {
     pub fn validate(&self) -> Result<(), AssetError> {
         let pronunciation = super::Pronunciation::new(&self.surface, &self.reading)?;
         if pronunciation.surface != self.surface || pronunciation.reading != self.reading {
-            return Err(invalid("цель должна быть канонической NFC-парой"));
+            return Err(identity_invalid("цель должна быть канонической NFC-парой"));
         }
         if self.source.key.is_empty() || self.source.key.len() > 512 {
-            return Err(invalid("у цели нет ключа происхождения"));
+            return Err(identity_invalid("у цели нет ключа происхождения"));
         }
         let mut seen = BTreeSet::new();
         for alt in &self.competing_readings {
@@ -307,7 +311,7 @@ impl TargetIdentity {
                 || !seen.insert(kana::to_hiragana(alt))
                 || self.competing_readings.len() > 16
             {
-                return Err(invalid(
+                return Err(identity_invalid(
                     "конкурирующие чтения — до 16 различных каноничных строк каны, не равных цели",
                 ));
             }

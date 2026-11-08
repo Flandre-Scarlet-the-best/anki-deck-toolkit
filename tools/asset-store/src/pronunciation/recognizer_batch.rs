@@ -45,6 +45,40 @@ fn invalid(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::InvalidTransition, message)
 }
 
+/// Ошибка содержимого манифеста целей: `invalid_identity` с указанием места.
+fn manifest_error(
+    message: impl Into<String>,
+    entry: Option<&ManifestEntry>,
+    target: Option<(usize, &ManifestTarget)>,
+) -> AssetError {
+    let mut details = serde_json::Map::new();
+    if let Some(entry) = entry {
+        details.insert("entry_id".into(), entry.id.clone().into());
+        if let Some(path) = &entry.path {
+            details.insert("path".into(), path.clone().into());
+        }
+        if let Some(sha) = &entry.sha256 {
+            details.insert("sha256".into(), sha.clone().into());
+        }
+    }
+    if let Some((index, target)) = target {
+        details.insert("target_index".into(), index.into());
+        details.insert("surface".into(), target.surface.clone().into());
+        details.insert("reading".into(), target.reading.clone().into());
+        if !target.competing_readings.is_empty() {
+            details.insert(
+                "competing_readings".into(),
+                target.competing_readings.clone().into(),
+            );
+        }
+    }
+    AssetError::with_details(
+        ErrorCode::InvalidIdentity,
+        message,
+        serde_json::Value::Object(details),
+    )
+}
+
 fn corrupt(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::ManifestCorrupt, message)
 }
@@ -101,8 +135,10 @@ impl TargetManifest {
             || self.provenance.is_empty()
             || self.provenance.len() > 256
         {
-            return Err(invalid(
+            return Err(manifest_error(
                 "манифест целей: ожидается schema_version 1, kind pronunciation_target_manifest и непустой provenance",
+                None,
+                None,
             ));
         }
         let mut ids = BTreeSet::new();
@@ -114,32 +150,46 @@ impl TargetManifest {
                     .chars()
                     .all(|c| c.is_alphanumeric() || "._-:".contains(c));
             if !id_ok || !ids.insert(entry.id.as_str()) {
-                return Err(invalid(format!(
-                    "манифест целей: идентификатор записи «{}» пуст, повторяется или содержит недопустимые символы",
-                    entry.id
-                )));
+                return Err(manifest_error(
+                    format!(
+                        "манифест целей: идентификатор записи «{}» пуст, повторяется или содержит недопустимые символы",
+                        entry.id
+                    ),
+                    Some(entry),
+                    None,
+                ));
             }
             if entry.sha256.is_none() && entry.path.is_none() {
-                return Err(invalid(format!(
-                    "запись {}: нужен sha256 или path",
-                    entry.id
-                )));
+                return Err(manifest_error(
+                    format!("запись {}: нужен sha256 или path", entry.id),
+                    Some(entry),
+                    None,
+                ));
             }
             if entry.sha256.as_deref().is_some_and(|s| !valid_sha(s)) {
-                return Err(invalid(format!(
-                    "запись {}: sha256 не в нижнем hex",
-                    entry.id
-                )));
+                return Err(manifest_error(
+                    format!("запись {}: sha256 не в нижнем hex", entry.id),
+                    Some(entry),
+                    None,
+                ));
             }
             if entry.targets.is_empty() || entry.targets.len() > MAX_TARGETS_PER_ENTRY {
-                return Err(invalid(format!(
-                    "запись {}: от 1 до {MAX_TARGETS_PER_ENTRY} целей",
-                    entry.id
-                )));
+                return Err(manifest_error(
+                    format!("запись {}: от 1 до {MAX_TARGETS_PER_ENTRY} целей", entry.id),
+                    Some(entry),
+                    None,
+                ));
             }
-            for target in &entry.targets {
+            for (index, target) in entry.targets.iter().enumerate() {
                 self.identity(entry, target, "0".repeat(64).as_str())
-                    .validate()?;
+                    .validate()
+                    .map_err(|e| {
+                        manifest_error(
+                            format!("запись {}, цель {index}: {}", entry.id, e.message),
+                            Some(entry),
+                            Some((index, target)),
+                        )
+                    })?;
             }
         }
         Ok(())
@@ -169,7 +219,7 @@ pub fn read_manifest(
 ) -> Result<TargetManifest, AssetError> {
     let bytes = crate::pronunciation_cli::read_local(path, protected, MAX_MANIFEST_BYTES)?;
     let manifest: TargetManifest = serde_json::from_slice(&bytes)
-        .map_err(|e| invalid(format!("манифест целей не разбирается: {e}")))?;
+        .map_err(|e| manifest_error(format!("манифест целей не разбирается: {e}"), None, None))?;
     manifest.validate()?;
     Ok(manifest)
 }
@@ -1250,6 +1300,21 @@ mod tests {
         m.entries[0].sha256 = None;
         m.entries[0].path = None;
         assert!(m.validate().is_err());
+
+        // Ошибка цели называет запись и цель, а не только правило.
+        let mut m = manifest();
+        m.entries[1].targets[0].competing_readings = vec!["セイ".into()];
+        let err = m.validate().unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidIdentity);
+        assert_eq!(err.details["entry_id"], "sei");
+        assert_eq!(err.details["path"], "copy-of-a.mp3");
+        assert_eq!(err.details["target_index"], 0);
+        assert_eq!(err.details["reading"], "せい");
+        assert!(
+            err.message.contains("запись sei, цель 0"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

@@ -322,6 +322,49 @@ fn batch_resumes_retries_infrastructure_failures_and_reuses_cache() {
 }
 
 #[test]
+fn invalid_manifest_target_is_reported_with_its_entry() {
+    let f = fixture();
+    let path = f.root.join("bad-targets.json");
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "kind": "pronunciation_target_manifest",
+        "provenance": "test-plan",
+        "entries": [
+            {"id": "ok", "path": "生.mp3", "targets": [{"surface": "生", "reading": "なま"}]},
+            {"id": "bad", "path": "生.mp3", "targets": [
+                {"surface": "生", "reading": "せい"},
+                {"surface": "生", "reading": "しょう", "competing_readings": ["ｾｲ"]}
+            ]}
+        ]
+    });
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut start: Vec<String> = vec![
+        "--input".into(),
+        f.input.to_str().unwrap().into(),
+        "--targets".into(),
+        path.to_str().unwrap().into(),
+        "--enhancer".into(),
+        "none".into(),
+    ];
+    start.extend(models_args(&f));
+    let refs: Vec<&str> = start.iter().map(String::as_str).collect();
+    let refused = run(&f, "batch-start", &refs);
+    assert_eq!(refused.status.code(), Some(3));
+    let error = &json(&refused)["error"];
+    assert_eq!(error["code"], "invalid_identity", "{error}");
+    let details = &error["details"];
+    assert_eq!(details["entry_id"], "bad", "{error}");
+    assert_eq!(details["path"], "生.mp3");
+    assert_eq!(details["target_index"], 1);
+    assert_eq!(details["reading"], "しょう");
+    assert_eq!(details["competing_readings"], serde_json::json!(["ｾｲ"]));
+    let leftovers = fs::read_dir(&f.workspace)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0, "отказ до создания пакета");
+}
+
+#[test]
 fn changed_worker_is_refused_on_resume() {
     let f = fixture();
     let mut start: Vec<String> = vec![
