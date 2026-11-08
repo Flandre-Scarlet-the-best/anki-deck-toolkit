@@ -1,0 +1,82 @@
+schema_version = 1
+module = "speech-enhance"
+
+[[scenario]]
+id = "speech-enhance.resemble-identify"
+title = "Проверка и загрузка весов Resemble"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Штатная команда identify Python-воркера проверяет закреплённые веса и загружает denoiser на CPU."
+measured = "Процесс от запуска Python до готового JSON-отчёта identify, включая чтение, SHA-256 и десериализацию модели."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "executable", name = "python3" }
+args = ["{input.worker}", "identify", "--model-dir", "{input.model}"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = []
+set = { PATH = "{param.runtime_bin}:/usr/bin:/bin", SPEECH_ENHANCE_RESEMBLE_DEVICE = "cpu", OMP_NUM_THREADS = "1" }
+
+[[scenario.parameter]]
+name = "runtime_bin"
+description = "Каталог bin окружения Python с закреплёнными зависимостями воркера."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.parameter]]
+name = "model_dir"
+description = "Каталог закреплённых файлов модели Resemble; путь не публикуется."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "worker"
+kind = "repo-file"
+role = "subject"
+identity = "file-sha256"
+path = "tools/speech-enhance/resemble/speech_enhance_resemble.py"
+description = "Исходный код исполняемого воркера."
+
+[[scenario.input]]
+id = "model"
+kind = "external-path"
+role = "workload"
+identity = "content-tree-sha256"
+parameter = "model_dir"
+description = "Закреплённые файлы весов и конфигурации Resemble."
+size = [{ name = "checkpoint_bytes", unit = "byte", description = "Размер чекпойнта.", measure = { kind = "file-bytes", path = "enhancer_stage2/ds/G/default/mp_rank_00_model_states.pt" } }]
+
+[scenario.runs]
+warmup = 1
+min_runs = 2
+max_runs = 20
+single_run_allowed = false
+run_timeout_seconds = 180
+total_budget_seconds = 1800
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Весовые файлы неизменны и page cache прогрет одним запуском."
+cleared = []
+retained = ["веса", "page cache ОС"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[scenario.environment]
+record = ["os", "arch", "cpu_model", "module_version", "hyperfine_version"]
+comparable = ["os", "arch", "cpu_model"]
