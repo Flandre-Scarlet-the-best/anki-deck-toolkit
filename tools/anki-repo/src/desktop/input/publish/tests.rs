@@ -19,6 +19,46 @@ fn export(version: &str, evidence: &str) -> VerifiedExport {
     )
 }
 
+/// Открыть владельца, переждав кратковременно занятый замок.
+///
+/// `flock` принадлежит открытому описанию файла: пока параллельный тест того же
+/// процесса порождает дочерний процесс, его копия дескриптора между `fork` и
+/// `exec` удерживает замок и после `drop` владельца. Немедленный повторный
+/// `try_lock` тогда получает `WouldBlock`, хотя владельца уже нет. Ожидание
+/// ограничено, любые другие результаты возвращаются без изменений.
+fn open_store(root: &std::path::Path) -> Result<Store> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match Store::open(root) {
+            Err(ExchangeError::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::yield_now()
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Публичный `status` с тем же ограниченным ожиданием занятого замка, что и
+/// [`open_store`]; остальные результаты возвращаются без изменений.
+fn status_when_free(
+    root: &std::path::Path,
+) -> std::result::Result<Value, crate::error::DomainError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match super::super::status(root) {
+            Err(e)
+                if e.details["reason"] == "input_busy" && std::time::Instant::now() < deadline =>
+            {
+                std::thread::yield_now()
+            }
+            result => return result,
+        }
+    }
+}
+
 fn key_dir(store: &Store, export: &VerifiedExport) -> Directory {
     store
         .input
@@ -35,7 +75,7 @@ fn receipt(dir: &Directory) -> Transaction {
 fn complete_generations_sequences_and_same_job_replay() {
     let tmp = TempDir::new("trusted-input-generations");
     let v1 = export("v1", "live-job-1");
-    let store = Store::open(tmp.path()).unwrap();
+    let store = open_store(tmp.path()).unwrap();
     let one = store.publish(&v1).unwrap();
     assert_eq!(one["source_sequence"], 1);
     assert_eq!(store.publish(&v1).unwrap()["source_sequence"], 1);
@@ -106,7 +146,7 @@ fn prepare_intent(store: &Store, export: &VerifiedExport) -> (Directory, Transac
 fn every_directory_and_exchange_crash_window_recovers_exactly_once() {
     for window in 0..5 {
         let tmp = TempDir::new("trusted-input-crash");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         store.publish(&export("v1", "first-live-job")).unwrap();
         let candidate = export("v2", "next-live-job");
         let (dir, tx) = prepare_intent(&store, &candidate);
@@ -135,7 +175,7 @@ fn every_directory_and_exchange_crash_window_recovers_exactly_once() {
             dir.remove_tree("previous").unwrap();
         }
         drop(store);
-        let reopened = Store::open(tmp.path()).unwrap();
+        let reopened = open_store(tmp.path()).unwrap();
         assert_eq!(reopened.recover().unwrap().len(), 1, "window {window}");
         assert!(reopened.recover().unwrap().is_empty());
         let dir = key_dir(&reopened, &candidate);
@@ -151,7 +191,7 @@ fn every_directory_and_exchange_crash_window_recovers_exactly_once() {
 fn corrupted_staging_and_cas_conflict_never_confirm_candidate() {
     for cas in [false, true] {
         let tmp = TempDir::new("trusted-input-refusal");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         let v1 = export("v1", "live-job-1");
         store.publish(&v1).unwrap();
         let v2 = export("v2", "live-job-2");
@@ -199,7 +239,7 @@ fn corrupted_staging_and_cas_conflict_never_confirm_candidate() {
 fn output_and_base_survive_independent_working_change() {
     let tmp = TempDir::new("trusted-input-output");
     fs::create_dir_all(tmp.path().join(".git")).unwrap();
-    let store = Store::open(tmp.path()).unwrap();
+    let store = open_store(tmp.path()).unwrap();
     let v1 = export("v1", "job-1");
     store.publish(&v1).unwrap();
     let key = v1.snapshot().identity().key();
@@ -235,7 +275,7 @@ fn output_and_base_survive_independent_working_change() {
 #[test]
 fn renamed_deck_keeps_identity_directory_and_output_binding() {
     let tmp = TempDir::new("trusted-input-rename");
-    let store = Store::open(tmp.path()).unwrap();
+    let store = open_store(tmp.path()).unwrap();
     let v1 = export("v1", "job-1");
     store.publish(&v1).unwrap();
     let key = v1.snapshot().identity().key();
@@ -314,7 +354,7 @@ fn input_symlink_and_unknown_owner_are_never_adopted() {
         .map(|e| e.unwrap().file_name())
         .collect();
     symlink(outside.path(), tmp.path().join("decks/input")).unwrap();
-    assert!(Store::open(tmp.path()).is_err());
+    assert!(open_store(tmp.path()).is_err());
     let after: Vec<_> = fs::read_dir(outside.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
@@ -333,7 +373,7 @@ fn io_errors_at_real_publication_boundaries_preserve_recoverable_state() {
         "receipt",
     ] {
         let tmp = TempDir::new("trusted-input-io-boundaries");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         let first = export("v1", "first-job");
         let next = export("v2", "next-job");
         store.publish(&first).unwrap();
@@ -343,7 +383,7 @@ fn io_errors_at_real_publication_boundaries_preserve_recoverable_state() {
             "{step}"
         );
         drop(store);
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         store.recover().unwrap();
         let state = store.exchange.read().unwrap();
         let current = &state.streams[&first.snapshot().identity().key()].current;
@@ -370,19 +410,7 @@ fn concurrent_owners_serialize_sequences_across_restart() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                let store = loop {
-                    match Store::open(&root) {
-                        Ok(store) => break store,
-                        Err(ExchangeError::Io(e))
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                && std::time::Instant::now() < deadline =>
-                        {
-                            std::thread::yield_now()
-                        }
-                        Err(e) => panic!("{e}"),
-                    }
-                };
+                let store = open_store(&root).unwrap();
                 store.recover().unwrap();
                 store
                     .publish(&export("same-content", &format!("live-job-{i}")))
@@ -395,14 +423,14 @@ fn concurrent_owners_serialize_sequences_across_restart() {
     let mut sequences: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
     sequences.sort();
     assert_eq!(sequences, [1, 2, 3, 4]);
-    let store = Store::open(&root).unwrap();
+    let store = open_store(&root).unwrap();
     assert_eq!(store.audit().unwrap()["streams"][0]["source_sequence"], 4);
 }
 
 #[test]
 fn accidental_journal_corruption_never_becomes_a_confirmation() {
     let tmp = TempDir::new("trusted-input-corrupt-intent");
-    let store = Store::open(tmp.path()).unwrap();
+    let store = open_store(tmp.path()).unwrap();
     let first = export("v1", "first-job");
     store.publish(&first).unwrap();
     let candidate = export("v2", "next-job");
@@ -424,7 +452,7 @@ fn accidental_journal_corruption_never_becomes_a_confirmation() {
 #[test]
 fn corrupted_pending_index_cannot_trigger_a_second_export() {
     let tmp = TempDir::new("trusted-input-corrupt-pending");
-    let mut store = Store::open(tmp.path()).unwrap();
+    let mut store = open_store(tmp.path()).unwrap();
     let job = PendingJob {
         id: "a".repeat(64),
         profile_id: "b".repeat(64),
@@ -442,7 +470,7 @@ fn corrupted_pending_index_cannot_trigger_a_second_export() {
     store.save_control().unwrap();
     drop(store);
     assert!(matches!(
-        Store::open(tmp.path()),
+        open_store(tmp.path()),
         Err(ExchangeError::CorruptState(_))
     ));
 }
@@ -451,7 +479,7 @@ fn corrupted_pending_index_cannot_trigger_a_second_export() {
 fn durable_admission_intent_distinguishes_unsent_and_unknown_after_restart() {
     use source::PreparedAction;
     let tmp = TempDir::new("trusted-input-admission-intent");
-    let mut store = Store::open(tmp.path()).unwrap();
+    let mut store = open_store(tmp.path()).unwrap();
     let job = PendingJob {
         id: "a".repeat(64),
         profile_id: "b".repeat(64),
@@ -465,7 +493,7 @@ fn durable_admission_intent_distinguishes_unsent_and_unknown_after_restart() {
     let key = job.key();
     store.save_job(&key, job).unwrap();
     drop(store);
-    let mut store = Store::open(tmp.path()).unwrap();
+    let mut store = open_store(tmp.path()).unwrap();
     let mut job = store.pending(&key).unwrap().clone();
     assert_eq!(
         job.prepared_action("new-process").unwrap(),
@@ -478,7 +506,7 @@ fn durable_admission_intent_distinguishes_unsent_and_unknown_after_restart() {
     job.admission_started = true;
     store.save_job(&key, job).unwrap();
     drop(store);
-    let store = Store::open(tmp.path()).unwrap();
+    let store = open_store(tmp.path()).unwrap();
     let job = store.pending(&key).unwrap();
     assert_eq!(
         job.prepared_action("new-process").unwrap_err().details["reason"],
@@ -528,7 +556,7 @@ fn physical_config_change_and_removal_keep_semantics_and_recover_new_inventory()
             let first = physical_export(Some(b"old config"));
             let next = physical_export(config);
             assert_eq!(first.snapshot(), next.snapshot());
-            let store = Store::open(tmp.path()).unwrap();
+            let store = open_store(tmp.path()).unwrap();
             store.publish(&first).unwrap();
             if step != "none" {
                 store.fault.set(Some(step));
@@ -539,7 +567,7 @@ fn physical_config_change_and_removal_keep_semantics_and_recover_new_inventory()
                 assert_eq!(result["files_changed"], true);
             }
             drop(store);
-            let store = Store::open(tmp.path()).unwrap();
+            let store = open_store(tmp.path()).unwrap();
             store.recover().unwrap();
             let replay = store.publish(&next).unwrap();
             assert_eq!(replay["source_sequence"], 2);
@@ -567,7 +595,7 @@ fn physical_config_change_and_removal_keep_semantics_and_recover_new_inventory()
 fn audit_rejects_orphan_missing_stream_and_unaccounted_objects_without_removing_them() {
     for kind in ["orphan", "missing", "garbage", "root"] {
         let tmp = TempDir::new("trusted-audit-inventory");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         let export = export("v1", "job");
         store.publish(&export).unwrap();
         let key = export.snapshot().identity().key();
@@ -598,7 +626,7 @@ fn audit_rejects_orphan_missing_stream_and_unaccounted_objects_without_removing_
             "{kind}"
         );
         drop(store);
-        let public_error = super::super::status(tmp.path()).unwrap_err();
+        let public_error = status_when_free(tmp.path()).unwrap_err();
         assert_eq!(public_error.details["reason"], "input_state_corrupt");
         assert!(public_error.message.contains("Перечень объектов input"));
         assert_eq!(fs::read(suspicious).unwrap(), before);
@@ -609,7 +637,7 @@ fn audit_rejects_orphan_missing_stream_and_unaccounted_objects_without_removing_
 fn busy_owner_returns_without_waiting_and_releases_exclusive_access() {
     let tmp = TempDir::new("trusted-busy-owner");
     let root = tmp.path().to_path_buf();
-    let store = Store::open(&root).unwrap();
+    let store = open_store(&root).unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let root2 = root.clone();
     let other = std::thread::spawn(move || {
@@ -625,7 +653,7 @@ fn busy_owner_returns_without_waiting_and_releases_exclusive_access() {
     store.publish(&export("v1", "first")).unwrap();
     drop(store);
     other.join().unwrap();
-    let store = Store::open(&root).unwrap();
+    let store = open_store(&root).unwrap();
     assert_eq!(
         store.publish(&export("v1", "second")).unwrap()["source_sequence"],
         2
@@ -639,7 +667,7 @@ fn busy_owner_returns_without_waiting_and_releases_exclusive_access() {
 #[test]
 fn final_rejection_is_durable_but_write_failure_and_uncertainty_keep_pending() {
     let tmp = TempDir::new("trusted-rejected-attempt");
-    let mut store = Store::open(tmp.path()).unwrap();
+    let mut store = open_store(tmp.path()).unwrap();
     let (_spool, target, job, result) = source::tests::live_fixture();
     let key = job.key();
     store.save_job(&key, job.clone()).unwrap();
@@ -674,12 +702,12 @@ fn final_rejection_is_durable_but_write_failure_and_uncertainty_keep_pending() {
     );
     assert!(store.pending(&key).is_some());
     drop(store);
-    let mut store = Store::open(tmp.path()).unwrap();
+    let mut store = open_store(tmp.path()).unwrap();
     assert!(store.pending(&key).is_some());
     let closed = super::super::close_rejected_attempt(&mut store, &key, &job, failure).unwrap();
     assert_eq!(closed.details["attempt_closed"], true);
     drop(store);
-    let mut store = Store::open(tmp.path()).unwrap();
+    let mut store = open_store(tmp.path()).unwrap();
     assert!(store.pending(&key).is_none());
     assert_eq!(store.control.rejected[&job.id].job.id, job.id);
     assert_eq!(
@@ -703,7 +731,7 @@ fn final_rejection_is_durable_but_write_failure_and_uncertainty_keep_pending() {
 #[test]
 fn legacy_intent_keeps_checksum_but_cannot_confirm_inventory_of_other_bytes() {
     let tmp = TempDir::new("trusted-legacy-inventory");
-    let store = Store::open(tmp.path()).unwrap();
+    let store = open_store(tmp.path()).unwrap();
     let first = physical_export(Some(b"old config"));
     store.publish(&first).unwrap();
     let dir = key_dir(&store, &first);
@@ -760,7 +788,7 @@ fn first_publication_recovers_reservation_partial_stage_and_committed_receipt() 
     ] {
         let tmp = TempDir::new("trusted-first-publication");
         let candidate = export("first", "first-job");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         store.fault.set(Some(step));
         assert!(
             matches!(store.publish(&candidate), Err(ExchangeError::Io(_))),
@@ -768,7 +796,7 @@ fn first_publication_recovers_reservation_partial_stage_and_committed_receipt() 
         );
         assert!(store.audit().is_err());
         drop(store);
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         store.recover().unwrap();
         store.audit().unwrap();
         let before = store.exchange.read().unwrap();
@@ -794,7 +822,7 @@ fn recovery_never_removes_unaccounted_first_generation_bytes() {
     for reserved in [false, true] {
         let tmp = TempDir::new("trusted-first-unknown-bytes");
         let candidate = export("first", "first-job");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         if reserved {
             store.fault.set(Some("writing"));
             assert!(store.publish(&candidate).is_err());
@@ -816,7 +844,7 @@ fn recovery_never_removes_unaccounted_first_generation_bytes() {
 #[test]
 fn missing_committed_first_generation_keeps_the_creation_intent() {
     let tmp = TempDir::new("trusted-first-missing-generation");
-    let store = Store::open(tmp.path()).unwrap();
+    let store = open_store(tmp.path()).unwrap();
     let candidate = export("first", "first-job");
     store.fault.set(Some("new_committed"));
     assert!(store.publish(&candidate).is_err());
@@ -847,14 +875,14 @@ fn status_preserves_recognized_temporaries_and_requires_explicit_recovery() {
         "..new-stream.json.tmp-1-2",
     ] {
         let tmp = TempDir::new("trusted-audit-temporary");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         let export = export("v1", "job");
         store.publish(&export).unwrap();
         store.input.publish(name, b"keep until recovery").unwrap();
         let path = tmp.path().join("decks/input").join(name);
         let recognized = name.ends_with("1-2-3");
         drop(store);
-        let error = super::super::status(tmp.path()).unwrap_err();
+        let error = status_when_free(tmp.path()).unwrap_err();
         assert_eq!(
             error.details["reason"],
             if recognized {
@@ -865,7 +893,7 @@ fn status_preserves_recognized_temporaries_and_requires_explicit_recovery() {
             "{name}"
         );
         assert_eq!(fs::read(&path).unwrap(), b"keep until recovery");
-        let store = Store::open(tmp.path()).unwrap();
+        let store = open_store(tmp.path()).unwrap();
         if recognized {
             store.recover().unwrap();
             assert!(!path.exists());
