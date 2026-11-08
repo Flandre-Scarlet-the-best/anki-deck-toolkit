@@ -37,6 +37,10 @@ test = false
 name = "engine"
 path = "tests/engine.rs"
 
+[[test]]
+name = "worker_cli"
+path = "tests/worker_cli.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 

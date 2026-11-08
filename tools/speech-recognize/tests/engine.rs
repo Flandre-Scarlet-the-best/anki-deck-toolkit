@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use speech_recognize::encoder::{Architecture, Model, Spec};
+use speech_recognize::model::{ModelIdentity, OutputKind};
 use speech_recognize::safetensors::{self, Tensor};
+use speech_recognize::{infer, protocol};
 
 /// Веса, вход, ожидаемые логиты и форма `кадры × словарь`.
 type Fixture = (BTreeMap<String, Tensor>, Vec<f32>, Vec<f32>, (usize, usize));
@@ -162,4 +164,77 @@ fn short_input_gives_no_frames_and_output_is_deterministic() {
     let a = model.log_probs(&input);
     let b = model.log_probs(&input);
     assert_eq!(a, b);
+}
+
+fn tiny_identity(lead: usize, trail: usize, normalize: bool) -> ModelIdentity {
+    ModelIdentity {
+        id: "tiny".into(),
+        name: "tiny".into(),
+        repository: String::new(),
+        revision: String::new(),
+        license: String::new(),
+        output: OutputKind::Phoneme,
+        manifest_sha256: String::new(),
+        files: Vec::new(),
+        sample_rate: 16_000,
+        frame_stride: 320,
+        receptive_field: 400,
+        lead_pad_samples: lead,
+        trail_pad_samples: trail,
+        normalize_input: normalize,
+        blank_id: 0,
+        vocab: (0..6).map(|i| i.to_string()).collect(),
+    }
+}
+
+#[test]
+fn input_is_padded_and_normalised_by_the_manifest() {
+    let samples = [1.0f32, 3.0];
+    let plain = infer::prepare_input(&tiny_identity(2, 1, false), &samples);
+    assert_eq!(plain, [0.0, 0.0, 1.0, 3.0, 0.0]);
+    // Нормализация считается по всему дополненному сигналу.
+    let normalised = infer::prepare_input(&tiny_identity(2, 1, true), &samples);
+    let n = normalised.len() as f64;
+    let mean = normalised.iter().map(|v| f64::from(*v)).sum::<f64>() / n;
+    let var = normalised
+        .iter()
+        .map(|v| (f64::from(*v) - mean).powi(2))
+        .sum::<f64>()
+        / n;
+    assert!(
+        mean.abs() < 1e-6 && (var - 1.0).abs() < 1e-5,
+        "{mean} {var}"
+    );
+    assert!(infer::prepare_input(&tiny_identity(0, 0, true), &[]).is_empty());
+}
+
+#[test]
+fn emissions_are_log_probabilities_of_the_padded_input() {
+    let (tensors, input, expected, shape) = fixture("tiny-hubert");
+    let model = Model::build(
+        tiny_spec(Architecture::PostLayerNorm, "hubert", false),
+        tensors,
+    )
+    .unwrap();
+    // Без дополнения эмиссии — тот же прямой проход, что и в эталоне.
+    let e = infer::emissions(&model, &tiny_identity(0, 0, false), &input);
+    assert_eq!((e.frames, e.vocab), shape);
+    assert_close(&e.log_probs, &expected);
+    // Дополнение тишиной добавляет кадры, каждая строка — распределение.
+    let padded = infer::emissions(&model, &tiny_identity(800, 800, false), &input);
+    assert!(padded.frames > e.frames);
+    for row in padded.log_probs.chunks(padded.vocab) {
+        let total: f32 = row.iter().map(|v| v.exp()).sum();
+        assert!((total - 1.0).abs() < 1e-4, "{total}");
+    }
+}
+
+#[test]
+fn protocol_reports_worker_and_bounded_threads() {
+    let worker = protocol::worker_info();
+    assert_eq!(worker.name, protocol::WORKER_NAME);
+    assert_eq!(worker.protocol, protocol::PROTOCOL_VERSION);
+    let runtime = protocol::runtime_info();
+    assert_eq!(runtime.device, "cpu");
+    assert!((1..=4).contains(&runtime.threads));
 }

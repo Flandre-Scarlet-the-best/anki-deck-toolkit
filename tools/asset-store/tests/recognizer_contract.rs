@@ -470,3 +470,140 @@ fn analyze_without_target_records_free_analysis_only() {
     assert!(result["matching"].is_null());
     assert!(result["pre_analysis"].is_object());
 }
+
+/// Разметка рядом с копиями входов (каталог отчёта — вне её каталога).
+fn labels(f: &Fixture) -> PathBuf {
+    let dir = f.root.join("labels");
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["生.mp3", "silence.mp3"] {
+        fs::copy(f.input.join(name), dir.join(name)).unwrap();
+    }
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "kind": "pronunciation_recognition_labels",
+        "license": "test",
+        "provenance": "synthetic chirp",
+        "cases": [
+            {"id": "nama", "file": "生.mp3", "category": "single_target",
+             "target": {"surface": "生", "reading": "なま", "competing_readings": ["せい"]},
+             "words": [{"reading": "なま", "start_ms": 300.0, "end_ms": 1100.0}]},
+            {"id": "absent", "file": "生.mp3", "category": "target_absent",
+             "target": {"surface": "本", "reading": "ほん"},
+             "words": [{"reading": "なま", "start_ms": 300.0, "end_ms": 1100.0}]},
+            {"id": "quiet", "file": "silence.mp3", "category": "no_speech",
+             "target": null, "words": []}
+        ]
+    });
+    let path = dir.join("labels.json");
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    path
+}
+
+fn eval_args(f: &Fixture, labels: &Path, out: &Path) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "eval".into(),
+        "--labels".into(),
+        labels.to_str().unwrap().into(),
+        "--out".into(),
+        out.to_str().unwrap().into(),
+        "--enhancer".into(),
+        "none".into(),
+        "--jobs".into(),
+        "2".into(),
+    ];
+    args.extend(models_args(f));
+    args
+}
+
+#[test]
+fn eval_accounts_for_every_labelled_case_and_writes_the_report() {
+    let f = fixture();
+    let labels = labels(&f);
+    let out = f.root.join("eval");
+    let args = eval_args(&f, &labels, &out);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let done = cli(&f, &refs);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stdout)
+    );
+    let summary = &json(&done)["result"];
+    // Каждая запись разметки оценена или учтена как сбой среды.
+    assert_eq!(summary["labelled_cases"], 3, "{summary}");
+    assert_eq!(summary["cases"], 3);
+    assert_eq!(summary["infrastructure_failures"], 0);
+    assert_eq!(summary["with_target"], 2);
+    assert_eq!(summary["target_present"], 1);
+    // Поддельные эмиссии ничего не слышат: принятий и ложных принятий нет,
+    // цель с произнесённым словом — пропуск.
+    assert_eq!(summary["accepted"], 0);
+    assert_eq!(summary["false_positives"], 0);
+    assert_eq!(summary["missed"], 1);
+    assert!(summary["precision"].is_null());
+    assert_eq!(summary["recall"], 0.0);
+    assert_eq!(summary["delivered_boundaries_unresolved"], 0);
+    assert_eq!(summary["extraction_cuts_target"], 0);
+    assert_eq!(summary["confidence"], "uncalibrated");
+    let by_outcome = summary["by_outcome"].as_object().unwrap();
+    assert_eq!(
+        by_outcome
+            .values()
+            .map(|v| v.as_u64().unwrap())
+            .sum::<u64>(),
+        3
+    );
+    assert_eq!(
+        summary["legacy_balanced"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_u64().unwrap())
+            .sum::<u64>(),
+        3
+    );
+    // Файлы отчёта согласованы со сводкой.
+    let written: serde_json::Value =
+        serde_json::from_slice(&fs::read(out.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(&written, summary);
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(out.join("cases.json")).unwrap()).unwrap();
+    assert_eq!(cases.len(), 3);
+    let quiet = cases.iter().find(|c| c["id"] == "quiet").unwrap();
+    assert_eq!(quiet["outcome"], "TARGET_IDENTITY_UNAVAILABLE");
+    assert!(quiet["delivered_boundaries_resolved"].is_null());
+    assert!(cases.iter().all(|c| c["accepted"] == false));
+    let results = fs::read_to_string(out.join("results.jsonl")).unwrap();
+    assert_eq!(results.lines().count(), 3);
+    // Каталог отчёта не перезаписывается, а внутри каталога разметки не создаётся.
+    let again = cli(&f, &refs);
+    assert!(!again.status.success());
+    let inside = labels.parent().unwrap().join("eval");
+    let args = eval_args(&f, &labels, &inside);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    assert!(!cli(&f, &refs).status.success());
+    assert!(!inside.exists());
+}
+
+#[test]
+fn eval_stops_on_backend_failure_instead_of_scoring_a_partial_set() {
+    let f = fixture();
+    let labels = labels(&f);
+    fs::write(f.state.join("fail"), b"").unwrap();
+    let out = f.root.join("eval");
+    let args = eval_args(&f, &labels, &out);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let failed = cli(&f, &refs);
+    assert_eq!(
+        failed.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&failed.stdout)
+    );
+    assert!(
+        json(&failed)["error"]["details"]["blocker"]
+            .as_str()
+            .is_some_and(|b| b.starts_with("recognizer_backend"))
+    );
+    assert!(!out.join("summary.json").exists());
+}
