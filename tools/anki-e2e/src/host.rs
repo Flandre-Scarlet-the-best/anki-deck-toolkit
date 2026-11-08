@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Базовый образ закреплён по digest: обновление — осознанная правка.
+/// Базовый образ закреплён по хэшу: обновление — осознанная правка.
 pub const BASE_IMAGE: &str =
     "ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac";
 const ANKI_DOCKERFILE: &str = include_str!("../docker/anki.Dockerfile");
@@ -228,7 +228,7 @@ pub fn resolve_only(args: &ReleaseArgs) -> u8 {
 
 /// `clean` удаляет контейнеры стенда, кроме контейнеров живого runner и
 /// другого хоста; `--images` — образы с меткой стенда; `--cache` — локальные
-/// `cache`/`build` рабочего каталога и BuildKit cache mounts Cargo стенда.
+/// `cache`/`build` рабочего каталога и монтирования кэша BuildKit для Cargo стенда.
 /// Обычный слоевой кэш BuildKit общий для демона и меток стенда не несёт: он не
 /// трогается. Любой неудалённый требуемый ресурс — код ошибки.
 pub fn clean(images: bool, cache: bool, docker_config: DockerConfig, work: Option<PathBuf>) -> u8 {
@@ -317,16 +317,16 @@ pub fn clean(images: bool, cache: bool, docker_config: DockerConfig, work: Optio
         match docker.prune_cache_mounts() {
             Ok(()) => match docker.remaining_cache_mounts() {
                 Ok(left) if left.is_empty() => println!(
-                    "Удалены BuildKit cache mounts стенда: {}",
+                    "Удалены монтирования кэша BuildKit стенда: {}",
                     docker::CACHE_MOUNTS.join(", ")
                 ),
                 Ok(left) => failures.push(format!(
-                    "BuildKit cache mounts стенда не удалены: {}",
+                    "Монтирования кэша BuildKit стенда не удалены: {}",
                     left.join(", ")
                 )),
-                Err(e) => failures.push(format!("проверка BuildKit cache mounts: {e}")),
+                Err(e) => failures.push(format!("проверка монтирований кэша BuildKit: {e}")),
             },
-            Err(e) => failures.push(format!("BuildKit cache mounts: {e}")),
+            Err(e) => failures.push(format!("монтирования кэша BuildKit: {e}")),
         }
         println!("Слоевой кэш BuildKit демона общий и не удаляется (см. README)");
     }
@@ -1271,9 +1271,18 @@ mod tests {
             .open(&path)
             .unwrap();
 
-        assert!(second.try_lock().is_err());
+        // Пока владелец жив, отказ обязан быть немедленным и именно «занято».
+        std::assert_matches!(second.try_lock(), Err(fs::TryLockError::WouldBlock));
         drop(first);
-        assert!(second.try_lock().is_ok());
+        // Замок освобождается с закрытием последнего описания файла, а копию
+        // дескриптора мог унаследовать форкнутый дочерний процесс параллельного
+        // теста: ждём только «занято» и только ограниченное время.
+        crate::test_lock_wait::await_release(
+            crate::test_lock_wait::RELEASE_LIMIT,
+            || second.try_lock(),
+            |error| matches!(error, fs::TryLockError::WouldBlock),
+        )
+        .unwrap_or_else(|error| panic!("замок runner не освобождён после drop: {error}"));
         drop(second);
         fs::remove_dir_all(dir).unwrap();
     }
