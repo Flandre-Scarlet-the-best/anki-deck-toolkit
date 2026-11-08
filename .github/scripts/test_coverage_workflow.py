@@ -3,6 +3,7 @@
 import itertools
 import json
 import os
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -153,6 +154,7 @@ class ToolBootstrapWorkflowTest(unittest.TestCase):
     def test_verified_bootstrap_precedes_unchanged_action_only_on_cloud_runner(self):
         path = Path(__file__).resolve().parents[1] / "workflows/ci.yml"
         workflow = Workflow(path.read_text(encoding="utf-8"))
+        pins = set()
         for job_name in ("code", "asset-store-extended"):
             with self.subTest(job=job_name):
                 steps = workflow.jobs[job_name]["steps"]
@@ -166,10 +168,15 @@ class ToolBootstrapWorkflowTest(unittest.TestCase):
                 self.assertIn('--sha256 "$SCCACHE_SHA256" --size "$SCCACHE_SIZE"', bootstrap)
                 self.assertIn("$RUNNER_TOOL_CACHE/sccache/${SCCACHE_VERSION#v}/x64", bootstrap)
                 self.assertNotIn("continue-on-error", bootstrap + action)
+                pins.add(tuple(re.findall(r"^\s+SCCACHE_(?:SHA256|SIZE): (\S+)$", bootstrap, re.M)))
                 condition = next(line.split("if:", 1)[1].strip() for line in steps[index - 1]["lines"]
                                  if line.strip().startswith("if:"))
                 for runner, expected in (("github-hosted", True), ("self-hosted", False)):
                     self.assertEqual(truthy(evaluate_value("${{ " + condition + " }}", {"runner": {"environment": runner}})), expected)
+        # Размер остаётся в env шага ради бюджета загрузки, поэтому копии обоих заданий
+        # обязаны совпадать: обновление версии с одной забытой копией ловится здесь.
+        self.assertEqual(len(pins), 1, pins)
+        self.assertEqual(len(next(iter(pins))), 2)
 
 
 if __name__ == "__main__":

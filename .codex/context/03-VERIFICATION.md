@@ -491,9 +491,13 @@ rustfmt и actionlint и на имя упавшего теста. Вывод т�
 копируются, `upload-artifact` не используется. Сводка без `--require` не меняет
 исход задания.
 
-Версии внешних инструментов (`ACTIONLINT_VERSION`, `CARGO_DENY_VERSION`,
-`SCCACHE_VERSION`) Renovate не отслеживает: версию, SHA-256 и закреплённый размер
-из официального релиза обновляют вместе вручную. При HTTP 5xx адреса GitHub
+Закрепления внешних инструментов Renovate не отслеживает: в `ci.yml` —
+`ACTIONLINT_VERSION`, `CARGO_DENY_VERSION`, `SCCACHE_VERSION`, в `sonarqube.yml` —
+`LLVM_COV_VERSION`, `CODECOV_VERSION`, `HYPERFINE_VERSION`, `FFMPEG_ARCHIVE` и имя
+wheel `coverage.py`. Версию или имя файла, SHA-256 и закреплённый размер обновляют
+вместе вручную по официальному источнику; размер остаётся в `env` шага загрузки,
+потому что по нему считается бюджет времени, а копии sccache в обоих заданиях
+обязаны совпадать. При HTTP 5xx адреса GitHub
 `releases/download` загрузчик может получить тот же публичный архив через
 официальный Releases API: репозиторий, тег и имя не меняются, размер и SHA-256
 проверяются после загрузки, токены и сторонние зеркала не используются.
