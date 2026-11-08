@@ -344,9 +344,116 @@ fn target_among_other_readings_is_extracted_without_neighbours() {
         plan.extraction.start <= own.start && plan.extraction.end >= own.end,
         "{plan:?}"
     );
-    assert!(res.post_validation.as_ref().unwrap().passed);
+    let post = res.post_validation.as_ref().unwrap();
+    assert!(post.passed);
+    // Обе границы измерены и укладываются в допуск.
+    let tolerance = f.profile.post.timing_tolerance_ms;
+    let (start_err, end_err) = (post.start_error_ms.unwrap(), post.end_error_ms.unwrap());
+    assert!(start_err <= tolerance && end_err <= tolerance, "{post:?}");
+    assert_eq!(post.timing_error_ms, Some(start_err.max(end_err)));
+    // Интервал выдаваемого кандидата на шкале исходника лежит внутри
+    // извлечения и содержит ядро.
+    let processing = res.processing.as_ref().unwrap();
+    let delivered = processing.output_span.expect("интервал кандидата");
+    assert!(plan.extraction.contains(&delivered) && delivered.contains(&plan.core));
     // Полная безопасная запись сохраняется всегда.
     assert!(res.full_record.is_some());
+}
+
+/// Этап 1 извлечения цели, затем подмена итогового кандидата файлом, PCM
+/// которого изменён `edit` (кадры кандидата, ожидаемое ядро в них), и этап 2.
+fn post_validate_edited(edit: impl Fn(&mut Vec<f32>, SampleSpan, u32)) -> RecognitionResult {
+    let f = fixture();
+    let (bytes, _) = scene(&[
+        Seg::Sil(400.0),
+        Seg::Word(0, -14.0),
+        Seg::Sil(450.0),
+        Seg::Word(1, -14.0),
+        Seg::Sil(450.0),
+        Seg::Word(2, -14.0),
+        Seg::Sil(400.0),
+    ]);
+    let tone = model();
+    let ctx = Context {
+        profile: &f.profile,
+        primary: &f.primary,
+        verifier: Some(&f.verifier),
+        base_profile: &f.base_profile,
+        base_toolchain: &f.toolchain,
+        enhancer: None,
+        config_sha256: "synthetic-config",
+        source: &tone,
+    };
+    let mut stage = stage_one(&bytes, Some(&target(1, &[0, 2])), &ctx).unwrap();
+    assert_eq!(stage.pending, Some(RecognitionOutcome::TargetExtracted));
+    let expected = stage
+        .result
+        .processing
+        .as_ref()
+        .unwrap()
+        .expected_core
+        .unwrap();
+    let candidate = stage.output_bytes.as_deref().unwrap();
+    let decoded = decode(candidate, &f.base_profile).unwrap().unwrap();
+    assert_eq!(decoded.pcm.channels, 1);
+    let rate = decoded.timeline.sample_rate;
+    let mut samples = decoded.pcm.samples;
+    edit(&mut samples, expected, rate);
+    stage.output_bytes =
+        Some(probe::encode_mp3(&samples, rate, 1, rate, &["-q:a".into(), "2".into()]).unwrap());
+    stage_two(stage, &ctx).unwrap().result
+}
+
+fn assert_end_rejected(result: &RecognitionResult) {
+    assert_eq!(result.outcome, RecognitionOutcome::PostValidationFailed);
+    assert_ne!(result.next_action, RecognitionAction::UseFinalCandidate);
+    let post = result.post_validation.as_ref().unwrap();
+    let tolerance = RecognitionProfile::conservative().post.timing_tolerance_ms;
+    // Начало не тронуто: отказ — именно по концу слова.
+    assert!(post.start_error_ms.unwrap() <= tolerance, "{post:?}");
+    assert!(post.end_error_ms.unwrap() > tolerance, "{post:?}");
+    let timing = post
+        .checks
+        .iter()
+        .find(|c| c.id == "timing_consistent")
+        .unwrap();
+    assert!(!timing.passed, "{:?}", post.checks);
+}
+
+#[test]
+fn post_validation_rejects_prematurely_cut_word_end() {
+    let result = post_validate_edited(|samples, expected, rate| {
+        // Конец слова срезан на 150 мс, начало и всё до него без изменений.
+        let cut = expected.end - u64::from(rate) * 150 / 1000;
+        samples.truncate(cut as usize);
+    });
+    assert_end_rejected(&result);
+}
+
+#[test]
+fn post_validation_rejects_noticeably_extended_word_end() {
+    let result = post_validate_edited(|samples, expected, rate| {
+        // Тот же тон продолжается ещё 200 мс после конца слова.
+        let from = expected.end as usize;
+        let len = (rate as usize) * 200 / 1000;
+        let tail = (rate as usize) * 150 / 1000;
+        samples.resize(samples.len().max(from + len + tail), 0.0);
+        let amp = 10f64.powf(-14.0 / 20.0);
+        for (i, v) in samples[from..from + len].iter_mut().enumerate() {
+            let p = 2.0 * std::f64::consts::PI * WORDS[1].0 * i as f64 / f64::from(rate);
+            *v = (amp * (p.sin() + 0.3 * (2.0 * p).sin())) as f32;
+        }
+        samples[from + len..].fill(0.0);
+    });
+    assert_end_rejected(&result);
+}
+
+#[test]
+fn post_validation_accepts_unchanged_reencoded_candidate() {
+    let result = post_validate_edited(|_, _, _| {});
+    let post = result.post_validation.as_ref().unwrap();
+    assert!(post.passed, "{:?}", post.checks);
+    assert_eq!(result.outcome, RecognitionOutcome::TargetExtracted);
 }
 
 #[test]
@@ -441,4 +548,100 @@ fn result_is_deterministic() {
         serde_json::to_value(&b.result).unwrap()
     );
     assert_eq!(a.output_bytes, b.output_bytes);
+}
+
+#[test]
+fn evaluation_measures_the_delivered_file_not_the_primary_extraction() {
+    use crate::pronunciation::recognizer_eval::{LabelWord, boundary_metrics};
+    let f = fixture();
+    let (bytes, truth) = scene(&[
+        Seg::Sil(400.0),
+        Seg::Word(0, -14.0),
+        Seg::Sil(450.0),
+        Seg::Word(1, -14.0),
+        Seg::Sil(450.0),
+        Seg::Word(2, -14.0),
+        Seg::Sil(400.0),
+    ]);
+    let r = run(&f, &model(), &bytes, Some(&target(1, &[0, 2]))).unwrap();
+    assert_eq!(r.result.outcome, RecognitionOutcome::TargetExtracted);
+    let words: Vec<LabelWord> = truth
+        .iter()
+        .map(|(w, span)| LabelWord {
+            reading: WORDS[*w].2.into(),
+            start_ms: to_ms(span.start),
+            end_ms: to_ms(span.end),
+        })
+        .collect();
+    let rate = f64::from(RATE);
+    let ok = boundary_metrics(&r.result, &words, Some(1), rate);
+    assert_eq!(ok.delivered_boundaries_resolved, Some(true));
+    assert_eq!(ok.extraction_cuts_target, Some(false));
+    assert_eq!(ok.extraction_contains_other_words, Some(false));
+
+    // Последующая обрезка срезает 100 мс конца слова, а первичное
+    // извлечение его покрывало. Длина выданного файла согласована с
+    // обрезкой, поэтому границы установлены — и обрезка видна.
+    let (_, word) = truth[1];
+    let cut = u64::from(RATE) / 10;
+    let mut trimmed = r.result.clone();
+    let processing = trimmed.processing.as_mut().unwrap();
+    let span = processing.output_span.as_mut().unwrap();
+    let removed = span.end - (word.end - cut);
+    span.end = word.end - cut;
+    let probe = trimmed
+        .post_validation
+        .as_mut()
+        .unwrap()
+        .output_probe
+        .as_mut()
+        .unwrap();
+    probe.decoded_samples -= removed * u64::from(probe.sample_rate) / u64::from(RATE);
+    let m = boundary_metrics(&trimmed, &words, Some(1), rate);
+    assert_eq!(m.primary_extraction_cuts_target, Some(false));
+    assert_eq!(m.extraction_cuts_target, Some(true));
+
+    // Длина выданного файла не согласуется с интервалом: связь шкал не
+    // доказана, метрика неразрешима, а не «обрезки нет».
+    let mut unknown = r.result.clone();
+    let probe = unknown
+        .post_validation
+        .as_mut()
+        .unwrap()
+        .output_probe
+        .as_mut()
+        .unwrap();
+    probe.decoded_samples += u64::from(probe.sample_rate) / 20;
+    let m = boundary_metrics(&unknown, &words, Some(1), rate);
+    assert_eq!(m.delivered_boundaries_resolved, Some(false));
+    assert_eq!(m.extraction_cuts_target, None);
+    assert_eq!(m.primary_extraction_cuts_target, Some(false));
+}
+
+#[test]
+fn worker_panic_is_an_explicit_item_error_not_a_missing_item() {
+    let inputs: Vec<usize> = (0..10).collect();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (results, panicked) = run_parallel("этап 1", &inputs, 3, &stop, |&i| {
+        if i == 4 {
+            panic!("смоделированный сбой элемента {i}");
+        }
+        Ok(i * 2)
+    });
+    assert!(panicked.is_none());
+    // Каждый вход учтён ровно один раз: паника не превращается в пропажу.
+    assert_eq!(results.iter().map(|(i, _)| *i).collect::<Vec<_>>(), inputs);
+    for (i, result) in &results {
+        match result {
+            Ok(v) => assert_eq!(*v, i * 2),
+            Err(error) => {
+                assert_eq!(*i, 4);
+                assert_eq!(error.details["blocker"], "worker_panicked");
+                assert!(error.message.contains("смоделированный сбой элемента 4"));
+                // Не сбой среды: пакет не повторяет его молча как временный.
+                assert!(!is_infrastructure_failure(error));
+            }
+        }
+    }
+    assert_eq!(results.iter().filter(|(_, r)| r.is_err()).count(), 1);
 }

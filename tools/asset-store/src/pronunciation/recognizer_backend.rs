@@ -1,5 +1,5 @@
 //! Граница локальных акустических моделей распознавания: изолированный
-//! процесс `speech-recognize-ctc` (Rust, CPU) того же workspace.
+//! процесс `speech-recognize-ctc` (Rust, CPU) того же рабочего пространства Cargo.
 //!
 //! `asset-store` не связывается с кодом инференса: воркер запускается через
 //! `prlimit` с пределами памяти, CPU, дескрипторов и времени; обмен — файлы
@@ -507,7 +507,9 @@ pub fn emissions(
                 "результат воркера не согласован с входом (SHA, словарь или число кадров)",
             ));
         }
-        let bytes = read_output(output, (frames * vocab * 4) as u64)?;
+        let length = Emissions::byte_length(frames, vocab)
+            .ok_or_else(|| protocol("размер эмиссий воркера не представим"))?;
+        let bytes = read_output(output, length as u64)?;
         if item["output_sha256"] != sha256_hex(&bytes).as_str() {
             return Err(protocol("SHA-256 эмиссий не совпал с отчётом воркера"));
         }

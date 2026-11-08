@@ -14,7 +14,8 @@ pub struct Emissions {
 /// Дополняет вход тишиной по манифесту и при необходимости нормализует его
 /// к нулевому среднему и единичной дисперсии (`eps = 1e-7`, как в
 /// `Wav2Vec2FeatureExtractor`). Нормализация считается по всему
-/// дополненному сигналу — так модель обучалась и так её вызывает upstream.
+/// дополненному сигналу — так модель обучалась и так её вызывает эталонная
+/// реализация `transformers`.
 pub fn prepare_input(identity: &ModelIdentity, samples: &[f32]) -> Vec<f32> {
     let mut padded = vec![0.0f32; identity.lead_pad_samples];
     padded.extend_from_slice(samples);

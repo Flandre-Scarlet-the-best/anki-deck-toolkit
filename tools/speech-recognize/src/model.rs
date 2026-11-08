@@ -463,13 +463,42 @@ pub fn installed_dir(models_root: &Path, pinned: &PinnedModel) -> PathBuf {
 }
 
 /// Устанавливает проверенные файлы из локального снимка репозитория модели в
-/// `<models_root>/<id>/`. Источник проверяется полностью до записи; запись
-/// идёт во временный каталог рядом и публикуется переименованием, поэтому
-/// прерванная установка не оставляет частичной модели под рабочим именем.
+/// `<models_root>/<id>/<manifest_sha256>`. Источник проверяется полностью до
+/// записи. Каталог адресуется манифестом, поэтому уже установленная и
+/// проходящая проверку копия — та же модель: повторная установка её не
+/// трогает. Иначе файлы пишутся во временный каталог рядом, он проверяется
+/// и только затем публикуется переименованием; прежний каталог под рабочим
+/// именем (неполный или повреждённый) на время публикации откладывается и
+/// при её сбое возвращается на место. Прерванная установка не оставляет ни
+/// частичной модели под рабочим именем, ни пустого места вместо прежней.
 pub fn install(
     pinned: &PinnedModel,
     source: &Path,
     models_root: &Path,
+) -> Result<ModelIdentity, ModelError> {
+    install_with(pinned, source, models_root, &|from, to| {
+        std::fs::rename(from, to)
+    })
+}
+
+type Rename = dyn Fn(&Path, &Path) -> std::io::Result<()>;
+
+/// Удаляет временный каталог установки, если до публикации дело не дошло.
+struct StagingGuard<'a>(Option<&'a Path>);
+
+impl Drop for StagingGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(path) = self.0 {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn install_with(
+    pinned: &PinnedModel,
+    source: &Path,
+    models_root: &Path,
+    rename: &Rename,
 ) -> Result<ModelIdentity, ModelError> {
     let files = read_all(pinned, source)?;
     let tokens = vocab_tokens(pinned, &files)?;
@@ -477,22 +506,58 @@ pub fn install(
     let target = installed_dir(models_root, pinned);
     let parent = target.parent().expect("каталог модели вложен в корень");
     std::fs::create_dir_all(parent).map_err(io)?;
-    let staging = parent.join(format!(".installing-{}", std::process::id()));
-    if staging.exists() {
+    // Без перехода по ссылке: ссылка под рабочим именем — не установка.
+    let existing = match std::fs::symlink_metadata(&target) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io(e)),
+    };
+    if existing.as_ref().is_some_and(|m| m.is_dir()) && verify_dir(pinned, &target).is_ok() {
+        return Ok(identity(pinned, tokens));
+    }
+    let pid = std::process::id();
+    let staging = parent.join(format!(".installing-{pid}"));
+    if std::fs::symlink_metadata(&staging).is_ok() {
         std::fs::remove_dir_all(&staging).map_err(io)?;
     }
     std::fs::create_dir(&staging).map_err(io)?;
+    let mut guard = StagingGuard(Some(&staging));
     for (name, bytes) in &files {
         let mut file = File::create_new(staging.join(name)).map_err(io)?;
         file.write_all(bytes).map_err(io)?;
         file.sync_all().map_err(io)?;
     }
-    if target.exists() {
-        // Прежняя установка заменяется только полностью проверенной копией.
-        std::fs::remove_dir_all(&target).map_err(io)?;
+    File::open(&staging)
+        .and_then(|d| d.sync_all())
+        .map_err(io)?;
+    // Публикуется только копия, прошедшая ту же проверку, что и запуск.
+    verify_dir(pinned, &staging)?;
+    if existing.is_some() {
+        let aside = parent.join(format!(".replaced-{pid}"));
+        if std::fs::symlink_metadata(&aside).is_ok() {
+            std::fs::remove_dir_all(&aside).map_err(io)?;
+        }
+        rename(&target, &aside).map_err(io)?;
+        if let Err(e) = rename(&staging, &target) {
+            // Прежний каталог возвращается под рабочее имя.
+            return Err(match rename(&aside, &target) {
+                Ok(()) => io(e),
+                Err(restore) => error(
+                    ModelErrorKind::Io,
+                    format!(
+                        "{e}; прежний каталог модели не возвращён и лежит в {}: {restore}",
+                        aside.display()
+                    ),
+                ),
+            });
+        }
+        guard.0 = None;
+        let _ = std::fs::remove_dir_all(&aside);
+    } else {
+        rename(&staging, &target).map_err(io)?;
+        guard.0 = None;
     }
-    std::fs::rename(&staging, &target).map_err(io)?;
-    verify_dir(pinned, &target)?;
+    File::open(parent).and_then(|d| d.sync_all()).map_err(io)?;
     Ok(identity(pinned, tokens))
 }
 
@@ -516,6 +581,134 @@ mod tests {
         assert_eq!(spec.frames_for(16_000), 49);
         assert_eq!(spec.frames_for(399), 0);
         assert_eq!(spec.frames_for(400), 1);
+    }
+
+    /// Синтетическая закреплённая модель с маленькими файлами: проверка
+    /// установки не зависит от настоящих весов.
+    fn tiny_model(source: &Path) -> PinnedModel {
+        let config = serde_json::json!({
+            "hidden_size": 8, "num_hidden_layers": 1, "num_attention_heads": 2,
+            "do_stable_layer_norm": false, "feat_extract_norm": "group",
+            "hidden_act": "gelu", "conv_stride": CONV_STRIDE, "conv_kernel": CONV_KERNEL,
+        });
+        let contents: [(&'static str, Vec<u8>); 4] = [
+            ("config.json", serde_json::to_vec(&config).unwrap()),
+            ("model.safetensors", b"weights".to_vec()),
+            (
+                "preprocessor_config.json",
+                br#"{"sampling_rate":16000,"do_normalize":false}"#.to_vec(),
+            ),
+            ("vocab.json", br#"{"PAD":0,"a":1}"#.to_vec()),
+        ];
+        std::fs::create_dir_all(source).unwrap();
+        let files = contents.map(|(name, bytes)| {
+            std::fs::write(source.join(name), &bytes).unwrap();
+            PinnedFile {
+                name,
+                byte_length: bytes.len() as u64,
+                sha256: Box::leak(sha256_hex(&bytes).into_boxed_str()),
+            }
+        });
+        PinnedModel {
+            id: "tiny-test-model",
+            hidden: 8,
+            layers: 1,
+            heads: 2,
+            vocab: 2,
+            blank_token: "PAD",
+            normalize_input: false,
+            architecture: Architecture::PostLayerNorm,
+            files,
+            ..HUBERT_PHONEME_V4
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "speech-recognize-install-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn fail_publication(from: &Path, to: &Path) -> std::io::Result<()> {
+        if from
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".installing-")
+        {
+            return Err(std::io::Error::other("смоделированный сбой публикации"));
+        }
+        std::fs::rename(from, to)
+    }
+
+    #[test]
+    fn reinstalling_a_verified_model_keeps_it_untouched() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = scratch("idempotent");
+        let pinned = tiny_model(&dir.join("source"));
+        let root = dir.join("models");
+        install(&pinned, &dir.join("source"), &root).unwrap();
+        let target = installed_dir(&root, &pinned);
+        let inode = std::fs::metadata(&target).unwrap().ino();
+        // Повтор, в том числе со сбоем публикации, до публикации не доходит.
+        install(&pinned, &dir.join("source"), &root).unwrap();
+        install_with(&pinned, &dir.join("source"), &root, &fail_publication).unwrap();
+        assert_eq!(std::fs::metadata(&target).unwrap().ino(), inode);
+        verify_dir(&pinned, &target).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failed_publication_restores_previous_directory() {
+        let dir = scratch("rollback");
+        let pinned = tiny_model(&dir.join("source"));
+        let root = dir.join("models");
+        install(&pinned, &dir.join("source"), &root).unwrap();
+        let target = installed_dir(&root, &pinned);
+        // Прежняя установка повреждена: её нужно заменить, а сбой замены
+        // возвращает каталог как был, без пустого места под рабочим именем.
+        std::fs::write(target.join("vocab.json"), br#"{"PAD":0,"b":1}"#).unwrap();
+        std::fs::write(target.join("marker"), b"prior").unwrap();
+        let err = install_with(&pinned, &dir.join("source"), &root, &fail_publication).unwrap_err();
+        assert_eq!(err.kind, ModelErrorKind::Io);
+        assert_eq!(std::fs::read(target.join("marker")).unwrap(), b"prior");
+        let names: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [pinned.manifest_sha256()],
+            "временные каталоги убраны"
+        );
+        // Штатная замена публикует проверенную копию.
+        install(&pinned, &dir.join("source"), &root).unwrap();
+        verify_dir(&pinned, &target).unwrap();
+        assert!(!target.join("marker").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_source_never_reaches_the_installed_directory() {
+        let dir = scratch("corrupt-source");
+        let pinned = tiny_model(&dir.join("source"));
+        let root = dir.join("models");
+        install(&pinned, &dir.join("source"), &root).unwrap();
+        std::fs::write(dir.join("source").join("vocab.json"), b"{}").unwrap();
+        std::fs::remove_file(installed_dir(&root, &pinned).join("vocab.json")).unwrap();
+        let err = install(&pinned, &dir.join("source"), &root).unwrap_err();
+        assert_eq!(err.kind, ModelErrorKind::Corrupt);
+        assert!(installed_dir(&root, &pinned).join("config.json").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

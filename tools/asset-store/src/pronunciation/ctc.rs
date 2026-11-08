@@ -22,14 +22,24 @@ pub struct Emissions {
 }
 
 impl Emissions {
+    /// `None` — размеры не согласованы с данными (в том числе произведение
+    /// `frames × vocab` не представимо) или есть неконечные значения.
     pub fn new(frames: usize, vocab: usize, log_probs: Vec<f32>) -> Option<Self> {
-        (log_probs.len() == frames * vocab && log_probs.iter().all(|v| v.is_finite())).then_some(
-            Self {
-                frames,
-                vocab,
-                log_probs,
-            },
-        )
+        (frames.checked_mul(vocab) == Some(log_probs.len())
+            && log_probs.iter().all(|v| v.is_finite()))
+        .then_some(Self {
+            frames,
+            vocab,
+            log_probs,
+        })
+    }
+
+    /// Длина сериализованных эмиссий (`f32` LE по строкам) в байтах; `None`,
+    /// если произведение `frames × vocab × 4` не представимо.
+    pub fn byte_length(frames: usize, vocab: usize) -> Option<usize> {
+        frames
+            .checked_mul(vocab)?
+            .checked_mul(std::mem::size_of::<f32>())
     }
 
     pub fn row(&self, t: usize) -> &[f32] {
@@ -350,6 +360,17 @@ mod tests {
     }
 
     const B: usize = 0;
+
+    #[test]
+    fn extreme_dimensions_are_rejected_without_overflow() {
+        assert!(Emissions::new(usize::MAX, 2, Vec::new()).is_none());
+        assert!(Emissions::new(usize::MAX / 2 + 1, 2, vec![0.0; 2]).is_none());
+        assert!(Emissions::new(2, 2, vec![0.0; 3]).is_none());
+        assert!(Emissions::new(1, 2, vec![0.0, f32::INFINITY]).is_none());
+        assert!(Emissions::byte_length(usize::MAX / 4 + 1, 1).is_none());
+        assert!(Emissions::byte_length(usize::MAX, 2).is_none());
+        assert_eq!(Emissions::byte_length(3, 5), Some(60));
+    }
 
     #[test]
     fn greedy_collapses_repeats_and_keeps_blank_separated_doubles() {

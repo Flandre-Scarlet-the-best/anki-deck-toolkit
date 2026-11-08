@@ -72,12 +72,13 @@ pub fn parse(bytes: &[u8]) -> Result<BTreeMap<String, Tensor>, FormatError> {
             )));
         }
         let [start, end] = entry.data_offsets;
-        let count = entry
+        let byte_length = entry
             .shape
             .iter()
             .try_fold(1usize, |acc, d| acc.checked_mul(*d))
+            .and_then(|count| count.checked_mul(4))
             .ok_or_else(|| bad(format!("{name}: переполнение формы")))?;
-        if start > end || end > data.len() || end - start != count * 4 {
+        if start > end || end > data.len() || end - start != byte_length {
             return Err(bad(format!("{name}: смещения не согласованы с формой")));
         }
         spans.push((start, end));
@@ -187,6 +188,20 @@ mod tests {
         assert!(parse(&hole).is_err());
         assert!(parse(&[1, 2, 3]).is_err());
         assert!(parse(&u64::MAX.to_le_bytes()).is_err());
+    }
+
+    #[test]
+    fn extreme_shapes_are_rejected_without_overflow() {
+        // Произведение формы представимо, а его длина в байтах — уже нет.
+        let quarter = usize::MAX / 4 + 1;
+        for shape in [format!("[{quarter}]"), format!("[{quarter},4]")] {
+            let header =
+                format!(r#"{{"a":{{"dtype":"F32","shape":{shape},"data_offsets":[0,4]}}}}"#);
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header.as_bytes());
+            bytes.extend_from_slice(&[0; 4]);
+            assert!(parse(&bytes).unwrap_err().0.contains("переполнение"));
+        }
     }
 
     #[test]

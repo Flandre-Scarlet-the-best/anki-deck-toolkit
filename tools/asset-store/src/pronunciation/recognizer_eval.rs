@@ -7,6 +7,12 @@
 //! ложные совпадения (кандидат принят, а цели нет или выбран не тот
 //! фрагмент), пропуски, обрезку внутрь цели, лишние слова внутри извлечения
 //! и погрешность границ относительно разметки.
+//!
+//! Обрезка и лишние слова считаются по фактически выданному файлу: по
+//! интервалу исходника, который несёт кандидат после всех обрезок
+//! (`processing.output_span`), а не по первичному плану извлечения. Если
+//! длина декодированного кандидата не согласуется с этим интервалом, связь
+//! шкал не доказана и метрика отмечается неразрешимой, а не успешной.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -18,15 +24,22 @@ use super::ctc::Emissions;
 use super::enhancer::{self, ItemContext};
 use super::kana;
 use super::normalizer::{self, Variant};
-use super::recognizer::{RecognitionAction, TargetIdentity, TargetSource, TargetSourceKind};
+use super::recognizer::{
+    RecognitionAction, SampleSpan, TargetIdentity, TargetSource, TargetSourceKind,
+};
 use super::recognizer_backend::ModelHandle;
-use super::recognizer_pipeline::{self as pipeline, EmissionSource};
+use super::recognizer_pipeline::{self as pipeline, EmissionSource, RecognitionResult};
 use super::recognizer_report::{Distribution, distribution};
 use crate::hashing::sha256_hex;
 use crate::pronunciation_recognizer_cli::Setup;
 use crate::{AssetError, ErrorCode};
 
 const MAX_LABELS_BYTES: u64 = 16 * 1024 * 1024;
+/// Допустимое расхождение длины декодированного кандидата с длиной
+/// интервала исходника, который он несёт (округления ресэмплинга).
+const DELIVERED_LENGTH_TOLERANCE_MS: f64 = 5.0;
+/// Перекрытие с чужим словом короче этого не считается его присутствием.
+const OTHER_WORD_MIN_OVERLAP_MS: f64 = 20.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,8 +145,16 @@ pub struct CaseReport {
     pub selected_overlaps_target: Option<bool>,
     pub start_error_ms: Option<f64>,
     pub end_error_ms: Option<f64>,
+    /// По фактически выданному файлу (`None` — не принят или неразрешимо).
     pub extraction_cuts_target: Option<bool>,
     pub extraction_contains_other_words: Option<bool>,
+    /// Связь шкалы выданного файла с исходником доказана (`None` — не принят).
+    pub delivered_boundaries_resolved: Option<bool>,
+    /// Интервал исходника, который несёт выданный файл.
+    pub delivered_span: Option<SampleSpan>,
+    /// Те же метрики по первичному плану извлечения — для диагностики.
+    pub primary_extraction_cuts_target: Option<bool>,
+    pub primary_extraction_contains_other_words: Option<bool>,
     pub free_hypothesis: String,
     pub verifier_hypothesis: Option<String>,
     pub legacy_balanced: Option<String>,
@@ -145,6 +166,8 @@ pub struct CaseReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalSummary {
     pub schema_version: u32,
+    /// Записей в разметке: `cases + infrastructure_failures`.
+    pub labelled_cases: usize,
     pub cases: usize,
     pub with_target: usize,
     pub target_present: usize,
@@ -154,8 +177,13 @@ pub struct EvalSummary {
     pub missed: usize,
     pub precision: Option<f64>,
     pub recall: Option<f64>,
+    /// По фактически выданным файлам.
     pub extraction_cuts_target: usize,
     pub extraction_contains_other_words: usize,
+    /// Принятые кандидаты, для которых границы выданного файла не установлены.
+    pub delivered_boundaries_unresolved: usize,
+    pub primary_extraction_cuts_target: usize,
+    pub primary_extraction_contains_other_words: usize,
     pub start_error_ms: Distribution,
     pub end_error_ms: Distribution,
     pub abs_boundary_error_ms: Distribution,
@@ -191,6 +219,88 @@ fn read_labels(path: &Path, protected: &BTreeSet<PathBuf>) -> Result<Labels, Ass
 
 fn same_reading(a: &str, b: &str) -> bool {
     kana::to_hiragana(a) == kana::to_hiragana(b)
+}
+
+/// Интервал исходника, который несёт выданный кандидат, если связь шкал
+/// доказана: длина декодированного кандидата совпала с длиной интервала в
+/// его частоте. Иначе `None` — границы неразрешимы.
+fn delivered_span(result: &RecognitionResult) -> Option<SampleSpan> {
+    let span = result.processing.as_ref()?.output_span?;
+    let probe = result.post_validation.as_ref()?.output_probe.as_ref()?;
+    let source_rate = result.pre_analysis.as_ref()?.timeline.sample_rate;
+    // `frames` пробы — число кадров MP3; длина PCM на канал — `decoded_samples`.
+    span_matches_length(span, source_rate, probe.decoded_samples, probe.sample_rate).then_some(span)
+}
+
+fn span_matches_length(span: SampleSpan, source_rate: u32, frames: u64, rate: u32) -> bool {
+    if source_rate == 0 || rate == 0 {
+        return false;
+    }
+    let expected = span.len() as f64 * f64::from(rate) / f64::from(source_rate);
+    (expected - frames as f64).abs() <= DELIVERED_LENGTH_TOLERANCE_MS * f64::from(rate) / 1000.0
+}
+
+/// Слово `[start, end)` (кадры исходника) не целиком внутри интервала.
+fn cuts(span: SampleSpan, word: SampleSpan) -> bool {
+    !span.contains(&word)
+}
+
+/// Чужое слово перекрывает интервал заметнее `min_overlap` кадров.
+fn contains_other(span: SampleSpan, others: &[SampleSpan], min_overlap: u64) -> bool {
+    others
+        .iter()
+        .any(|w| span.end.min(w.end).saturating_sub(span.start.max(w.start)) > min_overlap)
+}
+
+/// Сохранность целевого слова и присутствие чужих слов: по фактически
+/// выданному файлу и, для диагностики, по первичному плану извлечения. Всё
+/// `None`, если кандидат не принят.
+pub(crate) struct BoundaryMetrics {
+    pub delivered: Option<SampleSpan>,
+    pub delivered_boundaries_resolved: Option<bool>,
+    pub extraction_cuts_target: Option<bool>,
+    pub extraction_contains_other_words: Option<bool>,
+    pub primary_extraction_cuts_target: Option<bool>,
+    pub primary_extraction_contains_other_words: Option<bool>,
+}
+
+/// `target` — индекс размеченного целевого слова, совпавшего с выбранным
+/// вхождением; `rate` — частота исходника (кадры разметки).
+pub(crate) fn boundary_metrics(
+    result: &RecognitionResult,
+    words: &[LabelWord],
+    target: Option<usize>,
+    rate: f64,
+) -> BoundaryMetrics {
+    let accepted = result.next_action == RecognitionAction::UseFinalCandidate;
+    let to_frames = |ms: f64| (ms * rate / 1000.0).round().max(0.0) as u64;
+    let span_of = |w: &LabelWord| SampleSpan {
+        start: to_frames(w.start_ms),
+        end: to_frames(w.end_ms),
+    };
+    let target_span = target.and_then(|i| words.get(i)).map(span_of);
+    let others: Vec<SampleSpan> = words
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != target)
+        .map(|(_, w)| span_of(w))
+        .collect();
+    let min_overlap = to_frames(OTHER_WORD_MIN_OVERLAP_MS);
+    let delivered = delivered_span(result).filter(|_| accepted);
+    let primary = result
+        .processing
+        .as_ref()
+        .and_then(|p| p.extraction)
+        .filter(|_| accepted);
+    BoundaryMetrics {
+        delivered,
+        delivered_boundaries_resolved: accepted.then_some(delivered.is_some()),
+        extraction_cuts_target: delivered.zip(target_span).map(|(d, w)| cuts(d, w)),
+        extraction_contains_other_words: delivered.map(|d| contains_other(d, &others, min_overlap)),
+        primary_extraction_cuts_target: primary.zip(target_span).map(|(e, w)| cuts(e, w)),
+        primary_extraction_contains_other_words: primary
+            .map(|e| contains_other(e, &others, min_overlap)),
+    }
 }
 
 pub(crate) fn evaluate(
@@ -239,31 +349,18 @@ pub(crate) fn evaluate(
     if let Some(v) = ctx.verifier {
         source.emissions(v, &refs)?;
     }
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let stage_one: Vec<(usize, Result<pipeline::StageOne, AssetError>)> =
-        std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..jobs.clamp(1, 8))
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut local = Vec::new();
-                        loop {
-                            let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            let Some((_, bytes, target)) = cases.get(i) else {
-                                break;
-                            };
-                            local.push((i, pipeline::stage_one(bytes, target.as_ref(), &ctx)));
-                        }
-                        local
-                    })
-                })
-                .collect();
-            let mut all: Vec<_> = workers
-                .into_iter()
-                .flat_map(|w| w.join().unwrap_or_default())
-                .collect();
-            all.sort_by_key(|(i, _)| *i);
-            all
-        });
+    // Без сигнала остановки: оценка выполняется целиком или завершается ошибкой.
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let (stage_one, panicked) = pipeline::run_parallel(
+        "этап 1",
+        &cases,
+        jobs.clamp(1, 8),
+        &never,
+        |(_, bytes, target)| pipeline::stage_one(bytes, target.as_ref(), &ctx),
+    );
+    if let Some(error) = panicked {
+        return Err(error);
+    }
     let finals: Vec<Vec<f32>> = stage_one
         .iter()
         .filter_map(|(_, r)| r.as_ref().ok()?.needs_post_validation())
@@ -282,7 +379,9 @@ pub(crate) fn evaluate(
     let mut jsonl = String::new();
     for (i, stage) in stage_one {
         let (case, bytes, _) = &cases[i];
-        let recognized = match stage.and_then(|s| pipeline::stage_two(s, &ctx)) {
+        let recognized = match stage
+            .and_then(|s| pipeline::catch_panic("этап 2", || pipeline::stage_two(s, &ctx)))
+        {
             Ok(r) => r,
             Err(error) if pipeline::is_infrastructure_failure(&error) => {
                 infra += 1;
@@ -363,22 +462,16 @@ pub(crate) fn evaluate(
             ),
             _ => (None, None),
         };
-        let extraction = result
-            .processing
-            .as_ref()
-            .and_then(|p| p.extraction)
-            .filter(|_| accepted);
-        let extraction_cuts_target = extraction
-            .zip(overlap_word)
-            .map(|(e, w)| !(e.start <= to_frames(w.start_ms) && to_frames(w.end_ms) <= e.end));
-        let extraction_contains_other_words = extraction.map(|e| {
-            case.words.iter().any(|w| {
-                let is_selected = overlap_word.is_some_and(|t| std::ptr::eq(*t, w));
-                let (ws, we) = (to_frames(w.start_ms), to_frames(w.end_ms));
-                let overlap = e.end.min(we).saturating_sub(e.start.max(ws));
-                !is_selected && overlap > to_frames(20.0)
-            })
-        });
+        let target_index =
+            overlap_word.and_then(|t| case.words.iter().position(|w| std::ptr::eq(*t, w)));
+        let BoundaryMetrics {
+            delivered,
+            delivered_boundaries_resolved,
+            extraction_cuts_target,
+            extraction_contains_other_words,
+            primary_extraction_cuts_target,
+            primary_extraction_contains_other_words,
+        } = boundary_metrics(result, &case.words, target_index, rate);
         let false_positive =
             accepted && (!target_present || selected_overlaps_target == Some(false));
         let pre = result.pre_analysis.as_ref();
@@ -398,6 +491,10 @@ pub(crate) fn evaluate(
             end_error_ms,
             extraction_cuts_target,
             extraction_contains_other_words,
+            delivered_boundaries_resolved,
+            delivered_span: delivered,
+            primary_extraction_cuts_target,
+            primary_extraction_contains_other_words,
             free_hypothesis: pre
                 .map(|p| p.primary.normalized.clone())
                 .unwrap_or_default(),
@@ -446,8 +543,21 @@ pub(crate) fn evaluate(
             *legacy_enhancement.entry(l.clone()).or_insert(0) += 1;
         }
     }
+    // Каждая запись разметки либо оценена, либо учтена как сбой среды:
+    // иначе метрики считались бы по неполному набору незаметно.
+    if reports.len() + infra != labels.cases.len() {
+        return Err(AssetError::new(
+            ErrorCode::ValidatorFailure,
+            format!(
+                "оценено {} и сбоев среды {infra} при {} записях разметки",
+                reports.len(),
+                labels.cases.len()
+            ),
+        ));
+    }
     let summary = EvalSummary {
         schema_version: 1,
+        labelled_cases: labels.cases.len(),
         cases: reports.len(),
         with_target: count(&|r| r.target_reading.is_some()),
         target_present: present,
@@ -460,6 +570,11 @@ pub(crate) fn evaluate(
         extraction_cuts_target: count(&|r| r.extraction_cuts_target == Some(true)),
         extraction_contains_other_words: count(&|r| {
             r.extraction_contains_other_words == Some(true)
+        }),
+        delivered_boundaries_unresolved: count(&|r| r.delivered_boundaries_resolved == Some(false)),
+        primary_extraction_cuts_target: count(&|r| r.primary_extraction_cuts_target == Some(true)),
+        primary_extraction_contains_other_words: count(&|r| {
+            r.primary_extraction_contains_other_words == Some(true)
         }),
         start_error_ms: distribution(&mut starts),
         end_error_ms: distribution(&mut ends),

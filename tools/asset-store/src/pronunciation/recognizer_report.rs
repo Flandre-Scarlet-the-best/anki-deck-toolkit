@@ -212,6 +212,7 @@ pub fn write_report(
             "full_record": result.full_record,
             "post_validation": result.post_validation.as_ref().map(|p| serde_json::json!({
                 "passed": p.passed, "checks": p.checks, "timing_error_ms": p.timing_error_ms,
+                "start_error_ms": p.start_error_ms, "end_error_ms": p.end_error_ms,
             })),
             "reasons": result.reasons,
             "uncertainty": result.uncertainty,

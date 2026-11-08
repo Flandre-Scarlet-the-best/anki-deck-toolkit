@@ -308,6 +308,10 @@ pub struct ProcessingRecord {
     pub trim_preserves_core: bool,
     /// Ожидаемое положение ядра слова в итоговом кандидате (его кадры).
     pub expected_core: Option<SampleSpan>,
+    /// Интервал исходной записи (кадры исходной частоты), который несёт
+    /// итоговый кандидат после всех обрезок: связь шкалы выдаваемого MP3 со
+    /// шкалой исходника для проверок и оценки.
+    pub output_span: Option<SampleSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -332,7 +336,11 @@ pub struct PostValidation {
     pub events: usize,
     pub occurrence: Option<Occurrence>,
     pub expected_core: Option<SampleSpan>,
+    /// Наибольшая из ошибок начала и конца ядра (её сравнивает
+    /// `timing_consistent`).
     pub timing_error_ms: Option<f64>,
+    pub start_error_ms: Option<f64>,
+    pub end_error_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -563,6 +571,82 @@ pub fn is_infrastructure_failure(error: &AssetError) -> bool {
     enhancer::is_infrastructure_failure(error) || rbackend::is_backend_failure(error)
 }
 
+/// Паника рабочего потока — нарушение инварианта кода, а не свойство записи
+/// и не сбой среды для повтора: исполнение останавливается явной ошибкой с
+/// текстом паники, а элемент остаётся незавершённым.
+pub(crate) fn worker_panic(stage: &str, payload: Box<dyn std::any::Any + Send>) -> AssetError {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "без сообщения".into());
+    AssetError::with_details(
+        ErrorCode::ValidatorFailure,
+        format!("{stage}: рабочий поток аварийно завершился ({detail}); результат не сохранён"),
+        serde_json::json!({"blocker": "worker_panicked", "stage": stage}),
+    )
+}
+
+/// Выполняет `work`, превращая панику в [`worker_panic`].
+pub(crate) fn catch_panic<T>(
+    stage: &str,
+    work: impl FnOnce() -> Result<T, AssetError>,
+) -> Result<T, AssetError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+        .unwrap_or_else(|payload| Err(worker_panic(stage, payload)))
+}
+
+/// Результаты параллельного этапа по индексам входов и ошибка потока,
+/// упавшего вне отдельного элемента.
+pub(crate) type ParallelResults<T> = (Vec<(usize, Result<T, AssetError>)>, Option<AssetError>);
+
+/// Параллельно применяет `work` к входам (`jobs` потоков, очередь по
+/// индексу). Паника элемента становится его ошибкой [`worker_panic`], а не
+/// пропажей элемента; после `stop` новые входы не выдаются. Каждый выданный
+/// вход присутствует в результате ровно один раз.
+pub(crate) fn run_parallel<I: Sync, T: Send>(
+    stage: &str,
+    inputs: &[I],
+    jobs: usize,
+    stop: &std::sync::atomic::AtomicBool,
+    work: impl Fn(&I) -> Result<T, AssetError> + Sync,
+) -> ParallelResults<T> {
+    use std::sync::atomic::Ordering;
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..jobs.min(inputs.len()).max(1))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut local = Vec::new();
+                    loop {
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::SeqCst);
+                        let Some(input) = inputs.get(i) else {
+                            break;
+                        };
+                        local.push((i, catch_panic(stage, || work(input))));
+                    }
+                    local
+                })
+            })
+            .collect();
+        let mut all = Vec::new();
+        let mut panicked = None;
+        for worker in workers {
+            match worker.join() {
+                Ok(local) => all.extend(local),
+                Err(payload) => {
+                    panicked.get_or_insert(worker_panic(stage, payload));
+                }
+            }
+        }
+        all.sort_by_key(|(i, _)| *i);
+        (all, panicked)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Этап 1
 // ---------------------------------------------------------------------------
@@ -742,14 +826,20 @@ pub fn stage_one(
                     result.selected_occurrence = s2.selected;
                     result.fallback = Some(fallback);
                     result.output = enhanced.result.output.clone();
-                    let expected = occurrence.as_ref().map(|o| {
-                        expected_in_output(
-                            o.core,
-                            enhanced.result.balanced.as_ref(),
-                            true,
-                            after.timeline.sample_rate,
-                        )
-                    });
+                    // Вхождение найдено на самом улучшенном файле, то есть
+                    // уже после обрезки Balanced: ожидаемое ядро — его же
+                    // ядро, повторный сдвиг на обрезку исказил бы проверку.
+                    // До улучшения речь не распознана, поэтому ядра на шкале
+                    // исходника, с которым можно сверить обрезку, нет.
+                    let expected = occurrence.as_ref().map(|o| o.core);
+                    let output_span = Some(kept_span(
+                        SampleSpan {
+                            start: 0,
+                            end: decoded.timeline.frames,
+                        },
+                        enhanced.result.balanced.as_ref(),
+                        true,
+                    ));
                     result.processing = Some(ProcessingRecord {
                         mode: ProcessingMode::WholeRecord,
                         extraction: None,
@@ -761,6 +851,7 @@ pub fn stage_one(
                         balanced: enhanced.result.balanced.clone(),
                         trim_preserves_core: true,
                         expected_core: expected,
+                        output_span,
                     });
                     result.reasons = reasons;
                     return Ok(StageOne {
@@ -810,6 +901,13 @@ pub fn stage_one(
                 )
             });
             record.expected_core = expected;
+            let whole = SampleSpan {
+                start: 0,
+                end: decoded.timeline.frames,
+            };
+            let kept = kept_span(whole, record.balanced.as_ref(), derived);
+            record.output_span = output.as_ref().map(|_| kept);
+            record.trim_preserves_core = occurrence.as_ref().is_none_or(|o| kept.contains(&o.core));
             result.output = output.as_ref().map(|(r, _)| r.clone());
             result.processing = Some(record);
             result.reasons = reasons;
@@ -880,6 +978,23 @@ fn shift(span: SampleSpan, by: u64) -> SampleSpan {
     }
 }
 
+/// Часть `available` (кадры исходника), оставшаяся после обрезки Balanced
+/// производного кандидата; непроизводный кандидат — весь `available`.
+pub(crate) fn kept_span(
+    available: SampleSpan,
+    balanced: Option<&NormalizationResult>,
+    derived: bool,
+) -> SampleSpan {
+    let plan = balanced.and_then(|b| b.plan.as_ref()).filter(|_| derived);
+    let lead = plan.map(|p| p.leading.trim_frames).unwrap_or(0);
+    let trail = plan.map(|p| p.trailing.trim_frames).unwrap_or(0);
+    let start = (available.start + lead).min(available.end);
+    SampleSpan {
+        start,
+        end: available.end.saturating_sub(trail).max(start),
+    }
+}
+
 trait WithOrigin {
     fn with_origin(self, origin: ReasonOrigin) -> Self;
 }
@@ -911,6 +1026,7 @@ fn process_whole(
         balanced: Some(legacy.result.clone()),
         trim_preserves_core: true,
         expected_core: None,
+        output_span: None,
     };
     let selected: Option<(OutputRef, Vec<u8>)> = match legacy.result.gate.proposed_variant {
         Some(Variant::Processed) => legacy
@@ -972,6 +1088,7 @@ fn process_fragment(
         balanced: None,
         trim_preserves_core: false,
         expected_core: None,
+        output_span: None,
     };
     let mut signal = fragment.clone();
     if let Some(setup) = &ctx.enhancer {
@@ -1083,6 +1200,8 @@ fn process_fragment(
     let trail = plan_b.as_ref().map(|p| p.trailing.trim_frames).unwrap_or(0);
     let preserves = lead <= core.start - e.start && trail <= e.end - core.end;
     record.trim_preserves_core = preserves;
+    let kept = kept_span(e, Some(&processed.result), true);
+    record.output_span = Some(kept);
     let out_rate = plan_b
         .as_ref()
         .map(|p| p.output_sample_rate)
@@ -1151,6 +1270,8 @@ pub fn stage_two(stage: StageOne, ctx: &Context<'_>) -> Result<Recognized, Asset
         occurrence: None,
         expected_core: result.processing.as_ref().and_then(|p| p.expected_core),
         timing_error_ms: None,
+        start_error_ms: None,
+        end_error_ms: None,
     };
     let check = |id: &str, passed: bool, value: Option<f64>, limit: Option<f64>| Check {
         id: id.into(),
@@ -1237,23 +1358,29 @@ pub fn stage_two(stage: StageOne, ctx: &Context<'_>) -> Result<Recognized, Asset
                 (extra != usize::MAX).then_some(extra as f64),
                 Some(0.0),
             ));
+            // Сохранность обоих краёв: ядро в декодированном кандидате
+            // сверяется с ожидаемым положением (сдвиг на обрезку Balanced и
+            // пересчёт частоты уже учтены в `expected_core`) и по началу, и
+            // по концу. Преждевременно обрезанный или продлённый конец при
+            // верном начале этой проверки не проходит.
+            let tolerance = ctx.profile.post.timing_tolerance_ms;
             if let (Some(occ), Some(expected)) = (&best, post.expected_core) {
-                let err_frames = occ.core.start.abs_diff(expected.start);
-                let err_ms = err_frames as f64 * 1000.0 / f64::from(after.timeline.sample_rate);
-                post.timing_error_ms = Some(err_ms);
+                let ms =
+                    |frames: u64| frames as f64 * 1000.0 / f64::from(after.timeline.sample_rate);
+                let start_ms = ms(occ.core.start.abs_diff(expected.start));
+                let end_ms = ms(occ.core.end.abs_diff(expected.end));
+                let worst = start_ms.max(end_ms);
+                post.start_error_ms = Some(start_ms);
+                post.end_error_ms = Some(end_ms);
+                post.timing_error_ms = Some(worst);
                 checks.push(check(
                     "timing_consistent",
-                    err_ms <= ctx.profile.post.timing_tolerance_ms,
-                    Some(err_ms),
-                    Some(ctx.profile.post.timing_tolerance_ms),
+                    worst <= tolerance,
+                    Some(worst),
+                    Some(tolerance),
                 ));
             } else {
-                checks.push(check(
-                    "timing_consistent",
-                    false,
-                    None,
-                    Some(ctx.profile.post.timing_tolerance_ms),
-                ));
+                checks.push(check("timing_consistent", false, None, Some(tolerance)));
             }
             post.occurrence = best;
         }

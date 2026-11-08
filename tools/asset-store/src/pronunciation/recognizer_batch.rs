@@ -22,9 +22,11 @@ use serde::{Deserialize, Serialize};
 
 use super::ctc::Emissions;
 use super::enhancer_backend as ebackend;
-use super::normalizer::{NormalizerProfile, Toolchain};
+use super::normalizer::{NormalizerProfile, OutputRef, Toolchain, Variant};
 use super::normalizer_batch::{self as nbatch, Inventory, Limits};
-use super::recognizer::{RecognitionProfile, TargetIdentity, TargetSource, TargetSourceKind};
+use super::recognizer::{
+    RecognitionAction, RecognitionProfile, TargetIdentity, TargetSource, TargetSourceKind,
+};
 use super::recognizer_backend::ModelHandle;
 use super::recognizer_pipeline::{self as pipeline, EmissionSource, RecognitionResult, Recognized};
 use crate::batch_runtime::{RuntimeBatchState, RuntimeBlobRef, SafeBatchRuntime};
@@ -577,6 +579,16 @@ struct EmissionMeta {
     sha256: String,
 }
 
+/// Полная запись, выбирающая обработанный вариант Balanced, ссылается на
+/// сохранённый blob этого варианта. Выбор исходника blob не требует: исходный
+/// MP3 остаётся в проверенном входе пакета.
+fn full_record_stored(full: &pipeline::FullRecord) -> bool {
+    full.proposed_variant != Some(Variant::Processed)
+        || full.output.as_ref().is_some_and(|o| {
+            o.storage_path.is_some() && full.selected_sha256.as_deref() == Some(o.sha256.as_str())
+        })
+}
+
 impl ResultCache {
     pub fn open(workspace: &Path) -> Result<Self, AssetError> {
         Ok(Self {
@@ -585,7 +597,14 @@ impl ResultCache {
     }
 
     /// Готовый результат пары или `None`. Повреждённая или несогласованная
-    /// запись считается отсутствующей и пересчитывается.
+    /// запись считается отсутствующей и пересчитывается: в том числе запись,
+    /// чей итоговый кандидат или обещанный вариант полной записи утрачен
+    /// либо не проходит сверку SHA-256.
+    ///
+    /// Ключ результата — акустическое решение (SHA входа и пара цели без
+    /// происхождения), поэтому одна запись обслуживает одинаковые пары из
+    /// разных манифестов. Происхождение цели берётся из текущей пары, а не
+    /// из манифеста, при котором решение было вычислено.
     pub fn get(
         &self,
         config_sha: &str,
@@ -600,7 +619,7 @@ impl ResultCache {
             Err(error) if error.code == ErrorCode::MissingAssetFile => return Ok(None),
             Err(error) => return Err(error),
         };
-        let Ok(result) = serde_json::from_slice::<RecognitionResult>(&bytes) else {
+        let Ok(mut result) = serde_json::from_slice::<RecognitionResult>(&bytes) else {
             return Ok(None);
         };
         let key_ok = result.input.sha256 == item.sha256
@@ -609,19 +628,65 @@ impl ResultCache {
         if !key_ok || result.validate().is_err() {
             return Ok(None);
         }
-        if let Some(output) = &result.output
-            && let Some(path) = &output.storage_path
-            && self
-                .runtime
-                .read_blob(&RuntimeBlobRef {
-                    sha256: output.sha256.clone(),
-                    storage_path: path.clone(),
-                })
-                .is_err()
-        {
+        let blob_ok = |output: &OutputRef| {
+            output.storage_path.as_ref().is_none_or(|path| {
+                self.runtime
+                    .read_blob(&RuntimeBlobRef {
+                        sha256: output.sha256.clone(),
+                        storage_path: path.clone(),
+                    })
+                    .is_ok()
+            })
+        };
+        // Используемый кандидат обязан быть сохранён.
+        let candidate_ok = result.output.as_ref().is_none_or(|o| {
+            blob_ok(o)
+                && (result.next_action != RecognitionAction::UseFinalCandidate
+                    || o.storage_path.is_some())
+        });
+        let full_ok = result.full_record.as_ref().is_none_or(|full| {
+            full.output.as_ref().is_none_or(blob_ok) && full_record_stored(full)
+        });
+        if !candidate_ok || !full_ok {
             return Ok(None);
         }
+        result.target = item.target.clone();
         Ok(Some(result))
+    }
+
+    /// Сохраняет MP3 в хранилище кэша. Повреждённый прежний blob того же SHA
+    /// (другие байты или раздутый обычный файл) заменяется: ключ
+    /// детерминирован, а исключительная блокировка кэша не допускает
+    /// параллельного писателя. Прочие нарушения границы остаются ошибкой.
+    fn persist_audio(&self, bytes: &[u8], expected_sha: &str) -> Result<String, AssetError> {
+        let existing = RuntimeBlobRef {
+            sha256: sha256_hex(bytes),
+            storage_path: format!("candidates/{}.mp3", sha256_hex(bytes)),
+        };
+        let blob = match self
+            .runtime
+            .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)
+        {
+            Err(error)
+                if error.code == ErrorCode::IntegrityMismatch
+                    || (error.code == ErrorCode::BoundaryViolation
+                        && self
+                            .runtime
+                            .blob_is_oversized_regular_file(&existing, MAX_AUDIO_BYTES)?) =>
+            {
+                self.runtime.remove_blob(&existing)?;
+                self.runtime
+                    .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)?
+            }
+            other => other?,
+        };
+        if blob.sha256 != expected_sha {
+            return Err(AssetError::new(
+                ErrorCode::IntegrityMismatch,
+                "SHA сохраняемого MP3 не совпал с результатом",
+            ));
+        }
+        Ok(blob.storage_path)
     }
 
     fn put(&self, mut recognized: Recognized) -> Result<RecognitionResult, AssetError> {
@@ -630,16 +695,7 @@ impl ResultCache {
             recognized.output_bytes.as_deref(),
             recognized.result.output.as_mut(),
         ) {
-            let blob = self
-                .runtime
-                .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)?;
-            if blob.sha256 != output.sha256 {
-                return Err(AssetError::new(
-                    ErrorCode::IntegrityMismatch,
-                    "SHA кандидата не совпал",
-                ));
-            }
-            output.storage_path = Some(blob.storage_path);
+            output.storage_path = Some(self.persist_audio(bytes, &output.sha256)?);
         }
         if let (Some(bytes), Some(full)) = (
             recognized.full_record_bytes.as_deref(),
@@ -649,12 +705,15 @@ impl ResultCache {
                 .as_mut()
                 .and_then(|f| f.output.as_mut()),
         ) {
-            let blob = self
-                .runtime
-                .persist_blob_with_limit(bytes, "mp3", MAX_AUDIO_BYTES)?;
-            if blob.sha256 == full.sha256 {
-                full.storage_path = Some(blob.storage_path);
-            }
+            full.storage_path = Some(self.persist_audio(bytes, &full.sha256)?);
+        }
+        if let Some(full) = &recognized.result.full_record
+            && !full_record_stored(full)
+        {
+            return Err(AssetError::new(
+                ErrorCode::IntegrityMismatch,
+                "полная запись выбирает вариант Balanced, но его байты не переданы на сохранение",
+            ));
         }
         let item_key = format!(
             "{}-{}",
@@ -687,10 +746,14 @@ impl ResultCache {
         let Ok(meta) = serde_json::from_slice::<EmissionMeta>(&meta) else {
             return Ok(None);
         };
+        // Метаданные могли быть повреждены или подложены: размеры сверяются
+        // со словарём модели и с длиной данных без переполнения до любого
+        // выделения памяти, затем — SHA-256; несогласованная запись — промах.
         if meta.model_fingerprint != model.identity.fingerprint()
             || meta.input_sha256 != input_sha
+            || meta.vocab != model.identity.vocab.len()
+            || Emissions::byte_length(meta.frames, meta.vocab) != Some(bytes.len())
             || sha256_hex(&bytes) != meta.sha256
-            || bytes.len() != meta.frames * meta.vocab * 4
         {
             return Ok(None);
         }
@@ -959,7 +1022,9 @@ pub fn resume(
         for (item, bytes) in &inputs {
             unique.insert(item.sha256.as_str(), bytes.as_slice());
         }
-        let decoded: Vec<Vec<f32>> = std::thread::scope(|scope| {
+        // Отказ декодирования здесь не решает судьбу пары (этап 1 повторит
+        // его и сделает исходом), а паника потока — явная ошибка исполнения.
+        let decoded: Result<Vec<Vec<f32>>, AssetError> = std::thread::scope(|scope| {
             let handles: Vec<_> = unique
                 .values()
                 .map(|bytes| {
@@ -969,11 +1034,26 @@ pub fn resume(
                     })
                 })
                 .collect();
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().ok().flatten())
-                .collect()
+            let mut decoded = Vec::new();
+            let mut panicked = None;
+            for handle in handles {
+                match handle.join() {
+                    Ok(analysis) => decoded.extend(analysis),
+                    Err(payload) => {
+                        panicked
+                            .get_or_insert(pipeline::worker_panic("декодирование входов", payload));
+                    }
+                }
+            }
+            panicked.map_or(Ok(decoded), Err)
         });
+        let decoded = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        };
         let refs: Vec<&[f32]> = decoded.iter().map(Vec::as_slice).collect();
         let prefetch = source
             .emissions(ctx.primary, &refs)
@@ -998,36 +1078,9 @@ pub fn resume(
             break;
         }
         // Фаза B: этап 1 параллельно.
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let stage_one: Vec<(usize, Result<pipeline::StageOne, AssetError>)> =
-            std::thread::scope(|scope| {
-                let workers: Vec<_> = (0..jobs.min(inputs.len()).max(1))
-                    .map(|_| {
-                        scope.spawn(|| {
-                            let mut local = Vec::new();
-                            loop {
-                                if stop.load(Ordering::SeqCst) {
-                                    break;
-                                }
-                                let i = next.fetch_add(1, Ordering::SeqCst);
-                                let Some((item, bytes)) = inputs.get(i) else {
-                                    break;
-                                };
-                                local.push((
-                                    i,
-                                    pipeline::stage_one(bytes, item.target.as_ref(), &ctx),
-                                ));
-                            }
-                            local
-                        })
-                    })
-                    .collect();
-                let mut all: Vec<_> = workers
-                    .into_iter()
-                    .flat_map(|w| w.join().unwrap_or_default())
-                    .collect();
-                all.sort_by_key(|(i, _)| *i);
-                all
+        let (stage_one, panicked) =
+            pipeline::run_parallel("этап 1", &inputs, jobs, stop, |(item, bytes)| {
+                pipeline::stage_one(bytes, item.target.as_ref(), &ctx)
             });
         // Фаза C: эмиссии итоговых кандидатов одним вызовом на модель.
         let finals: Vec<Vec<f32>> = stage_one
@@ -1059,7 +1112,8 @@ pub fn resume(
         }
         for (i, stage) in stage_one {
             let item = &inputs[i].0;
-            let outcome = stage.and_then(|s| pipeline::stage_two(s, &ctx));
+            let outcome = stage
+                .and_then(|s| pipeline::catch_panic("этап 2", || pipeline::stage_two(s, &ctx)));
             match outcome {
                 Ok(recognized) => match cache.put(recognized) {
                     Ok(result) => {
@@ -1091,6 +1145,12 @@ pub fn resume(
                     break 'chunks;
                 }
             }
+        }
+        // Поток этапа 1 упал вне элемента: его входы не обработаны, готовые
+        // пары группы уже сохранены выше, исполнение останавливается.
+        if let Some(error) = panicked {
+            failure = Some(error);
+            break;
         }
         if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
             last_checkpoint = Instant::now();
@@ -1315,6 +1375,307 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Кэш результатов и эмиссий
+    // -----------------------------------------------------------------------
+
+    use crate::pronunciation::normalizer::{InputRef, ProfileRef};
+    use crate::pronunciation::recognizer::{self, Level, RecognitionOutcome, Uncertainty};
+    use crate::pronunciation::recognizer_backend::{ModelIdentity, classes_for};
+    use crate::temp_workspace::TempWorkspace;
+
+    const CONFIG: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn pair(key: &str) -> TargetIdentity {
+        TargetIdentity {
+            surface: "生".into(),
+            reading: "なま".into(),
+            source: TargetSource {
+                kind: TargetSourceKind::Manifest,
+                key: key.into(),
+            },
+            competing_readings: vec!["せい".into()],
+        }
+    }
+
+    /// Минимальный согласованный результат пары с полной записью, которая
+    /// выбирает `variant`; байты варианта — `full`.
+    fn recognized(target: TargetIdentity, variant: Variant, full: &[u8]) -> Recognized {
+        let output = OutputRef {
+            sha256: sha256_hex(full),
+            byte_length: full.len() as u64,
+            probe: None,
+            storage_path: None,
+        };
+        let result = RecognitionResult {
+            schema_version: recognizer::RESULT_SCHEMA_VERSION,
+            algorithm_version: recognizer::ALGORITHM_VERSION.into(),
+            config_sha256: CONFIG.into(),
+            profile: ProfileRef {
+                id: "test".into(),
+                version: 1,
+            },
+            models: Vec::new(),
+            input: InputRef {
+                sha256: sha('a'),
+                byte_length: 1,
+                probe: None,
+                error: None,
+            },
+            target_key: Some(target.matching_key()),
+            target: Some(target),
+            pre_analysis: None,
+            matching: None,
+            selected_occurrence: None,
+            extraction: None,
+            fallback: None,
+            full_record: Some(pipeline::FullRecord {
+                balanced_config_sha256: CONFIG.into(),
+                balanced_outcome: "test".into(),
+                proposed_variant: Some(variant),
+                selected_sha256: Some(match variant {
+                    Variant::Processed => output.sha256.clone(),
+                    Variant::Original => sha('a'),
+                }),
+                output: Some(output),
+            }),
+            processing: None,
+            post_validation: None,
+            output: None,
+            outcome: RecognitionOutcome::TargetAbsent,
+            next_action: recognizer::action_for(RecognitionOutcome::TargetAbsent, false),
+            reasons: Vec::new(),
+            uncertainty: Uncertainty {
+                reading_match: Level::Failed,
+                segmentation: Level::Uncertain,
+                signal: Level::Uncertain,
+                pitch_accent: Level::NotAssessed,
+                lexical_identity: Level::NotAssessed,
+                provenance: Level::Confirmed,
+                confidence: "uncalibrated".into(),
+            },
+        };
+        Recognized {
+            result,
+            output_bytes: None,
+            full_record_bytes: Some(full.to_vec()),
+        }
+    }
+
+    fn item(target: TargetIdentity) -> WorkItem {
+        WorkItem {
+            sha256: sha('a'),
+            path: "a.mp3".into(),
+            target: Some(target),
+        }
+    }
+
+    /// Файл blob по SHA внутри рабочего каталога кэша.
+    fn blob_file(root: &Path, sha: &str) -> PathBuf {
+        let name = format!("{sha}.mp3");
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.file_name().is_some_and(|n| n == name.as_str()) {
+                    return path;
+                }
+            }
+        }
+        panic!("blob {sha} не найден");
+    }
+
+    #[test]
+    fn full_record_variant_must_be_stored_and_intact_to_be_reused() {
+        let ws = TempWorkspace::create("recognizer-cache-full-record").unwrap();
+        let cache = ResultCache::open(ws.path()).unwrap();
+        let full = b"full balanced variant".as_slice();
+        let stored = cache
+            .put(recognized(pair("k"), Variant::Processed, full))
+            .unwrap();
+        let output = stored
+            .full_record
+            .as_ref()
+            .unwrap()
+            .output
+            .as_ref()
+            .unwrap();
+        assert!(output.storage_path.is_some(), "вариант сохранён");
+        assert!(cache.get(CONFIG, &item(pair("k"))).unwrap().is_some());
+
+        // Утраченный blob полной записи — не попадание, а пересчёт.
+        let file = blob_file(ws.path(), &sha256_hex(full));
+        std::fs::remove_file(&file).unwrap();
+        assert!(cache.get(CONFIG, &item(pair("k"))).unwrap().is_none());
+        cache
+            .put(recognized(pair("k"), Variant::Processed, full))
+            .unwrap();
+        assert!(cache.get(CONFIG, &item(pair("k"))).unwrap().is_some());
+
+        // Подменённый blob: тоже пересчёт, и повторное сохранение его чинит.
+        std::fs::write(&file, b"substituted bytes").unwrap();
+        assert!(cache.get(CONFIG, &item(pair("k"))).unwrap().is_none());
+        cache
+            .put(recognized(pair("k"), Variant::Processed, full))
+            .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), full);
+        assert!(cache.get(CONFIG, &item(pair("k"))).unwrap().is_some());
+    }
+
+    #[test]
+    fn full_record_never_falsely_claims_a_stored_variant() {
+        let ws = TempWorkspace::create("recognizer-cache-full-claim").unwrap();
+        let cache = ResultCache::open(ws.path()).unwrap();
+        // Байты не совпали с объявленным SHA — явная ошибка целостности.
+        let mut wrong = recognized(pair("k"), Variant::Processed, b"declared");
+        wrong.full_record_bytes = Some(b"other bytes".to_vec());
+        let err = cache.put(wrong).unwrap_err();
+        assert_eq!(err.code, ErrorCode::IntegrityMismatch);
+        // Вариант выбран, а байтов нет — тоже ошибка, не запись без файла.
+        let mut missing = recognized(pair("k"), Variant::Processed, b"declared");
+        missing.full_record_bytes = None;
+        assert_eq!(
+            cache.put(missing).unwrap_err().code,
+            ErrorCode::IntegrityMismatch
+        );
+        assert!(cache.get(CONFIG, &item(pair("k"))).unwrap().is_none());
+
+        // Выбран исходник: он остаётся во входе, отдельный blob не нужен.
+        let mut original = recognized(pair("k"), Variant::Original, b"diagnostic variant");
+        original.full_record_bytes = None;
+        cache.put(original).unwrap();
+        assert!(cache.get(CONFIG, &item(pair("k"))).unwrap().is_some());
+    }
+
+    #[test]
+    fn cached_decision_reports_the_current_target_provenance() {
+        let ws = TempWorkspace::create("recognizer-cache-provenance").unwrap();
+        let cache = ResultCache::open(ws.path()).unwrap();
+        let first = pair(&format!("manifest:{}:nama", sha('1')));
+        let second = pair(&format!("manifest:{}:other-entry", sha('2')));
+        assert_eq!(item(first.clone()).key(), item(second.clone()).key());
+        cache
+            .put(recognized(first.clone(), Variant::Processed, b"variant"))
+            .unwrap();
+        // Второй манифест с той же парой переиспользует акустическое
+        // решение, но видит только собственное происхождение цели.
+        let reused = cache.get(CONFIG, &item(second.clone())).unwrap().unwrap();
+        assert_eq!(reused.target.as_ref(), Some(&second));
+        let own = cache.get(CONFIG, &item(first.clone())).unwrap().unwrap();
+        assert_eq!(own.target.as_ref(), Some(&first));
+        // Тот же путь через пары пакета: два манифеста, один SHA и одна пара.
+        let mut m = manifest();
+        m.entries.truncate(1);
+        let mut other = m.clone();
+        other.provenance = "other".into();
+        other.entries[0].id = "other-entry".into();
+        let (a, _) = work_items(&inventory(), Some(&m), Some(&sha('1')));
+        let (b, _) = work_items(&inventory(), Some(&other), Some(&sha('2')));
+        let pick = |items: &[WorkItem]| {
+            items
+                .iter()
+                .find(|i| i.target.as_ref().is_some_and(|t| t.reading == "なま"))
+                .cloned()
+                .unwrap()
+        };
+        let (a, b) = (pick(&a), pick(&b));
+        assert_eq!(a.key(), b.key());
+        let shown = cache.get(CONFIG, &b).unwrap().unwrap();
+        assert_eq!(shown.target, b.target);
+        assert_ne!(shown.target, a.target);
+    }
+
+    fn model_handle(vocab: usize) -> ModelHandle {
+        let identity = ModelIdentity {
+            model_id: "synthetic".into(),
+            output: "phoneme".into(),
+            repository: String::new(),
+            revision: String::new(),
+            license: String::new(),
+            manifest_sha256: String::new(),
+            worker_sha256: String::new(),
+            worker_byte_length: 0,
+            worker_version: String::new(),
+            inference: String::new(),
+            device: "cpu".into(),
+            threads: 1,
+            sample_rate: 16_000,
+            frame_stride: 320,
+            receptive_field: 400,
+            lead_pad_samples: 0,
+            trail_pad_samples: 0,
+            blank_id: 0,
+            vocab: (0..vocab).map(|i| format!("t{i}")).collect(),
+        };
+        ModelHandle {
+            classes: classes_for(&identity),
+            identity,
+            model_dir: PathBuf::from("synthetic"),
+            worker: PathBuf::from("synthetic"),
+            address_space: 0,
+        }
+    }
+
+    #[test]
+    fn corrupt_emission_metadata_and_payload_are_misses_without_panic() {
+        let ws = TempWorkspace::create("recognizer-cache-emissions").unwrap();
+        let cache = ResultCache::open(ws.path()).unwrap();
+        let model = model_handle(3);
+        let input = sha('e');
+        let valid = Emissions::new(2, 3, vec![-0.5; 6]).unwrap();
+        cache.emissions_put(&model, &input, &valid).unwrap();
+        assert_eq!(
+            cache.emissions_get(&model, &input).unwrap(),
+            Some(valid.clone())
+        );
+
+        let dir = cache.runtime.artifact_directory("emissions").unwrap();
+        let name = emission_name(&model, &input);
+        let payload: Vec<u8> = valid
+            .log_probs
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let write = |frames: usize, vocab: usize, bytes: &[u8]| {
+            let meta = EmissionMeta {
+                model_fingerprint: model.identity.fingerprint(),
+                input_sha256: input.clone(),
+                frames,
+                vocab,
+                sha256: sha256_hex(bytes),
+            };
+            dir.write(&name, bytes).unwrap();
+            dir.write(&format!("{name}.json"), &serde_json::to_vec(&meta).unwrap())
+                .unwrap();
+        };
+        // Экстремальные размеры: произведение не представимо.
+        for frames in [usize::MAX, usize::MAX / 3 + 1, usize::MAX / 12 + 1] {
+            write(frames, 3, &payload);
+            assert_eq!(
+                cache.emissions_get(&model, &input).unwrap(),
+                None,
+                "{frames}"
+            );
+        }
+        // Словарь не той модели и несовместимая длина.
+        write(3, 2, &payload);
+        assert_eq!(cache.emissions_get(&model, &input).unwrap(), None);
+        write(3, 3, &payload);
+        assert_eq!(cache.emissions_get(&model, &input).unwrap(), None);
+        // Испорченные данные при прежних метаданных.
+        write(2, 3, &payload);
+        let mut spoiled = payload.clone();
+        spoiled[0] ^= 0xff;
+        dir.write(&name, &spoiled).unwrap();
+        assert_eq!(cache.emissions_get(&model, &input).unwrap(), None);
+        // Согласованный SHA, но неконечные значения.
+        let nan: Vec<u8> = [f32::NAN; 6].iter().flat_map(|v| v.to_le_bytes()).collect();
+        write(2, 3, &nan);
+        assert_eq!(cache.emissions_get(&model, &input).unwrap(), None);
     }
 
     #[test]
