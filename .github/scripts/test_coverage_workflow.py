@@ -73,7 +73,7 @@ class CoverageWorkflowTest(unittest.TestCase):
               listWorkflowRuns: async args => {
                 assert.deepEqual(args, {owner: 'owner', repo: 'repo', workflow_id: 'ci.yml',
                   head_sha: 'tested-sha', event: (scenario.event === 'workflow_dispatch' ? 'push' : scenario.event || 'pull_request'), per_page: 100});
-                if (scenario.apiError) throw new Error('API unavailable');
+                if (scenario.apiError) throw new Error('API недоступен');
                 const state = scenario.poll[Math.min(polls++, scenario.poll.length - 1)];
                 return {data: {workflow_runs: state.map(run => ({...base, ...run}))}};
               },
