@@ -326,7 +326,7 @@ pub(crate) fn export(
         |name| runtime.artifact_directory(name),
         &snapshot,
         &FORMAT,
-        |row| {
+        |row, _| {
             let item = batch
                 .items
                 .iter()

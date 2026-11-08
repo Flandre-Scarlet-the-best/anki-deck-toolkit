@@ -35,6 +35,12 @@ pub(crate) trait ReviewRow: Serialize + DeserializeOwned {
     fn identity(&self) -> &AssetIdentity;
     /// Имя копии изображения в каталоге снимка и точный SHA её байтов.
     fn image(&self) -> Option<(&str, &str)>;
+    /// Все точные копии строки (имя и SHA). По умолчанию — единственная копия
+    /// [`Self::image`]; аудиоадаптер прикладывает несколько файлов на строку
+    /// (оригинал, полная обработанная запись, извлечённые фрагменты).
+    fn files(&self) -> Vec<(&str, &str)> {
+        self.image().into_iter().collect()
+    }
     /// Неизменяемые колонки строки после колонки решения.
     fn columns(&self) -> String;
     /// Предметная проверка целостности строки при чтении (например, что
@@ -110,12 +116,12 @@ fn decisions_template<R: ReviewRow>(
 
 /// Создаёт или повторно открывает снимок. Каталог открывает владелец runtime
 /// пакета под своей блокировкой; `read_image` возвращает проверенные байты
-/// кандидата строки из сохранённого состояния.
+/// названной копии строки из сохранённого состояния.
 pub(crate) fn export<R: ReviewRow>(
     open_directory: impl FnOnce(&str) -> Result<ArtifactDirectory, AssetError>,
     snapshot: &ReviewSnapshot<R>,
     format: &ReviewFormat,
-    mut read_image: impl FnMut(&R) -> Result<Vec<u8>, AssetError>,
+    mut read_image: impl FnMut(&R, &str) -> Result<Vec<u8>, AssetError>,
 ) -> Result<(ReviewBundle, ArtifactDirectory), AssetError> {
     if snapshot.schema_version != format.schema {
         return Err(invalid("схема снимка review не совпадает с форматом"));
@@ -127,23 +133,22 @@ pub(crate) fn export<R: ReviewRow>(
     match directory.read("snapshot.json") {
         Ok(existing) if existing == encoded => {
             for row in &snapshot.rows {
-                let Some((filename, sha256)) = row.image() else {
-                    continue;
-                };
-                match directory.read(filename) {
-                    Ok(bytes) if sha256_hex(&bytes) == sha256 => {}
-                    Ok(_) => return Err(invalid("копия изображения review изменена")),
-                    Err(error) if error.code == ErrorCode::MissingAssetFile => {
-                        let bytes = read_image(row)?;
-                        if sha256_hex(&bytes) != sha256 {
-                            return Err(invalid("исходный кандидат review изменён"));
+                for (filename, sha256) in row.files() {
+                    match directory.read(filename) {
+                        Ok(bytes) if sha256_hex(&bytes) == sha256 => {}
+                        Ok(_) => return Err(invalid("копия изображения review изменена")),
+                        Err(error) if error.code == ErrorCode::MissingAssetFile => {
+                            let bytes = read_image(row, filename)?;
+                            if sha256_hex(&bytes) != sha256 {
+                                return Err(invalid("исходный кандидат review изменён"));
+                            }
+                            directory.write_if_absent(filename, &bytes)?;
+                            if sha256_hex(&directory.read(filename)?) != sha256 {
+                                return Err(invalid("копия изображения review изменена"));
+                            }
                         }
-                        directory.write_if_absent(filename, &bytes)?;
-                        if sha256_hex(&directory.read(filename)?) != sha256 {
-                            return Err(invalid("копия изображения review изменена"));
-                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
                 }
             }
             match directory.read("decisions.tsv") {
@@ -161,14 +166,13 @@ pub(crate) fn export<R: ReviewRow>(
         Ok(_) => return Err(invalid("содержимое снимка review не совпадает с его SHA")),
         Err(error) if error.code == ErrorCode::MissingAssetFile => {
             for row in &snapshot.rows {
-                let Some((filename, sha256)) = row.image() else {
-                    continue;
-                };
-                let bytes = read_image(row)?;
-                if sha256_hex(&bytes) != sha256 {
-                    return Err(invalid("исходный кандидат review изменён"));
+                for (filename, sha256) in row.files() {
+                    let bytes = read_image(row, filename)?;
+                    if sha256_hex(&bytes) != sha256 {
+                        return Err(invalid("исходный кандидат review изменён"));
+                    }
+                    directory.write(filename, &bytes)?;
                 }
-                directory.write(filename, &bytes)?;
             }
             directory.write(
                 "decisions.tsv",
@@ -207,10 +211,10 @@ pub(crate) fn read<R: ReviewRow>(
     }
     for row in &snapshot.rows {
         row.validate()?;
-        if let Some((filename, sha256)) = row.image()
-            && sha256_hex(&directory.read(filename)?) != sha256
-        {
-            return Err(invalid("SHA копии изображения review не совпадает"));
+        for (filename, sha256) in row.files() {
+            if sha256_hex(&directory.read(filename)?) != sha256 {
+                return Err(invalid("SHA копии изображения review не совпадает"));
+            }
         }
     }
     let bytes = directory.read("decisions.tsv")?;

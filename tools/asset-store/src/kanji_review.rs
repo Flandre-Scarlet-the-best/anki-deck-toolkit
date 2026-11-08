@@ -192,7 +192,7 @@ pub(crate) fn prepare(
         |name| runtime.artifact_directory(name),
         &snapshot,
         &FORMAT,
-        |row| runtime.read_candidate(candidate(state, row)?),
+        |row, _| runtime.read_candidate(candidate(state, row)?),
     )?;
     write_preview(&directory, &snapshot)?;
     Ok(bundle)
