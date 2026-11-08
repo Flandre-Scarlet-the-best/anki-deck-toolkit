@@ -53,7 +53,13 @@ LOCK_NAME = ".fetch.lock"
 PART_SUFFIX = ".part"
 # Адрес приходит из аргумента командной строки, поэтому допустимый получатель
 # закреплён здесь: только эти https-хосты публикуют проверяемые архивы CI.
-TRUSTED_HOSTS = frozenset({"github.com", "api.github.com", "files.pythonhosted.org"})
+# Итоговый адрес собирается из этой константы, а не из строки аргумента.
+TRUSTED_ORIGINS = {
+    "github.com": "https://github.com",
+    "api.github.com": "https://api.github.com",
+    "files.pythonhosted.org": "https://files.pythonhosted.org",
+}
+TRUSTED_HOSTS = frozenset(TRUSTED_ORIGINS)
 TRUSTED_SCHEME = "https"
 # None в наборе означает порт по умолчанию для схемы.
 TRUSTED_PORTS: tuple[int | None, ...] | None = (None, 443)
@@ -123,34 +129,38 @@ def response_total(response, offset: int) -> int | None:
 
 
 def checked_url(url: str) -> str:
-    """Отказ адресу вне закреплённого https-списка до любого сетевого вызова.
+    """Собрать адрес запроса из закреплённой константы хоста, а не из аргумента.
 
-    Проверка стоит на самом пути к запросу, поэтому ни аргумент командной строки,
-    ни метаданные выпуска не могут адресовать другой хост, схему, порт или
-    встроенные учётные данные. Итоговая проверка файла этим не заменяется.
+    Схема и получатель берутся исключительно из ``TRUSTED_ORIGINS``; из входной
+    строки переносится только проверенный путь и запрос. Поэтому ни аргумент
+    командной строки, ни метаданные выпуска не могут адресовать другой хост,
+    схему, порт или встроенные учётные данные. Итоговая проверка файла этим
+    не заменяется.
     """
     try:
         parts = urllib.parse.urlsplit(url)
         port = parts.port
     except ValueError as error:
         raise TransferError("адрес нельзя разобрать") from error
-    if (parts.scheme != TRUSTED_SCHEME or parts.hostname not in TRUSTED_HOSTS
-            or parts.username is not None or parts.password is not None
+    origin = TRUSTED_ORIGINS.get(parts.hostname) if parts.scheme == TRUSTED_SCHEME else None
+    if (origin is None or parts.username is not None or parts.password is not None
             or (TRUSTED_PORTS is not None and port not in TRUSTED_PORTS)):
         raise TransferError(f"адрес вне закреплённого списка https-хостов: {url!r}")
-    return url
+    segments = parts.path.split("/")
+    if not parts.path.startswith("/") or any(segment in (".", "..") for segment in segments):
+        raise TransferError(f"путь адреса недопустим: {parts.path!r}")
+    return f"{origin}{parts.path}" + (f"?{parts.query}" if parts.query else "")
 
 
 def transfer(url: str, partial: Path, size: int | None) -> None:
     """Одна передача: докачивает ``partial`` и проверяет число полученных байт."""
-    url = checked_url(url)
+    request = urllib.request.Request(checked_url(url), headers={"Accept": "application/octet-stream"})
     offset = partial.stat().st_size if partial.exists() else 0
     if size is not None and offset > size:
         partial.unlink()
         offset = 0
     if size is not None and offset == size:
         return
-    request = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
     if offset:
         request.add_header("Range", f"bytes={offset}-")
     try:
