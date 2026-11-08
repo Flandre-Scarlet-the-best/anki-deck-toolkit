@@ -1772,6 +1772,11 @@ program = {{ kind = "executable", name = "benchmark-workload" }}
 args = [{args}]
 touches = "read-only"
 timeout_seconds = 10
+
+# Проба — тот же инструментированный бинарник: без пути профиля она сама
+# изменила бы дерево, и проверка подготовки прошла бы без правки пробы.
+[scenario.input.probe.env]
+inherit = ["LLVM_PROFILE_FILE"]
 "#
             )
         })
@@ -1828,6 +1833,9 @@ program = { kind = "executable", name = "benchmark-workload" }
 args = ["--append", "tracked.txt", "drift"]
 touches = "scenario-temp"
 timeout_seconds = 10
+
+[scenario.profile.conclude.env]
+inherit = ["LLVM_PROFILE_FILE"]
 "#,
         ),
         tree_scenario(

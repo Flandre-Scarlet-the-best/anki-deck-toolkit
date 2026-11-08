@@ -493,9 +493,11 @@ rustfmt и actionlint и на имя упавшего теста. Вывод т�
 
 Закрепления внешних инструментов Renovate не отслеживает: в `ci.yml` —
 `ACTIONLINT_VERSION`, `CARGO_DENY_VERSION`, `SCCACHE_VERSION`, в `sonarqube.yml` —
-`LLVM_COV_VERSION`, `CODECOV_VERSION`, `HYPERFINE_VERSION`, `FFMPEG_ARCHIVE` и имя
-wheel `coverage.py`. Версию или имя файла, SHA-256 и закреплённый размер обновляют
-вместе вручную по официальному источнику; размер остаётся в `env` шага загрузки,
+`LLVM_COV_VERSION`, `CODECOV_VERSION`, `HYPERFINE_VERSION`, `FFMPEG_RELEASE`,
+`FFMPEG_ARCHIVE` (его SHA-256 повторяется в ключе `actions/cache` архива) и имя
+wheel `coverage.py` (с хеш-каталогом в адресе `files.pythonhosted.org`). Версию,
+тег или имя файла, SHA-256 со всеми его копиями, адрес и закреплённый размер
+обновляют вместе вручную по официальному источнику; размер остаётся в `env` шага загрузки,
 потому что по нему считается бюджет времени, а копии sccache в обоих заданиях
 обязаны совпадать. При HTTP 5xx адреса GitHub
 `releases/download` загрузчик может получить тот же публичный архив через

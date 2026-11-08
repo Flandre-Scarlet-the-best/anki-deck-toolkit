@@ -141,6 +141,18 @@ class CoverageWorkflowTest(unittest.TestCase):
                 if expected:
                     self.assertEqual(result["jobsCalls"], 1)
 
+    def test_gate_finds_tests_job_by_its_actual_name_in_ci(self):
+        path = Path(__file__).resolve().parents[1] / "workflows/ci.yml"
+        name = Workflow(path.read_text(encoding="utf-8")).jobs["code"]["keys"]["name"]
+        script = gate_script()
+        # Барьер ищет задание по отображаемому имени: оно обязано совпадать с ci.yml.
+        self.assertIn(f"job.name === {json.dumps(name, ensure_ascii=False)}", script.replace("'", '"'))
+        ok = {"poll": [[{}]], "jobs": [{"name": name, "status": "completed", "conclusion": "success"}]}
+        self.assertTrue(self.run_gate(ok)["ok"])
+        renamed = {"poll": [[{}]], "jobs": [{"name": name + " (старое)", "status": "completed",
+                                               "conclusion": "success"}]}
+        self.assertFalse(self.run_gate(renamed)["ok"])
+
     def test_pending_then_success_and_latest_failed_run(self):
         result = self.run_gate({"poll": [[{"status": "in_progress", "conclusion": None}], [{}]]})
         self.assertTrue(result["ok"])

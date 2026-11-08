@@ -316,11 +316,27 @@ class GitHubFallbackTests(FetchTestCase):
         failure = urllib.error.HTTPError(self.url, 504, "Тайм-аут шлюза", {}, None)
         self.addCleanup(failure.close)
         with mock.patch.object(fetch_verified_tool, "transfer", side_effect=failure) as transfer, mock.patch.object(
-                fetch_verified_tool, "github_asset_url", side_effect=fetch_verified_tool.TransferError("нет архива")):
+                fetch_verified_tool, "github_asset_url",
+                side_effect=fetch_verified_tool.TransferError("нет архива")) as resolve:
             with self.assertRaises(SystemExit):
                 self.fetch(self.url, attempts=3)
             self.assertEqual(transfer.call_count, 3)
+            # Резервный путь через API пробуется один раз за загрузку, а не на каждой попытке.
+            resolve.assert_called_once_with(self.url)
             self.assertTrue(all(call.args[0] == self.url for call in transfer.call_args_list))
+        self.assertEqual(self.entries(), [])
+
+    def test_non_gateway_http_error_does_not_use_api(self):
+        for code in (403, 404, 501):
+            failure = urllib.error.HTTPError(self.url, code, "Отказ", {}, None)
+            self.addCleanup(failure.close)
+            with self.subTest(code=code), mock.patch.object(
+                    fetch_verified_tool, "transfer", side_effect=failure) as transfer, mock.patch.object(
+                    fetch_verified_tool, "github_asset_url") as resolve:
+                with self.assertRaises(SystemExit):
+                    self.fetch(self.url, attempts=2)
+                resolve.assert_not_called()
+                self.assertTrue(all(call.args[0] == self.url for call in transfer.call_args_list))
         self.assertEqual(self.entries(), [])
 
 
