@@ -1772,6 +1772,11 @@ program = {{ kind = "executable", name = "benchmark-workload" }}
 args = [{args}]
 touches = "read-only"
 timeout_seconds = 10
+
+# Проба — тот же инструментированный бинарник: без пути профиля она сама
+# изменила бы дерево, и проверка подготовки прошла бы без правки пробы.
+[scenario.input.probe.env]
+inherit = ["LLVM_PROFILE_FILE"]
 "#
             )
         })
@@ -1792,6 +1797,11 @@ platforms = ["linux"]
 program = {{ kind = "executable", name = "benchmark-workload" }}
 args = ["--busy-ms", "1"]
 expect_exit_codes = [0]
+
+# Инструментированная синтетическая цель пишет профиль вне проверяемого Git-дерева.
+# Без этой переменной LLVM создаёт default_*.profraw внутри дерева и меняет снимок.
+[scenario.target.env]
+inherit = ["LLVM_PROFILE_FILE"]
 
 [[scenario.input]]
 id = "tree"
@@ -1823,6 +1833,9 @@ program = { kind = "executable", name = "benchmark-workload" }
 args = ["--append", "tracked.txt", "drift"]
 touches = "scenario-temp"
 timeout_seconds = 10
+
+[scenario.profile.conclude.env]
+inherit = ["LLVM_PROFILE_FILE"]
 "#,
         ),
         tree_scenario(
