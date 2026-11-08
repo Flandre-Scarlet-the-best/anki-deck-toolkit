@@ -51,6 +51,12 @@ TIMEOUT_SECONDS = 60
 CHUNK = 1 << 20
 LOCK_NAME = ".fetch.lock"
 PART_SUFFIX = ".part"
+# Адрес приходит из аргумента командной строки, поэтому допустимый получатель
+# закреплён здесь: только эти https-хосты публикуют проверяемые архивы CI.
+TRUSTED_HOSTS = frozenset({"github.com", "api.github.com", "files.pythonhosted.org"})
+TRUSTED_SCHEME = "https"
+# None в наборе означает порт по умолчанию для схемы.
+TRUSTED_PORTS: tuple[int | None, ...] | None = (None, 443)
 
 
 class TransferError(Exception):
@@ -116,8 +122,28 @@ def response_total(response, offset: int) -> int | None:
     return int(length) if length and length.isdigit() else None
 
 
+def checked_url(url: str) -> str:
+    """Отказ адресу вне закреплённого https-списка до любого сетевого вызова.
+
+    Проверка стоит на самом пути к запросу, поэтому ни аргумент командной строки,
+    ни метаданные выпуска не могут адресовать другой хост, схему, порт или
+    встроенные учётные данные. Итоговая проверка файла этим не заменяется.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError as error:
+        raise TransferError("адрес нельзя разобрать") from error
+    if (parts.scheme != TRUSTED_SCHEME or parts.hostname not in TRUSTED_HOSTS
+            or parts.username is not None or parts.password is not None
+            or (TRUSTED_PORTS is not None and port not in TRUSTED_PORTS)):
+        raise TransferError(f"адрес вне закреплённого списка https-хостов: {url!r}")
+    return url
+
+
 def transfer(url: str, partial: Path, size: int | None) -> None:
     """Одна передача: докачивает ``partial`` и проверяет число полученных байт."""
+    url = checked_url(url)
     offset = partial.stat().st_size if partial.exists() else 0
     if size is not None and offset > size:
         partial.unlink()
@@ -167,9 +193,9 @@ def github_asset_url(url: str) -> str | None:
         return None
     owner, repo, tag, filename = match.groups()
     tag, filename = urllib.parse.unquote(tag), urllib.parse.unquote(filename)
-    api_root = f"https://api.github.com/repos/{owner}/{repo}/releases"
+    api_root = checked_url(f"https://api.github.com/repos/{owner}/{repo}/releases")
     request = urllib.request.Request(
-        f"{api_root}/tags/{urllib.parse.quote(tag, safe='')}",
+        checked_url(f"{api_root}/tags/{urllib.parse.quote(tag, safe='')}"),
         headers={"Accept": "application/vnd.github+json"},
     )
     with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
@@ -187,7 +213,7 @@ def github_asset_url(url: str) -> str | None:
         if (asset["browser_download_url"] != url or asset["state"] != "uploaded"
                 or type(asset["id"]) is not int or asset["id"] <= 0):
             raise TransferError("API не подтвердил идентичность опубликованного архива")
-        return f"{api_root}/assets/{asset['id']}"
+        return checked_url(f"{api_root}/assets/{asset['id']}")
     except (ValueError, TypeError, KeyError) as error:
         raise TransferError("некорректные метаданные выпуска GitHub") from error
 
@@ -195,6 +221,10 @@ def github_asset_url(url: str) -> str | None:
 def fetch(url: str, expected: str, name: str, size: int | None = None, *,
           attempts: int = ATTEMPTS, sleep=time.sleep) -> Path:
     expected = expected.lower()
+    try:
+        url = checked_url(url)
+    except TransferError as error:
+        raise SystemExit(f"fetch_verified_tool: {error}") from error
     directory = storage_dir()
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / name

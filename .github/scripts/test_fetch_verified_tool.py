@@ -98,6 +98,12 @@ class FetchTestCase(unittest.TestCase):
         self.cache = self.root / "tool-cache"
         self.sleeps = []
         for patcher in (mock.patch.dict(os.environ, {"CI_TOOL_CACHE": str(self.cache)}),
+                        # Изолированный сервер теста намеренно добавлен к списку хостов
+                        # и говорит по http: production-значения проверяет TrustedHostTests.
+                        mock.patch.object(fetch_verified_tool, "TRUSTED_HOSTS",
+                                          frozenset({"127.0.0.1"})),
+                        mock.patch.object(fetch_verified_tool, "TRUSTED_SCHEME", "http"),
+                        mock.patch.object(fetch_verified_tool, "TRUSTED_PORTS", None),
                         mock.patch.object(fetch_verified_tool, "log")):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -117,6 +123,11 @@ class FetchTestCase(unittest.TestCase):
 
 
 class RetryTests(FetchTestCase):
+    def test_transfer_requests_binary_content(self):
+        source = self.source([("full",)])
+        self.fetch(source.url)
+        self.assertEqual(source.accepts, ["application/octet-stream"])
+
     def test_truncated_transfer_is_resumed_and_verified(self):
         source = self.source([("truncate", 1000), ("full",)])
         path = self.fetch(source.url)
@@ -213,6 +224,21 @@ class GitHubFallbackTests(FetchTestCase):
     url = "https://github.com/owner/repo/releases/download/v1.2.3/tool.tar.gz"
     api = "https://api.github.com/repos/owner/repo/releases/assets/17"
 
+    def setUp(self):
+        super().setUp()
+        # Адреса этого класса — настоящие хосты GitHub: проверка адреса остаётся
+        # production-значением, поэтому тестовый сервер здесь не используется.
+        patcher = mock.patch.object(fetch_verified_tool, "TRUSTED_HOSTS",
+                                    frozenset({"github.com", "api.github.com"}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        scheme = mock.patch.object(fetch_verified_tool, "TRUSTED_SCHEME", "https")
+        scheme.start()
+        self.addCleanup(scheme.stop)
+        ports = mock.patch.object(fetch_verified_tool, "TRUSTED_PORTS", (None, 443))
+        ports.start()
+        self.addCleanup(ports.stop)
+
     def release(self):
         return {"tag_name": "v1.2.3", "draft": False, "assets": [
             {"id": 17, "name": "tool.tar.gz", "state": "uploaded", "browser_download_url": self.url}]}
@@ -276,11 +302,6 @@ class GitHubFallbackTests(FetchTestCase):
         self.assertEqual(requests, [self.url, self.api])
         return result
 
-    def test_transfer_requests_binary_content(self):
-        source = self.source([("full",)])
-        self.fetch(source.url)
-        self.assertEqual(source.accepts, ["application/octet-stream"])
-
     def test_gateway_failure_uses_same_asset_and_still_verifies_bytes(self):
         self.assertEqual(self.run_fallback().read_bytes(), BODY)
         self.assertEqual(self.sleeps, [2])
@@ -301,6 +322,51 @@ class GitHubFallbackTests(FetchTestCase):
             self.assertEqual(transfer.call_count, 3)
             self.assertTrue(all(call.args[0] == self.url for call in transfer.call_args_list))
         self.assertEqual(self.entries(), [])
+
+
+class TrustedHostTests(unittest.TestCase):
+    """Адрес из аргументов не адресует произвольный получатель.
+
+    Проверяются фактические production-значения, без расширения списка тестов.
+    """
+
+    def test_untrusted_scheme_host_port_and_credentials_are_refused(self):
+        refused = ("http://github.com/tool.tar.gz", "https://attacker.example/tool.tar.gz",
+                   "https://github.com.attacker.example/tool.tar.gz", "https://user@github.com/tool.tar.gz",
+                   "https://user:secret@github.com/tool.tar.gz", "https://github.com:8443/tool.tar.gz",
+                   "file:///etc/passwd", "ftp://github.com/tool.tar.gz", "https://127.0.0.1/tool.tar.gz",
+                   "https://[::1]/tool.tar.gz", "https:///tool.tar.gz", "не адрес",
+                   "https://github.com@attacker.example/tool.tar.gz")
+        for url in refused:
+            with self.subTest(url=url), self.assertRaises(fetch_verified_tool.TransferError):
+                fetch_verified_tool.checked_url(url)
+
+    def test_production_values_are_pinned(self):
+        self.assertEqual(fetch_verified_tool.TRUSTED_SCHEME, "https")
+        self.assertEqual(fetch_verified_tool.TRUSTED_HOSTS,
+                         frozenset({"github.com", "api.github.com", "files.pythonhosted.org"}))
+        self.assertEqual(fetch_verified_tool.TRUSTED_PORTS, (None, 443))
+
+    def test_allowed_https_hosts_and_default_port_pass(self):
+        for url in ("https://github.com/o/r/releases/download/v1/t.tar.gz",
+                    "https://api.github.com/repos/o/r/releases/assets/1",
+                    "https://files.pythonhosted.org/packages/x/y.whl",
+                    "https://github.com:443/o/r/releases/download/v1/t.tar.gz"):
+            with self.subTest(url=url):
+                self.assertEqual(fetch_verified_tool.checked_url(url), url)
+
+    def test_refusal_happens_before_any_transfer_or_metadata_call(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.dict(os.environ, {"CI_TOOL_CACHE": tmp.name}), \
+                mock.patch.object(fetch_verified_tool, "transfer") as transfer, \
+                mock.patch.object(fetch_verified_tool.urllib.request, "urlopen") as open_url:
+            with self.assertRaises(SystemExit):
+                fetch_verified_tool.fetch("https://attacker.example/tool.tar.gz", SHA, "tool.tar.gz",
+                                          attempts=2, sleep=lambda _seconds: None)
+            transfer.assert_not_called()
+            open_url.assert_not_called()
+        self.assertEqual(sorted(os.listdir(tmp.name)), [])
 
 
 class PruneTests(FetchTestCase):
@@ -332,24 +398,43 @@ class PruneTests(FetchTestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    """Контракт командной строки: одна строка stdout с путём, отказ при неверных аргументах."""
+    """Контракт командной строки: одна строка stdout с путём, отказ при неверных аргументах.
+
+    Запускается настоящий main() в отдельном процессе. Драйвер явно переводит
+    закреплённые адреса на изолированный сервер теста: production-значения
+    проверяет TrustedHostTests, сеть тест не использует.
+    """
+
+    DRIVER = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('fvt', {script!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "module.TRUSTED_HOSTS = frozenset({{'127.0.0.1'}})\n"
+        "module.TRUSTED_SCHEME = 'http'\n"
+        "module.TRUSTED_PORTS = None\n"
+        "sys.argv = ['fvt', *sys.argv[1:]]\n"
+        "sys.exit(module.main())\n"
+    )
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
-        self.source = root / "source.tar.gz"
-        self.source.write_bytes(BODY)
+        self.source = ScriptedSource([])
+        self.addCleanup(self.source.close)
         self.runner_temp = root / "runner-temp"
         self.runner_temp.mkdir()
+        self.driver = root / "driver.py"
+        self.driver.write_text(self.DRIVER.format(script=str(SCRIPT)), encoding="utf-8")
 
-    def run_script(self, *extra, name="tool.tar.gz", cache=None):
+    def run_script(self, *extra, name="tool.tar.gz", cache=None, url=None):
         env = {k: v for k, v in os.environ.items() if k not in ("CI_TOOL_CACHE", "RUNNER_TEMP")}
         env["RUNNER_TEMP"] = str(self.runner_temp)
         if cache is not None:
             env["CI_TOOL_CACHE"] = str(cache)
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "--url", self.source.as_uri(), "--sha256", SHA,
+            [sys.executable, str(self.driver), "--url", url or self.source.url, "--sha256", SHA,
              "--name", name, *extra],
             env=env, capture_output=True, text=True, check=False,
         )
@@ -371,6 +456,13 @@ class CommandLineTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(self.run_script(name=name).returncode, 0)
         self.assertFalse((Path(self.tmp.name) / "escape").exists())
+
+    def test_untrusted_address_is_a_real_process_failure(self):
+        before = len(self.source.requests)
+        result = self.run_script(url="https://attacker.example/tool.tar.gz")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("вне закреплённого списка", result.stderr)
+        self.assertEqual(len(self.source.requests), before)
 
 
 if __name__ == "__main__":
