@@ -1271,9 +1271,18 @@ mod tests {
             .open(&path)
             .unwrap();
 
-        assert!(second.try_lock().is_err());
+        // Пока владелец жив, отказ обязан быть немедленным и именно «занято».
+        std::assert_matches!(second.try_lock(), Err(fs::TryLockError::WouldBlock));
         drop(first);
-        assert!(second.try_lock().is_ok());
+        // Замок освобождается с закрытием последнего описания файла, а копию
+        // дескриптора мог унаследовать форкнутый дочерний процесс параллельного
+        // теста: ждём только «занято» и только ограниченное время.
+        crate::test_lock_wait::await_release(
+            crate::test_lock_wait::RELEASE_LIMIT,
+            || second.try_lock(),
+            |error| matches!(error, fs::TryLockError::WouldBlock),
+        )
+        .unwrap_or_else(|error| panic!("замок runner не освобождён после drop: {error}"));
         drop(second);
         fs::remove_dir_all(dir).unwrap();
     }
