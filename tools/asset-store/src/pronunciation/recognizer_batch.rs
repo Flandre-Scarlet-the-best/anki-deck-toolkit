@@ -971,18 +971,15 @@ pub fn resume(
                 .entry(result.next_action.as_str().to_string())
                 .or_insert(0) += 1;
         }
-        let complete_inputs: BTreeSet<&str> = items
-            .iter()
-            .map(|i| i.sha256.as_str())
-            .filter(|sha| {
-                items
-                    .iter()
-                    .filter(|i| i.sha256 == *sha)
-                    .all(|i| done.contains_key(&i.key()))
-            })
-            .collect();
+        // Вход завершён, когда готовы все его пары.
+        let mut input_complete: BTreeMap<&str, bool> = BTreeMap::new();
+        for item in &items {
+            let ready = done.contains_key(&item.key());
+            *input_complete.entry(item.sha256.as_str()).or_insert(true) &= ready;
+        }
+        let complete_inputs = input_complete.values().filter(|ready| **ready).count();
         stored.progress.completed_pairs = done.len() as u64;
-        stored.progress.completed_inputs = complete_inputs.len() as u64;
+        stored.progress.completed_inputs = complete_inputs as u64;
         stored.progress.processed = processed;
         stored.progress.by_outcome = by_outcome;
         stored.progress.by_action = by_action;

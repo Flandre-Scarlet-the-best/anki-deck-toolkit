@@ -251,6 +251,9 @@ fn batch_resumes_retries_infrastructure_failures_and_reuses_cache() {
         serde_json::json!(["missing"])
     );
     assert_eq!(json(&started)["result"]["run"]["outcome"], "paused");
+    // Готова одна из двух пар входа с целями: вход ещё не завершён.
+    assert_eq!(progress["completed_pairs"], 1);
+    assert_eq!(progress["completed_inputs"], 0);
 
     // Сбой воркера: пары остаются незавершёнными, результат не кэшируется.
     fs::write(f.state.join("fail"), b"").unwrap();
@@ -280,6 +283,10 @@ fn batch_resumes_retries_infrastructure_failures_and_reuses_cache() {
     assert_eq!(
         done["result"]["run"]["batch"]["progress"]["completed_pairs"],
         3
+    );
+    assert_eq!(
+        done["result"]["run"]["batch"]["progress"]["completed_inputs"],
+        2
     );
 
     // Повтор: всё из кэша, модели не вызываются.
