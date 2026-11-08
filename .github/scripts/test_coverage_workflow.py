@@ -68,12 +68,15 @@ class CoverageWorkflowTest(unittest.TestCase):
             let polls = 0, jobsCalls = 0;
             const base = {id: 10, html_url: 'url', status: 'completed', conclusion: 'success',
               head_sha: 'tested-sha', event: (scenario.event === 'workflow_dispatch' ? 'push' : scenario.event || 'pull_request'),
-              repository: {full_name: 'owner/repo'},
+              head_branch: 'main', repository: {full_name: 'owner/repo'},
               pull_requests: [{number: 12, head: {sha: 'tested-sha', repo: {id: 123}}}]};
             const github = {rest: {actions: {
               listWorkflowRuns: async args => {
-                assert.deepEqual(args, {owner: 'owner', repo: 'repo', workflow_id: 'ci.yml',
-                  head_sha: 'tested-sha', event: (scenario.event === 'workflow_dispatch' ? 'push' : scenario.event || 'pull_request'), per_page: 100});
+                // Ручной анализ запрашивает запуски без фильтра события и отбирает их сам.
+                const expected = {owner: 'owner', repo: 'repo', workflow_id: 'ci.yml',
+                  head_sha: 'tested-sha', per_page: 100};
+                if (scenario.event !== 'workflow_dispatch') expected.event = scenario.event || 'pull_request';
+                assert.deepEqual(args, expected);
                 if (scenario.apiError) throw new Error('API недоступен');
                 const state = scenario.poll[Math.min(polls++, scenario.poll.length - 1)];
                 return {data: {workflow_runs: state.map(run => ({...base, ...run}))}};
@@ -87,7 +90,7 @@ class CoverageWorkflowTest(unittest.TestCase):
             }};
             const context = {repo: {owner: 'owner', repo: 'repo'},
               eventName: scenario.event || 'pull_request', issue: {number: 12},
-              payload: {repository: {id: 123}}};
+              payload: {repository: {id: 123, default_branch: 'main'}}};
             const core = {info: () => {}};
             const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
             new AsyncFunction('github', 'context', 'core', script)(github, context, core)
@@ -109,6 +112,17 @@ class CoverageWorkflowTest(unittest.TestCase):
             ("успех PR", {"poll": [[{}]]}, True),
             ("успех push", {"poll": [[{}]], "event": "push"}, True),
             ("ручной запуск ждёт push CI", {"poll": [[{}]], "event": "workflow_dispatch"}, True),
+            ("ручной запуск принимает ручной CI", {"poll": [[{"event": "workflow_dispatch"}]],
+                                                   "event": "workflow_dispatch"}, True),
+            ("ручной запуск пропускает push рабочей ветки", {"poll": [[
+                {"head_branch": "feature", "id": 11}, {"event": "workflow_dispatch"}]],
+                "event": "workflow_dispatch"}, True),
+            ("ручной запуск: только push рабочей ветки", {"poll": [[{"head_branch": "feature"}]],
+                                                         "event": "workflow_dispatch"}, False),
+            ("ручной запуск: чужое событие", {"poll": [[{"event": "schedule"}]],
+                                             "event": "workflow_dispatch"}, False),
+            ("push не принимает ручной CI", {"poll": [[{"event": "workflow_dispatch"}]], "event": "push"}, False),
+            ("PR не принимает ручной CI", {"poll": [[{"event": "workflow_dispatch"}]]}, False),
             ("нет запуска", {"poll": [[]]}, False),
             ("ошибка API", {"poll": [[]], "apiError": True}, False),
             ("отказ CI", {"poll": [[{"conclusion": "failure"}]]}, False),

@@ -184,6 +184,11 @@ jobs:
           script: |
             const {owner, repo} = context.repo;
             const event = context.eventName === 'pull_request' ? 'pull_request' : 'push';
+            // Ручной анализ принимает и ручной запуск ci.yml того же SHA: в рабочей ветке
+            // задания ci.yml на push пропускаются, поэтому push учитывается только из
+            // основной ветки, как и в условиях заданий ci.yml.
+            const events = context.eventName === 'workflow_dispatch' ? ['push', 'workflow_dispatch'] : [event];
+            const defaultBranch = context.payload.repository.default_branch;
             const prNumber = context.issue.number;
             const budgetMs = Number(process.env.CI_GATE_BUDGET_MS);
             const pollMs = Number(process.env.CI_GATE_POLL_MS);
@@ -193,10 +198,11 @@ jobs:
             while (true) {
               const {data} = await github.rest.actions.listWorkflowRuns({
                 owner, repo, workflow_id: 'ci.yml', head_sha: process.env.COVERAGE_SHA,
-                event, per_page: 100,
+                ...(events.length === 1 ? {event} : {}), per_page: 100,
               });
               const runs = data.workflow_runs.filter(candidate =>
-                candidate.head_sha === process.env.COVERAGE_SHA && candidate.event === event
+                candidate.head_sha === process.env.COVERAGE_SHA && events.includes(candidate.event)
+                && (candidate.event !== 'push' || candidate.head_branch === defaultBranch)
                 && candidate.repository.full_name === `${owner}/${repo}`
                 && (event !== 'pull_request' || candidate.pull_requests.some(pr =>
                   pr.number === prNumber && pr.head.sha === process.env.COVERAGE_SHA
