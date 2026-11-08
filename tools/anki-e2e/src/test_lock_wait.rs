@@ -10,8 +10,8 @@
 //! Помощник ждёт только ту ошибку, которую тест сам назвал временно занятым
 //! замком, и только ограниченное время: результат, не связанный с занятым
 //! замком, возвращается без изменений. Модуль компилируется только в
-//! test-режиме, поэтому production-политика немедленного отказа при настоящем
-//! владельце не меняется.
+//! режиме тестирования, поэтому политика немедленного отказа в рабочем коде
+//! при настоящем владельце не меняется.
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -167,26 +167,28 @@ mod tests {
         assert!(waited >= limit, "выдержано {waited:?}, срок {limit:?}");
     }
 
-    /// Детерминированный повтор: владелец удерживает настоящий `flock`
-    /// контролируемое время и освобождает его по таймеру, без расчёта на
-    /// случайное совпадение с `fork`/`exec`.
+    /// Владелец освобождает настоящий `flock` только после отказа внутри ожидания.
     #[test]
-    fn real_flock_released_by_a_timed_holder_is_awaited() {
+    fn real_flock_released_after_a_busy_attempt_is_awaited() {
         let (dir, path) = lock_in_temp_dir("released");
         let owner = open_lock(&path);
         owner
             .try_lock()
             .unwrap_or_else(|error| panic!("владелец не взял замок: {error}"));
-        let holder = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(40));
-            drop(owner);
-        });
+        let mut owner = Some(owner);
         let probe = open_lock(&path);
-        // Пока владелец жив, замок занят именно для этого помощника.
-        assert!(matches!(probe.try_lock(), Err(TryLockError::WouldBlock)));
+        let mut attempts = 0;
         let result = await_release(
             RELEASE_LIMIT,
-            || probe.try_lock(),
+            || {
+                attempts += 1;
+                let result = probe.try_lock();
+                if attempts == 1 {
+                    assert!(matches!(result, Err(TryLockError::WouldBlock)));
+                    drop(owner.take());
+                }
+                result
+            },
             |error| matches!(error, TryLockError::WouldBlock),
         );
         assert!(
@@ -194,7 +196,7 @@ mod tests {
             "замок не освобождён: {:?}",
             result.err().map(|error| error.to_string())
         );
-        holder.join().unwrap();
+        assert!(attempts >= 2, "попыток захвата: {attempts}");
         drop(probe);
         std::fs::remove_dir_all(&dir).unwrap();
     }
