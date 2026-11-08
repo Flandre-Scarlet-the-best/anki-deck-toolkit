@@ -149,5 +149,28 @@ class CoverageWorkflowTest(unittest.TestCase):
         self.assertEqual(result["jobsCalls"], 0)
 
 
+class ToolBootstrapWorkflowTest(unittest.TestCase):
+    def test_verified_bootstrap_precedes_unchanged_action_only_on_cloud_runner(self):
+        path = Path(__file__).resolve().parents[1] / "workflows/ci.yml"
+        workflow = Workflow(path.read_text(encoding="utf-8"))
+        for job_name in ("code", "asset-store-extended"):
+            with self.subTest(job=job_name):
+                steps = workflow.jobs[job_name]["steps"]
+                index = next(i for i, step in enumerate(steps) if any(
+                    "uses: Mozilla-Actions/sccache-action@" in line for line in step["lines"]))
+                action = "\n".join(steps[index]["lines"])
+                self.assertIn("Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba", action)
+                self.assertIn("version: ${{ env.SCCACHE_VERSION }}", action)
+                bootstrap = "\n".join(steps[index - 1]["lines"])
+                self.assertIn("fetch_verified_tool.py", bootstrap)
+                self.assertIn('--sha256 "$SCCACHE_SHA256" --size "$SCCACHE_SIZE"', bootstrap)
+                self.assertIn("$RUNNER_TOOL_CACHE/sccache/${SCCACHE_VERSION#v}/x64", bootstrap)
+                self.assertNotIn("continue-on-error", bootstrap + action)
+                condition = next(line.split("if:", 1)[1].strip() for line in steps[index - 1]["lines"]
+                                 if line.strip().startswith("if:"))
+                for runner, expected in (("github-hosted", True), ("self-hosted", False)):
+                    self.assertEqual(truthy(evaluate_value("${{ " + condition + " }}", {"runner": {"environment": runner}})), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

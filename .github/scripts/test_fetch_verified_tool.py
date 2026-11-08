@@ -7,6 +7,8 @@
 
 import hashlib
 import importlib.util
+import io
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -35,6 +38,7 @@ class ScriptedSource:
         self.body = body
         self.honour_range = honour_range
         self.requests = []
+        self.accepts = []
         source = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -43,6 +47,7 @@ class ScriptedSource:
 
             def do_GET(self):
                 source.requests.append(self.headers.get("Range"))
+                source.accepts.append(self.headers.get("Accept"))
                 behaviour = source.behaviours.pop(0) if source.behaviours else ("full",)
                 source.respond(self, behaviour)
 
@@ -202,6 +207,100 @@ class CacheTests(FetchTestCase):
         source = self.source([("full",), ("full",)])
         self.assertEqual(self.fetch(source.url).read_bytes(), BODY)
         self.assertEqual(source.requests, ["bytes=4000-", None])
+
+
+class GitHubFallbackTests(FetchTestCase):
+    url = "https://github.com/owner/repo/releases/download/v1.2.3/tool.tar.gz"
+    api = "https://api.github.com/repos/owner/repo/releases/assets/17"
+
+    def release(self):
+        return {"tag_name": "v1.2.3", "draft": False, "assets": [
+            {"id": 17, "name": "tool.tar.gz", "state": "uploaded", "browser_download_url": self.url}]}
+
+    def test_same_public_release_is_resolved_without_credentials(self):
+        data = json.dumps(self.release()).encode()
+        with mock.patch.object(fetch_verified_tool.urllib.request, "urlopen",
+                               return_value=io.BytesIO(data)) as open_url:
+            self.assertEqual(fetch_verified_tool.github_asset_url(self.url), self.api)
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.github.com/repos/owner/repo/releases/tags/v1.2.3")
+        self.assertEqual(request.get_header("Accept"), "application/vnd.github+json")
+        self.assertIsNone(request.get_header("Authorization"))
+
+    def test_foreign_hosts_and_non_release_urls_never_use_api(self):
+        with mock.patch.object(fetch_verified_tool.urllib.request, "urlopen") as open_url:
+            for url in ("http://github.com/owner/repo/releases/download/v1/tool.tar.gz",
+                        self.url.replace("github.com", "github.com.attacker.example"),
+                        self.url.replace("github.com", "user@github.com"),
+                        "https://github.com/owner/repo/releases/latest/download/tool.tar.gz"):
+                with self.subTest(url=url):
+                    self.assertIsNone(fetch_verified_tool.github_asset_url(url))
+            open_url.assert_not_called()
+
+    def test_ambiguous_foreign_and_malformed_metadata_are_rejected(self):
+        mutations = [lambda r: r.update(tag_name="other"), lambda r: r.update(draft=True),
+                     lambda r: r.update(assets=[]), lambda r: r["assets"].append(r["assets"][0].copy()),
+                     lambda r: r["assets"][0].update(browser_download_url="https://attacker.example/tool"),
+                     lambda r: r["assets"][0].update(state="open"),
+                     lambda r: r["assets"][0].update(id="17"), lambda r: r["assets"][0].update(id=True),
+                     lambda r: r["assets"][0].update(id=-1), lambda r: r.pop("tag_name")]
+        for mutation in mutations:
+            release = self.release()
+            mutation(release)
+            with self.subTest(release=release), mock.patch.object(
+                    fetch_verified_tool.urllib.request, "urlopen",
+                    return_value=io.BytesIO(json.dumps(release).encode())):
+                with self.assertRaises(fetch_verified_tool.TransferError):
+                    fetch_verified_tool.github_asset_url(self.url)
+        for data in (b"not JSON", b"null", b"[]", b"x" * (8 * 1024 * 1024 + 1)):
+            with self.subTest(size=len(data)), mock.patch.object(
+                    fetch_verified_tool.urllib.request, "urlopen", return_value=io.BytesIO(data)):
+                with self.assertRaises(fetch_verified_tool.TransferError):
+                    fetch_verified_tool.github_asset_url(self.url)
+
+    def run_fallback(self, body=BODY):
+        requests = []
+
+        def transfer(url, partial, size):
+            requests.append(url)
+            if len(requests) == 1:
+                failure = urllib.error.HTTPError(url, 504, "Тайм-аут шлюза", {}, None)
+                failure.close()
+                raise failure
+            partial.write_bytes(body)
+
+        with mock.patch.object(fetch_verified_tool, "transfer", side_effect=transfer), mock.patch.object(
+                fetch_verified_tool, "github_asset_url", return_value=self.api) as resolve:
+            result = self.fetch(self.url, size=len(BODY), attempts=2)
+            resolve.assert_called_once_with(self.url)
+        self.assertEqual(requests, [self.url, self.api])
+        return result
+
+    def test_transfer_requests_binary_content(self):
+        source = self.source([("full",)])
+        self.fetch(source.url)
+        self.assertEqual(source.accepts, ["application/octet-stream"])
+
+    def test_gateway_failure_uses_same_asset_and_still_verifies_bytes(self):
+        self.assertEqual(self.run_fallback().read_bytes(), BODY)
+        self.assertEqual(self.sleeps, [2])
+
+    def test_api_download_cannot_bypass_checksum_or_size(self):
+        for body in (BODY[:-1], bytes([BODY[0] ^ 255]) + BODY[1:]):
+            with self.subTest(size=len(body)), self.assertRaises(SystemExit):
+                self.run_fallback(body)
+            self.assertEqual(self.entries(), [])
+
+    def test_unavailable_metadata_preserves_bounded_failure(self):
+        failure = urllib.error.HTTPError(self.url, 504, "Тайм-аут шлюза", {}, None)
+        self.addCleanup(failure.close)
+        with mock.patch.object(fetch_verified_tool, "transfer", side_effect=failure) as transfer, mock.patch.object(
+                fetch_verified_tool, "github_asset_url", side_effect=fetch_verified_tool.TransferError("нет архива")):
+            with self.assertRaises(SystemExit):
+                self.fetch(self.url, attempts=3)
+            self.assertEqual(transfer.call_count, 3)
+            self.assertTrue(all(call.args[0] == self.url for call in transfer.call_args_list))
+        self.assertEqual(self.entries(), [])
 
 
 class PruneTests(FetchTestCase):
