@@ -191,5 +191,17 @@ class ToolBootstrapWorkflowTest(unittest.TestCase):
         self.assertEqual(len(next(iter(pins))), 2)
 
 
+class SharedToolPinsTest(unittest.TestCase):
+    def test_ffmpeg_and_hyperfine_pins_match_between_workflows(self):
+        # Копии закреплений в двух workflow обновляются вместе: расхождение ловится здесь.
+        pattern = re.compile(r"^\s+((?:FFMPEG|HYPERFINE)_[A-Z0-9]+|key: ffmpeg-[^\s]+)(?:: (\S+))?$", re.M)
+        pins = {}
+        for workflow in ("ci.yml", "sonarqube.yml"):
+            text = (Path(__file__).resolve().parents[1] / "workflows" / workflow).read_text(encoding="utf-8")
+            pins[workflow] = sorted(pattern.findall(text))
+        self.assertEqual(len(pins["ci.yml"]), 8, pins["ci.yml"])
+        self.assertEqual(pins["ci.yml"], pins["sonarqube.yml"])
+
+
 if __name__ == "__main__":
     unittest.main()
