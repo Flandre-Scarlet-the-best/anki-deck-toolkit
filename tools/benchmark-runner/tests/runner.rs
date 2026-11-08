@@ -1793,6 +1793,11 @@ program = {{ kind = "executable", name = "benchmark-workload" }}
 args = ["--busy-ms", "1"]
 expect_exit_codes = [0]
 
+# Инструментированная синтетическая цель пишет профиль вне проверяемого Git-дерева.
+# Без этой переменной LLVM создаёт default_*.profraw внутри дерева и меняет снимок.
+[scenario.target.env]
+inherit = ["LLVM_PROFILE_FILE"]
+
 [[scenario.input]]
 id = "tree"
 kind = "repo-tree"

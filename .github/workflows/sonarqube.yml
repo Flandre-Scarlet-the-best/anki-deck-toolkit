@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: read
+  # Перед Codecov проверяем успешный основной CI того же коммита.
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -26,7 +28,7 @@ jobs:
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - name: Получить полный Git-репозиторий для корректного blame и анализа PR
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -36,6 +38,7 @@ jobs:
       - name: Установить Rust, Cargo и Clippy из rust-toolchain.toml
         run: |
           rustup toolchain install
+          rustup component add llvm-tools-preview
           rustup show active-toolchain
           cargo clippy --version
 
@@ -49,6 +52,75 @@ jobs:
           key: ${{ runner.os }}-sonar
           restore-keys: ${{ runner.os }}-sonar
 
+      - name: Установить cargo-llvm-cov
+        env:
+          LLVM_COV_VERSION: 0.9.1
+          LLVM_COV_SHA256: 3fca950394a3c49457657c158b1619cec8dfd2647ae5b48746734c0ab969a522
+          LLVM_COV_SIZE: 1789044
+        run: |
+          name="cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz"
+          archive="$(python3 .github/scripts/fetch_verified_tool.py --name "$name" \
+            --sha256 "$LLVM_COV_SHA256" --size "$LLVM_COV_SIZE" \
+            --url "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${LLVM_COV_VERSION}/${name}")"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" cargo-llvm-cov
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/cargo-llvm-cov" llvm-cov --version
+
+      - name: Восстановить архив FFmpeg
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ffmpeg.tar.xz
+          key: ffmpeg-linux-x64-dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e
+
+      - name: Подготовить декодер синтетических MP3
+        env:
+          FFMPEG_RELEASE: autobuild-2026-09-30-13-08
+          FFMPEG_ARCHIVE: ffmpeg-n8.1.3-9-g29e619e767-linux64-lgpl-8.1.tar.xz
+          FFMPEG_SHA256: dfa863a00ca81f1bdf58a372b18cff4820f0017e55de32778de8ecd8ed92a02e
+          FFMPEG_SIZE: 137034436
+        run: |
+          archive="$(python3 .github/scripts/fetch_verified_tool.py --name ffmpeg.tar.xz \
+            --sha256 "$FFMPEG_SHA256" --size "$FFMPEG_SIZE" \
+            --url "https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$FFMPEG_ARCHIVE")"
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          tar -xJf "$archive" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
+          echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ffmpeg/bin/ffmpeg" -version
+          "$RUNNER_TEMP/ffmpeg/bin/ffprobe" -version
+          prlimit --version
+
+      - name: Установить Hyperfine для синтетических тестов
+        env:
+          HYPERFINE_VERSION: 2.0.0
+          HYPERFINE_SHA256: 38e59087bd65520930a13cf513d8a493b7043741e8ad62349a8a9929eb61bc5c
+          HYPERFINE_SIZE: 737116
+        run: |
+          name="hyperfine-v${HYPERFINE_VERSION}-x86_64-unknown-linux-musl"
+          archive="$(python3 .github/scripts/fetch_verified_tool.py --name "$name.tar.gz" \
+            --sha256 "$HYPERFINE_SHA256" --size "$HYPERFINE_SIZE" \
+            --url "https://github.com/sharkdp/hyperfine/releases/download/v${HYPERFINE_VERSION}/$name.tar.gz")"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" "$name/hyperfine"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/$name/hyperfine" --version
+
+      - name: Установить Python для тестов воркера Resemble
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.15.2'
+
+      - name: Установить coverage.py
+        env:
+          PY_COVERAGE_SHA256: 3bd065e75c077d6de8cd3fe68699a8b47be3ec595af6b66e3629926839094609
+          PY_COVERAGE_SIZE: 263632
+        run: |
+          name='coverage-7.17.2-cp315-cp315-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl'
+          wheel="$(python3 .github/scripts/fetch_verified_tool.py --name "$name" \
+            --sha256 "$PY_COVERAGE_SHA256" --size "$PY_COVERAGE_SIZE" \
+            --url "https://files.pythonhosted.org/packages/f5/c6/4f3931c3ff80a6f2608209181adb00527970a4b43b64c3aa323383c37d51/$name")"
+          python3 -m venv "$RUNNER_TEMP/python-coverage"
+          "$RUNNER_TEMP/python-coverage/bin/python" -m pip install --no-deps "$wheel"
+          "$RUNNER_TEMP/python-coverage/bin/python" -m coverage --version
+
       - name: Проверить наличие токена SonarQube
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -58,7 +130,118 @@ jobs:
             exit 1
           fi
 
+      - name: Измерить покрытие тестов Python-скриптов CI
+        id: python_coverage
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/python-coverage-data
+        run: |
+          if [ -e python-coverage.xml ]; then
+            echo '::error::Найден старый отчёт Python coverage.'
+            exit 1
+          fi
+          python="$RUNNER_TEMP/python-coverage/bin/python"
+          "$python" -m coverage run --branch --source=.github/scripts -m unittest discover -s .github/scripts -p 'test_*.py'
+          "$python" -m coverage xml -o python-coverage.xml
+          test -s python-coverage.xml
+
+      - name: Выполнить тесты workspace и собрать покрытие
+        id: coverage
+        env:
+          CARGO_BUILD_WARNINGS: deny
+          RESEMBLE_EXPECT_PYTHON: '3.15.2'
+        shell: bash
+        run: |
+          if [ -e lcov.info ]; then
+            echo '::error::Найден старый LCOV; отказываемся использовать его повторно.'
+            exit 1
+          fi
+          cargo llvm-cov --workspace --locked --profile ci --no-fail-fast --lcov --output-path lcov.info
+
+      - name: Проверить сформированный LCOV
+        id: lcov
+        run: python3 .github/scripts/check_rust_lcov.py lcov.info
+
       - name: Запустить анализ SonarQube Cloud
         uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Дождаться основного CI и подтвердить его успех
+        # Покрытие уходит в Codecov только по проверенному коммиту: если основной
+        # CI того же SHA ещё выполняется, шаг ждёт его; при отказе или выходе за
+        # бюджет отправка не выполняется вовсе. Так результат покрытия не может
+        # появиться раньше зелёных тестов и не маскирует красный CI.
+        id: ci_gate
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          COVERAGE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Бюджет ожидания и период опроса; значения заданы явно, чтобы поведение
+          # шага и его тест не зависели от скрытых констант.
+          CI_GATE_BUDGET_MS: '1200000'
+          CI_GATE_POLL_MS: '20000'
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const event = context.eventName === 'pull_request' ? 'pull_request' : 'push';
+            const prNumber = context.issue.number;
+            const budgetMs = Number(process.env.CI_GATE_BUDGET_MS);
+            const pollMs = Number(process.env.CI_GATE_POLL_MS);
+            const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+            const deadline = Date.now() + budgetMs;
+            let run = null;
+            while (true) {
+              const {data} = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: 'ci.yml', head_sha: process.env.COVERAGE_SHA,
+                event, per_page: 100,
+              });
+              const runs = context.eventName === 'pull_request'
+                ? data.workflow_runs.filter(
+                    candidate => candidate.pull_requests.some(pr => pr.number === prNumber))
+                : data.workflow_runs;
+              run = runs[0] ?? null;
+              if (run?.status === 'completed') break;
+              if (Date.now() >= deadline) {
+                throw new Error(
+                  'Основной CI этого коммита не завершился за отведённый бюджет; Codecov не запускается.');
+              }
+              await sleep(pollMs);
+            }
+            if (run.conclusion !== 'success') {
+              throw new Error('Основной CI этого коммита завершился неуспешно; Codecov не запускается.');
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner, repo, run_id: run.id, per_page: 100,
+            });
+            const tests = jobs.find(job => job.name === 'Код и тесты');
+            if (!tests || tests.conclusion !== 'success') {
+              throw new Error('Основной тестовый job не прошёл; Codecov не запускается.');
+            }
+            core.info(`Основной CI ${run.html_url}: успешно`);
+
+      - name: Установить проверенный Codecov CLI
+        if: ${{ success() && steps.python_coverage.outcome == 'success' && steps.coverage.outcome == 'success' && steps.lcov.outcome == 'success' && steps.ci_gate.outcome == 'success' }}
+        env:
+          CODECOV_VERSION: 11.3.2
+          CODECOV_SHA256: 8e1bfb71661378530f6ea21e82b414095899e565cbb4cf555c613064be17b973
+          CODECOV_SIZE: 18466776
+        run: |
+          binary="$(python3 .github/scripts/fetch_verified_tool.py --name codecov-cli \
+            --sha256 "$CODECOV_SHA256" --size "$CODECOV_SIZE" \
+            --url "https://github.com/codecov/codecov-cli/releases/download/v${CODECOV_VERSION}/codecovcli_linux")"
+          chmod u+x "$binary"
+          "$binary" --version
+
+      - name: Отправить проверенное покрытие в Codecov
+        # Ни установка, ни отправка не выполняются после сбоя тестов или проверки отчёта.
+        if: ${{ success() && steps.python_coverage.outcome == 'success' && steps.coverage.outcome == 'success' && steps.lcov.outcome == 'success' && steps.ci_gate.outcome == 'success' }}
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          COVERAGE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$CODECOV_TOKEN" ]; then
+            echo '::error::Создайте секрет CODECOV_TOKEN в настройках GitHub Actions.'
+            exit 1
+          fi
+          "$RUNNER_TEMP/codecov-cli" upload-coverage --fail-on-error --disable-search \
+            --plugin noop --file lcov.info --file python-coverage.xml \
+            --git-service github --sha "$COVERAGE_SHA"
