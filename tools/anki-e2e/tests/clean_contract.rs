@@ -27,7 +27,7 @@ fn unavailable_docker_reports_cleanup_failure_and_still_clears_local_cache() {
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("список контейнеров стенда"), "{stderr}");
     assert!(stderr.contains("список образов стенда"), "{stderr}");
-    assert!(stderr.contains("BuildKit cache mounts"), "{stderr}");
+    assert!(stderr.contains("монтирования кэша BuildKit"), "{stderr}");
     assert!(!work.join("cache").exists());
     assert!(!work.join("build").exists());
     assert_eq!(fs::read(work.join("runs/fixture")).unwrap(), b"fixture");

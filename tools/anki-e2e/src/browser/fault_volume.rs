@@ -145,12 +145,16 @@ fn errno(e: rustix::io::Errno) -> String {
     std::io::Error::from(e).to_string()
 }
 
+/// Отказ при занятом томе: единственная ошибка, которую тест вправе переждать.
+const BUSY: &str =
+    "fault-volume занят другим запуском; параллельное заполнение одного тома запрещено";
+
 /// Исключительная межпроцессная блокировка открытого описания каталога: файлов не создаёт.
+/// Захват не повторяется: при настоящем владельце отказ обязан быть немедленным.
 fn lock_exclusive(dir: &OwnedFd) -> Result<()> {
     rustix::fs::flock(dir, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
         if e == rustix::io::Errno::WOULDBLOCK {
-            "fault-volume занят другим запуском; параллельное заполнение одного тома запрещено"
-                .to_owned()
+            BUSY.to_owned()
         } else {
             format!("блокировка fault-volume: {}", errno(e))
         }
@@ -589,17 +593,36 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
     }
 
+    /// Наблюдаемый текст отказа закреплён своим литералом, а не константой рабочего кода:
+    /// иначе правка формулировки проходила бы мимо теста молча.
+    const BUSY_MESSAGE: &str =
+        "fault-volume занят другим запуском; параллельное заполнение одного тома запрещено";
+
+    #[test]
+    fn busy_refusal_text_is_pinned_independently_of_the_production_constant() {
+        assert_eq!(BUSY, BUSY_MESSAGE);
+    }
+
     #[test]
     fn second_holder_of_the_same_volume_is_refused_until_release() {
         let dir = TempDirectory::create("lock");
         let first = test_volume(&dir.0, dir.0.join("unused"));
         // flock принадлежит открытому описанию файла, как у другого процесса.
-        let error = open_locked(&dir.0).err().unwrap();
-        assert!(error.contains("занят другим запуском"), "{error}");
+        // Пока владелец жив, отказ обязан быть немедленным и именно «занято».
+        assert_eq!(open_locked(&dir.0).err().unwrap(), BUSY_MESSAGE);
         // Сама блокировка файлов не создаёт: проверка пустоты не ломается.
         assert!(first.is_empty().unwrap());
         drop(first);
-        assert!(open_locked(&dir.0).is_ok());
+        // Освобождение видно после закрытия последнего описания файла, а копию
+        // дескриптора мог унаследовать форкнутый дочерний процесс параллельного
+        // теста: ждём только «занято» и только ограниченное время.
+        let reopened = crate::test_lock_wait::await_release(
+            crate::test_lock_wait::RELEASE_LIMIT,
+            || open_locked(&dir.0),
+            |error| error == BUSY_MESSAGE,
+        )
+        .unwrap_or_else(|error| panic!("том не освобождён после drop владельца: {error}"));
+        drop(reopened);
     }
 
     #[test]

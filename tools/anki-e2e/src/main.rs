@@ -14,6 +14,8 @@ mod real_site;
 mod release;
 mod report;
 mod source;
+#[cfg(test)]
+mod test_lock_wait;
 mod util;
 
 use clap::Parser;
