@@ -215,7 +215,7 @@ fn is_mp3_name(name: &str) -> bool {
         .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("mp3"))
 }
 
-fn open_dir(path: &Path) -> Result<File, AssetError> {
+pub(crate) fn open_dir(path: &Path) -> Result<File, AssetError> {
     Ok(File::from(
         open(
             path,
@@ -1445,17 +1445,25 @@ pub fn verify_sources(
     batch: &NormalizerBatch,
     inventory: &Inventory,
 ) -> Result<SourceCheck, AssetError> {
-    let current =
-        self::inventory(Path::new(&batch.input_root), &batch.limits).map_err(|error| {
-            AssetError::with_details(
-                ErrorCode::IntegrityMismatch,
-                format!(
-                    "повторная инвентаризация входа не выполнена: {}",
-                    error.message
-                ),
-                serde_json::json!({"code": error.code.as_str()}),
-            )
-        })?;
+    verify_inventory(Path::new(&batch.input_root), &batch.limits, inventory)
+}
+
+/// [`verify_sources`] для любого пакета с зафиксированной инвентаризацией.
+pub fn verify_inventory(
+    input_root: &Path,
+    limits: &Limits,
+    inventory: &Inventory,
+) -> Result<SourceCheck, AssetError> {
+    let current = self::inventory(input_root, limits).map_err(|error| {
+        AssetError::with_details(
+            ErrorCode::IntegrityMismatch,
+            format!(
+                "повторная инвентаризация входа не выполнена: {}",
+                error.message
+            ),
+            serde_json::json!({"code": error.code.as_str()}),
+        )
+    })?;
     let now: BTreeMap<&str, &InventoryEntry> = current
         .entries
         .iter()
