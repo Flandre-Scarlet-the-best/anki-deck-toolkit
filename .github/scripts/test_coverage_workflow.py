@@ -1,5 +1,6 @@
-"""Проверить порядок coverage и запрет загрузки после отказа тестов."""
+"""Контракт покрытия: идентичность CI и запрет обеих публикаций после отказа."""
 
+import itertools
 import json
 import os
 import subprocess
@@ -9,130 +10,143 @@ from pathlib import Path
 from test_ci_runner_routing import Workflow, evaluate_value, truthy
 
 
+def coverage_steps():
+    path = Path(__file__).resolve().parents[1] / "workflows/sonarqube.yml"
+    steps = Workflow(path.read_text(encoding="utf-8")).jobs["analyze"]["steps"]
+    return {line.strip().split(": ", 1)[1]: (index, step)
+            for index, step in enumerate(steps) for line in step["lines"]
+            if line.strip().startswith("id: ")}
+
+
+def gate_script():
+    _, gate = coverage_steps()["ci_gate"]
+    start = gate["lines"].index("          script: |") + 1
+    return "\n".join(line[12:] for line in gate["lines"][start:])
+
+
 class CoverageWorkflowTest(unittest.TestCase):
-    def test_codecov_runs_only_after_successful_tests_and_validation(self):
-        path = Path(__file__).resolve().parents[1] / "workflows/sonarqube.yml"
-        steps = Workflow(path.read_text(encoding="utf-8")).jobs["analyze"]["steps"]
-
-        def locate(name):
-            matches = [(i, s) for i, s in enumerate(steps)
-                       if s["lines"][0].strip() == f"- name: {name}"]
-            self.assertEqual(len(matches), 1, name)
-            return matches[0]
-
-        python_index, python = locate("Измерить покрытие тестов Python-скриптов CI")
-        test_index, test = locate("Выполнить тесты workspace и собрать покрытие")
-        check_index, check = locate("Проверить сформированный LCOV")
-        scan_index, _ = locate("Запустить анализ SonarQube Cloud")
-        gate_index, gate = locate("Дождаться основного CI и подтвердить его успех")
-        install_index, install = locate("Установить проверенный Codecov CLI")
-        upload_index, upload = locate("Отправить проверенное покрытие в Codecov")
-        self.assertLess(python_index, test_index)
-        self.assertIn("        id: python_coverage", python["lines"])
-        self.assertLess(test_index, check_index)
-        self.assertLess(check_index, scan_index)
-        self.assertLess(scan_index, gate_index)
-        self.assertLess(gate_index, install_index)
-        self.assertIn("        id: ci_gate", gate["lines"])
-        self.assertLess(install_index, upload_index)
-        self.assertIn("        id: coverage", test["lines"])
-        self.assertIn("        id: lcov", check["lines"])
-        self.assertNotIn("--ignore-run-fail", "\n".join(test["lines"]))
-        self.assertNotIn("continue-on-error:", "\n".join(test["lines"]))
-        for step in (install, upload):
+    def test_publications_require_successful_tests_validation_and_same_sha_ci(self):
+        steps = coverage_steps()
+        ordered = ("python_coverage", "coverage", "lcov", "ci_gate", "sonar",
+                   "codecov_install", "codecov_upload")
+        self.assertEqual(sorted(ordered, key=lambda key: steps[key][0]), list(ordered))
+        test = "\n".join(steps["coverage"][1]["lines"])
+        self.assertNotIn("--ignore-run-fail", test)
+        self.assertNotIn("continue-on-error:", test)
+        self.assertIn("--file lcov.info --file python-coverage.xml",
+                      "\n".join(steps["codecov_upload"][1]["lines"]))
+        for key in ("sonar", "codecov_install", "codecov_upload"):
+            lines = steps[key][1]["lines"]
+            self.assertNotIn("continue-on-error:", "\n".join(lines))
             expression = next(line.split("if:", 1)[1].strip()
-                              for line in step["lines"] if line.strip().startswith("if:"))
+                              for line in lines if line.strip().startswith("if:"))
             self.assertIn("success()", expression)
             for previous_success in (False, True):
-                for coverage in ("failure", "success", "skipped"):
-                    for lcov in ("failure", "success", "skipped"):
-                        for ci_gate in ("failure", "success", "skipped"):
-                            for python_coverage in ("failure", "success", "skipped"):
-                                contexts = {"steps": {"coverage": {"outcome": coverage},
-                                                      "lcov": {"outcome": lcov},
-                                                      "python_coverage": {"outcome": python_coverage},
-                                                      "ci_gate": {"outcome": ci_gate}}}
-                                value = evaluate_value(expression.replace("success()", str(previous_success).lower()),
-                                                       contexts)
-                                self.assertEqual(truthy(value), previous_success and
-                                                 coverage == lcov == ci_gate == python_coverage == "success")
+                for outcomes in itertools.product(("failure", "success", "skipped", "cancelled"), repeat=4):
+                    contexts = {"steps": {name: {"outcome": outcome} for name, outcome in
+                                           zip(ordered[:4], outcomes)}}
+                    value = evaluate_value(expression.replace("success()", str(previous_success).lower()), contexts)
+                    self.assertEqual(truthy(value), previous_success and all(o == "success" for o in outcomes))
 
-    def test_ci_gate_waits_then_rejects_failed_or_unrelated_runs(self):
-        path = Path(__file__).resolve().parents[1] / "workflows/sonarqube.yml"
-        steps = Workflow(path.read_text(encoding="utf-8")).jobs["analyze"]["steps"]
-        gate = next(s for s in steps if s["lines"][0].strip() ==
-                    "- name: Дождаться основного CI и подтвердить его успех")
-        start = gate["lines"].index("          script: |") + 1
-        script = "\n".join(line[12:] for line in gate["lines"][start:])
+    def test_cache_is_separate_and_does_not_disable_profile_cleanup(self):
+        steps = coverage_steps()
+        cache = "\n".join(steps["rust_cache"][1]["lines"])
+        self.assertIn("shared-key: llvm-cov-v1", cache)
+        self.assertIn("workspaces: . -> target/llvm-cov-target", cache)
+        self.assertNotIn("cache-workspace-crates: true", cache)
+        command = "\n".join(steps["coverage"][1]["lines"])
+        for unsafe in ("--no-clean", "--no-report", "--no-run", "--ignore-run-fail"):
+            self.assertNotIn(unsafe, command)
+        self.assertIn("cargo llvm-cov --workspace --locked --profile ci --no-fail-fast --lcov", command)
+
+    def run_gate(self, scenario, script=None):
         driver = r"""
+            const assert = require('node:assert/strict');
             const scenario = JSON.parse(process.argv[1]);
             const script = process.argv[2];
-            let poll = 0;
+            let polls = 0, jobsCalls = 0;
+            const base = {id: 10, html_url: 'url', status: 'completed', conclusion: 'success',
+              head_sha: 'tested-sha', event: (scenario.event === 'workflow_dispatch' ? 'push' : scenario.event || 'pull_request'),
+              repository: {full_name: 'owner/repo'},
+              pull_requests: [{number: 12, head: {sha: 'tested-sha', repo: {id: 123}}}]};
             const github = {rest: {actions: {
-              listWorkflowRuns: async () => {
-                const index = Math.min(poll++, scenario.poll.length - 1);
-                const state = scenario.poll[index];
-                return {data: {workflow_runs: [{id: 10, html_url: 'url', status: state.status,
-                  conclusion: state.conclusion, pull_requests: [{number: scenario.pr}]}]}};
+              listWorkflowRuns: async args => {
+                assert.deepEqual(args, {owner: 'owner', repo: 'repo', workflow_id: 'ci.yml',
+                  head_sha: 'tested-sha', event: (scenario.event === 'workflow_dispatch' ? 'push' : scenario.event || 'pull_request'), per_page: 100});
+                if (scenario.apiError) throw new Error('API unavailable');
+                const state = scenario.poll[Math.min(polls++, scenario.poll.length - 1)];
+                return {data: {workflow_runs: state.map(run => ({...base, ...run}))}};
               },
               listJobsForWorkflowRun: () => {},
-            }}, paginate: async () => [{name: 'Код и тесты', conclusion: scenario.tests}]};
+            }}, paginate: async (method, args) => {
+              assert.equal(method, github.rest.actions.listJobsForWorkflowRun);
+              assert.deepEqual(args, {owner: 'owner', repo: 'repo', run_id: 10, per_page: 100});
+              jobsCalls++;
+              return scenario.jobs ?? [{name: 'Код и тесты', status: 'completed', conclusion: 'success'}];
+            }};
             const context = {repo: {owner: 'owner', repo: 'repo'},
-                             eventName: 'pull_request', issue: {number: 12}};
+              eventName: scenario.event || 'pull_request', issue: {number: 12},
+              payload: {repository: {id: 123}}};
             const core = {info: () => {}};
             const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
             new AsyncFunction('github', 'context', 'core', script)(github, context, core)
-              .then(() => process.exit(0)).catch(() => process.exit(1));
+              .then(() => console.log(JSON.stringify({ok: true, polls, jobsCalls})))
+              .catch(error => {
+                if (error.code === 'ERR_ASSERTION') { console.error(error); process.exit(2); }
+                console.log(JSON.stringify({ok: false, polls, jobsCalls}));
+              });
         """
-        done, running = ("completed", "success"), ("in_progress", None)
-        # Бюджет ожидания мал, чтобы проверка «сдаётся, если CI не завершился»
-        # не занимала минуты; период опроса — 1 мс.
-        cases = [
-            ("успешный основной CI", [dict(status=done[0], conclusion=done[1])], "success", 12, 20000, 0),
-            ("отказ основного CI", [dict(status="completed", conclusion="failure")], "failure", 12, 20000, 1),
-            ("тестовый job пропущен", [dict(status=done[0], conclusion=done[1])], "skipped", 12, 20000, 1),
-            ("чужой PR", [dict(status=done[0], conclusion=done[1])], "success", 13, 200, 1),
-            ("ожидание завершения", [dict(status=running[0], conclusion=running[1]),
-                                     dict(status=done[0], conclusion=done[1])], "success", 12, 20000, 0),
-            ("бюджет исчерпан", [dict(status=running[0], conclusion=running[1])], "success", 12, 200, 1),
-        ]
-        for title, poll, tests, pr, budget, expected in cases:
-            with self.subTest(title=title):
-                scenario = json.dumps(dict(poll=poll, tests=tests, pr=pr))
-                environment = {**os.environ, "CI_GATE_BUDGET_MS": str(budget),
-                               "CI_GATE_POLL_MS": "1"}
-                result = subprocess.run(["node", "-e", driver, scenario, script],
-                                        check=False, env=environment)
-                self.assertEqual(result.returncode, expected)
+        environment = {**os.environ, "COVERAGE_SHA": "tested-sha", "CI_GATE_BUDGET_MS": "20",
+                       "CI_GATE_POLL_MS": "1"}
+        result = subprocess.run(["node", "-e", driver, json.dumps(scenario), script or gate_script()],
+                                check=False, env=environment, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
 
-    def test_ci_gate_gives_up_on_stale_pending_run(self):
-        path = Path(__file__).resolve().parents[1] / "workflows/sonarqube.yml"
-        steps = Workflow(path.read_text(encoding="utf-8")).jobs["analyze"]["steps"]
-        gate = next(s for s in steps if s["lines"][0].strip() ==
-                    "- name: Дождаться основного CI и подтвердить его успех")
-        start = gate["lines"].index("          script: |") + 1
-        script = "\n".join(line[12:] for line in gate["lines"][start:])
-        driver = r"""
-            const script = process.argv[1];
-            let polls = 0;
-            const github = {rest: {actions: {
-              listWorkflowRuns: async () => {
-                polls++;
-                return {data: {workflow_runs: [{id: 10, html_url: 'url', status: 'in_progress',
-                  conclusion: null, pull_requests: [{number: 12}]}]}};
-              },
-              listJobsForWorkflowRun: () => {},
-            }}, paginate: async () => []};
-            const context = {repo: {owner: 'owner', repo: 'repo'},
-                             eventName: 'pull_request', issue: {number: 12}};
-            const core = {info: () => {}};
-            const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-            new AsyncFunction('github', 'context', 'core', script)(github, context, core)
-              .then(() => process.exit(0)).catch(() => process.exit(1));
-        """
-        environment = {**os.environ, "CI_GATE_BUDGET_MS": "0", "CI_GATE_POLL_MS": "1"}
-        result = subprocess.run(["node", "-e", driver, script], check=False, env=environment)
-        self.assertEqual(result.returncode, 1)
+    def test_ci_identity_completion_and_failure_paths(self):
+        cases = [
+            ("успех PR", {"poll": [[{}]]}, True),
+            ("успех push", {"poll": [[{}]], "event": "push"}, True),
+            ("ручной запуск ждёт push CI", {"poll": [[{}]], "event": "workflow_dispatch"}, True),
+            ("нет запуска", {"poll": [[]]}, False),
+            ("ошибка API", {"poll": [[]], "apiError": True}, False),
+            ("отказ CI", {"poll": [[{"conclusion": "failure"}]]}, False),
+            ("отмена CI", {"poll": [[{"conclusion": "cancelled"}]]}, False),
+            ("пропуск CI", {"poll": [[{"conclusion": "skipped"}]]}, False),
+            ("чужой SHA", {"poll": [[{"head_sha": "foreign-sha"}]]}, False),
+            ("чужое событие", {"poll": [[{"event": "push"}]]}, False),
+            ("чужой репозиторий", {"poll": [[{"repository": {"full_name": "other/repo"}}]]}, False),
+            ("чужой PR", {"poll": [[{"pull_requests": [{"number": 13}]}]]}, False),
+            ("нет PR", {"poll": [[{"pull_requests": []}]]}, False),
+            ("чужая ревизия PR", {"poll": [[{"pull_requests": [
+                {"number": 12, "head": {"sha": "old", "repo": {"id": 123}}}]}]]}, False),
+            ("чужой исходный репозиторий PR", {"poll": [[{"pull_requests": [
+                {"number": 12, "head": {"sha": "tested-sha", "repo": {"id": 456}}}]}]]}, False),
+            ("бюджет ожидания", {"poll": [[{"status": "in_progress", "conclusion": None}]]}, False),
+            ("очередь", {"poll": [[{"status": "queued", "conclusion": None}]]}, False),
+            ("нет задания тестов", {"poll": [[{}]], "jobs": []}, False),
+            ("другое задание", {"poll": [[{}]], "jobs": [
+                {"name": "Другое", "status": "completed", "conclusion": "success"}]}, False),
+        ]
+        for outcome in ("failure", "skipped", "cancelled", None):
+            cases.append((f"задание тестов: {outcome}", {"poll": [[{}]], "jobs": [
+                {"name": "Код и тесты", "status": "completed", "conclusion": outcome}]}, False))
+        cases.append(("задание ещё выполняется", {"poll": [[{}]], "jobs": [
+            {"name": "Код и тесты", "status": "in_progress", "conclusion": "success"}]}, False))
+        for title, scenario, expected in cases:
+            with self.subTest(title=title):
+                result = self.run_gate(scenario)
+                self.assertEqual(result["ok"], expected)
+                if expected:
+                    self.assertEqual(result["jobsCalls"], 1)
+
+    def test_pending_then_success_and_latest_failed_run(self):
+        result = self.run_gate({"poll": [[{"status": "in_progress", "conclusion": None}], [{}]]})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["polls"], 2)
+        result = self.run_gate({"poll": [[{"conclusion": "failure"}, {"id": 9}]]})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["jobsCalls"], 0)
 
 
 if __name__ == "__main__":

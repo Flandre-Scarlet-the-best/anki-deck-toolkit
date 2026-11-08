@@ -13,7 +13,7 @@ on:
 
 permissions:
   contents: read
-  # Перед Codecov проверяем успешный основной CI того же коммита.
+  # Перед SonarQube и Codecov проверяем успешный основной CI того же коммита.
   actions: read
 
 concurrency:
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Получить полный Git-репозиторий для корректного blame и анализа PR
+      - name: Получить полный Git-репозиторий для определения авторства строк и анализа PR
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
@@ -42,8 +42,14 @@ jobs:
           rustup show active-toolchain
           cargo clippy --version
 
-      - name: Восстановить кэш Cargo
+      - name: Восстановить зависимости сборки покрытия
+        id: rust_cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # Отдельный ключ не наследует неизменяемый кэш обычного анализа.
+          # Сохраняются зависимости, но не пакеты рабочей области и не данные покрытия.
+          shared-key: llvm-cov-v1
+          workspaces: . -> target/llvm-cov-target
 
       - name: Кэшировать загрузки SonarScanner
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -136,7 +142,7 @@ jobs:
           COVERAGE_FILE: ${{ runner.temp }}/python-coverage-data
         run: |
           if [ -e python-coverage.xml ]; then
-            echo '::error::Найден старый отчёт Python coverage.'
+            echo '::error::Найден старый отчёт покрытия Python.'
             exit 1
           fi
           python="$RUNNER_TEMP/python-coverage/bin/python"
@@ -144,7 +150,7 @@ jobs:
           "$python" -m coverage xml -o python-coverage.xml
           test -s python-coverage.xml
 
-      - name: Выполнить тесты workspace и собрать покрытие
+      - name: Выполнить тесты рабочей области и собрать покрытие
         id: coverage
         env:
           CARGO_BUILD_WARNINGS: deny
@@ -157,17 +163,12 @@ jobs:
           fi
           cargo llvm-cov --workspace --locked --profile ci --no-fail-fast --lcov --output-path lcov.info
 
-      - name: Проверить сформированный LCOV
+      - name: Проверить LCOV и подготовить совместимый отчёт Sonar
         id: lcov
         run: python3 .github/scripts/check_rust_lcov.py lcov.info
 
-      - name: Запустить анализ SonarQube Cloud
-        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
       - name: Дождаться основного CI и подтвердить его успех
-        # Покрытие уходит в Codecov только по проверенному коммиту: если основной
+        # Покрытие уходит в SonarQube и Codecov только по проверенному коммиту: если основной
         # CI того же SHA ещё выполняется, шаг ждёт его; при отказе или выходе за
         # бюджет отправка не выполняется вовсе. Так результат покрытия не может
         # появиться раньше зелёных тестов и не маскирует красный CI.
@@ -194,31 +195,41 @@ jobs:
                 owner, repo, workflow_id: 'ci.yml', head_sha: process.env.COVERAGE_SHA,
                 event, per_page: 100,
               });
-              const runs = context.eventName === 'pull_request'
-                ? data.workflow_runs.filter(
-                    candidate => candidate.pull_requests.some(pr => pr.number === prNumber))
-                : data.workflow_runs;
+              const runs = data.workflow_runs.filter(candidate =>
+                candidate.head_sha === process.env.COVERAGE_SHA && candidate.event === event
+                && candidate.repository.full_name === `${owner}/${repo}`
+                && (event !== 'pull_request' || candidate.pull_requests.some(pr =>
+                  pr.number === prNumber && pr.head.sha === process.env.COVERAGE_SHA
+                  && pr.head.repo.id === context.payload.repository.id)));
               run = runs[0] ?? null;
               if (run?.status === 'completed') break;
               if (Date.now() >= deadline) {
                 throw new Error(
-                  'Основной CI этого коммита не завершился за отведённый бюджет; Codecov не запускается.');
+                  'Основной CI этого коммита не завершился за отведённый бюджет; публикация покрытия запрещена.');
               }
               await sleep(pollMs);
             }
             if (run.conclusion !== 'success') {
-              throw new Error('Основной CI этого коммита завершился неуспешно; Codecov не запускается.');
+              throw new Error('Основной CI этого коммита завершился неуспешно; публикация покрытия запрещена.');
             }
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
               owner, repo, run_id: run.id, per_page: 100,
             });
             const tests = jobs.find(job => job.name === 'Код и тесты');
-            if (!tests || tests.conclusion !== 'success') {
-              throw new Error('Основной тестовый job не прошёл; Codecov не запускается.');
+            if (!tests || tests.status !== 'completed' || tests.conclusion !== 'success') {
+              throw new Error('Основное задание тестов не прошло; публикация покрытия запрещена.');
             }
             core.info(`Основной CI ${run.html_url}: успешно`);
 
+      - name: Запустить анализ SonarQube Cloud
+        id: sonar
+        if: ${{ success() && steps.python_coverage.outcome == 'success' && steps.coverage.outcome == 'success' && steps.lcov.outcome == 'success' && steps.ci_gate.outcome == 'success' }}
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
       - name: Установить проверенный Codecov CLI
+        id: codecov_install
         if: ${{ success() && steps.python_coverage.outcome == 'success' && steps.coverage.outcome == 'success' && steps.lcov.outcome == 'success' && steps.ci_gate.outcome == 'success' }}
         env:
           CODECOV_VERSION: 11.3.2
@@ -232,6 +243,7 @@ jobs:
           "$binary" --version
 
       - name: Отправить проверенное покрытие в Codecov
+        id: codecov_upload
         # Ни установка, ни отправка не выполняются после сбоя тестов или проверки отчёта.
         if: ${{ success() && steps.python_coverage.outcome == 'success' && steps.coverage.outcome == 'success' && steps.lcov.outcome == 'success' && steps.ci_gate.outcome == 'success' }}
         env:
