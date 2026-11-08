@@ -22,7 +22,7 @@ set = { PATH = "{param.runtime_bin}:/usr/bin:/bin", SPEECH_ENHANCE_RESEMBLE_DEVI
 
 [[scenario.parameter]]
 name = "runtime_bin"
-description = "Каталог bin окружения Python с закреплёнными зависимостями воркера."
+description = "Каталог bin окружения Python с закреплёнными зависимостями воркера; добавьте его также в PATH процесса benchmark-runner, который разрешает python3 до запуска цели."
 required = true
 record = false
 affects_comparability = false
