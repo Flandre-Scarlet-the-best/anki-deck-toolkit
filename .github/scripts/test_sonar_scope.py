@@ -5,71 +5,16 @@
 настройки сервера, языковые фильтры и другие параметры запуска анализатора.
 """
 
-import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
+from sonar_scope import read_properties, scope, sonar_match
+
+
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def read_properties(path):
-    """Прочитать используемый здесь поднабор Java properties, отказывая при неоднозначности."""
-    properties = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", "!")):
-            continue
-        if line.endswith("\\") or "=" not in line:
-            raise ValueError(f"Неподдерживаемая строка properties: {raw!r}")
-        key, value = (part.strip() for part in line.split("=", 1))
-        if key in properties:
-            raise ValueError(f"Повторное свойство: {key}")
-        properties[key] = value
-    return properties
-
-
-def sonar_match(pattern, path):
-    """Sonar wildcards: * и ? внутри компонента, ** для нуля и более каталогов."""
-    parts = pattern.split("/")
-    expressions = []
-    for index, part in enumerate(parts):
-        if part == "**":
-            expressions.append(".*" if index == len(parts) - 1 else "(?:[^/]+/)*")
-        else:
-            if "**" in part:
-                raise ValueError(f"Неподдерживаемый составной **: {pattern!r}")
-            component = "".join(
-                "[^/]*" if char == "*" else "[^/]" if char == "?" else re.escape(char)
-                for char in part
-            )
-            expressions.append(component + ("/" if index < len(parts) - 1 else ""))
-    return re.fullmatch("".join(expressions), path) is not None
-
-
-def patterns(properties, key):
-    return [part.strip() for part in properties.get(key, "").split(",") if part.strip()]
-
-
-def in_roots(path, roots):
-    return any(root == "." or path == root or path.startswith(root.rstrip("/") + "/")
-               for root in roots)
-
-
-def matches_any(path, globs):
-    return any(sonar_match(pattern, path) for pattern in globs)
-
-
-def scope(properties, path):
-    """Рассчитать локальные source/test-фильтры как отдельные множества."""
-    source = (in_roots(path, patterns(properties, "sonar.sources"))
-              and not matches_any(path, patterns(properties, "sonar.exclusions")))
-    inclusions = patterns(properties, "sonar.test.inclusions")
-    test = (in_roots(path, patterns(properties, "sonar.tests"))
-            and (not inclusions or matches_any(path, inclusions))
-            and not matches_any(path, patterns(properties, "sonar.test.exclusions")))
-    return source, test
 
 
 def conventions(path):
@@ -104,6 +49,18 @@ def tracked_paths():
 
 
 class SonarGlobTest(unittest.TestCase):
+    def test_ambiguous_properties_and_unsupported_globs_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sonar-project.properties"
+            for contents in ("key=a\nkey=b\n", "missing-equals\n", "key=value\\\n"):
+                with self.subTest(contents=contents), self.assertRaises(ValueError):
+                    path.write_text(contents, encoding="utf-8")
+                    read_properties(path)
+            path.write_text("# комментарий\n! комментарий\n\n key = a=b \n", encoding="utf-8")
+            self.assertEqual(read_properties(path), {"key": "a=b"})
+        with self.assertRaises(ValueError):
+            sonar_match("src/a**b.rs", "src/ab.rs")
+
     def test_wildcards_do_not_cross_directory_boundaries(self):
         for pattern, path, expected in [
             ("**/tests/**", "tests/check.rs", True),

@@ -17,6 +17,10 @@ self-hosted раннера), иначе ``RUNNER_TEMP`` (GitHub-hosted: ката
 файл появляется атомарно и только после проверки. После исчерпания попыток —
 явный отказ, неполный файл удаляется. Если шаг прерван по тайм-ауту, неполный
 файл остаётся и следующий запуск докачивает его (с той же итоговой проверкой).
+При HTTP 500, 502, 503 или 504 маршрута GitHub releases/download следующая
+попытка может получить тот же публичный архив через официальный Releases API.
+Тег и имя не меняются, метаданные проверяются, проверки размера и SHA-256 не
+ослабляются; токен не нужен.
 
 Параллельные загрузки в один каталог сериализуются блокировкой ``.fetch.lock``;
 её же берёт обслуживание кэша (``prune_stale``), чтобы не удалить файл,
@@ -29,11 +33,13 @@ import argparse
 import fcntl
 import hashlib
 import http.client
+import json
 import os
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -46,6 +52,18 @@ TIMEOUT_SECONDS = 60
 CHUNK = 1 << 20
 LOCK_NAME = ".fetch.lock"
 PART_SUFFIX = ".part"
+# Адрес приходит из аргумента командной строки, поэтому допустимый получатель
+# закреплён здесь: только эти https-хосты публикуют проверяемые архивы CI.
+# Итоговый адрес собирается из этой константы, а не из строки аргумента.
+TRUSTED_ORIGINS = {
+    "github.com": "https://github.com",
+    "api.github.com": "https://api.github.com",
+    "files.pythonhosted.org": "https://files.pythonhosted.org",
+}
+TRUSTED_HOSTS = frozenset(TRUSTED_ORIGINS)
+TRUSTED_SCHEME = "https"
+# None в наборе означает порт по умолчанию для схемы.
+TRUSTED_PORTS: tuple[int | None, ...] | None = (None, 443)
 
 
 class TransferError(Exception):
@@ -111,20 +129,47 @@ def response_total(response, offset: int) -> int | None:
     return int(length) if length and length.isdigit() else None
 
 
+def checked_url(url: str) -> str:
+    """Собрать адрес запроса из закреплённой константы хоста, а не из аргумента.
+
+    Схема и получатель начального запроса берутся исключительно из
+    ``TRUSTED_ORIGINS``; из входной строки переносится только проверенный путь
+    и запрос. Поэтому ни аргумент командной строки, ни метаданные выпуска не
+    могут адресовать первым запросом другой хост, схему, порт или встроенные
+    учётные данные. Редиректы ответа ``urllib`` следует штатно (GitHub отдаёт
+    архивы выпусков из своего хранилища), и их получатель здесь не сверяется:
+    подлинность файла обеспечивают закреплённые размер и SHA-256.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError as error:
+        raise TransferError("адрес нельзя разобрать") from error
+    origin = TRUSTED_ORIGINS.get(parts.hostname) if parts.scheme == TRUSTED_SCHEME else None
+    if (origin is None or parts.username is not None or parts.password is not None
+            or (TRUSTED_PORTS is not None and port not in TRUSTED_PORTS)):
+        raise TransferError(f"адрес вне закреплённого списка https-хостов: {url!r}")
+    segments = parts.path.split("/")
+    if not parts.path.startswith("/") or any(segment in (".", "..") for segment in segments):
+        raise TransferError(f"путь адреса недопустим: {parts.path!r}")
+    return f"{origin}{parts.path}" + (f"?{parts.query}" if parts.query else "")
+
+
 def transfer(url: str, partial: Path, size: int | None) -> None:
     """Одна передача: докачивает ``partial`` и проверяет число полученных байт."""
+    request = urllib.request.Request(checked_url(url), headers={"Accept": "application/octet-stream"})
     offset = partial.stat().st_size if partial.exists() else 0
     if size is not None and offset > size:
         partial.unlink()
         offset = 0
     if size is not None and offset == size:
         return
-    request = urllib.request.Request(url)
     if offset:
         request.add_header("Range", f"bytes={offset}-")
     try:
         response = urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS)
     except urllib.error.HTTPError as error:
+        error.close()
         if error.code == 416:
             partial.unlink(missing_ok=True)
             raise TransferError("сервер отверг докачку (416), неполный файл отброшен") from error
@@ -147,9 +192,52 @@ def transfer(url: str, partial: Path, size: int | None) -> None:
         raise TransferError(f"передача оборвана: получено {received} из {expected_total} байт")
 
 
+def github_asset_url(url: str) -> str | None:
+    """Тот же публичный архив через официальный API при отказе маршрута releases/download.
+
+    Ни зеркало, ни latest не используются. Репозиторий, тег и имя берутся только
+    из исходного URL; метаданные не могут подставить произвольный адрес загрузки.
+    Итоговые размер и SHA-256 по-прежнему проверяет fetch, без доступа к токенам.
+    """
+    match = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/releases/download/([^/?#]+)/([^/?#]+)", url,
+    )
+    if match is None:
+        return None
+    owner, repo, tag, filename = match.groups()
+    tag, filename = urllib.parse.unquote(tag), urllib.parse.unquote(filename)
+    api_root = checked_url(f"https://api.github.com/repos/{owner}/{repo}/releases")
+    request = urllib.request.Request(
+        checked_url(f"{api_root}/tags/{urllib.parse.quote(tag, safe='')}"),
+        headers={"Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        contents = response.read(8 * 1024 * 1024 + 1)
+    if len(contents) > 8 * 1024 * 1024:
+        raise TransferError("слишком большой ответ API выпуска")
+    try:
+        release = json.loads(contents)
+        if release["tag_name"] != tag or release.get("draft", False):
+            raise TransferError("API вернул другой тег или неопубликованный выпуск")
+        assets = [asset for asset in release["assets"] if asset["name"] == filename]
+        if len(assets) != 1:
+            raise TransferError("API не подтвердил единственный архив указанного имени")
+        asset = assets[0]
+        if (asset["browser_download_url"] != url or asset["state"] != "uploaded"
+                or type(asset["id"]) is not int or asset["id"] <= 0):
+            raise TransferError("API не подтвердил идентичность опубликованного архива")
+        return checked_url(f"{api_root}/assets/{asset['id']}")
+    except (ValueError, TypeError, KeyError) as error:
+        raise TransferError("некорректные метаданные выпуска GitHub") from error
+
+
 def fetch(url: str, expected: str, name: str, size: int | None = None, *,
           attempts: int = ATTEMPTS, sleep=time.sleep) -> Path:
     expected = expected.lower()
+    try:
+        url = checked_url(url)
+    except TransferError as error:
+        raise SystemExit(f"fetch_verified_tool: {error}") from error
     directory = storage_dir()
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / name
@@ -163,9 +251,11 @@ def fetch(url: str, expected: str, name: str, size: int | None = None, *,
             log(f"{target} не прошёл проверку, скачиваю заново")
         partial = partial_path(directory, name, expected)
         last_error: BaseException | None = None
+        transfer_url = url
+        api_attempted = False
         for attempt in range(1, attempts + 1):
             try:
-                transfer(url, partial, size)
+                transfer(transfer_url, partial, size)
                 actual = sha256_of(partial)
                 if actual != expected:
                     partial.unlink()
@@ -176,6 +266,18 @@ def fetch(url: str, expected: str, name: str, size: int | None = None, *,
                 last_error = error
                 log(f"попытка {attempt}/{attempts} не удалась: {error}")
                 if attempt < attempts:
+                    if (not api_attempted and isinstance(error, urllib.error.HTTPError)
+                            and error.code in (500, 502, 503, 504)):
+                        api_attempted = True
+                        try:
+                            alternative = github_asset_url(url)
+                            if alternative is not None:
+                                transfer_url = alternative
+                                log("следующая попытка загрузит тот же архив через GitHub Releases API")
+                        except (OSError, http.client.HTTPException, TransferError) as api_error:
+                            if isinstance(api_error, urllib.error.HTTPError):
+                                api_error.close()
+                            log(f"адрес того же архива через API не подтверждён: {api_error}")
                     sleep(BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS)) - 1])
         partial.unlink(missing_ok=True)
     raise SystemExit(f"fetch_verified_tool: не удалось получить проверенный {name} из {url}: {last_error}")

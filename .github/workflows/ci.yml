@@ -66,6 +66,8 @@ env:
   CARGO_TERM_COLOR: always
   # Предупреждения компиляции делают сборку и тесты красными, как и Clippy.
   CARGO_BUILD_WARNINGS: deny
+  # Та же версия, которую проверяет доверенный sccache-action; хеш фиксирует архив.
+  SCCACHE_VERSION: v0.18.0
 
 # Обязательные контексты ruleset — значения `name:` заданий `lint`
 # («Форматирование и Clippy»), `code` («Код и тесты»), `msrv` («Заявленная MSRV»)
@@ -239,10 +241,27 @@ jobs:
       - name: Проверить контракт MSRV, rustup и компилятора
         run: python3 .github/scripts/check_rust_toolchain.py
 
+      - name: Подготовить проверенный бинарник для доверенного sccache-action
+        if: runner.environment == 'github-hosted'
+        timeout-minutes: 3
+        env:
+          SCCACHE_SHA256: 45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
+          SCCACHE_SIZE: 9730540
+        run: |
+          name="sccache-$SCCACHE_VERSION-x86_64-unknown-linux-musl"
+          archive="$(python3 .github/scripts/fetch_verified_tool.py --name "$name.tar.gz" \
+            --sha256 "$SCCACHE_SHA256" --size "$SCCACHE_SIZE" \
+            --url "https://github.com/mozilla/sccache/releases/download/$SCCACHE_VERSION/$name.tar.gz")"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" "$name/sccache"
+          tool_dir="$RUNNER_TOOL_CACHE/sccache/${SCCACHE_VERSION#v}/x64"
+          mkdir -p "$tool_dir"
+          install -m 755 "$RUNNER_TEMP/$name/sccache" "$tool_dir/sccache"
+          touch "$tool_dir.complete"
+
       - name: Настроить sccache
         uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: v0.18.0
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Восстановить кэш Rust
         if: runner.environment == 'github-hosted'
@@ -460,10 +479,27 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
 
+      - name: Подготовить проверенный бинарник для доверенного sccache-action
+        if: runner.environment == 'github-hosted'
+        timeout-minutes: 3
+        env:
+          SCCACHE_SHA256: 45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
+          SCCACHE_SIZE: 9730540
+        run: |
+          name="sccache-$SCCACHE_VERSION-x86_64-unknown-linux-musl"
+          archive="$(python3 .github/scripts/fetch_verified_tool.py --name "$name.tar.gz" \
+            --sha256 "$SCCACHE_SHA256" --size "$SCCACHE_SIZE" \
+            --url "https://github.com/mozilla/sccache/releases/download/$SCCACHE_VERSION/$name.tar.gz")"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" "$name/sccache"
+          tool_dir="$RUNNER_TOOL_CACHE/sccache/${SCCACHE_VERSION#v}/x64"
+          mkdir -p "$tool_dir"
+          install -m 755 "$RUNNER_TEMP/$name/sccache" "$tool_dir/sccache"
+          touch "$tool_dir.complete"
+
       - name: Настроить sccache
         uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: v0.18.0
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Восстановить кэш Rust задания «Код и тесты»
         if: runner.environment == 'github-hosted'
