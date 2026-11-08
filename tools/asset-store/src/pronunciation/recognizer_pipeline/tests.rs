@@ -269,6 +269,82 @@ fn shift_saturates_at_zero() {
     assert_eq!(shift(span, 20), SampleSpan { start: 0, end: 30 });
 }
 
+fn occurrence_at(core: SampleSpan) -> Occurrence {
+    Occurrence {
+        index: 0,
+        phonemes: "n a m a".into(),
+        frames: (0, 0),
+        core,
+        start_uncertainty: SampleSpan {
+            start: core.start.saturating_sub(480),
+            end: core.start,
+        },
+        end_uncertainty: SampleSpan {
+            start: core.end,
+            end: core.end + 480,
+        },
+        score: 0.0,
+        score_per_token: 0.0,
+        free_phonemes: String::new(),
+        free_distance: 0,
+        best_competitor: None,
+        competitor_margin: None,
+        verifier_text: None,
+        verifier_distance: None,
+        snr_db: None,
+        evidence: recognizer::Evidence::Match,
+        reasons: Vec::new(),
+    }
+}
+
+#[test]
+fn derived_record_spans_return_to_source_scale() {
+    // Balanced срезал 0,1 с исходника 44,1 kHz и вывел 48 kHz: секунда вывода
+    // — это секунда исходника после среза.
+    let span = SampleSpan {
+        start: 48_000,
+        end: 96_000,
+    };
+    assert_eq!(
+        to_source(span, 4_410, 48_000, 44_100),
+        SampleSpan {
+            start: 48_510,
+            end: 92_610,
+        }
+    );
+    // Без среза и пересчёта шкала не меняется.
+    assert_eq!(to_source(span, 0, 48_000, 48_000), span);
+}
+
+#[test]
+fn fallback_matching_keeps_order_and_moves_every_span_to_source() {
+    let first = SampleSpan {
+        start: 9_600,
+        end: 19_200,
+    };
+    let second = SampleSpan {
+        start: 28_800,
+        end: 38_400,
+    };
+    let matching = Matching {
+        target_variants: vec!["n a m a".into()],
+        competitors: 0,
+        occurrences: vec![occurrence_at(first), occurrence_at(second)],
+    };
+    let moved = matching_on_source(matching.clone(), 1_600, 48_000, 16_000);
+    assert_eq!(moved.occurrences.len(), 2);
+    for (before, after) in matching.occurrences.iter().zip(&moved.occurrences) {
+        let expect = |s: SampleSpan| SampleSpan {
+            start: s.start / 3 + 1_600,
+            end: s.end / 3 + 1_600,
+        };
+        assert_eq!(after.core, expect(before.core));
+        assert_eq!(after.start_uncertainty, expect(before.start_uncertainty));
+        assert_eq!(after.end_uncertainty, expect(before.end_uncertainty));
+        assert_eq!(after.phonemes, before.phonemes);
+    }
+}
+
 #[test]
 fn single_target_is_accepted_and_post_validated_on_decoded_output() {
     let f = fixture();

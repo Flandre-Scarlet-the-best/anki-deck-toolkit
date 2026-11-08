@@ -810,6 +810,21 @@ pub fn stage_one(
         {
             let (pre2, p2, v2) = analyze_decoded(ctx, &after)?;
             if let Ok((m2, s2)) = match_decoded(ctx, &after, &pre2, &p2, v2.as_ref(), target) {
+                // Вхождения повторного анализа — в отсчётах улучшенной записи;
+                // в `matching` результата они переводятся на шкалу исходника,
+                // порядок и индексы сохраняются.
+                let lead_trim = enhanced
+                    .result
+                    .balanced
+                    .as_ref()
+                    .and_then(|b| b.plan.as_ref())
+                    .map_or(0, |p| p.leading.trim_frames);
+                let m2_on_source = matching_on_source(
+                    m2.clone(),
+                    lead_trim,
+                    after.timeline.sample_rate,
+                    decoded.timeline.sample_rate,
+                );
                 fallback.outcome_after = Some(s2.outcome);
                 fallback.pre_analysis = Some(pre2.clone());
                 fallback.matching = Some(m2.clone());
@@ -822,7 +837,7 @@ pub fn stage_one(
                     // Вся улучшенная запись — цель: кандидат — улучшенный файл
                     // без какой-либо обрезки, после повторной проверки.
                     let occurrence = s2.selected.and_then(|i| m2.occurrences.get(i).cloned());
-                    result.matching = Some(m2);
+                    result.matching = Some(m2_on_source);
                     result.selected_occurrence = s2.selected;
                     result.fallback = Some(fallback);
                     result.output = enhanced.result.output.clone();
@@ -862,6 +877,9 @@ pub fn stage_one(
                         pending: Some(RecognitionOutcome::TargetWhole),
                     });
                 }
+                // Выбор ниже индексирует вхождения повторного анализа: список
+                // кандидатов результата обязан быть тем же.
+                result.matching = Some(m2_on_source);
                 if matches!(s2.outcome, RecognitionOutcome::TargetExtracted) {
                     reasons.push(recognition_reason(
                         "target_found_only_after_enhancement",
@@ -969,6 +987,37 @@ fn expected_in_output(
         start: convert(shifted.start),
         end: convert(shifted.end),
     }
+}
+
+/// Обратное к `expected_in_output` для производной записи: кадры записи с
+/// частотой `out_rate`, из начала которой Balanced срезал `lead_trim` кадров
+/// исходника, → кадры исходника.
+fn to_source(span: SampleSpan, lead_trim: u64, out_rate: u32, source_rate: u32) -> SampleSpan {
+    let convert = |v: u64| {
+        let frames = u128::from(v) * u128::from(source_rate) / u128::from(out_rate.max(1));
+        u64::try_from(frames)
+            .unwrap_or(u64::MAX)
+            .saturating_add(lead_trim)
+    };
+    SampleSpan {
+        start: convert(span.start),
+        end: convert(span.end),
+    }
+}
+
+/// Вхождения анализа производной записи на шкале исходника.
+fn matching_on_source(
+    mut matching: Matching,
+    lead_trim: u64,
+    out_rate: u32,
+    source_rate: u32,
+) -> Matching {
+    for o in &mut matching.occurrences {
+        o.core = to_source(o.core, lead_trim, out_rate, source_rate);
+        o.start_uncertainty = to_source(o.start_uncertainty, lead_trim, out_rate, source_rate);
+        o.end_uncertainty = to_source(o.end_uncertainty, lead_trim, out_rate, source_rate);
+    }
+    matching
 }
 
 fn shift(span: SampleSpan, by: u64) -> SampleSpan {

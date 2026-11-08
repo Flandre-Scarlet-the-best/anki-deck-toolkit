@@ -614,3 +614,38 @@ fn eval_stops_on_backend_failure_instead_of_scoring_a_partial_set() {
     );
     assert!(!out.join("summary.json").exists());
 }
+
+#[test]
+fn eval_refuses_ambiguous_ids_and_invalid_word_intervals() {
+    let f = fixture();
+    let labels = labels(&f);
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&labels).unwrap()).unwrap();
+    type Mutation = fn(&mut serde_json::Value);
+    let broken: [(&str, Mutation); 4] = [
+        ("duplicate", |v| v["cases"][1]["id"] = "nama".into()),
+        ("empty", |v| v["cases"][0]["id"] = "".into()),
+        ("reversed", |v| {
+            v["cases"][0]["words"][0]["end_ms"] = 300.0.into();
+        }),
+        ("negative", |v| {
+            v["cases"][0]["words"][0]["start_ms"] = (-1.0).into();
+        }),
+    ];
+    for (name, mutate) in broken {
+        let mut value = original.clone();
+        mutate(&mut value);
+        fs::write(&labels, serde_json::to_vec(&value).unwrap()).unwrap();
+        let out = f.root.join(format!("eval-{name}"));
+        let args = eval_args(&f, &labels, &out);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let refused = cli(&f, &refs);
+        assert_eq!(refused.status.code(), Some(3), "{name}");
+        assert_eq!(
+            json(&refused)["error"]["code"],
+            "invalid_transition",
+            "{name}"
+        );
+        // Отказ до оценки: каталог отчёта не создаётся.
+        assert!(!out.exists(), "{name}");
+    }
+}

@@ -268,6 +268,9 @@ pub fn work_items(
         for entry in &manifest.entries {
             let via_path = entry.path.as_deref().and_then(|p| by_path.get(p).copied());
             let sha = match (entry.sha256.as_deref(), via_path) {
+                // Названный путь обязан найтись во входе: иначе запись
+                // не разрешается одним SHA другого файла.
+                _ if entry.path.is_some() && via_path.is_none() => None,
                 (Some(sha), Some(p)) if sha != p => None,
                 (Some(sha), _) if known.contains(sha) => Some(sha.to_string()),
                 (None, Some(p)) => Some(p.to_string()),
@@ -1680,6 +1683,32 @@ mod tests {
         let mut m = manifest();
         m.entries[1].sha256 = Some(sha('b'));
         let (_, unresolved) = work_items(&inventory(), Some(&m), Some(&sha('f')));
+        assert!(unresolved.contains(&"sei".to_string()));
+    }
+
+    #[test]
+    fn missing_path_is_unresolved_even_when_sha_is_known() {
+        let mut m = manifest();
+        m.entries[1].sha256 = Some(sha('a'));
+        m.entries[1].path = Some("нет-такого.mp3".into());
+        let (items, unresolved) = work_items(&inventory(), Some(&m), Some(&sha('f')));
+        assert!(unresolved.contains(&"sei".to_string()));
+        assert!(
+            items
+                .iter()
+                .filter_map(|i| i.target.as_ref())
+                .all(|t| t.reading != "せい")
+        );
+    }
+
+    #[test]
+    fn path_with_failed_inventory_is_unresolved_even_when_sha_is_known() {
+        let mut inv = inventory();
+        inv.entries[1].sha256 = None;
+        inv.entries[1].error = Some("unreadable".into());
+        let mut m = manifest();
+        m.entries[1].sha256 = Some(sha('a'));
+        let (_, unresolved) = work_items(&inv, Some(&m), Some(&sha('f')));
         assert!(unresolved.contains(&"sei".to_string()));
     }
 }

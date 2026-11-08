@@ -214,6 +214,33 @@ fn read_labels(path: &Path, protected: &BTreeSet<PathBuf>) -> Result<Labels, Ass
             "разметка: ожидается schema_version 1 и kind pronunciation_recognition_labels",
         ));
     }
+    // Метрики строятся прямо по записям: неоднозначный ключ или перевёрнутый
+    // интервал дали бы неверную оценку без ошибки.
+    let mut ids = BTreeSet::new();
+    for case in &labels.cases {
+        if case.id.is_empty() || !ids.insert(case.id.as_str()) {
+            return Err(AssetError::new(
+                ErrorCode::InvalidTransition,
+                format!("разметка: пустой или повторяющийся id записи «{}»", case.id),
+            ));
+        }
+        for (index, word) in case.words.iter().enumerate() {
+            let valid = word.start_ms.is_finite()
+                && word.end_ms.is_finite()
+                && word.start_ms >= 0.0
+                && word.end_ms > word.start_ms;
+            if !valid {
+                return Err(AssetError::new(
+                    ErrorCode::InvalidTransition,
+                    format!(
+                        "разметка: интервал слова {index} записи «{}» должен удовлетворять \
+                         0 <= start_ms < end_ms",
+                        case.id
+                    ),
+                ));
+            }
+        }
+    }
     Ok(labels)
 }
 
