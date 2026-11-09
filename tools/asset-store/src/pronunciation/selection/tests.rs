@@ -2890,3 +2890,63 @@ fn audio_review_of_replaced_candidate_keeps_state_savable() {
         link.candidates[0].candidate_id
     );
 }
+
+/// Повторный приём тех же байтов и повторная та же связь не меняют состояние:
+/// иначе новый номер ревизии обесценивал бы уже выгруженный обзор.
+#[test]
+fn repeated_intake_and_link_do_not_advance_revision() {
+    let (_workspace, store) = store();
+    let bytes = mp3(440);
+    let intake = |store: &AssetStore| {
+        intake_files(
+            store,
+            "sel",
+            vec![IntakeFile {
+                source_name: "nama.mp3".into(),
+                bytes: bytes.clone(),
+            }],
+            None,
+        )
+        .unwrap()
+    };
+    let first = intake(&store);
+    let sha = first.added[0].clone();
+    let revision = first.revision;
+    let again = intake(&store);
+    assert!(
+        again.added.is_empty(),
+        "повторный приём не добавляет исходник"
+    );
+    assert_eq!(again.already_present.len(), 1);
+    assert_eq!(
+        again.revision, revision,
+        "повторный приём не меняет ревизию"
+    );
+
+    let link = link_target(&store, "sel", &sha, "生", "なま", vec![], vec![]).unwrap();
+    let linked = load(&store, "sel").revision;
+    assert_eq!(linked, revision + 1, "новая связь меняет ревизию");
+    link_target(&store, "sel", &sha, "生", "なま", vec![], vec![]).unwrap();
+    assert_eq!(
+        load(&store, "sel").revision,
+        linked,
+        "повторная связь с теми же параметрами не меняет ревизию"
+    );
+
+    let changed = link_target(
+        &store,
+        "sel",
+        &sha,
+        "生",
+        "なま",
+        vec!["せい".into()],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(changed.generation, link.generation + 1);
+    assert_eq!(
+        load(&store, "sel").revision,
+        linked + 1,
+        "изменение контекста связи меняет ревизию"
+    );
+}

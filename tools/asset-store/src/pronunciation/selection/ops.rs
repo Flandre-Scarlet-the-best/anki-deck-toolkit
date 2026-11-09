@@ -82,6 +82,8 @@ pub struct IntakeReport {
     pub revision: u64,
 }
 
+/// Возвращает `true`, если состояние пакета изменилось: повторный приём тех же
+/// байтов с тем же происхождением не создаёт нового состояния.
 fn add_source(
     runtime: &SafeBatchRuntime,
     batch: &mut SelectionBatch,
@@ -89,21 +91,26 @@ fn add_source(
     origin: SourceOrigin,
     surface_hint: Option<&str>,
     report: &mut IntakeReport,
-) -> Result<(), AssetError> {
+) -> Result<bool, AssetError> {
     let sha = sha256_hex(bytes);
     if let Some(existing) = batch.sources.iter_mut().find(|s| s.sha256 == sha) {
+        let mut changed = false;
         if !existing.origins.contains(&origin) {
             existing.origins.push(origin);
+            changed = true;
         }
         match (&existing.surface_hint, surface_hint) {
-            (None, Some(hint)) => existing.surface_hint = Some(hint.into()),
+            (None, Some(hint)) => {
+                existing.surface_hint = Some(hint.into());
+                changed = true;
+            }
             (Some(current), Some(hint)) if current != hint => {
                 report.surface_hint_conflicts.push(sha.clone());
             }
             _ => {}
         }
         report.already_present.push(sha);
-        return Ok(());
+        return Ok(changed);
     }
     if batch.sources.len() >= MAX_SOURCES {
         return Err(invalid(format!(
@@ -122,7 +129,7 @@ fn add_source(
         free_analysis: None,
     });
     report.added.push(sha);
-    Ok(())
+    Ok(true)
 }
 
 /// Один вход приёма: прочитанный файл или отказ чтения, который не мешает
@@ -144,9 +151,12 @@ fn intake_inputs(
     hint: Option<&str>,
 ) -> Result<IntakeReport, AssetError> {
     let mut runtime = open(store.root(), batch_id)?;
-    let mut batch = runtime
-        .load::<SelectionBatch>()?
-        .unwrap_or_else(|| SelectionBatch::new(batch_id));
+    let stored = runtime.load::<SelectionBatch>()?;
+    // Новый пакет сохраняется всегда; существующий — только при изменении,
+    // иначе повторный приём на тот же каталог обесценивал бы готовый обзор.
+    let existed = stored.is_some();
+    let mut changed = false;
+    let mut batch = stored.unwrap_or_else(|| SelectionBatch::new(batch_id));
     let mut report = IntakeReport::default();
     for input in inputs {
         let (source_name, bytes) = match input {
@@ -179,18 +189,20 @@ fn intake_inputs(
         let origin = SourceOrigin::LocalFile {
             source_name: source_name.clone(),
         };
-        if let Err(error) = add_source(&runtime, &mut batch, &bytes, origin, hint, &mut report) {
-            if error.code == ErrorCode::InvalidTransition {
-                return Err(error);
-            }
-            report.rejected.push(IntakeRejection {
+        match add_source(&runtime, &mut batch, &bytes, origin, hint, &mut report) {
+            Ok(true) => changed = true,
+            Ok(false) => {}
+            Err(error) if error.code == ErrorCode::InvalidTransition => return Err(error),
+            Err(error) => report.rejected.push(IntakeRejection {
                 source_name,
                 code: error.code.as_str().into(),
                 message: error.message,
-            });
+            }),
         }
     }
-    save(&mut runtime, &mut batch)?;
+    if changed || !existed {
+        save(&mut runtime, &mut batch)?;
+    }
     report.sources = batch.sources.len();
     report.revision = batch.revision;
     Ok(report)
@@ -279,9 +291,10 @@ pub fn intake_forvo_batch(
         }
     }
     let mut runtime = open(store.root(), batch_id)?;
-    let mut batch = runtime
-        .load::<SelectionBatch>()?
-        .unwrap_or_else(|| SelectionBatch::new(batch_id));
+    let stored = runtime.load::<SelectionBatch>()?;
+    let existed = stored.is_some();
+    let mut changed = false;
+    let mut batch = stored.unwrap_or_else(|| SelectionBatch::new(batch_id));
     let mut report = IntakeReport::default();
     for (request, evidence, blob) in acquisitions {
         let bytes = forvo_runtime.read_blob_with_limit(&blob, MAX_AUDIO_BYTES)?;
@@ -291,7 +304,7 @@ pub fn intake_forvo_batch(
             plan_reading: request.reading.clone(),
             surface: Some(request.surface.clone()),
         };
-        if let Err(error) = add_source(
+        match add_source(
             &runtime,
             &mut batch,
             &bytes,
@@ -299,17 +312,19 @@ pub fn intake_forvo_batch(
             Some(&request.surface),
             &mut report,
         ) {
-            if error.code == ErrorCode::InvalidTransition {
-                return Err(error);
-            }
-            report.rejected.push(IntakeRejection {
+            Ok(true) => changed = true,
+            Ok(false) => {}
+            Err(error) if error.code == ErrorCode::InvalidTransition => return Err(error),
+            Err(error) => report.rejected.push(IntakeRejection {
                 source_name: format!("forvo:{}", request.surface),
                 code: error.code.as_str().into(),
                 message: error.message,
-            });
+            }),
         }
     }
-    save(&mut runtime, &mut batch)?;
+    if changed || !existed {
+        save(&mut runtime, &mut batch)?;
+    }
     report.sources = batch.sources.len();
     report.revision = batch.revision;
     Ok(report)
@@ -380,8 +395,12 @@ pub fn link_target(
         ));
     }
     let id = link_id(&source.sha256, &request.surface, &request.reading);
+    // Повторная связь с теми же параметрами не меняет состояние: иначе
+    // новый номер ревизии обесценивал бы уже готовый обзор.
+    let changed;
     let link = match batch.links.iter_mut().find(|l| l.link_id == id) {
         Some(existing) => {
+            let before = existing.clone();
             if existing.competing_readings != target.competing_readings
                 || existing.particle_morae != particle_morae
             {
@@ -397,9 +416,15 @@ pub fn link_target(
             }
             existing.competing_readings = target.competing_readings.clone();
             existing.particle_morae = particle_morae;
+            changed = *existing != before;
             existing.clone()
         }
         None => {
+            if batch.links.len() >= MAX_LINKS {
+                return Err(invalid(format!(
+                    "пакет выбора ограничен {MAX_LINKS} связями"
+                )));
+            }
             let link = TargetLink {
                 link_id: id.clone(),
                 source_sha256: source.sha256.clone(),
@@ -436,11 +461,14 @@ pub fn link_target(
                     },
                 }],
             };
+            changed = true;
             batch.links.push(link.clone());
             link
         }
     };
-    save(&mut runtime, &mut batch)?;
+    if changed {
+        save(&mut runtime, &mut batch)?;
+    }
     Ok(link)
 }
 
@@ -758,6 +786,7 @@ pub fn link_recognizer(
         ..LinkReport::default()
     };
     let mut missing = BTreeSet::new();
+    let mut rechanged = false;
     for (item, result) in &results {
         let WorkItem { sha256, path, .. } = item;
         if batch.source(sha256).is_none() {
@@ -771,13 +800,16 @@ pub fn link_recognizer(
                             "исходник входа распознавания изменился после инвентаризации",
                         ));
                     }
+                    // Имя проверяется так же, как при приёме: иначе негодное имя
+                    // отвергло бы сохранение всего пакета вместо одного исходника.
                     let name = Path::new(path)
                         .file_name()
                         .and_then(|n| n.to_str())
+                        .filter(|n| valid_text(n, 255) && !n.contains(['/', '\\']))
                         .unwrap_or("source.mp3")
                         .to_owned();
                     let mut intake = IntakeReport::default();
-                    add_source(
+                    let added = add_source(
                         &runtime,
                         &mut batch,
                         &bytes,
@@ -785,6 +817,7 @@ pub fn link_recognizer(
                         None,
                         &mut intake,
                     )?;
+                    rechanged |= added;
                     report.sources_intaken += intake.added.len();
                 }
                 None => {
@@ -807,8 +840,11 @@ pub fn link_recognizer(
                     .and_then(|p| p.verifier.as_ref().map(|v| v.raw_text.clone())),
                 outcome: result.outcome,
             };
-            if let Some(source) = batch.sources.iter_mut().find(|s| s.sha256 == *sha256) {
+            if let Some(source) = batch.sources.iter_mut().find(|s| s.sha256 == *sha256)
+                && source.free_analysis != Some(analysis.clone())
+            {
                 source.free_analysis = Some(analysis);
+                rechanged = true;
             }
             report.free_analyses += 1;
             continue;
@@ -841,6 +877,9 @@ pub fn link_recognizer(
                         .checked_add(1)
                         .ok_or_else(|| invalid("исчерпаны поколения связи"))?;
                 }
+                if *existing != link {
+                    rechanged = true;
+                }
                 *existing = link;
                 report.links_updated += 1;
             }
@@ -851,12 +890,17 @@ pub fn link_recognizer(
                     )));
                 }
                 batch.links.push(link);
+                rechanged = true;
                 report.links_created += 1;
             }
         }
     }
     report.missing_sources = missing.into_iter().collect();
-    save(&mut runtime, &mut batch)?;
+    // Повторный прогон того же пакета распознавания не меняет состояние и не
+    // обесценивает готовый обзор своим новым номером ревизии.
+    if rechanged {
+        save(&mut runtime, &mut batch)?;
+    }
     report.revision = batch.revision;
     Ok(report)
 }

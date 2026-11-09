@@ -248,7 +248,7 @@ fn decide(
             ),
             "e" => (
                 HumanBatchAction::RejectAndHold,
-                "unusable_image; требуется явный повтор".to_owned(),
+                "unusable_image; explicit retry required".to_owned(),
             ),
             other => {
                 let character = parse_kanji_character(other)
@@ -260,7 +260,7 @@ fn decide(
                 }
                 (
                     HumanBatchAction::RejectAndHold,
-                    format!("actual_character={character}; требуется явный повтор"),
+                    format!("actual_character={character}; explicit retry required"),
                 )
             }
         };

@@ -720,11 +720,28 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
         String::from_utf8_lossy(&started.stdout)
     );
 
-    // Защищённые данные не читаются даже как каталог исходников.
+    // Защищённые данные не читаются даже как каталог исходников: пригодный
+    // MP3 внутри `decks/` отвергается по границе, а не по пустому набору.
     fs::create_dir_all(f.root.join("decks")).unwrap();
+    fs::copy(f.input.join("生.mp3"), f.root.join("decks/生.mp3")).unwrap();
     fs::write(f.root.join("AGENTS.md"), b"").unwrap();
     let refused = selection(&f, &["intake", "--batch-id", "sel", "--dir", "decks"]);
     assert!(!refused.status.success());
+    assert_eq!(
+        json(&refused)["error"]["code"],
+        "boundary_violation",
+        "{}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        !f.state
+            .join(".runtime")
+            .join("batches")
+            .join("sel")
+            .join("state.json")
+            .exists(),
+        "отвергнутый приём не создаёт пакет"
+    );
 
     let intake = json(&selection(
         &f,

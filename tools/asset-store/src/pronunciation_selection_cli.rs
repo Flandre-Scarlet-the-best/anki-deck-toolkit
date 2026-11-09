@@ -246,7 +246,9 @@ pub(crate) fn execute(
                     )?;
                     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
                         .map_err(|e| AssetError::io("каталог исходников", e))?
-                        .filter_map(Result::ok)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| AssetError::io("чтение каталога исходников", e))?
+                        .into_iter()
                         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
                         .map(|e| e.path())
                         .filter(|p| {
@@ -344,18 +346,18 @@ pub(crate) fn execute(
             reason,
             expected_fingerprint,
         } => {
+            if !matches!(authority, AuthorityArg::UserViaAgent)
+                && (*user_listened || statement.is_some() || channel.is_some())
+            {
+                return Err(input_error(
+                    "--user-listened, --statement и --channel относятся только к ответу пользователя",
+                ));
+            }
             let authority = match authority {
-                AuthorityArg::AgentEvidence => {
-                    if *user_listened || statement.is_some() {
-                        return Err(input_error(
-                            "--user-listened и --statement относятся только к ответу пользователя",
-                        ));
-                    }
-                    DecisionAuthority::AgentEvidence {
-                        agent: agent_id.clone(),
-                        policy: AGENT_EVIDENCE_POLICY.into(),
-                    }
-                }
+                AuthorityArg::AgentEvidence => DecisionAuthority::AgentEvidence {
+                    agent: agent_id.clone(),
+                    policy: AGENT_EVIDENCE_POLICY.into(),
+                },
                 AuthorityArg::AgentAudio => DecisionAuthority::AgentAudioModel {
                     agent: agent_id.clone(),
                     audio_review_id: audio_review_id
@@ -382,11 +384,6 @@ pub(crate) fn execute(
                     }
                 }
             };
-            if !matches!(authority, DecisionAuthority::UserViaAgent { .. }) && *user_listened {
-                return Err(input_error(
-                    "--user-listened допустим только для user-via-agent",
-                ));
-            }
             let action = if *defer {
                 DecideAction::Defer
             } else {

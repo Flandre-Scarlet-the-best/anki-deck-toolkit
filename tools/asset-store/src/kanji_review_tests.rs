@@ -55,7 +55,7 @@ fn only_explicit_y_confirms_and_windows_text_is_accepted() {
             candidate_sha256: snapshot.rows[1].sha256.clone(),
             action: HumanBatchAction::RejectAndHold,
             reason: format!(
-                "review:{}; unusable_image; требуется явный повтор",
+                "review:{}; unusable_image; explicit retry required",
                 "b".repeat(64)
             ),
         })

@@ -18,7 +18,7 @@
 //! строке только с привязкой к её идентичности и точному SHA (`ReviewRow::validate`)
 //! и никогда не становятся решением: решение — только явная первая колонка.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -135,8 +135,13 @@ pub(crate) fn export<R: ReviewRow>(
     // Повторный export не перезаписывает уже заполненный файл редактора.
     match directory.read("snapshot.json") {
         Ok(existing) if existing == encoded => {
+            // Один файл может входить в несколько строк: проверяем копию один раз.
+            let mut checked: BTreeMap<&str, &str> = BTreeMap::new();
             for row in &snapshot.rows {
                 for (filename, sha256) in row.files() {
+                    if checked.insert(filename, sha256).is_some() {
+                        continue;
+                    }
                     match directory.read(filename) {
                         Ok(bytes) if sha256_hex(&bytes) == sha256 => {}
                         Ok(_) => return Err(invalid("копия файла review изменена")),
@@ -168,8 +173,13 @@ pub(crate) fn export<R: ReviewRow>(
         }
         Ok(_) => return Err(invalid("содержимое снимка review не совпадает с его SHA")),
         Err(error) if error.code == ErrorCode::MissingAssetFile => {
+            // Один файл может входить в несколько строк: копия пишется один раз.
+            let mut written: BTreeMap<&str, &str> = BTreeMap::new();
             for row in &snapshot.rows {
                 for (filename, sha256) in row.files() {
+                    if written.insert(filename, sha256).is_some() {
+                        continue;
+                    }
                     let bytes = read_candidate(row, filename)?;
                     if sha256_hex(&bytes) != sha256 {
                         return Err(invalid("исходный кандидат review изменён"));
