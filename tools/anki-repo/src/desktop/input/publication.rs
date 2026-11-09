@@ -742,48 +742,63 @@ fn stage_import(
             "Каталог нового job уже существует",
         ));
     }
-    let (source, _) = job.ensure_child("source").map_err(super::io_error)?;
-    let (_working, lock) = work::lock_export(&output, &stream.output_directory)
-        .map_err(ex)?
-        .ok_or_else(|| error("working_missing", "Рабочая копия отсутствует"))?;
-    let inventory = work::copy_export(&_working, &source, None).map_err(ex)?;
-    drop(lock);
-    let (sent, checked) = read_inventory(&source, identity.profile.clone()).map_err(ex)?;
-    if sent.revision() != permit.working_revision() || checked != inventory {
-        return Err(error(
-            "working_changed_since_plan",
-            "Рабочая копия изменилась во время копирования; импорт не отправлен",
-        ));
-    }
-    let ticket = json!({"approved":true,"action":"import","profile":port.profile(),
-        "profile_id":identity.profile.as_str(),"process":catalog["process"],"expires":expiry()?});
-    job.publish(
-        "request.json",
-        &serde_json::to_vec(&ticket).map_err(super::io_error)?,
-    )
-    .map_err(super::io_error)?;
-    let journal = ImportJournal {
-        job_id: id,
-        identity: identity.clone(),
-        profile: port.profile().to_owned(),
-        process: catalog["process"].as_str().unwrap_or_default().to_owned(),
-        output_directory: stream.output_directory.clone(),
-        working_revision: permit.working_revision().into(),
-        working_inventory: inventory,
-        checked_input_sequence: permit.source_sequence(),
-        checked_input_revision: checked_revision.into(),
-        base_sequence: permit.base_sequence(),
-        admission_started: false,
-        import_state: None,
-        import_error: None,
-        partial_changes_possible: None,
+    // До записи журнала импорт не отправлялся: при отказе job убирается из
+    // spool, чтобы повторы не копили брошенные копии B.
+    let staged = (|| -> Result<ImportJournal> {
+        let (source, _) = job.ensure_child("source").map_err(super::io_error)?;
+        let (_working, lock) = work::lock_export(&output, &stream.output_directory)
+            .map_err(ex)?
+            .ok_or_else(|| error("working_missing", "Рабочая копия отсутствует"))?;
+        let inventory = work::copy_export(&_working, &source, None).map_err(ex)?;
+        drop(lock);
+        let (sent, checked) = read_inventory(&source, identity.profile.clone()).map_err(ex)?;
+        if sent.revision() != permit.working_revision() || checked != inventory {
+            return Err(error(
+                "working_changed_since_plan",
+                "Рабочая копия изменилась во время копирования; импорт не отправлен",
+            ));
+        }
+        let ticket = json!({"approved":true,"action":"import","profile":port.profile(),
+            "profile_id":identity.profile.as_str(),"process":catalog["process"],"expires":expiry()?});
+        job.publish(
+            "request.json",
+            &serde_json::to_vec(&ticket).map_err(super::io_error)?,
+        )
+        .map_err(super::io_error)?;
+        let journal = ImportJournal {
+            job_id: id.clone(),
+            identity: identity.clone(),
+            profile: port.profile().to_owned(),
+            process: catalog["process"].as_str().unwrap_or_default().to_owned(),
+            output_directory: stream.output_directory.clone(),
+            working_revision: permit.working_revision().into(),
+            working_inventory: inventory,
+            checked_input_sequence: permit.source_sequence(),
+            checked_input_revision: checked_revision.into(),
+            base_sequence: permit.base_sequence(),
+            admission_started: false,
+            import_state: None,
+            import_error: None,
+            partial_changes_possible: None,
+        };
+        if journal.process.is_empty() {
+            return Err(external_error(
+                "invalid_export_catalog",
+                "Нет процесса Anki в каталоге",
+            ));
+        }
+        Ok(journal)
+    })();
+    let journal = match staged {
+        Ok(journal) => journal,
+        Err(e) => {
+            drop(job);
+            let _ = spool.remove_tree(&id);
+            return Err(e);
+        }
     };
-    if journal.process.is_empty() {
-        return Err(external_error(
-            "invalid_export_catalog",
-            "Нет процесса Anki в каталоге",
-        ));
-    }
+    // Исход записи журнала может остаться неизвестным: job после этой точки
+    // не удаляется, его судьбу решает сохранённый журнал.
     let area = store.work_area(true).map_err(ex)?.expect("создана");
     let dir = work::stream_dir(&area, &identity.key()).map_err(ex)?;
     work::save(&dir, PUBLISH, &journal).map_err(ex)?;

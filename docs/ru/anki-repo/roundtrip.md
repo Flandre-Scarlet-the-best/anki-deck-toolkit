@@ -24,7 +24,7 @@ anki-repo anki prepare-output --output '<каталог>' --apply
 anki-repo anki prepare-output --all --apply
 
 # 4. Правка рабочей копии штатными командами (edit/create/retire …)
-anki-repo edit decks/output/<каталог> --guid G --field Поле --set 'значение' --apply
+anki-repo edit decks/output/<каталог> --guid G --field Поле --expect 'было' --set 'стало' --apply
 
 # 5. План импорта без Anki и без записи, затем проверенный импорт
 anki-repo anki --profile 'Профиль' publish-output --output '<каталог>'

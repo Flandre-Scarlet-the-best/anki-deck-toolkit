@@ -128,11 +128,12 @@ pub(super) fn select(
         return state.streams.values().cloned().map(Ok).collect();
     }
     let mut seen = std::collections::BTreeSet::new();
+    // Обе формы одного имени (с префиксом и без) выбирают поток один раз.
     outputs
         .iter()
-        .filter(|name| seen.insert(name.as_str()))
+        .map(|name| name.strip_prefix("decks/output/").unwrap_or(name))
+        .filter(|name| seen.insert(*name))
         .map(|name| {
-            let name = name.strip_prefix("decks/output/").unwrap_or(name);
             state
                 .streams
                 .values()

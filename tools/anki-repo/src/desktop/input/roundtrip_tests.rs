@@ -955,7 +955,7 @@ fn pending_publication_blocks_preparation_and_profile_id_bound_journal_round_tri
     fs::write(&path, &bytes).unwrap();
     assert!(work::load::<ImportJournal>(&dir, PUBLISH).is_err());
     assert!(path.exists());
-    let _ = ProfileId::new(PROFILE).unwrap();
+    assert_eq!(journal.identity.profile, ProfileId::new(PROFILE).unwrap());
 }
 
 /// Пользовательские точки входа без Anki: план/применение/состояние и план импорта.
@@ -996,6 +996,15 @@ fn command_entry_points_report_per_deck_outcomes_without_anki() {
     let nothing = publication::plan(root, &prefixed);
     assert_eq!(nothing["decks"][0]["state"], "nothing_to_publish");
     assert_eq!(nothing["state"], "publish_plan");
+    // Обе формы одного каталога выбирают поток один раз.
+    let both = [prefixed[0].clone(), name.clone()];
+    assert_eq!(
+        publication::plan(root, &both)["decks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     fs::write(
         root.join("decks/output").join(&name).join("deck.json"),
         deck("agent"),
@@ -1375,4 +1384,41 @@ fn pending_export_job_blocks_import_before_and_after_fresh_export() {
     assert_eq!(port.submits.get(), 0);
     assert!(port.jobs().is_empty(), "spool не тронут");
     assert!(work_names(tmp.path(), &v1).is_empty());
+}
+
+#[test]
+fn foreign_journal_identity_is_refused_and_kept() {
+    let tmp = TempDir::new("orchestrate-foreign-journal");
+    let (mut store, v1, _) = edited(&tmp);
+    let mut foreign = journal(&store, &v1, None);
+    foreign.identity = crate::exchange::DeckIdentity::new(
+        ProfileId::new("other-profile").unwrap(),
+        v1.snapshot().identity().crowdanki_uuid.as_str(),
+    )
+    .unwrap();
+    let dir = work_dir(&store, &v1);
+    work::save(&dir, PUBLISH, &foreign).unwrap();
+    let port = Scripted::new(&tmp, &["unavailable"]);
+    let stream = stream(&store, &v1);
+    assert!(publication::apply_one(&port, &mut store, &catalog(), &stream, 1).is_err());
+    assert_eq!(
+        work::load::<ImportJournal>(&dir, PUBLISH).unwrap().unwrap(),
+        foreign
+    );
+    assert_eq!(port.submits.get(), 0);
+}
+
+#[test]
+fn refused_staging_before_journal_removes_spool_job() {
+    let tmp = TempDir::new("orchestrate-staging-cleanup");
+    let (mut store, v1, _) = edited(&tmp);
+    let mut broken = catalog();
+    broken["process"] = json!("");
+    let port = Scripted::new(&tmp, &["unavailable"]).fresh(Ok(export("v1", "fresh-1")));
+    let stream = stream(&store, &v1);
+    let refused = publication::apply_one(&port, &mut store, &broken, &stream, 1).unwrap_err();
+    assert_eq!(refused.details["reason"], "invalid_export_catalog");
+    assert!(port.jobs().is_empty(), "брошенная копия B убрана из spool");
+    assert!(work_names(tmp.path(), &v1).is_empty(), "журнал не создан");
+    assert_eq!(port.submits.get(), 0);
 }
