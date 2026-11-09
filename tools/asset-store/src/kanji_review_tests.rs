@@ -3,6 +3,7 @@ use super::*;
 fn snapshot() -> ReviewSnapshot {
     ReviewSnapshot {
         schema_version: SCHEMA,
+        batch_revision: None,
         batch_id: "review-test".into(),
         validator: crate::kanji_validator::KanjiImageValidator::validator_identity(),
         rows: ['保', '倉', '点', '門']

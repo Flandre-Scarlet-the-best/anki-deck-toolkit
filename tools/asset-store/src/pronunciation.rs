@@ -19,6 +19,7 @@ pub mod recognizer_batch;
 pub mod recognizer_eval;
 pub mod recognizer_pipeline;
 pub mod recognizer_report;
+pub mod selection;
 
 use std::io::Read;
 use std::path::Path;

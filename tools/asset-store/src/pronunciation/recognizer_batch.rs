@@ -805,6 +805,33 @@ impl ResultCache {
             storage_path: path.clone(),
         })?))
     }
+
+    /// Байты сохранённого варианта Balanced полной записи, если полная запись
+    /// выбирает именно его (`proposed_variant: processed`). Выбор исходника
+    /// отдельного файла не имеет: исходник остаётся во входе пакета.
+    pub fn full_record_bytes(
+        &self,
+        result: &RecognitionResult,
+    ) -> Result<Option<Vec<u8>>, AssetError> {
+        let Some(full) = &result.full_record else {
+            return Ok(None);
+        };
+        let Some(output) = &full.output else {
+            return Ok(None);
+        };
+        let Some(path) = &output.storage_path else {
+            return Ok(None);
+        };
+        if full.proposed_variant != Some(Variant::Processed)
+            || full.selected_sha256.as_deref() != Some(output.sha256.as_str())
+        {
+            return Ok(None);
+        }
+        Ok(Some(self.runtime.read_blob(&RuntimeBlobRef {
+            sha256: output.sha256.clone(),
+            storage_path: path.clone(),
+        })?))
+    }
 }
 
 /// Эмиссии через кэш: промахи считаются группами одним вызовом воркера.
