@@ -1146,3 +1146,89 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
     );
     assert_eq!(missing.status.code(), Some(2));
 }
+
+/// Отказ отдельного файла при `link --intake-missing` остаётся исходом этого
+/// файла: операция не падает, а остальные результаты связываются.
+#[test]
+fn link_intake_missing_keeps_single_file_refusal_inside_the_report() {
+    let f = fixture();
+    let targets = manifest(&f);
+    let mut start: Vec<String> = vec![
+        "--input".into(),
+        f.input.to_str().unwrap().into(),
+        "--targets".into(),
+        targets.to_str().unwrap().into(),
+        "--enhancer".into(),
+        "none".into(),
+    ];
+    start.extend(models_args(&f));
+    let refs: Vec<&str> = start.iter().map(String::as_str).collect();
+    let started = run(&f, "batch-start", &refs);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stdout)
+    );
+    // Пакет выбора уже существует, но исходников входа в нём нет: для `sel`
+    // принят только посторонний MP3.
+    let extra = f.root.join("extra");
+    fs::create_dir_all(&extra).unwrap();
+    ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=700:duration=0.4:sample_rate=44100",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+        ],
+        &extra.join("other.mp3"),
+    );
+    let warmup = json(&selection(
+        &f,
+        &[
+            "intake",
+            "--batch-id",
+            "sel",
+            "--dir",
+            extra.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(warmup["outcome"], "ok", "{warmup}");
+
+    // Файл входа перестаёт быть обычным файлом уже после инвентаризации.
+    fs::remove_file(f.input.join("silence.mp3")).unwrap();
+    fs::create_dir(f.input.join("silence.mp3")).unwrap();
+
+    let linked = selection(
+        &f,
+        &[
+            "link-recognizer",
+            "--batch-id",
+            "sel",
+            "--workspace",
+            f.workspace.to_str().unwrap(),
+            "--recognizer-batch",
+            "b1",
+            "--intake-missing",
+        ],
+    );
+    assert!(
+        linked.status.success(),
+        "отказ одного файла не отменяет операцию: {}",
+        String::from_utf8_lossy(&linked.stdout)
+    );
+    let linked = json(&linked);
+    assert_eq!(linked["outcome"], "ok", "{linked}");
+    let rejected = linked["result"]["sources_rejected"]
+        .as_array()
+        .unwrap_or_else(|| panic!("нет поля отказов: {linked}"));
+    assert_eq!(rejected.len(), 1, "{linked}");
+    assert_eq!(rejected[0]["code"], "source_not_regular", "{linked}");
+    assert!(
+        linked["result"]["links_created"].as_u64().unwrap() >= 1,
+        "остальные результаты связаны: {linked}"
+    );
+}

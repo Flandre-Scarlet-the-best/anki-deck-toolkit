@@ -893,6 +893,11 @@ pub fn link_recognizer(
                         read,
                         &mut report,
                     )?;
+                    // Отказ отдельного файла: исходника в пакете нет, поэтому
+                    // этот результат не связывается, а остальные обрабатываются.
+                    if batch.source(sha256).is_none() {
+                        continue;
+                    }
                 }
                 None => {
                     missing.insert(sha256.clone());
