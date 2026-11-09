@@ -160,7 +160,7 @@ fn consumer_names_include_reading_and_never_collide() {
     ));
     assert!(!policy.record_consumer_filename_matches(&sei.identity(), "本.mp3", "生_せい.mp3"));
     assert!(policy.proves_legacy_consumer_filename(&sei.identity(), "生.mp3"));
-    // Регистр и Unicode-форма не различают имена на Windows: ключ сравнения
+    // Имена, различающиеся только регистром или Unicode-формой: ключ сравнения
     // сворачивает их, и набор с такими парами отклоняется до выдачи.
     let upper = Pronunciation::new("ABC", "えー").unwrap();
     let lower = Pronunciation::new("abc", "えー").unwrap();

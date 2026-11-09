@@ -3034,14 +3034,6 @@ fn create_new_with(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // Пока файл пишется, другие процессы могут только читать его:
-        // ни удалить, ни переименовать, ни перезаписать.
-        const FILE_SHARE_READ: u32 = 0x0000_0001;
-        options.share_mode(FILE_SHARE_READ);
-    }
     let mut file = options.open(target)?;
     file.write_all(bytes)?;
     file.sync_all()
