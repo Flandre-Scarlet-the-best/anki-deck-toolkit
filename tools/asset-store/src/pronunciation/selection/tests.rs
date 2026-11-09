@@ -2950,3 +2950,39 @@ fn repeated_intake_and_link_do_not_advance_revision() {
         "изменение контекста связи меняет ревизию"
     );
 }
+
+/// Пустой список вхождений при `MultipleOccurrences` не доказывает консенсус:
+/// иначе Forvo-запись стала бы `agent_selectable` без фонетического свидетельства
+/// и автоматика записала бы выбор без экспертизы.
+#[test]
+fn empty_occurrences_do_not_produce_agent_selectable() {
+    let source = fake_source(3, "生", true);
+    let id = ops::link_id(&source.sha256, "生", "なま");
+    let mut link = whole_link(&source, "生", "なま", "なま");
+    link.recognition = Some(recognition(RecognitionOutcome::MultipleOccurrences));
+    link.occurrences.clear();
+    for candidate in &mut link.candidates {
+        candidate.occurrence = None;
+    }
+    assert_eq!(link.link_id, id);
+    let batch = batch_with(vec![source], vec![link]);
+    let recommendation = engine::recommend(&batch, "生", "なま");
+    assert_ne!(
+        recommendation.class,
+        SelectionClass::AgentSelectable,
+        "без вхождений нет консенсуса: {:?}",
+        recommendation.reasons
+    );
+    let (decisions, report) = ops::plan_auto_select(
+        &batch,
+        Some(&ops::AgentPolicy {
+            agent: "agent".into(),
+        }),
+    );
+    assert!(
+        decisions.is_empty(),
+        "автоматика не выбирает без свидетельств"
+    );
+    assert_eq!(report.selected_agent_evidence, 0);
+    assert_eq!(report.selected_agent_audio, 0);
+}

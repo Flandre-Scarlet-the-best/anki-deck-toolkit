@@ -215,6 +215,25 @@ impl<'a> SelectionIndex<'a> {
         link: &TargetLink,
         candidate: &PronunciationCandidate,
     ) -> Option<&'a AudioReview> {
+        self.review_for(link, candidate, false)
+    }
+
+    /// Последняя поддерживающая экспертиза точных байтов: только она даёт
+    /// агентское полномочие `agent_audio_model`.
+    pub(crate) fn supporting_review(
+        &self,
+        link: &TargetLink,
+        candidate: &PronunciationCandidate,
+    ) -> Option<&'a AudioReview> {
+        self.review_for(link, candidate, true)
+    }
+
+    fn review_for(
+        &self,
+        link: &TargetLink,
+        candidate: &PronunciationCandidate,
+        require_support: bool,
+    ) -> Option<&'a AudioReview> {
         let sha = candidate.addressed_sha(&link.source_sha256);
         self.reviews_by_candidate
             .get(candidate.candidate_id.as_str())?
@@ -225,6 +244,7 @@ impl<'a> SelectionIndex<'a> {
                     && review.surface == link.surface
                     && review.reading == link.reading
                     && review.link_generation == link.generation
+                    && (!require_support || review.verdict == AudioVerdict::Supports)
             })
             .copied()
     }
@@ -388,12 +408,15 @@ fn classify_by_outcome(
             proof_class(proof, forvo)
         }
         O::MultipleOccurrences => {
-            let all_consensus = link.occurrences.iter().all(|o| {
-                matches!(
-                    assess_occurrence(link, o).0,
-                    PhoneticProof::AsrConsensus | PhoneticProof::AsrToleratedDivergence
-                )
-            });
+            // Пустой список вхождений не доказывает консенсус: иначе Forvo-запись
+            // стала бы `agent_selectable` без фонетического свидетельства.
+            let all_consensus = !link.occurrences.is_empty()
+                && link.occurrences.iter().all(|o| {
+                    matches!(
+                        assess_occurrence(link, o).0,
+                        PhoneticProof::AsrConsensus | PhoneticProof::AsrToleratedDivergence
+                    )
+                });
             match candidate.kind {
                 K::OccurrenceInterval => {
                     reasons.push(ReasonCode::IntervalRequiresExtraction);

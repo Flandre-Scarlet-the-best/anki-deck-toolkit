@@ -1241,23 +1241,13 @@ pub(crate) fn plan_auto_select(
                 })
             }
             (SelectionClass::AgentSelectable, Some(best), Some(policy)) => {
-                let (link, candidate) = batch
+                let (link, candidate) = index
                     .find_candidate(&best.candidate_id)
                     .expect("рекомендация ссылается на кандидата пакета");
-                let sha = candidate.addressed_sha(&link.source_sha256);
                 let review = best
                     .reasons
                     .contains(&ReasonCode::AudioReviewSupports)
-                    .then(|| {
-                        batch.audio_reviews.iter().rev().find(|r| {
-                            r.candidate_id == best.candidate_id
-                                && r.audio_sha256 == sha
-                                && r.surface == link.surface
-                                && r.reading == link.reading
-                                && r.link_generation == link.generation
-                                && r.verdict == AudioVerdict::Supports
-                        })
-                    })
+                    .then(|| index.supporting_review(link, candidate))
                     .flatten();
                 Some(match review {
                     Some(review) => {
@@ -1281,7 +1271,7 @@ pub(crate) fn plan_auto_select(
         };
         match (authority, best) {
             (Some(authority), Some(best)) => {
-                let (link, candidate) = batch
+                let (link, candidate) = index
                     .find_candidate(&best.candidate_id)
                     .expect("рекомендация ссылается на кандидата пакета");
                 decisions.push(SelectionDecision {
@@ -1408,6 +1398,21 @@ pub(crate) fn validate_decision(
     action: &DecideAction,
     authority: &DecisionAuthority,
 ) -> Result<DecisionAction, AssetError> {
+    // Экспертиза, на которую ссылается полномочие, проверяется до записи для
+    // любого действия: иначе отказ приходит из `validate` как порча состояния.
+    if let DecisionAuthority::AgentAudioModel {
+        audio_review_id, ..
+    } = authority
+        && !batch
+            .audio_reviews
+            .iter()
+            .any(|review| &review.review_id == audio_review_id)
+    {
+        return Err(AssetError::new(
+            ErrorCode::InvalidValidationEvidence,
+            "аудиоэкспертиза с таким идентификатором отсутствует",
+        ));
+    }
     let resolve = |candidate_id: &str, expected: &str| {
         let assessment = recommendation
             .candidates

@@ -353,6 +353,11 @@ pub(crate) fn execute(
                     "--user-listened, --statement и --channel относятся только к ответу пользователя",
                 ));
             }
+            if !matches!(authority, AuthorityArg::AgentAudio) && audio_review_id.is_some() {
+                return Err(input_error(
+                    "--audio-review-id относится только к полномочию agent-audio",
+                ));
+            }
             let authority = match authority {
                 AuthorityArg::AgentEvidence => DecisionAuthority::AgentEvidence {
                     agent: agent_id.clone(),
