@@ -894,10 +894,14 @@ impl RuntimeBatchState for SelectionBatch {
         }
         let mut review_ids = BTreeSet::new();
         for review in &self.audio_reviews {
+            // Аудиоэкспертиза — журнал свидетельств: при новом результате
+            // распознавания кандидатов может уже не быть, а запись остаётся.
+            // Действительность экспертизы проверяет сопоставление с текущими
+            // кандидатами (`audio_review_for`), а не существование идентификатора.
             if !review_ids.insert(review.review_id.as_str())
                 || !valid_token(&review.review_id)
                 || !valid_sha(&review.audio_sha256)
-                || !candidate_ids.contains(review.candidate_id.as_str())
+                || !valid_token(&review.candidate_id)
             {
                 return Err(corrupt("некорректная аудиоэкспертиза"));
             }

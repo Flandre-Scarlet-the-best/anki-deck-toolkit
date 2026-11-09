@@ -469,7 +469,8 @@ pub(crate) fn execute(
         } => {
             let items = read_requests(requests, protected)?;
             let policy = trust_policy(*policy);
-            serde_json::json!({"assets": selection::read_selected(store.root(), batch_id, &items, policy)?})
+            // Метаданные просмотра не требуют удерживать байты набора в памяти.
+            serde_json::json!({"assets": selection::read_selected_info(store.root(), batch_id, &items, policy)?})
         }
         SelectionAction::Export {
             batch_id,

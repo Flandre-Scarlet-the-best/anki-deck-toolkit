@@ -111,7 +111,7 @@ fn proof_class(proof: PhoneticProof, forvo: bool) -> SelectionClass {
 /// исходникам и аудиоэкспертизам пакета: на корпусе из тысяч исходников это
 /// миллионы сравнений строк на одну команду. Порядок элементов пакета
 /// сохраняется, поэтому выбор кандидата не меняется.
-struct SelectionIndex<'a> {
+pub(crate) struct SelectionIndex<'a> {
     sources: BTreeMap<&'a str, &'a AudioSource>,
     links_by_surface: BTreeMap<&'a str, Vec<&'a TargetLink>>,
     links_by_source: BTreeMap<&'a str, Vec<&'a TargetLink>>,
@@ -120,7 +120,7 @@ struct SelectionIndex<'a> {
 }
 
 impl<'a> SelectionIndex<'a> {
-    fn new(batch: &'a SelectionBatch) -> Self {
+    pub(crate) fn new(batch: &'a SelectionBatch) -> Self {
         let mut sources: BTreeMap<&str, &AudioSource> = BTreeMap::new();
         for source in &batch.sources {
             // Первый исходник с этим SHA — как и последовательный поиск.
@@ -227,16 +227,8 @@ impl<'a> SelectionIndex<'a> {
     }
 }
 
-pub(crate) fn assess_candidate(
-    batch: &SelectionBatch,
-    link: &TargetLink,
-    candidate: &PronunciationCandidate,
-) -> CandidateAssessment {
-    assess_candidate_with(&SelectionIndex::new(batch), link, candidate)
-}
-
 /// Оценка кандидата по уже построенным индексам пакета.
-fn assess_candidate_with(
+pub(crate) fn assess_candidate_with(
     index: &SelectionIndex<'_>,
     link: &TargetLink,
     candidate: &PronunciationCandidate,
@@ -616,17 +608,29 @@ fn group_fingerprint(
 }
 
 /// Рекомендации всех целей пакета.
-pub(crate) fn recommend_all(
+/// Рекомендации всех целей по индексам, уже построенным вызывающим: индекс
+/// пакета не пересобирается на каждую цель и на каждую проверку решения.
+pub(crate) fn recommend_all_with_index(
+    index: &SelectionIndex<'_>,
     batch: &SelectionBatch,
 ) -> BTreeMap<(String, String), GroupRecommendation> {
-    let index = SelectionIndex::new(batch);
     let rejected = rejected_candidates(batch);
     batch
         .identities()
         .into_iter()
         .map(|(surface, reading)| {
-            let recommendation = recommend_with_index(&index, &rejected, &surface, &reading);
+            let recommendation = recommend_with_index(index, &rejected, &surface, &reading);
             ((surface, reading), recommendation)
         })
         .collect()
+}
+
+/// Рекомендация одной цели по индексам, уже построенным вызывающим.
+pub(crate) fn recommend_with(
+    index: &SelectionIndex<'_>,
+    batch: &SelectionBatch,
+    surface: &str,
+    reading: &str,
+) -> GroupRecommendation {
+    recommend_with_index(index, &rejected_candidates(batch), surface, reading)
 }

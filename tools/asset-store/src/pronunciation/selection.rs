@@ -27,9 +27,9 @@ pub use model::*;
 pub use ops::{
     AgentPolicy, AutoSelectReport, ConsumerTrustPolicy, DecideAction, DecideReport, DecideRequest,
     ExportedAudio, GroupFilter, IntakeFile, IntakeReport, LinkReport, PERCEPTION_NOTICE,
-    PromoteReport, SelectedAudio, auto_select, decide, export_selected, intake_files,
-    intake_forvo_batch, intake_paths, link_recognizer, link_target, promote, read_selected,
-    status_value,
+    PromoteReport, SelectedAudio, SelectedAudioInfo, auto_select, decide, export_selected,
+    intake_files, intake_forvo_batch, intake_paths, link_recognizer, link_target, promote,
+    read_selected, read_selected_info, status_value,
 };
 
 #[cfg(test)]

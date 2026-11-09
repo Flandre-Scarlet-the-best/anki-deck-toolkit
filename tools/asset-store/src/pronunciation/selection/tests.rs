@@ -454,7 +454,8 @@ fn each_reading_of_one_recording_is_a_separate_target_and_intervals_need_extract
         &[(1200.0, 1600.0), (2000.0, 2400.0)],
     );
     let batch = batch_with(vec![source], vec![sei, nama.clone()]);
-    let all = engine::recommend_all(&batch);
+    let index = engine::SelectionIndex::new(&batch);
+    let all = engine::recommend_all_with_index(&index, &batch);
     assert_eq!(all.len(), 2, "каждое чтение — отдельная цель");
     let nama_rec = &all[&("生".to_string(), "なま".to_string())];
     let interval = nama_rec
@@ -707,13 +708,15 @@ fn deterministic_authority_expires_when_only_agent_policy_remains() {
     let mut batch = batch_with(vec![source], vec![link]);
     let (decisions, _) = ops::plan_auto_select(&batch, None);
     assert_eq!(decisions.len(), 1);
-    assert!(ops::decision_is_effective(&batch, &decisions[0]));
+    let index = engine::SelectionIndex::new(&batch);
+    assert!(ops::decision_is_effective(&index, &batch, &decisions[0]));
     batch.links[0].occurrences[0].verifier_text = Some("じょう".into());
     assert_eq!(
         engine::recommend(&batch, "生", "しょう").class,
         SelectionClass::AgentSelectable
     );
-    assert!(!ops::decision_is_effective(&batch, &decisions[0]));
+    let index = engine::SelectionIndex::new(&batch);
+    assert!(!ops::decision_is_effective(&index, &batch, &decisions[0]));
 }
 
 #[test]
@@ -992,7 +995,7 @@ fn audio_is_staged_without_reading_or_deck_and_promoted_only_explicitly() {
     )
     .unwrap();
     assert_eq!(selected[0].bytes, bytes);
-    assert!(!selected[0].authority.human_listened());
+    assert!(!selected[0].info.authority.human_listened());
     // Строгий потребитель человеческого Verified ничего не получает.
     assert!(read_trusted(store.root(), &requests).is_err());
 
@@ -1248,8 +1251,8 @@ fn agent_selected_audio_needs_explicit_consumer_policy_and_stays_out_of_verified
     )
     .unwrap();
     assert_eq!(selected[0].bytes, processed);
-    assert_eq!(selected[0].kind, CandidateKind::ProcessedWhole);
-    assert_eq!(selected[0].proof, PhoneticProof::AsrConsensus);
+    assert_eq!(selected[0].info.kind, CandidateKind::ProcessedWhole);
+    assert_eq!(selected[0].info.proof, PhoneticProof::AsrConsensus);
     assert!(read_trusted(store.root(), &requests).is_err());
     // Производный фрагмент в канонический домен не переносится.
     assert_eq!(
@@ -1757,7 +1760,8 @@ fn forvo_batch_sources_keep_plan_reading_as_hint_and_promote_with_forvo_evidence
         SourceOrigin::ForvoBatch { plan_reading, .. } if plan_reading == "なま"
     ));
     // Чтение плана — подсказка: без связи целей нет.
-    assert_eq!(engine::recommend_all(&batch).len(), 0);
+    let index = engine::SelectionIndex::new(&batch);
+    assert_eq!(engine::recommend_all_with_index(&index, &batch).len(), 0);
     let link = link_target(&store, "sel", &sha, "生", "なま", vec![], vec![]).unwrap();
     decide(
         &store,
@@ -1817,13 +1821,13 @@ fn forvo_batch_sources_keep_plan_reading_as_hint_and_promote_with_forvo_evidence
         ConsumerTrustPolicy::HumanDecision,
     )
     .unwrap();
-    assert_eq!(seiselected[0].sha256, sha);
+    assert_eq!(seiselected[0].info.sha256, sha);
     assert!(
-        seiselected[0].authority.is_user(),
+        seiselected[0].info.authority.is_user(),
         "второе чтение имеет собственное решение пользователя"
     );
     assert!(
-        !seiselected[0].authority.human_listened(),
+        !seiselected[0].info.authority.human_listened(),
         "про второе чтение пользователь прослушивание не заявлял"
     );
 }
@@ -2633,7 +2637,8 @@ fn invalid_audio_review_does_not_authorize_selection_or_block_other_targets() {
             .reasons
             .contains(&ReasonCode::AudioReviewInvalidProvenance)
     }));
-    let view = serde_json::to_value(ops::group_view(&batch, &recommendation)).unwrap();
+    let index = engine::SelectionIndex::new(&batch);
+    let view = serde_json::to_value(ops::group_view(&index, &batch, &recommendation)).unwrap();
     assert_eq!(view["audio_reviews"][0]["backend"], "other-backend");
     let (decisions, report) = ops::plan_auto_select(
         &batch,
@@ -2745,5 +2750,143 @@ fn system_recording_time_is_explicit_and_legacy_decisions_deserialize() {
             .unwrap()
             .recorded_at_unix_ms,
         None
+    );
+}
+
+/// Идентичность кандидата — связь, вид, точные байты и интервал, а не
+/// вхождение: приход ASR-свидетельства без изменения контекста не отменяет
+/// точное решение пользователя.
+#[test]
+fn user_selection_survives_asr_arrival_without_context_change() {
+    let (_workspace, store) = store();
+    let bytes = mp3(440);
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "nama.mp3".into(),
+            bytes: bytes.clone(),
+        }],
+        None,
+    )
+    .unwrap();
+    let sha = intake.added[0].clone();
+    let link = link_target(&store, "sel", &sha, "生", "なま", vec![], vec![]).unwrap();
+    decide(
+        &store,
+        "sel",
+        DecideRequest {
+            surface: "生".into(),
+            reading: "なま".into(),
+            action: DecideAction::Select {
+                candidate_id: link.candidates[0].candidate_id.clone(),
+                expected_sha256: sha.clone(),
+            },
+            authority: user("я прослушал, это なま", true),
+            reason: "ответ пользователя".into(),
+            expected_fingerprint: None,
+        },
+    )
+    .unwrap();
+    let requests = [Pronunciation::new("生", "なま").unwrap()];
+    assert_eq!(
+        read_selected(
+            store.root(),
+            "sel",
+            &requests,
+            ConsumerTrustPolicy::HumanDecision
+        )
+        .unwrap()[0]
+            .bytes,
+        bytes
+    );
+
+    // Тот же исходник получает результат распознавания: связь заменяется новой,
+    // у исходного кандидата появляется выбранное вхождение.
+    let rebuilt = {
+        let workspace = TempWorkspace::create("selection-asr-arrival").unwrap();
+        let cache =
+            crate::pronunciation::recognizer_batch::ResultCache::open(workspace.path()).unwrap();
+        let mut runtime = SafeBatchRuntime::open(store.root(), "sel").unwrap();
+        let loaded: SelectionBatch = runtime.load().unwrap().unwrap();
+        let source = loaded.source(&sha).expect("исходник принят").clone();
+        let result = recognition_result(
+            RecognitionOutcome::TargetWhole,
+            vec![recognizer_occurrence(0, Evidence::Match, (4410, 8820))],
+        );
+        let mut rebuilt =
+            ops::build_link_for_test(&runtime, &cache, "rb", &source, &result).unwrap();
+        rebuilt.generation = link.generation;
+        rebuilt
+    };
+    assert_eq!(
+        rebuilt.candidates[0].candidate_id, link.candidates[0].candidate_id,
+        "точные байты сохраняют идентичность"
+    );
+    mutate(&store, "sel", |batch, _| {
+        let existing = batch
+            .links
+            .iter_mut()
+            .find(|l| l.link_id == link.link_id)
+            .expect("связь на месте");
+        *existing = rebuilt;
+    });
+
+    assert_eq!(
+        read_selected(
+            store.root(),
+            "sel",
+            &requests,
+            ConsumerTrustPolicy::HumanDecision
+        )
+        .expect("решение пользователя действует после прихода ASR")[0]
+            .bytes,
+        bytes
+    );
+}
+
+/// Аудиоэкспертиза — журнал свидетельств: когда новый результат распознавания
+/// убирает кандидата, запись журнала остаётся, а состояние пакета сохраняемо.
+#[test]
+fn audio_review_of_replaced_candidate_keeps_state_savable() {
+    let (_workspace, store) = store();
+    let bytes = mp3(440);
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "nama.mp3".into(),
+            bytes: bytes.clone(),
+        }],
+        None,
+    )
+    .unwrap();
+    let sha = intake.added[0].clone();
+    let link = link_target(&store, "sel", &sha, "生", "なま", vec![], vec![]).unwrap();
+    mutate(&store, "sel", |batch, _| {
+        let mut review = audio_review(&link.candidates[0], &sha, AudioVerdict::Supports);
+        review.surface = "生".into();
+        review.reading = "なま".into();
+        batch.audio_reviews.push(review);
+    });
+    mutate(&store, "sel", |batch, _| {
+        let mut replacement = link.candidates[0].clone();
+        replacement.candidate_id = "c-other-bytes".into();
+        let existing = batch
+            .links
+            .iter_mut()
+            .find(|l| l.link_id == link.link_id)
+            .expect("связь на месте");
+        existing.candidates = vec![replacement];
+    });
+    let batch = load(&store, "sel");
+    assert_eq!(
+        batch.audio_reviews.len(),
+        1,
+        "журнал свидетельств сохраняется при смене кандидатов"
+    );
+    assert_eq!(
+        batch.audio_reviews[0].candidate_id,
+        link.candidates[0].candidate_id
     );
 }

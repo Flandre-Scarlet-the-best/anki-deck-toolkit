@@ -15,7 +15,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::engine;
+use super::engine::{self, SelectionIndex};
 use super::model::*;
 use super::ops::{
     DecideAction, GroupFilter, candidate_bytes, group_view, recorded_at, validate_decision,
@@ -160,10 +160,18 @@ fn rows_for(
     page: usize,
     page_size: usize,
 ) -> Result<(Vec<AudioReviewRow>, usize), AssetError> {
-    let recommendations = engine::recommend_all(batch);
+    let index = SelectionIndex::new(batch);
+    let recommendations = engine::recommend_all_with_index(&index, batch);
     let selected: Vec<&GroupRecommendation> = recommendations
         .values()
-        .filter(|r| filter.accepts(batch, r, batch.current_decision(&r.surface, &r.reading)))
+        .filter(|r| {
+            filter.accepts(
+                &index,
+                batch,
+                r,
+                batch.current_decision(&r.surface, &r.reading),
+            )
+        })
         .collect();
     let matched = selected.len();
     let mut rows = Vec::new();
@@ -195,7 +203,7 @@ fn rows_for(
                 file_sha256: file_sha,
             });
         }
-        let view = group_view(batch, recommendation);
+        let view = group_view(&index, batch, recommendation);
         let display = serde_json::to_value(&view).map_err(|e| invalid(e.to_string()))?;
         rows.push(AudioReviewRow {
             identity: Pronunciation::new(&recommendation.surface, &recommendation.reading)?
@@ -382,10 +390,11 @@ pub fn apply(
         base
     });
     let base = base_on_replay.as_ref().unwrap_or(&batch);
+    let index = SelectionIndex::new(base);
     let mut report = ApplyReport::default();
     let mut decisions = Vec::new();
     for (row, cell) in snapshot.rows.iter().zip(cells) {
-        let recommendation = engine::recommend(base, &row.surface, &row.reading);
+        let recommendation = engine::recommend_with(&index, base, &row.surface, &row.reading);
         if recommendation.fingerprint != row.fingerprint {
             return Err(invalid(format!(
                 "{}: обзор устарел: кандидаты, свидетельства или экспертизы цели изменились",
