@@ -670,6 +670,16 @@ fn working_change_after_readback_records_observed_c_without_publication() {
     );
     assert_eq!(fs::read(path.join("deck.json")).unwrap(), deck("agent V2b"));
     audit_consistent(&store, &key);
+    drop(state);
+
+    // Повтор того же readback (сбой до удаления журнала) не выдаёт новую ревизию.
+    let sequence = stream(&store, &v1).current.source_sequence;
+    work::save(&dir, PUBLISH, &journal).unwrap();
+    let again = publication::conclude(&store, &dir, &journal, &readback, &sent).unwrap();
+    assert_eq!(again["state"], "import_applied_unconfirmed", "{again}");
+    assert_eq!(again["source_sequence"], sequence);
+    assert_eq!(stream(&store, &v1).current.source_sequence, sequence);
+    audit_consistent(&store, &key);
 }
 
 #[test]
@@ -1343,9 +1353,7 @@ fn proven_unsubmitted_import_closes_journal_and_ticket() {
     let result = publish_with(&mut store, &v1, &port, &catalog());
     assert_eq!(result["state"], "import_not_submitted", "{result}");
     assert_eq!(port.submits.get(), 1);
-    let jobs = port.jobs();
-    assert_eq!(jobs.len(), 1);
-    assert!(!jobs[0].join("request.json").exists(), "билет отозван");
+    assert!(port.jobs().is_empty(), "билет и копия B убраны из spool");
     assert!(work_names(tmp.path(), &v1).is_empty());
 
     // Незавершённая подготовка блокирует импорт до prepare-output.

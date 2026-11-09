@@ -669,10 +669,15 @@ pub(super) fn apply_one(
             return Ok(value);
         }
         Progress::NotSubmitted(detail) => {
+            // Доказанно неотправленный импорт: отзывается билет, а после
+            // закрытия журнала убирается и вся копия B, как в jobs::discard_unsubmitted.
             if let Ok(job) = spool_job(port, &journal.job_id) {
                 let _ = job.remove_file("request.json");
             }
             dir.remove_file(PUBLISH).map_err(ex)?;
+            if let Ok(spool) = port.spool() {
+                let _ = spool.remove_tree(&journal.job_id);
+            }
             value["state"] = json!("import_not_submitted");
             value["reason"] = json!("import_not_submitted");
             value["detail"] = json!(detail);

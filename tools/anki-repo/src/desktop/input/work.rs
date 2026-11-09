@@ -88,16 +88,7 @@ pub(super) fn stream_dir(area: &Directory, key: &str) -> Result<Directory> {
 }
 
 fn is_journal_temporary(name: &str) -> bool {
-    [PREPARE, PUBLISH].iter().any(|target| {
-        name.strip_prefix(&format!(".{target}.tmp-"))
-            .is_some_and(|suffix| {
-                let parts: Vec<_> = suffix.split('-').collect();
-                parts.len() == 3
-                    && parts
-                        .iter()
-                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-            })
-    })
+    super::publish::is_temporary(name, &[PREPARE, PUBLISH])
 }
 
 /// Потоковое чтение полного экспорта без advisory-блокировки: вызывающий

@@ -427,10 +427,11 @@ impl Store {
         if new_stream {
             self.checkpoint("created")?;
         }
-        if publication.is_none()
-            && previous
-                .as_ref()
-                .is_some_and(|p| p.snapshot == *snapshot && p.evidence == export.evidence())
+        // Повтор того же задания (в том числе readback после неизвестного итога)
+        // не выдаёт новую ревизию тем же байтам.
+        if previous
+            .as_ref()
+            .is_some_and(|p| p.snapshot == *snapshot && p.evidence == export.evidence())
         {
             let receipt = read_transaction(&dir, "receipt.json")?;
             if receipt.snapshot != *snapshot
@@ -448,12 +449,20 @@ impl Store {
                 .child("current")?
                 .ok_or_else(|| corrupt("нет current"))?;
             verify_generation(&current, &receipt)?;
-            return Ok(
-                json!({"state":"published","name":snapshot.name(),"identity":snapshot.identity(),
+            let mut outcome = json!({"state":"published","name":snapshot.name(),"identity":snapshot.identity(),
                 "revision":snapshot.revision(),"source_sequence":receipt.sequence,"evidence":receipt.evidence,
                 "content_changed":false,"files_changed":false,"recovered":true,"inventory":receipt.inventory,
-                "input_directory":format!("decks/input/{key}/current")}),
-            );
+                "input_directory":format!("decks/input/{key}/current")});
+            if let Some(publication) = &publication {
+                // Истину о подтверждении даёт сохранённый published, как в `record`.
+                let confirmed = state.streams[&key].published.as_ref().is_some_and(|p| {
+                    p.confirmed_sequence == receipt.sequence
+                        && p.evidence == receipt.evidence
+                        && p.working_revision == publication.working_revision
+                });
+                outcome["publication_confirmed"] = json!(confirmed);
+            }
+            return Ok(outcome);
         }
         let sequence = previous
             .as_ref()
@@ -965,7 +974,7 @@ fn read_transaction(dir: &Directory, name: &str) -> Result<Transaction> {
     Ok(envelope.transaction)
 }
 
-fn is_temporary(name: &str, targets: &[&str]) -> bool {
+pub(super) fn is_temporary(name: &str, targets: &[&str]) -> bool {
     targets.iter().any(|target| {
         name.strip_prefix(&format!(".{target}.tmp-"))
             .is_some_and(|suffix| {

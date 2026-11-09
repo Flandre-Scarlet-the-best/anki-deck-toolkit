@@ -111,40 +111,14 @@ impl Directory {
     }
 
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
-        plain_filename(name)?;
-        let mut file: File = openat(
-            &self.0,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(|e| ExchangeError::UnsafePath(format!("файл {name:?}: {e}")))?
-        .into();
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > MAX_FILE_BYTES {
-            return Err(ExchangeError::UnsafePath(format!(
-                "не обычный единственный файл или превышен лимит: {name}"
-            )));
-        }
+        let (file, before) = self.open_regular(name)?;
         let mut bytes = Vec::new();
-        (&mut file)
-            .take(MAX_FILE_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+        (&file).take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(ExchangeError::UnsafePath("файл вырос сверх лимита".into()));
         }
-        let after = file.metadata()?;
-        let linked = fs::symlink_metadata(self.fd_path().join(name))?;
-        if metadata.dev() != linked.dev()
-            || metadata.ino() != linked.ino()
-            || metadata.len() != after.len()
-            || metadata.mtime_nsec() != after.mtime_nsec()
-            || metadata.mtime() != after.mtime()
-            || metadata.ctime_nsec() != after.ctime_nsec()
-            || metadata.ctime() != after.ctime()
-            || after.nlink() != 1
-            || bytes.len() as u64 != after.len()
-        {
+        self.unchanged_after(name, &before, &file)?;
+        if bytes.len() as u64 != before.len() {
             return Err(ExchangeError::UnsafePath(
                 "файл изменился при чтении".into(),
             ));
