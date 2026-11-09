@@ -53,7 +53,11 @@ AnkiConnect и оригинальный CrowdAnki. Её контракт — `do
 официальных пакетов AnkiWeb. Единственный доверенный путь Anki → `decks/input/`
 принадлежит закрытому владельцу `desktop::input`, командам `anki sync-input` и
 `anki input-status`; его контракт — `docs/ru/anki-repo/input-export.md`.
-Обычным командам это доступа к закрытой области не даёт.
+Обычным командам это доступа к закрытой области не даёт. Тот же владелец ведёт
+явный цикл `anki prepare-output` (подготовка `decks/output/` по решению exchange),
+`anki publish-output` (импорт рабочей копии через оригинальный CrowdAnki с
+подтверждённым readback) и `anki exchange-status`; его контракт —
+`docs/ru/anki-repo/roundtrip.md`.
 
 Мутирующих команд в наборе инструментов четыре, и каждая работает по тем же правилам
 (режим без записи по умолчанию, запись только по явному `--apply`, канонический `deck.json`,

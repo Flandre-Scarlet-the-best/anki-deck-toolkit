@@ -136,6 +136,7 @@ fn prepare_intent(store: &Store, export: &VerifiedExport) -> (Directory, Transac
         previous,
         unchanged: false,
         files_changed: None,
+        publication: None,
     };
     dir.publish("transaction.json", &encode_transaction(&tx).unwrap())
         .unwrap();
@@ -752,6 +753,7 @@ fn legacy_intent_keeps_checksum_but_cannot_confirm_inventory_of_other_bytes() {
         previous: Some(previous),
         unchanged: true,
         files_changed: None,
+        publication: None,
     };
     dir.publish("transaction.json", &encode_transaction(&tx).unwrap())
         .unwrap();

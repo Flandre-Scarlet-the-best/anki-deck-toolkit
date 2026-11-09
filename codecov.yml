@@ -1,0 +1,6 @@
+# Только исключение файлов сценариев E2E: они исполняются в opt-in Docker-стенде
+# anki-e2e и не запускаются cargo test. Статусы и пороги Codecov не меняются.
+# Тот же список — sonar.coverage.exclusions в sonar-project.properties.
+ignore:
+  - "tools/anki-e2e/src/**/*scenarios.rs"
+  - "tools/anki-e2e/src/agent/scenarios/**"

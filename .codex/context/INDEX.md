@@ -21,6 +21,7 @@
 | `docs/ru/anki-repo/exchange.md` | библиотечный `anki_repo::exchange`: идентичности, ревизии, A/C/B, доверенный программный обмен |
 | `docs/ru/anki-repo/desktop.md` | `anki_repo::desktop` и группа `anki`: выбор Anki, диагностика, native setup, bootstrap, реальные CrowdAnki actions, backup и перезапуск |
 | `docs/ru/anki-repo/input-export.md` | Доверенный Anki → input: живой export, привязка профиля, durable-публикация, recovery, подтверждение C и диагностика без содержимого карточек |
+| `docs/ru/anki-repo/roundtrip.md` | Управляемый цикл input ↔ output ↔ Anki: подготовка output по решениям exchange, проверенный импорт CrowdAnki, readback, журналы и восстановление |
 | `docs/ru/anki-e2e/README.md` | локальный opt-in E2E-стенд Anki Desktop в изолированном Docker-контейнере: политика выбора релиза Anki, сценарии, каталог окон и уведомлений, отчёт, cleanup; не входит в CI и `cargo test` |
 | `docs/ru/performance/README.md` | методика замеров производительности и потребления ресурсов, где живёт история (локально и в PR) и указатель страниц модулей с последним подтверждённым снимком (`docs/ru/<модуль>/performance.md`); значения — свидетельства окружения, а не контракт и не порог CI |
 | `docs/ru/performance/benchmarks.md` | каталог сценариев бенчмаркинга `benchmarks/` и контракт результатов: регистрация сценария нового модуля, поля, профили и состояние кэша, жизненный цикл и граница измерения, scope метрик, отсутствующие значения, импорт Hyperfine 2.0, эволюция схемы |

@@ -280,6 +280,25 @@ fn every_export_directory_command_refuses_the_closed_input_area() {
     let cases: Vec<Vec<&str>> = vec![
         vec!["anki", "sync-input", "--repository", &path, "--all"],
         vec!["anki", "input-status", "--repository", &path],
+        vec!["anki", "exchange-status", "--repository", &path],
+        vec!["anki", "prepare-output", "--repository", &path, "--all"],
+        vec![
+            "anki",
+            "publish-output",
+            "--repository",
+            &path,
+            "--output",
+            "o",
+        ],
+        vec![
+            "anki",
+            "publish-output",
+            "--repository",
+            &path,
+            "--output",
+            "o",
+            "--apply",
+        ],
         vec!["inspect", &path],
         vec!["stats", &path],
         vec!["validate", &path],
@@ -470,4 +489,46 @@ fn a_repository_without_the_legacy_area_reports_it_without_failing() {
             .iter()
             .any(|diagnostic| diagnostic["code"] == "legacy_area_absent")
     );
+}
+
+#[test]
+fn exchange_cycle_commands_without_trusted_state_fail_closed_and_write_nothing() {
+    let repo = Repo::new("exchange-cycle-empty");
+    let root = repo.root().display().to_string();
+    for args in [
+        vec!["anki", "exchange-status", "--repository", &root],
+        vec!["anki", "prepare-output", "--repository", &root, "--all"],
+        vec![
+            "anki",
+            "prepare-output",
+            "--repository",
+            &root,
+            "--all",
+            "--apply",
+        ],
+        vec![
+            "anki",
+            "publish-output",
+            "--repository",
+            &root,
+            "--output",
+            "x",
+        ],
+    ] {
+        let mut args = args;
+        args.push("--json");
+        let (code, stdout, stderr) = run_cli(&args);
+        assert_eq!(code, 6, "{args:?}: {stderr}");
+        let value = parse_json(&stdout);
+        assert_eq!(value["result"]["state"], "failed", "{args:?}");
+        // Без доверенного состояния ни input, ни exchange, ни рабочая область не создаются.
+        let names: Vec<_> = fs::read_dir(repo.path("decks"))
+            .expect("decks")
+            .map(|e| e.expect("запись").file_name())
+            .collect();
+        assert!(names.is_empty(), "{args:?}: {names:?}");
+    }
+    // Выбор без --output/--all отвергается разбором аргументов.
+    let (code, _, _) = run_cli(&["anki", "prepare-output", "--repository", &root]);
+    assert_eq!(code, 2);
 }

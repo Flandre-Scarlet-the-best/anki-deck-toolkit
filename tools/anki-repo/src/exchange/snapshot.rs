@@ -59,6 +59,16 @@ impl Snapshot {
         Self::read_directory(profile, &directory)
     }
 
+    /// Потоковый вариант доверенного адаптера: media уже прочитаны с проверкой
+    /// SHA-256 по одному файлу, без удержания всех байтов в памяти.
+    pub(crate) fn from_media_hashes(
+        profile: ProfileId,
+        deck_json: &[u8],
+        media: BTreeMap<String, String>,
+    ) -> Result<Self> {
+        Self::from_hashes(profile, deck_json, media)
+    }
+
     pub(super) fn read_directory(
         profile: ProfileId,
         directory: &super::filesystem::Directory,

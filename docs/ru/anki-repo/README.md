@@ -15,7 +15,10 @@
 [`anki sync-input`](input-export.md) соединяет оригинальный CrowdAnki exporter
 с закрытым доверенным владельцем `input` и подтверждением C в `exchange`.
 `anki input-status` проверяет сохранённые байты и ревизии, не раскрывая содержимого
-карточек. Эти операции не подготавливают и не изменяют `output`.
+карточек. Эти операции не подготавливают и не изменяют `output`: это делают
+отдельные явные команды [управляемого цикла](roundtrip.md) — `anki prepare-output`
+(подготовка рабочей копии по решению exchange), `anki publish-output`
+(проверенный импорт в Anki с readback) и `anki exchange-status`.
 
 Команды `inspect`, `find`, `stats`, `validate`, `qa`, `review`, `review-check`
 и `models` только читают экспорт. `visual-report` читает экспорт и записывает
@@ -71,7 +74,8 @@
 
 Группа `anki-repo anki` отдельно управляет Anki Desktop: `doctor`, `setup`,
 `patch install/status/repair/remove`, `restore`, `launch/stop/restart`, `export/import`
-и `job`, а также [`sync-input` и `input-status`](input-export.md). В WSL выбирается установленная Windows Anki, в обычном Linux — Linux Anki;
+и `job`, а также [`sync-input` и `input-status`](input-export.md) и
+[`prepare-output`, `publish-output`, `exchange-status`](roundtrip.md). В WSL выбирается установленная Windows Anki, в обычном Linux — Linux Anki;
 неоднозначная установка требует явного `--executable`/`--data-dir`. Диагностика
 показывает фактическую платформу, executable, версию, базу и профиль. Установка
 аддонов использует официальные пакеты и интерактивный штатный установщик Anki.
