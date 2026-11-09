@@ -956,3 +956,80 @@ fn pending_publication_blocks_preparation_and_profile_id_bound_journal_round_tri
     assert!(path.exists());
     let _ = ProfileId::new(PROFILE).unwrap();
 }
+
+/// Пользовательские точки входа без Anki: план/применение/состояние и план импорта.
+#[test]
+fn command_entry_points_report_per_deck_outcomes_without_anki() {
+    let tmp = TempDir::new("roundtrip-commands");
+    let store = open(tmp.path());
+    let v1 = export("v1", "job-1");
+    store.publish(&v1).unwrap();
+    let name = stream(&store, &v1).output_directory;
+    drop(store);
+    let root = tmp.path();
+    let names = [name.clone(), "missing".into()];
+
+    let plan = run(root, &names, false, false);
+    assert_eq!(plan["state"], "prepare_plan");
+    assert_eq!(plan["decks"][0]["action"], "prepare_first");
+    assert_eq!(plan["decks"][1]["reason"], "output_not_registered");
+    assert!(!root.join("decks/output").exists());
+
+    let applied = run(root, &names, false, true);
+    assert_eq!(
+        applied["state"], "partial",
+        "отсутствующая привязка не скрыта"
+    );
+    assert_eq!(applied["decks"][0]["state"], "prepared");
+    let all = run(root, &[], true, true);
+    assert_eq!(all["state"], "succeeded");
+    assert_eq!(all["decks"][0]["state"], "kept");
+
+    let observed = status(root);
+    assert_eq!(observed["state"], "succeeded");
+    assert_eq!(observed["decks"][0]["action"], "keep");
+    assert_eq!(observed["decks"][0]["pending"], json!([]));
+
+    // План импорта: нечего публиковать, затем разрешение после правки B.
+    let prefixed = [format!("decks/output/{name}")];
+    let nothing = publication::plan(root, &prefixed);
+    assert_eq!(nothing["decks"][0]["state"], "nothing_to_publish");
+    fs::write(
+        root.join("decks/output").join(&name).join("deck.json"),
+        deck("agent"),
+    )
+    .unwrap();
+    let planned = publication::plan(root, &prefixed);
+    assert_eq!(planned["state"], "publish_plan");
+    assert_eq!(
+        planned["decks"][0]["comparison"]["disposition"],
+        "working_only"
+    );
+    let text = crate::desktop::render_text(&planned);
+    assert!(
+        text.contains("Подтвердить штатный диалог импорта"),
+        "{text}"
+    );
+    assert!(!text.contains("null"), "{text}");
+
+    // Изменились обе стороны: публикация запрещена до согласования.
+    let store = open(root);
+    store.publish(&export("v2", "job-2")).unwrap();
+    drop(store);
+    let blocked = publication::plan(root, &prefixed);
+    assert_eq!(blocked["state"], "publish_plan_blocked");
+    assert_eq!(blocked["decks"][0]["reason"], "publication_blocked");
+    let refused = run(root, &[name], false, true);
+    assert_eq!(refused["decks"][0]["state"], "blocked");
+    assert_eq!(refused["decks"][0]["reason"], "stale_or_unproven_base");
+
+    // Без доверенного состояния — отказ без создания каталогов.
+    let empty = TempDir::new("roundtrip-empty");
+    fs::create_dir_all(empty.path().join(".git")).unwrap();
+    assert_eq!(status(empty.path())["state"], "failed");
+    assert_eq!(
+        publication::plan(empty.path(), &prefixed)["state"],
+        "failed"
+    );
+    assert!(!empty.path().join("decks").exists());
+}
