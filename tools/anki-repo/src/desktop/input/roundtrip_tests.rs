@@ -1093,6 +1093,10 @@ struct Scripted {
     unguarded: Cell<bool>,
     /// Дополнительные поля терминального задания (error, partial_changes_possible).
     job_extra: RefCell<Value>,
+    /// Отказ продления билета перед отправкой.
+    renew_error: RefCell<Option<crate::desktop::DomainError>>,
+    /// Правка B, сделанная пользователем во время свежего экспорта.
+    fresh_edit: RefCell<Option<(PathBuf, Vec<u8>)>>,
 }
 
 impl Scripted {
@@ -1109,6 +1113,8 @@ impl Scripted {
             fresh_leftover: RefCell::new(None),
             unguarded: Cell::new(false),
             job_extra: RefCell::new(json!({})),
+            renew_error: RefCell::new(None),
+            fresh_edit: RefCell::new(None),
         }
     }
     fn fresh(self, export: crate::desktop::Result<VerifiedExport>) -> Self {
@@ -1174,7 +1180,10 @@ impl Bridge for Scripted {
         }
     }
     fn renew(&self, _journal: &ImportJournal) -> crate::desktop::Result<()> {
-        Ok(())
+        match self.renew_error.borrow_mut().take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1204,6 +1213,9 @@ impl Port for Scripted {
             store
                 .save_job(&job.key(), job)
                 .map_err(|e| unavailable(&e.to_string()))?;
+        }
+        if let Some((path, bytes)) = self.fresh_edit.borrow_mut().take() {
+            fs::write(path, bytes).unwrap();
         }
         let guard = (!self.unguarded.get())
             .then(|| export.import_guard())
@@ -1757,4 +1769,105 @@ fn marker_of_another_job_beside_an_open_journal_is_refused_and_kept() {
             .unwrap()
     );
     assert_eq!(port.submits.get(), 0);
+}
+
+/// Пользователь правит B во время проверки актуальности Anki: импорт не
+/// отправляется, новая правка B и подтверждённый C сохраняются, merge нет.
+#[test]
+fn working_copy_edited_during_freshness_check_is_never_sent() {
+    let tmp = TempDir::new("orchestrate-working-race");
+    let (mut store, v1, path) = edited(&tmp);
+    let port = Scripted::new(&tmp, &["unavailable"]).fresh(Ok(export("v1", "fresh-1")));
+    *port.fresh_edit.borrow_mut() = Some((path.join("deck.json"), deck("user B edit")));
+    let result = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(result["state"], "blocked", "{result}");
+    assert_eq!(result["reason"], "working_changed_since_plan");
+    assert_eq!(port.submits.get(), 0);
+    assert!(port.jobs().is_empty(), "spool не тронут");
+    assert!(work_names(tmp.path(), &v1).is_empty());
+    assert_eq!(
+        fs::read(path.join("deck.json")).unwrap(),
+        deck("user B edit")
+    );
+    assert!(stream(&store, &v1).published.is_none());
+}
+
+/// Продление билета не удалось: признак отправки не ставится, повтор
+/// продолжит тот же журнал; неизвестный статус задания тоже не даёт исхода.
+#[test]
+fn unavailable_ticket_and_unknown_job_state_keep_the_same_journal() {
+    let tmp = TempDir::new("orchestrate-ticket");
+    let (mut store, v1, _) = edited(&tmp);
+    let port = Scripted::new(&tmp, &["prepared"]).fresh(Ok(export("v1", "fresh-1")));
+    *port.renew_error.borrow_mut() = Some(unavailable("билет недоступен"));
+    let first = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(first["state"], "pending", "{first}");
+    assert_eq!(first["reason"], "import_ticket_unavailable");
+    assert_eq!(port.submits.get(), 0);
+    let saved = work::load::<ImportJournal>(&work_dir(&store, &v1), PUBLISH)
+        .unwrap()
+        .unwrap();
+    assert!(!saved.admission_started, "отправка не начиналась");
+
+    let odd = Scripted::new(&tmp, &["mystery"]);
+    let again = publish_with(&mut store, &v1, &odd, &catalog());
+    assert_eq!(again["reason"], "import_status_unknown", "{again}");
+    assert_eq!(again["job_id"], first["job_id"]);
+    assert!(
+        again["expected_user_action"]
+            .as_str()
+            .unwrap()
+            .contains("повторной отправки нет")
+    );
+    assert_eq!(odd.submits.get(), 0);
+    assert_eq!(port.copies(), 1, "копия B нужна открытому журналу");
+}
+
+#[test]
+fn readback_of_another_identity_is_refused_without_any_record() {
+    let tmp = TempDir::new("publish-foreign-readback");
+    let (store, v1, _) = edited(&tmp);
+    let journal = journal(&store, &v1, Some("succeeded"));
+    let dir = work_dir(&store, &v1);
+    work::save(&dir, PUBLISH, &journal).unwrap();
+    let foreign = source::synthetic_for("other-profile", &deck("agent V2"), &media(), None, "rb");
+    let sent = foreign.snapshot().clone();
+    assert!(matches!(
+        publication::conclude(&store, &dir, &journal, &foreign, &sent),
+        Err(ExchangeError::IdentityMismatch)
+    ));
+    assert!(
+        store
+            .publication_pending(&v1.snapshot().identity().key())
+            .unwrap()
+    );
+    assert_eq!(stream(&store, &v1).current.source_sequence, 1);
+}
+
+/// Повреждённый ID в маркере никогда не используется для удаления.
+#[test]
+fn corrupt_spool_marker_blocks_import_and_removes_nothing() {
+    let tmp = TempDir::new("orchestrate-bad-marker");
+    let (mut store, v1, _) = edited(&tmp);
+    let dir = work_dir(&store, &v1);
+    work::save(&dir, "publish-spool.json", &json!({"job_id":"../escape"})).unwrap();
+    let port = Scripted::new(&tmp, &["unavailable"]);
+    let result = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(result["state"], "blocked", "{result}");
+    assert_eq!(result["reason"], "import_spool_cleanup_pending");
+    assert_eq!(work_names(tmp.path(), &v1), ["publish-spool.json"]);
+    assert_eq!(port.submits.get(), 0);
+}
+
+#[test]
+fn damaged_working_copy_is_reported_by_the_plan_without_failing_others() {
+    let tmp = TempDir::new("plan-damaged-working");
+    let (store, v1, path) = edited(&tmp);
+    let name = stream(&store, &v1).output_directory;
+    drop(store);
+    fs::write(path.join("deck.json"), b"{").unwrap();
+    let plan = publication::plan(tmp.path(), &[format!("decks/output/{name}")]);
+    assert_eq!(plan["state"], "publish_plan_blocked", "{plan}");
+    assert_eq!(plan["decks"][0]["state"], "blocked");
+    assert!(plan["decks"][0]["reason"].is_string());
 }

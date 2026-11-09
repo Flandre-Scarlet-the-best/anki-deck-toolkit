@@ -632,12 +632,27 @@ class BridgeContract(unittest.TestCase):
             self.scheduled[0]()
         return self.call('toolkitJob', id=identifier)['result'], loader
 
-    def test_import_without_checked_collection_state_is_refused_before_crowdanki(self):
-        value, loader = self.run_import(lambda ticket: ticket.pop('expected'))
-        self.assertEqual(value['state'], 'failed')
-        self.assertIn('freshness_guard_missing', value['error'])
-        self.assertFalse(value['partial_changes_possible'])
-        loader.assert_not_called()
+    def test_exchange_import_without_checked_collection_state_is_refused_before_crowdanki(self):
+        self.profile_manager()
+        identity = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        for broken in (lambda t: t.pop('expected'), lambda t: t['expected'].pop('collection_state')):
+            with self.subTest(broken=broken):
+                def update(ticket):
+                    ticket['profile_id'] = identity
+                    ticket['expected'] = dict(GUARD)
+                    broken(ticket)
+                value, loader = self.run_import(update)
+                self.assertEqual(value['state'], 'failed')
+                self.assertIn('freshness_guard_missing', value['error'])
+                self.assertFalse(value['partial_changes_possible'])
+                loader.assert_not_called()
+                self.scheduled.clear()
+
+    def test_plain_import_command_keeps_its_contract_without_exchange_guard(self):
+        # `anki import` произвольного каталога не относится к циклу обмена: C нет.
+        value, _ = self.run_import(lambda ticket: ticket.pop('expected'))
+        self.assertEqual(value['state'], 'succeeded')
+        self.assertEqual(self.guard_checks, [])
 
     def test_guard_runs_before_dialog_and_again_after_it_before_any_write(self):
         value, _ = self.run_import()

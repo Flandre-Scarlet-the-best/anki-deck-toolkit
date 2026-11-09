@@ -379,6 +379,11 @@ def deck_state(mw, deck_id, scoped=None):
 
 
 def import_guard(ticket):
+    # Билет со стабильным profile_id выдаёт только публикация обмена
+    # (publish-output): для него охрана обязательна. Обычный `anki import`
+    # произвольного каталога C не имеет и работает по прежнему контракту jobs.
+    if "profile_id" not in ticket and "expected" not in ticket:
+        return None
     guard = ticket.get("expected")
     if (not isinstance(guard, dict) or not isinstance(guard.get("collection_state"), str)
             or not isinstance(guard.get("deck_id"), str) or not isinstance(guard.get("deck_uuid"), str)
@@ -474,10 +479,6 @@ def execute_job(identifier, mw, action, path, ticket):
             mw.create_backup_now()
             exporter = CheckedExporter(mw.col, config.ConfigSettings.get_instance())
             exporter.export_to_directory(adapters.AnkiDeck(deck), output, copy_media=True, create_deck_subdirectory=False)
-            # Снимается после экспорта в том же потоке GUI: CrowdAnki при экспорте
-            # сам дописывает crowdanki_uuid в колоду, модели и настройки, и C
-            # описывает именно это состояние.
-            state = deck_state(mw, deck["id"])
             payload = json.loads((output / "deck.json").read_text("utf-8"))
             for name in media_names(payload):
                 if not safe_path(output / "media" / name).is_file():
@@ -486,15 +487,20 @@ def execute_job(identifier, mw, action, path, ticket):
             if ticket.get("profile_id") is not None:
                 if payload["crowdanki_uuid"] != mw.col.decks.by_name(ticket["deck"])["crowdanki_uuid"]:
                     raise ValueError("export_uuid_mismatch")
+                # Снимается после экспорта в том же потоке GUI: CrowdAnki при
+                # экспорте сам дописывает crowdanki_uuid в колоду, модели и
+                # настройки, и C описывает именно это состояние.
                 value.update(profile_id=ticket["profile_id"], deck_id=ticket["deck_id"],
                              deck_name=ticket["deck"], deck_uuid=payload["crowdanki_uuid"],
-                             inventory=export_inventory(output), collection_state=state)
+                             inventory=export_inventory(output),
+                             collection_state=deck_state(mw, deck["id"]))
         else:
             source = safe_path(path / "source")
             payload = json.loads(safe_path(source / "deck.json").read_text("utf-8"))
             import_preflight(mw, payload, source)
             guard = import_guard(ticket)
-            verify_unchanged(mw, guard, payload, source)
+            if guard is not None:
+                verify_unchanged(mw, guard, payload, source)
             module = importlib.import_module(CROWD + ".importer.anki_importer")
             # Оригинальный загрузчик с диалогом конфигурации и резервным копированием.
             # Выполняется в потоке GUI после завершения принятия задания по HTTP.
@@ -508,7 +514,8 @@ def execute_job(identifier, mw, action, path, ticket):
                     # create_backup_now/save_to_collection, без возврата в цикл событий:
                     # последний момент отказа без изменения коллекции. Повторная
                     # проверка ловит правки, сохранённые во время диалога.
-                    verify_unchanged(mw, guard, payload, source)
+                    if guard is not None:
+                        verify_unchanged(mw, guard, payload, source)
                     partial_changes_possible = True
                 return config
             importer.read_import_config = confirmed
