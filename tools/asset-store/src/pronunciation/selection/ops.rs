@@ -44,6 +44,14 @@ fn short_hash(value: &impl Serialize) -> String {
     sha256_hex(serde_json::to_vec(value).expect("значение сериализуемо"))[..16].to_owned()
 }
 
+pub(crate) fn recorded_at(time: std::time::SystemTime) -> Result<u64, AssetError> {
+    let millis = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| invalid("системные часы раньше UNIX epoch"))?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| invalid("системное время вне допустимого диапазона"))
+}
+
 // ---------------------------------------------------------------------------
 // Приём исходников
 // ---------------------------------------------------------------------------
@@ -203,6 +211,7 @@ pub fn intake_forvo_batch(
             batch_id: forvo_batch_id.into(),
             evidence,
             plan_reading: request.reading.clone(),
+            surface: Some(request.surface.clone()),
         };
         if let Err(error) = add_source(
             &runtime,
@@ -291,6 +300,19 @@ pub fn link_target(
     let id = link_id(&source.sha256, &request.surface, &request.reading);
     let link = match batch.links.iter_mut().find(|l| l.link_id == id) {
         Some(existing) => {
+            if existing.competing_readings != target.competing_readings
+                || existing.particle_morae != particle_morae
+            {
+                existing.generation = existing
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("исчерпаны поколения связи"))?;
+                existing.recognition = None;
+                existing.occurrences.clear();
+                for candidate in &mut existing.candidates {
+                    candidate.occurrence = None;
+                }
+            }
             existing.competing_readings = target.competing_readings.clone();
             existing.particle_morae = particle_morae;
             existing.clone()
@@ -301,6 +323,7 @@ pub fn link_target(
                 source_sha256: source.sha256.clone(),
                 surface: request.surface.clone(),
                 reading: request.reading.clone(),
+                generation: 0,
                 competing_readings: target.competing_readings.clone(),
                 particle_morae,
                 origin: TargetOrigin {
@@ -433,6 +456,30 @@ fn build_link(
             .filter(|c| !c.passed)
             .map(|c| c.id.clone())
             .collect(),
+        quality_details: Some(serde_json::json!({
+            "pre_analysis": result.pre_analysis.as_ref().map(|p| serde_json::json!({
+                "timeline": p.timeline, "noise_floor_dbfs": p.noise_floor_dbfs,
+                "activity": p.activity, "unrecognized_activity": p.unrecognized_activity,
+            })),
+            "full_record": result.full_record.as_ref().map(|f| serde_json::json!({
+                "balanced_config_sha256": f.balanced_config_sha256,
+                "balanced_outcome": f.balanced_outcome, "proposed_variant": f.proposed_variant,
+                "selected_sha256": f.selected_sha256,
+            })),
+            "processing": result.processing.as_ref().map(|p| serde_json::json!({
+                "mode": p.mode, "extraction": p.extraction, "context": p.context,
+                "legacy_enhancement_outcome": p.legacy_enhancement_outcome,
+                "enhancement": p.enhancement.as_ref().map(|e| serde_json::json!({
+                    "triage": e.triage, "applied": e.applied, "qc": e.qc, "reasons": e.reasons,
+                })),
+                "balanced": p.balanced.as_ref().map(|b| serde_json::json!({
+                    "analysis": b.analysis, "plan": b.plan, "post_qc": b.post_qc, "gate": b.gate,
+                })),
+                "trim_preserves_core": p.trim_preserves_core, "output_span": p.output_span,
+            })),
+            "post_validation": result.post_validation,
+            "uncertainty": result.uncertainty,
+        })),
         fragment_mode,
         unrecognized_activity: result
             .pre_analysis
@@ -578,6 +625,7 @@ fn build_link(
         source_sha256: source.sha256.clone(),
         surface: target.surface.clone(),
         reading: target.reading.clone(),
+        generation: 0,
         competing_readings: target.competing_readings.clone(),
         particle_morae: previous_particles,
         origin: TargetOrigin {
@@ -705,7 +753,7 @@ pub fn link_recognizer(
             .find(|l| l.link_id == id)
             .map(|l| l.particle_morae.clone())
             .unwrap_or_default();
-        let link = build_link(
+        let mut link = build_link(
             &runtime,
             &cache,
             recognizer_batch_id,
@@ -717,6 +765,15 @@ pub fn link_recognizer(
         report.candidates += link.candidates.len();
         match batch.links.iter_mut().find(|l| l.link_id == id) {
             Some(existing) => {
+                link.generation = existing.generation;
+                if existing.competing_readings != link.competing_readings
+                    || existing.particle_morae != link.particle_morae
+                {
+                    link.generation = existing
+                        .generation
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("исчерпаны поколения связи"))?;
+                }
                 *existing = link;
                 report.links_updated += 1;
             }
@@ -768,12 +825,20 @@ impl GroupFilter {
         })
     }
 
-    fn accepts(self, recommendation: &GroupRecommendation, decided: bool) -> bool {
+    pub(crate) fn accepts(
+        self,
+        batch: &SelectionBatch,
+        recommendation: &GroupRecommendation,
+        decision: Option<&SelectionDecision>,
+    ) -> bool {
+        let selected = decision.is_some_and(|d| decision_is_effective(batch, d));
+        let deferred = decision.is_some_and(|d| matches!(d.action, DecisionAction::Defer));
         match self {
             Self::All => true,
-            Self::Undecided => !decided,
-            // Неразрешённое: решения нет и автоматика его не примет.
-            Self::Unresolved => !decided && recommendation.class > SelectionClass::AgentSelectable,
+            Self::Undecided => !selected,
+            Self::Unresolved => {
+                !selected && (deferred || recommendation.class > SelectionClass::AgentSelectable)
+            }
             Self::Class(class) => recommendation.class == class,
         }
     }
@@ -795,8 +860,21 @@ pub struct GroupView<'a> {
     pub reading: &'a str,
     pub recommendation: &'a GroupRecommendation,
     pub decision: Option<&'a SelectionDecision>,
+    pub selection_effective: bool,
     pub candidates: Vec<CandidateView<'a>>,
-    pub links: Vec<&'a TargetLink>,
+    pub links: Vec<serde_json::Value>,
+    pub sources: Vec<SourceView<'a>>,
+}
+
+/// Проверяемое происхождение без внутренних путей blob-хранилища.
+#[derive(Debug, Serialize)]
+pub struct SourceView<'a> {
+    pub sha256: &'a str,
+    pub byte_length: u64,
+    pub probe: &'a crate::pronunciation::AudioProbe,
+    pub origins: &'a [SourceOrigin],
+    pub surface_hint: &'a Option<String>,
+    pub free_analysis: &'a Option<FreeAnalysis>,
 }
 
 /// Машиночитаемый пакет свидетельств для агента.
@@ -812,7 +890,9 @@ pub struct StatusView<'a> {
     pub links: usize,
     pub groups: usize,
     pub classes: BTreeMap<&'static str, usize>,
+    /// Полномочия только выбранных целей.
     pub decided: BTreeMap<&'static str, usize>,
+    pub dispositions: BTreeMap<&'static str, usize>,
     pub matched: usize,
     pub items: Vec<GroupView<'a>>,
 }
@@ -843,9 +923,45 @@ pub(crate) fn group_view<'a>(
         reading: &recommendation.reading,
         recommendation,
         decision: batch.current_decision(&recommendation.surface, &recommendation.reading),
+        selection_effective: batch
+            .current_decision(&recommendation.surface, &recommendation.reading)
+            .is_some_and(|d| decision_is_effective(batch, d)),
         candidates,
         links: batch
             .links_of(&recommendation.surface, &recommendation.reading)
+            .map(|link| {
+                let mut public = serde_json::to_value(link).expect("связь сериализуема");
+                if let Some(origin) = public.get_mut("origin").and_then(|v| v.as_object_mut()) {
+                    origin.remove("key");
+                }
+                if let Some(candidates) =
+                    public.get_mut("candidates").and_then(|v| v.as_array_mut())
+                {
+                    for candidate in candidates {
+                        if let Some(audio) =
+                            candidate.get_mut("audio").and_then(|v| v.as_object_mut())
+                        {
+                            audio.remove("blob");
+                        }
+                    }
+                }
+                public
+            })
+            .collect(),
+        sources: batch
+            .links_of(&recommendation.surface, &recommendation.reading)
+            .map(|l| l.source_sha256.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|sha| batch.source(sha))
+            .map(|s| SourceView {
+                sha256: &s.sha256,
+                byte_length: s.byte_length,
+                probe: &s.probe,
+                origins: &s.origins,
+                surface_hint: &s.surface_hint,
+                free_analysis: &s.free_analysis,
+            })
             .collect(),
     }
 }
@@ -861,15 +977,28 @@ pub fn status_value(
     let recommendations = engine::recommend_all(&batch);
     let mut classes = BTreeMap::new();
     let mut decided = BTreeMap::new();
+    let mut dispositions = BTreeMap::new();
     let mut items = Vec::new();
     let mut matched = 0;
     for recommendation in recommendations.values() {
         *classes.entry(recommendation.class.as_str()).or_insert(0) += 1;
         let decision = batch.current_decision(&recommendation.surface, &recommendation.reading);
         if let Some(decision) = decision {
-            *decided.entry(decision.authority.kind()).or_insert(0) += 1;
+            let kind = match decision.action {
+                DecisionAction::Select { .. } => {
+                    if decision_is_effective(&batch, decision) {
+                        *decided.entry(decision.authority.kind()).or_insert(0) += 1;
+                        "selected"
+                    } else {
+                        "selection_expired"
+                    }
+                }
+                DecisionAction::RejectCandidate { .. } => "candidate_rejected",
+                DecisionAction::Defer => "deferred",
+            };
+            *dispositions.entry(kind).or_insert(0) += 1;
         }
-        if filter.accepts(recommendation, decision.is_some()) {
+        if filter.accepts(&batch, recommendation, decision) {
             matched += 1;
             if items.len() < limit {
                 items.push(group_view(&batch, recommendation));
@@ -886,6 +1015,7 @@ pub fn status_value(
         groups: recommendations.len(),
         classes,
         decided,
+        dispositions,
         matched,
         items,
     };
@@ -922,7 +1052,9 @@ pub(crate) fn plan_auto_select(
     let mut decisions = Vec::new();
     for recommendation in recommendations.values() {
         let (surface, reading) = (&recommendation.surface, &recommendation.reading);
-        if batch.current_decision(surface, reading).is_some() {
+        if batch.current_decision(surface, reading).is_some_and(|d| {
+            matches!(d.action, DecisionAction::Defer) || decision_is_effective(batch, d)
+        }) {
             report.already_decided += 1;
             continue;
         }
@@ -948,6 +1080,9 @@ pub(crate) fn plan_auto_select(
                         batch.audio_reviews.iter().rev().find(|r| {
                             r.candidate_id == best.candidate_id
                                 && r.audio_sha256 == sha
+                                && r.surface == link.surface
+                                && r.reading == link.reading
+                                && r.link_generation == link.generation
                                 && r.verdict == AudioVerdict::Supports
                         })
                     })
@@ -986,6 +1121,7 @@ pub(crate) fn plan_auto_select(
                         addressed_sha256: candidate.addressed_sha(&link.source_sha256).into(),
                         source_sha256: link.source_sha256.clone(),
                         span: candidate.span,
+                        link_generation: link.generation,
                     },
                     authority,
                     reason: format!(
@@ -998,6 +1134,7 @@ pub(crate) fn plan_auto_select(
                     ),
                     group_fingerprint: recommendation.fingerprint.clone(),
                     state_revision: 0,
+                    recorded_at_unix_ms: None,
                 });
             }
             _ => report
@@ -1028,10 +1165,32 @@ pub fn auto_select(
     let mut batch = load_existing(&mut runtime)?;
     let (decisions, mut report) = plan_auto_select(&batch, agent);
     if !decisions.is_empty() {
+        // До записи всех решений проверяем реальные blob для экспертиз,
+        // использованных автоматическим планом, и их действующие полномочия.
+        for decision in &decisions {
+            if matches!(
+                decision.authority,
+                DecisionAuthority::AgentAudioModel { .. }
+            ) {
+                let request = Pronunciation::new(&decision.surface, &decision.reading)?;
+                let (link, candidate, _) =
+                    validate_effective_selection(&batch, decision, &request)?;
+                let bytes = candidate_bytes(&runtime, &batch, link, candidate)?;
+                if sha256_hex(&bytes) != candidate.addressed_sha(&link.source_sha256) {
+                    return Err(AssetError::new(
+                        ErrorCode::IntegrityMismatch,
+                        "байты аудиоэкспертизы изменились",
+                    ));
+                }
+                probe_mp3(&bytes)?;
+            }
+        }
         let revision = batch.revision + 1;
+        let timestamp = recorded_at(std::time::SystemTime::now())?;
         for mut decision in decisions {
             decision.decision_id = batch.next_decision_id();
             decision.state_revision = revision;
+            decision.recorded_at_unix_ms = Some(timestamp);
             batch.decisions.push(decision);
         }
         save(&mut runtime, &mut batch)?;
@@ -1133,32 +1292,15 @@ pub(crate) fn validate_decision(
                     return Err(invalid("детерминированный выбор делает только auto-select"));
                 }
                 DecisionAuthority::AgentEvidence { .. } => {
-                    if assessment.class > SelectionClass::AgentProposed {
+                    if assessment.class > SelectionClass::AgentSelectable {
                         return Err(AssetError::new(
                             ErrorCode::InvalidValidationEvidence,
-                            "решение агента по тексту и метрикам невозможно для кандидата, который требует аудиоанализа или ответа пользователя",
+                            "agent_proposed — только предложение: для выбора нужны аудиоэкспертиза или явное решение пользователя",
                         ));
                     }
                 }
-                DecisionAuthority::AgentAudioModel {
-                    audio_review_id, ..
-                } => {
-                    let review = batch
-                        .audio_reviews
-                        .iter()
-                        .find(|r| &r.review_id == audio_review_id)
-                        .ok_or_else(|| invalid("аудиоэкспертиза не найдена"))?;
-                    if review.candidate_id != candidate.candidate_id
-                        || review.audio_sha256 != candidate.addressed_sha(&link.source_sha256)
-                        || review.surface != link.surface
-                        || review.reading != link.reading
-                        || review.verdict != AudioVerdict::Supports
-                    {
-                        return Err(AssetError::new(
-                            ErrorCode::InvalidValidationEvidence,
-                            "аудиоэкспертиза не поддерживает именно этого кандидата и его байты",
-                        ));
-                    }
+                DecisionAuthority::AgentAudioModel { .. } => {
+                    validate_agent_authority(batch, link, candidate, authority, assessment)?;
                 }
                 DecisionAuthority::UserViaAgent { .. }
                 | DecisionAuthority::UserDirectReview { .. } => {}
@@ -1168,9 +1310,121 @@ pub(crate) fn validate_decision(
                 addressed_sha256: expected_sha256.clone(),
                 source_sha256: link.source_sha256.clone(),
                 span: candidate.span,
+                link_generation: link.generation,
             })
         }
     }
+}
+
+/// Проверяет действующее право агента, включая последнюю экспертизу точного
+/// кандидата. Историческое Supports не отменяет более поздний вердикт.
+fn validate_agent_authority(
+    batch: &SelectionBatch,
+    link: &TargetLink,
+    candidate: &PronunciationCandidate,
+    authority: &DecisionAuthority,
+    assessment: &CandidateAssessment,
+) -> Result<(), AssetError> {
+    let permitted = match authority {
+        DecisionAuthority::DeterministicAutomation { .. } => {
+            assessment.class == SelectionClass::AutoQualified
+        }
+        _ => assessment.class <= SelectionClass::AgentSelectable,
+    };
+    if !permitted {
+        return Err(AssetError::new(
+            ErrorCode::InvalidValidationEvidence,
+            "текущие свидетельства не разрешают агентский выбор кандидата",
+        ));
+    }
+    if let DecisionAuthority::AgentAudioModel {
+        audio_review_id,
+        backend,
+        ..
+    } = authority
+    {
+        let sha = candidate.addressed_sha(&link.source_sha256);
+        let latest = batch.audio_reviews.iter().rev().find(|r| {
+            r.candidate_id == candidate.candidate_id
+                && r.audio_sha256 == sha
+                && r.surface == link.surface
+                && r.reading == link.reading
+                && r.link_generation == link.generation
+        });
+        if !latest.is_some_and(|r| {
+            &r.review_id == audio_review_id
+                && &r.backend == backend
+                && r.backend == LOCAL_AUDIO_BACKEND
+                && r.local
+                && !r.independent_of_triage
+                && !r.model_fingerprints.is_empty()
+                && r.model_fingerprints
+                    .iter()
+                    .all(|fingerprint| valid_sha(fingerprint))
+                && valid_sha(&r.config_sha256)
+                && r.verdict == AudioVerdict::Supports
+        }) {
+            return Err(AssetError::new(
+                ErrorCode::InvalidValidationEvidence,
+                "нет актуальной поддерживающей аудиоэкспертизы точного кандидата и backend",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Общая проверка действующего решения перед чтением и публикацией.
+fn validate_effective_selection<'a>(
+    batch: &'a SelectionBatch,
+    decision: &SelectionDecision,
+    request: &Pronunciation,
+) -> Result<
+    (
+        &'a TargetLink,
+        &'a PronunciationCandidate,
+        CandidateAssessment,
+    ),
+    AssetError,
+> {
+    let DecisionAction::Select {
+        candidate_id,
+        addressed_sha256,
+        source_sha256,
+        span,
+        link_generation,
+    } = &decision.action
+    else {
+        return Err(invalid("текущее решение цели — не выбор кандидата"));
+    };
+    let (link, candidate) = batch
+        .find_candidate(candidate_id)
+        .ok_or_else(|| invalid("выбранный кандидат больше не существует; решение устарело"))?;
+    if decision.surface != request.surface
+        || decision.reading != request.reading
+        || link.surface != request.surface
+        || link.reading != request.reading
+        || &link.source_sha256 != source_sha256
+        || candidate.span != *span
+        || link.generation != *link_generation
+        || candidate.addressed_sha(&link.source_sha256) != addressed_sha256
+        || !candidate.technical.usable
+    {
+        return Err(AssetError::new(
+            ErrorCode::IdentityConflict,
+            "решение не относится к точной паре, кандидату, SHA и интервалу",
+        ));
+    }
+    let assessment = engine::assess_candidate(batch, link, candidate);
+    if !decision.authority.is_user() {
+        validate_agent_authority(batch, link, candidate, &decision.authority, &assessment)?;
+    }
+    Ok((link, candidate, assessment))
+}
+
+pub(crate) fn decision_is_effective(batch: &SelectionBatch, decision: &SelectionDecision) -> bool {
+    Pronunciation::new(&decision.surface, &decision.reading)
+        .ok()
+        .is_some_and(|request| validate_effective_selection(batch, decision, &request).is_ok())
 }
 
 pub fn decide(
@@ -1205,6 +1459,25 @@ pub fn decide(
         ));
     }
     let action = validate_decision(&batch, &recommendation, &request.action, &request.authority)?;
+    if matches!(request.authority, DecisionAuthority::AgentAudioModel { .. })
+        && let DecisionAction::Select {
+            candidate_id,
+            addressed_sha256,
+            ..
+        } = &action
+    {
+        let (link, candidate) = batch
+            .find_candidate(candidate_id)
+            .ok_or_else(|| invalid("кандидат аудиоэкспертизы отсутствует"))?;
+        let bytes = candidate_bytes(&runtime, &batch, link, candidate)?;
+        if sha256_hex(&bytes) != *addressed_sha256 {
+            return Err(AssetError::new(
+                ErrorCode::IntegrityMismatch,
+                "байты аудиоэкспертизы изменились",
+            ));
+        }
+        probe_mp3(&bytes)?;
+    }
     if let Some(current) = batch.current_decision(&pronunciation.surface, &pronunciation.reading)
         && current.action == action
         && current.authority == request.authority
@@ -1224,6 +1497,7 @@ pub fn decide(
         reason: request.reason,
         group_fingerprint: recommendation.fingerprint,
         state_revision: batch.revision + 1,
+        recorded_at_unix_ms: Some(recorded_at(std::time::SystemTime::now())?),
     };
     batch.decisions.push(decision.clone());
     save(&mut runtime, &mut batch)?;
@@ -1295,8 +1569,31 @@ pub(crate) fn verdict_of(
         .flat_map(|m| m.occurrences.iter())
         .collect();
     let mut reasons: Vec<String> = result.reasons.iter().map(|r| r.code.clone()).collect();
-    let conflict = occurrences.iter().any(|o| o.evidence == Evidence::Conflict);
-    let competitor_won = occurrences.iter().any(|o| {
+    if span.is_some() && result.outcome == RecognitionOutcome::BoundariesUnresolved {
+        reasons.push("expert_inconclusive".into());
+        return (AudioVerdict::Inconclusive, reasons);
+    }
+    // Границы полуоткрытые; несовпадение шкалы не доказывает пересечения.
+    // TARGET_ABSENT относится ко всей записи и поэтому противоречит и интервалу.
+    let relevant = |o: &&&crate::pronunciation::recognizer::Occurrence| match span {
+        None => true,
+        Some(span) => {
+            let own = CandidateSpan {
+                start_frame: o.core.start,
+                end_frame: o.core.end,
+                sample_rate,
+            };
+            span.sample_rate != 0
+                && span.start_frame < span.end_frame
+                && own.start_frame < own.end_frame
+                && own.overlaps(span)
+        }
+    };
+    let conflict = occurrences
+        .iter()
+        .filter(relevant)
+        .any(|o| o.evidence == Evidence::Conflict);
+    let competitor_won = occurrences.iter().filter(relevant).any(|o| {
         o.best_competitor
             .as_ref()
             .is_some_and(|c| c.origin.starts_with("explicit:"))
@@ -1306,17 +1603,6 @@ pub(crate) fn verdict_of(
         reasons.push("expert_contradicts_target".into());
         return (AudioVerdict::Contradicts, reasons);
     }
-    let relevant = |o: &&&crate::pronunciation::recognizer::Occurrence| match span {
-        None => true,
-        Some(span) => {
-            let own = CandidateSpan {
-                start_frame: o.core.start,
-                end_frame: o.core.end,
-                sample_rate,
-            };
-            own.overlaps(span)
-        }
-    };
     let supports = matches!(
         result.outcome,
         RecognitionOutcome::TargetWhole
@@ -1368,8 +1654,9 @@ pub(crate) fn audio_review_local(
         crate::pronunciation::recognizer_pipeline::recognize_one(&bytes, Some(&target), &ctx)?;
     let sample_rate = batch
         .source(&link.source_sha256)
-        .map(|s| s.probe.sample_rate)
-        .unwrap_or(44100);
+        .ok_or_else(|| invalid("исходник аудиоэкспертизы отсутствует"))?
+        .probe
+        .sample_rate;
     // Интервал сверяется по шкале исходника; у байтов кандидата своя шкала.
     let span = if candidate.audio.is_none() {
         candidate.span.as_ref()
@@ -1388,6 +1675,7 @@ pub(crate) fn audio_review_local(
         candidate_id: candidate_id.into(),
         surface: link.surface.clone(),
         reading: link.reading.clone(),
+        link_generation: link.generation,
         competitors: target.competing_readings.clone(),
         outcome: recognized.result.outcome,
         verdict,
@@ -1433,26 +1721,7 @@ pub fn promote(
         .current_decision(&request.surface, &request.reading)
         .ok_or_else(|| invalid("у цели нет текущего решения"))?
         .clone();
-    let DecisionAction::Select {
-        candidate_id,
-        addressed_sha256,
-        ..
-    } = &decision.action
-    else {
-        return Err(invalid("текущее решение цели — не выбор кандидата"));
-    };
-    let (link, candidate) = batch
-        .find_candidate(candidate_id)
-        .ok_or_else(|| invalid("выбранный кандидат больше не существует; решение устарело"))?;
-    if link.surface != request.surface
-        || link.reading != request.reading
-        || candidate.addressed_sha(&link.source_sha256) != addressed_sha256
-    {
-        return Err(AssetError::new(
-            ErrorCode::IdentityConflict,
-            "решение не относится к точной паре и SHA",
-        ));
-    }
+    let (link, candidate, _) = validate_effective_selection(&batch, &decision, &request)?;
     if candidate.kind != CandidateKind::SourceOriginal || !candidate.technical.usable {
         return Err(AssetError::new(
             ErrorCode::InvalidTransition,
@@ -1469,15 +1738,9 @@ pub fn promote(
         .source(&link.source_sha256)
         .ok_or_else(|| invalid("исходник выбора отсутствует"))?;
     let bytes = runtime.read_blob_with_limit(&source.blob, MAX_AUDIO_BYTES)?;
-    drop(runtime);
-    let forvo = source.origins.iter().find_map(|origin| match origin {
-        SourceOrigin::ForvoBatch { evidence, .. }
-            if source.surface_hint.as_deref() == Some(request.surface.as_str()) =>
-        {
-            Some(evidence)
-        }
-        _ => None,
-    });
+    let forvo = source
+        .forvo_for(&request.surface)
+        .map(|(evidence, _)| evidence);
     let asset = match forvo {
         Some(evidence) => crate::pronunciation::import_forvo_bytes(
             store,
@@ -1615,17 +1878,6 @@ pub fn read_selected(
                     request.surface, request.reading
                 ))
             })?;
-        let DecisionAction::Select {
-            candidate_id,
-            addressed_sha256,
-            ..
-        } = &decision.action
-        else {
-            return Err(invalid(format!(
-                "{}/{}: текущее решение — не выбор",
-                request.surface, request.reading
-            )));
-        };
         if !policy.accepts(&decision.authority) {
             return Err(AssetError::new(
                 ErrorCode::InvalidValidationEvidence,
@@ -1637,42 +1889,11 @@ pub fn read_selected(
                 ),
             ));
         }
-        let (link, candidate) = batch
-            .find_candidate(candidate_id)
-            .ok_or_else(|| invalid("выбранный кандидат больше не существует"))?;
+        let (_link, candidate, assessment) =
+            validate_effective_selection(&batch, decision, &request)?;
         let audio = candidate.audio.as_ref().ok_or_else(|| {
             invalid("выбран интервал без извлечённых байтов: потребление требует извлечения")
         })?;
-        if link.surface != request.surface
-            || link.reading != request.reading
-            || &audio.sha256 != addressed_sha256
-            || !candidate.technical.usable
-        {
-            return Err(AssetError::new(
-                ErrorCode::IdentityConflict,
-                "решение не относится к точной паре и SHA",
-            ));
-        }
-        let assessment = engine::assess_candidate(&batch, link, candidate);
-        if !decision.authority.is_user() {
-            let still_selectable = assessment.class <= SelectionClass::AgentSelectable;
-            let audio_ok = match &decision.authority {
-                DecisionAuthority::AgentAudioModel {
-                    audio_review_id, ..
-                } => batch.audio_reviews.iter().any(|r| {
-                    &r.review_id == audio_review_id
-                        && r.verdict == AudioVerdict::Supports
-                        && r.audio_sha256 == audio.sha256
-                }),
-                _ => true,
-            };
-            if !still_selectable || !audio_ok {
-                return Err(AssetError::new(
-                    ErrorCode::InvalidValidationEvidence,
-                    "новые свидетельства понизили класс кандидата: агентское решение больше не действует",
-                ));
-            }
-        }
         let bytes = runtime.read_blob_with_limit(&audio.blob, MAX_AUDIO_BYTES)?;
         probe_mp3(&bytes)?;
         out.push(SelectedAudio {

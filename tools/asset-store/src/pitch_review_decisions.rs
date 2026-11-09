@@ -318,6 +318,7 @@ pub(crate) fn export(
     }
     let snapshot = PitchReviewSnapshot {
         schema_version: SCHEMA,
+        batch_revision: None,
         batch_id: batch.batch_id.clone(),
         validator: batch.validator.clone(),
         rows,

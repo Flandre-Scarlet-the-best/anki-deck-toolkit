@@ -81,6 +81,7 @@ fn fake_source(n: u32, surface: &str, forvo: bool) -> AudioSource {
     let origin = if forvo {
         SourceOrigin::ForvoBatch {
             batch_id: "forvo".into(),
+            surface: Some(surface.into()),
             evidence: forvo_evidence(surface, &sha, 4),
             plan_reading: "なま".into(),
         }
@@ -144,6 +145,7 @@ fn recognition(outcome: RecognitionOutcome) -> RecognitionSummary {
         selected_occurrence: Some(0),
         post_validation_passed: Some(true),
         post_validation_failed_checks: Vec::new(),
+        quality_details: None,
         fragment_mode: outcome == RecognitionOutcome::TargetExtracted,
         unrecognized_activity: false,
     }
@@ -189,6 +191,7 @@ fn whole_link(source: &AudioSource, surface: &str, reading: &str, verifier: &str
         source_sha256: source.sha256.clone(),
         surface: surface.into(),
         reading: reading.into(),
+        generation: 0,
         competing_readings: Vec::new(),
         particle_morae: Vec::new(),
         origin: TargetOrigin {
@@ -422,6 +425,7 @@ fn multi_reading_link(
         source_sha256: source.sha256.clone(),
         surface: "生".into(),
         reading: reading.into(),
+        generation: 0,
         competing_readings: Vec::new(),
         particle_morae: Vec::new(),
         origin: TargetOrigin {
@@ -545,6 +549,7 @@ fn audio_review(
         candidate_id: candidate.candidate_id.clone(),
         surface: "橋".into(),
         reading: "はし".into(),
+        link_generation: 0,
         competitors: vec!["はち".into()],
         outcome: RecognitionOutcome::TargetWhole,
         verdict,
@@ -620,7 +625,7 @@ fn batch_of_500_completes_487_automatically_and_keeps_13_for_later() {
         sources.push(source);
         links.push(link);
     }
-    let batch = batch_with(sources, links);
+    let mut batch = batch_with(sources, links);
     let (decisions, report) = ops::plan_auto_select(&batch, None);
     assert_eq!(report.selected_deterministic, 487);
     assert_eq!(decisions.len(), 487);
@@ -635,6 +640,40 @@ fn batch_of_500_completes_487_automatically_and_keeps_13_for_later() {
         let recommendation = engine::recommend(&batch, surface, reading);
         assert_eq!(recommendation.candidates.len(), 2);
         assert!(recommendation.recommended.is_some());
+    }
+    // Адресный ответ разрешает одну спорную цель, не меняя остальные 487
+    // и не теряя варианты двенадцати оставшихся целей.
+    batch.decisions.extend(decisions);
+    let (surface, reading) = &pending[0];
+    let recommendation = engine::recommend(&batch, surface, reading);
+    let candidate = &recommendation.candidates[1].candidate_id;
+    let (link, value) = batch.find_candidate(candidate).unwrap();
+    let choice = DecideAction::Select {
+        candidate_id: candidate.clone(),
+        expected_sha256: value.addressed_sha(&link.source_sha256).into(),
+    };
+    let authority = user("выберите второй вариант", false);
+    let action = ops::validate_decision(&batch, &recommendation, &choice, &authority).unwrap();
+    batch.decisions.push(SelectionDecision {
+        decision_id: "manual".into(),
+        surface: surface.clone(),
+        reading: reading.clone(),
+        action,
+        authority,
+        reason: "адресный ответ".into(),
+        group_fingerprint: recommendation.fingerprint,
+        state_revision: 0,
+        recorded_at_unix_ms: None,
+    });
+    let (later, report) = ops::plan_auto_select(&batch, None);
+    assert!(later.is_empty());
+    assert_eq!(report.already_decided, 488);
+    assert_eq!(report.pending["needs_audio_analysis"].len(), 12);
+    for (surface, reading) in &report.pending["needs_audio_analysis"] {
+        assert_eq!(
+            engine::recommend(&batch, surface, reading).candidates.len(),
+            2
+        );
     }
 }
 
@@ -659,6 +698,22 @@ fn agent_policy_is_explicit_and_recorded_as_agent_evidence() {
         }
     );
     assert!(!decisions[0].authority.human_listened());
+}
+
+#[test]
+fn deterministic_authority_expires_when_only_agent_policy_remains() {
+    let source = fake_source(1, "生", true);
+    let link = whole_link(&source, "生", "しょう", "しょう");
+    let mut batch = batch_with(vec![source], vec![link]);
+    let (decisions, _) = ops::plan_auto_select(&batch, None);
+    assert_eq!(decisions.len(), 1);
+    assert!(ops::decision_is_effective(&batch, &decisions[0]));
+    batch.links[0].occurrences[0].verifier_text = Some("じょう".into());
+    assert_eq!(
+        engine::recommend(&batch, "生", "しょう").class,
+        SelectionClass::AgentSelectable
+    );
+    assert!(!ops::decision_is_effective(&batch, &decisions[0]));
 }
 
 #[test]
@@ -1379,9 +1434,17 @@ fn review_copy_tampering_deletion_and_symlink_are_refused() {
     assert!(review::apply(store, "sel", &export.review_id).is_err());
     let outside = directory.parent().unwrap().join("outside.mp3");
     std::fs::write(&outside, &original).unwrap();
-    std::os::unix::fs::symlink(&outside, &copy).unwrap();
-    assert!(review::apply(store, "sel", &export.review_id).is_err());
-    std::fs::remove_file(&copy).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, &copy).unwrap();
+        assert!(review::apply(store, "sel", &export.review_id).is_err());
+        std::fs::remove_file(&copy).unwrap();
+    }
+    #[cfg(windows)]
+    if std::os::windows::fs::symlink_file(&outside, &copy).is_ok() {
+        assert!(review::apply(store, "sel", &export.review_id).is_err());
+        std::fs::remove_file(&copy).unwrap();
+    }
     std::fs::write(&copy, &original).unwrap();
     assert_eq!(
         review::apply(store, "sel", &export.review_id)
@@ -1633,6 +1696,42 @@ fn recognizer_occurrences_become_interval_candidates_without_inventing_bytes() {
     );
     assert!(link.candidates[1].audio.is_none());
     assert_eq!(link.recognition.as_ref().unwrap().occurrences, 2);
+    let details = link
+        .recognition
+        .as_ref()
+        .unwrap()
+        .quality_details
+        .as_ref()
+        .unwrap();
+    assert_eq!(details["uncertainty"]["pitch_accent"], "not_assessed");
+    assert!(details["processing"].is_null());
+    assert!(details["post_validation"].is_null());
+    let mut with_qc = result.clone();
+    with_qc.post_validation = Some(crate::pronunciation::recognizer_pipeline::PostValidation {
+        passed: false,
+        checks: vec![crate::pronunciation::normalizer::Check {
+            id: "timing_consistent".into(),
+            passed: false,
+            value: Some(40.0),
+            limit: Some(20.0),
+        }],
+        output_probe: None,
+        hypothesis: None,
+        verifier_hypothesis: None,
+        events: 0,
+        occurrence: None,
+        expected_core: None,
+        timing_error_ms: Some(40.0),
+        start_error_ms: Some(40.0),
+        end_error_ms: Some(0.0),
+    });
+    let with_qc = ops::build_link_for_test(&runtime, &cache, "rb", &source, &with_qc).unwrap();
+    let details = with_qc.recognition.unwrap().quality_details.unwrap();
+    assert_eq!(
+        details["post_validation"]["checks"][0]["id"],
+        "timing_consistent"
+    );
+    assert_eq!(details["post_validation"]["checks"][0]["value"], 40.0);
     // Границы не разрешены: интервалы не создаются.
     let unresolved = recognition_result(
         RecognitionOutcome::BoundariesUnresolved,
@@ -1711,5 +1810,649 @@ fn expert_competitors_include_heard_forms_but_never_the_target() {
     assert_eq!(
         competitors,
         vec!["きょう".to_string(), "はさ".into(), "はち".into()]
+    );
+}
+
+#[test]
+fn agent_proposal_is_not_a_consumable_selection() {
+    let source = fake_source(1, "生", false);
+    let link = whole_link(&source, "生", "しょう", "じょう");
+    let batch = batch_with(vec![source], vec![link.clone()]);
+    let recommendation = engine::recommend(&batch, "生", "しょう");
+    assert_eq!(recommendation.class, SelectionClass::AgentProposed);
+    let candidate = &link.candidates[0];
+    let action = DecideAction::Select {
+        candidate_id: candidate.candidate_id.clone(),
+        expected_sha256: candidate.audio.as_ref().unwrap().sha256.clone(),
+    };
+    let authority = DecisionAuthority::AgentEvidence {
+        agent: "agent".into(),
+        policy: AGENT_EVIDENCE_POLICY.into(),
+    };
+    assert!(ops::validate_decision(&batch, &recommendation, &action, &authority).is_err());
+    assert!(
+        ops::validate_decision(&batch, &recommendation, &action, &user("выберите", false)).is_ok()
+    );
+}
+
+#[test]
+fn revoked_agent_selection_cannot_be_read_or_promoted_but_user_can_reconfirm() {
+    let (_workspace, store) = store();
+    let bytes = mp3(440);
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "hon.mp3".into(),
+            bytes: bytes.clone(),
+        }],
+        None,
+    )
+    .unwrap();
+    let sha = &intake.added[0];
+    let link = link_target(&store, "sel", sha, "本", "ほん", vec![], vec![]).unwrap();
+    mutate(&store, "sel", |batch, _| {
+        let existing = batch
+            .links
+            .iter_mut()
+            .find(|l| l.link_id == link.link_id)
+            .unwrap();
+        existing.recognition = Some(recognition(RecognitionOutcome::TargetWhole));
+        existing.occurrences = vec![occurrence(
+            0,
+            Evidence::Match,
+            Some("ほん"),
+            0,
+            (100.0, 600.0),
+        )];
+        existing.candidates[0].occurrence = Some(0);
+    });
+    let select = || DecideRequest {
+        surface: "本".into(),
+        reading: "ほん".into(),
+        action: DecideAction::Select {
+            candidate_id: link.candidates[0].candidate_id.clone(),
+            expected_sha256: sha.clone(),
+        },
+        authority: DecisionAuthority::AgentEvidence {
+            agent: "agent".into(),
+            policy: AGENT_EVIDENCE_POLICY.into(),
+        },
+        reason: "выбор по свидетельствам".into(),
+        expected_fingerprint: None,
+    };
+    let selected_decision = decide(&store, "sel", select()).unwrap();
+    assert!(selected_decision.decision.recorded_at_unix_ms.is_some());
+    let requests = [Pronunciation::new("本", "ほん").unwrap()];
+    assert_eq!(
+        read_selected(
+            store.root(),
+            "sel",
+            &requests,
+            ConsumerTrustPolicy::AgentSelected
+        )
+        .unwrap()[0]
+            .bytes,
+        bytes
+    );
+    let promoted = promote(&store, "sel", "本", "ほん", None, false).unwrap();
+    assert!(!promoted.human_attestation_created);
+    mutate(&store, "sel", |batch, _| {
+        let mut review = audio_review(&link.candidates[0], sha, AudioVerdict::Contradicts);
+        review.surface = "本".into();
+        review.reading = "ほん".into();
+        batch.audio_reviews.push(review);
+    });
+    assert!(
+        read_selected(
+            store.root(),
+            "sel",
+            &requests,
+            ConsumerTrustPolicy::AgentSelected
+        )
+        .is_err()
+    );
+    assert!(promote(&store, "sel", "本", "ほん", Some(sha.clone()), false).is_err());
+    let pending = ops::status_value(&store, "sel", GroupFilter::Unresolved, 10).unwrap();
+    assert_eq!(pending["matched"], 1);
+    assert_eq!(pending["items"][0]["selection_effective"], false);
+    let mut explicit = select();
+    explicit.authority = user("выберите эту запись", false);
+    decide(&store, "sel", explicit).unwrap();
+    mutate(&store, "sel", |batch, _| {
+        let mut review = audio_review(&link.candidates[0], sha, AudioVerdict::Contradicts);
+        review.review_id = "a-2".into();
+        review.surface = "本".into();
+        review.reading = "ほん".into();
+        batch.audio_reviews.push(review);
+    });
+    assert_eq!(
+        read_selected(
+            store.root(),
+            "sel",
+            &requests,
+            ConsumerTrustPolicy::HumanDecision
+        )
+        .unwrap()[0]
+            .bytes,
+        bytes
+    );
+    assert!(promote(&store, "sel", "本", "ほん", Some(sha.clone()), true).is_err());
+}
+
+#[test]
+fn expert_verdict_only_uses_overlapping_occurrences() {
+    let result = recognition_result(
+        RecognitionOutcome::MultipleOccurrences,
+        vec![
+            recognizer_occurrence(0, Evidence::Match, (4410, 8820)),
+            recognizer_occurrence(1, Evidence::Conflict, (13230, 17640)),
+        ],
+    );
+    assert_eq!(
+        ops::verdict_of(&result, Some(&span(100.0, 200.0)), 44100).0,
+        AudioVerdict::Supports
+    );
+    assert_eq!(
+        ops::verdict_of(&result, Some(&span(300.0, 400.0)), 44100).0,
+        AudioVerdict::Contradicts
+    );
+    assert_eq!(
+        ops::verdict_of(&result, Some(&span(200.0, 300.0)), 44100).0,
+        AudioVerdict::Inconclusive
+    );
+    assert_eq!(
+        ops::verdict_of(&result, None, 44100).0,
+        AudioVerdict::Contradicts
+    );
+    assert_eq!(
+        ops::verdict_of(&result, Some(&span(150.0, 150.0)), 44100).0,
+        AudioVerdict::Inconclusive
+    );
+    let mut unresolved = result.clone();
+    unresolved.outcome = RecognitionOutcome::BoundariesUnresolved;
+    assert_eq!(
+        ops::verdict_of(&unresolved, Some(&span(300.0, 400.0)), 44100).0,
+        AudioVerdict::Inconclusive
+    );
+}
+
+#[test]
+fn invalid_zero_rate_intervals_are_rejected_in_state() {
+    let source = fake_source(1, "生", false);
+    let link = multi_reading_link(
+        &source,
+        "なま",
+        RecognitionOutcome::MultipleOccurrences,
+        &[(50.0, 250.0)],
+    );
+    let mut batch = batch_with(vec![source], vec![link]);
+    assert!(batch.validate().is_ok());
+    batch.links[0].occurrences[0].span.sample_rate = 0;
+    assert!(batch.validate().is_err());
+    batch.links[0].occurrences[0].span.sample_rate = 44100;
+    batch.links[0]
+        .candidates
+        .last_mut()
+        .unwrap()
+        .span
+        .as_mut()
+        .unwrap()
+        .sample_rate = 0;
+    assert!(batch.validate().is_err());
+}
+
+#[test]
+fn reject_excludes_only_the_candidate_and_defer_holds_the_group() {
+    let source = fake_source(1, "本", false);
+    let link = whole_link(&source, "本", "ほん", "ほん");
+    let other_source = fake_source(2, "橋", false);
+    let other = whole_link(&other_source, "橋", "はし", "はし");
+    let mut batch = batch_with(vec![source, other_source], vec![link.clone(), other]);
+    let first = engine::recommend(&batch, "本", "ほん").recommended.unwrap();
+    let candidate = batch.find_candidate(&first).unwrap().1;
+    let action = DecisionAction::RejectCandidate {
+        candidate_id: first.clone(),
+        addressed_sha256: candidate.audio.as_ref().unwrap().sha256.clone(),
+    };
+    batch.decisions.push(SelectionDecision {
+        decision_id: "d-1".into(),
+        surface: "本".into(),
+        reading: "ほん".into(),
+        action,
+        authority: user("отклонить первый", false),
+        reason: "отклонение".into(),
+        group_fingerprint: sha(7),
+        state_revision: 0,
+        recorded_at_unix_ms: None,
+    });
+    let recommendation = engine::recommend(&batch, "本", "ほん");
+    assert_ne!(recommendation.recommended.as_deref(), Some(first.as_str()));
+    let (planned, _) = ops::plan_auto_select(&batch, None);
+    assert!(planned.iter().any(|d| d.surface == "本"));
+    assert!(planned.iter().any(|d| d.surface == "橋"));
+    batch.decisions.push(SelectionDecision {
+        decision_id: "d-2".into(),
+        surface: "本".into(),
+        reading: "ほん".into(),
+        action: DecisionAction::Defer,
+        authority: user("отложить", false),
+        reason: "ожидание".into(),
+        group_fingerprint: sha(8),
+        state_revision: 0,
+        recorded_at_unix_ms: None,
+    });
+    let (planned, _) = ops::plan_auto_select(&batch, None);
+    assert!(!planned.iter().any(|d| d.surface == "本"));
+    assert!(planned.iter().any(|d| d.surface == "橋"));
+}
+
+#[test]
+fn relinking_invalidates_old_recognition_and_old_authority() {
+    let (_workspace, store) = store();
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "hon.mp3".into(),
+            bytes: mp3(440),
+        }],
+        None,
+    )
+    .unwrap();
+    let sha = &intake.added[0];
+    let link = link_target(&store, "sel", sha, "本", "ほん", vec![], vec![]).unwrap();
+    mutate(&store, "sel", |batch, _| {
+        let existing = &mut batch.links[0];
+        existing.recognition = Some(recognition(RecognitionOutcome::TargetWhole));
+        existing.occurrences = vec![occurrence(
+            0,
+            Evidence::Match,
+            Some("ほん"),
+            0,
+            (100.0, 600.0),
+        )];
+        existing.candidates[0].occurrence = Some(0);
+    });
+    decide(
+        &store,
+        "sel",
+        DecideRequest {
+            surface: "本".into(),
+            reading: "ほん".into(),
+            action: DecideAction::Select {
+                candidate_id: link.candidates[0].candidate_id.clone(),
+                expected_sha256: sha.clone(),
+            },
+            authority: user("подтверждаю", false),
+            reason: "выбор".into(),
+            expected_fingerprint: None,
+        },
+    )
+    .unwrap();
+    let changed = link_target(
+        &store,
+        "sel",
+        sha,
+        "本",
+        "ほん",
+        vec!["ぽん".into()],
+        vec![0],
+    )
+    .unwrap();
+    assert!(changed.recognition.is_none());
+    assert!(changed.occurrences.is_empty());
+    let requests = [Pronunciation::new("本", "ほん").unwrap()];
+    assert!(
+        read_selected(
+            store.root(),
+            "sel",
+            &requests,
+            ConsumerTrustPolicy::HumanDecision
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn skipped_review_row_must_also_be_current() {
+    let fixture = review_fixture();
+    let store = &fixture.store;
+    let export = review::export(store, "sel", GroupFilter::All, 0, 10).unwrap();
+    let directory = Path::new(&export.directory);
+    let rows = snapshot_rows(directory);
+    set_action(&directory.join("decisions.tsv"), &rows, "せい", "defer");
+    mutate(store, "sel", |batch, _| {
+        let link = batch
+            .links
+            .iter_mut()
+            .find(|l| l.reading == "なま")
+            .unwrap();
+        link.particle_morae.push(0);
+    });
+    assert!(review::apply(store, "sel", &export.review_id).is_err());
+    assert!(load(store, "sel").decisions.is_empty());
+}
+
+#[test]
+fn review_rejects_revision_change_even_if_target_evidence_is_unchanged() {
+    let fixture = review_fixture();
+    let store = &fixture.store;
+    let export = review::export(store, "sel", GroupFilter::All, 0, 10).unwrap();
+    let directory = Path::new(&export.directory);
+    let rows = snapshot_rows(directory);
+    set_action(&directory.join("decisions.tsv"), &rows, "せい", "defer");
+    mutate(store, "sel", |_, _| {});
+    assert!(review::apply(store, "sel", &export.review_id).is_err());
+    assert!(load(store, "sel").decisions.is_empty());
+}
+
+#[test]
+fn review_escapes_untrusted_source_metadata() {
+    let (_workspace, store) = store();
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "<img onerror=alert(1)>.mp3".into(),
+            bytes: mp3(440),
+        }],
+        None,
+    )
+    .unwrap();
+    link_target(
+        &store,
+        "sel",
+        &intake.added[0],
+        "本",
+        "ほん",
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let report = review::export(&store, "sel", GroupFilter::All, 0, 10).unwrap();
+    let html = std::fs::read_to_string(&report.index).unwrap();
+    assert!(html.contains("&lt;img onerror=alert(1)&gt;"));
+    assert!(!html.contains("<img onerror=alert(1)>"));
+    assert_eq!(html.matches("<script>").count(), 1);
+}
+
+#[test]
+fn review_rejects_missing_blob_even_for_skipped_row() {
+    let fixture = review_fixture();
+    let store = &fixture.store;
+    let export = review::export(store, "sel", GroupFilter::All, 0, 10).unwrap();
+    let directory = Path::new(&export.directory);
+    let rows = snapshot_rows(directory);
+    set_action(&directory.join("decisions.tsv"), &rows, "せい", "defer");
+    let removed = {
+        let runtime = SafeBatchRuntime::open(store.root(), "sel").unwrap();
+        let blob = fixture
+            .nama
+            .candidates
+            .last()
+            .unwrap()
+            .audio
+            .as_ref()
+            .unwrap()
+            .blob
+            .clone();
+        let bytes = runtime.read_blob(&blob).unwrap();
+        runtime.remove_blob(&blob).unwrap();
+        bytes
+    };
+    assert!(review::apply(store, "sel", &export.review_id).is_err());
+    SafeBatchRuntime::open(store.root(), "sel")
+        .unwrap()
+        .persist_blob_with_limit(&removed, "mp3", crate::pronunciation::MAX_AUDIO_BYTES)
+        .unwrap();
+    assert!(load(store, "sel").decisions.is_empty());
+}
+
+#[test]
+fn identical_forvo_bytes_keep_surface_specific_provenance() {
+    use crate::forvo::batch::{ForvoBatch, Item, StoredAcquisition, Transport};
+    let (_workspace, store) = store();
+    let bytes = mp3(440);
+    let sha = sha256_hex(&bytes);
+    {
+        let mut runtime = SafeBatchRuntime::open(store.root(), "forvo").unwrap();
+        let blob = runtime
+            .persist_blob_with_limit(&bytes, "mp3", crate::pronunciation::MAX_AUDIO_BYTES)
+            .unwrap();
+        let items = [("生", "なま"), ("本", "ほん")]
+            .into_iter()
+            .map(|(surface, reading)| Item {
+                request: Pronunciation::new(surface, reading).unwrap(),
+                replace_expected_sha256: None,
+                acquisition: Some(StoredAcquisition {
+                    blob: blob.clone(),
+                    evidence: forvo_evidence(surface, &sha, 4),
+                }),
+                outcome: None,
+            })
+            .collect();
+        runtime
+            .save(&ForvoBatch {
+                schema_version: 2,
+                provider: "forvo_web".into(),
+                transport: Some(Transport::CdpChromium),
+                browser: None,
+                target: None,
+                batch_id: "forvo".into(),
+                revision: 0,
+                cancelled: false,
+                paused: None,
+                items,
+            })
+            .unwrap();
+    }
+    let report = intake_forvo_batch(&store, "sel", "forvo").unwrap();
+    assert_eq!(report.added.len(), 1);
+    assert_eq!(report.already_present.len(), 1);
+    for (surface, reading) in [("生", "なま"), ("本", "ほん")] {
+        let link = link_target(&store, "sel", &sha, surface, reading, vec![], vec![]).unwrap();
+        let status = ops::status_value(&store, "sel", GroupFilter::All, 10).unwrap();
+        let item = status["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["surface"] == surface)
+            .unwrap();
+        assert_eq!(item["sources"][0]["sha256"], sha);
+        assert_eq!(item["sources"][0]["origins"].as_array().unwrap().len(), 2);
+        assert!(item["sources"][0].get("blob").is_none());
+        assert!(!item.to_string().contains("storage_path"));
+        decide(
+            &store,
+            "sel",
+            DecideRequest {
+                surface: surface.into(),
+                reading: reading.into(),
+                action: DecideAction::Select {
+                    candidate_id: link.candidates[0].candidate_id.clone(),
+                    expected_sha256: sha.clone(),
+                },
+                authority: user("подтверждаю", false),
+                reason: "выбор".into(),
+                expected_fingerprint: None,
+            },
+        )
+        .unwrap();
+        let promoted = promote(&store, "sel", surface, reading, None, false).unwrap();
+        assert_eq!(promoted.asset.provenance.source_kind, "forvo_web");
+    }
+}
+
+#[test]
+fn audio_authority_requires_matching_latest_backend_and_target() {
+    let source = fake_source(1, "橋", true);
+    let link = whole_link(&source, "橋", "はし", "はち");
+    let candidate = &link.candidates[1];
+    let sha = candidate.audio.as_ref().unwrap().sha256.clone();
+    let mut batch = batch_with(vec![source], vec![link.clone()]);
+    batch
+        .audio_reviews
+        .push(audio_review(candidate, &sha, AudioVerdict::Supports));
+    let action = DecideAction::Select {
+        candidate_id: candidate.candidate_id.clone(),
+        expected_sha256: sha.clone(),
+    };
+    let authority = |backend: &str, id: &str| DecisionAuthority::AgentAudioModel {
+        agent: "agent".into(),
+        backend: backend.into(),
+        audio_review_id: id.into(),
+    };
+    let recommendation = engine::recommend(&batch, "橋", "はし");
+    assert!(
+        ops::validate_decision(
+            &batch,
+            &recommendation,
+            &action,
+            &authority(ops::LOCAL_AUDIO_BACKEND, "a-1")
+        )
+        .is_ok()
+    );
+    assert!(
+        ops::validate_decision(
+            &batch,
+            &recommendation,
+            &action,
+            &authority("other-backend", "a-1")
+        )
+        .is_err()
+    );
+    for corrupt in 0..3 {
+        let mut bad = batch.clone();
+        match corrupt {
+            0 => bad.audio_reviews[0].audio_sha256 = sha256_hex("другие байты"),
+            1 => bad.audio_reviews[0].reading = "はち".into(),
+            _ => bad.audio_reviews[0].candidate_id = link.candidates[0].candidate_id.clone(),
+        }
+        let recommendation = engine::recommend(&bad, "橋", "はし");
+        assert!(
+            ops::validate_decision(
+                &bad,
+                &recommendation,
+                &action,
+                &authority(ops::LOCAL_AUDIO_BACKEND, "a-1")
+            )
+            .is_err()
+        );
+    }
+    let mut newer = audio_review(candidate, &sha, AudioVerdict::Contradicts);
+    newer.review_id = "a-2".into();
+    batch.audio_reviews.push(newer);
+    let recommendation = engine::recommend(&batch, "橋", "はし");
+    assert!(
+        ops::validate_decision(
+            &batch,
+            &recommendation,
+            &action,
+            &authority(ops::LOCAL_AUDIO_BACKEND, "a-1")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn audio_authority_refuses_missing_candidate_bytes_before_deciding() {
+    let (_workspace, store) = store();
+    let bytes = mp3(440);
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "hon.mp3".into(),
+            bytes,
+        }],
+        None,
+    )
+    .unwrap();
+    let sha = &intake.added[0];
+    let link = link_target(&store, "sel", sha, "本", "ほん", vec![], vec![]).unwrap();
+    mutate(&store, "sel", |batch, _| {
+        let mut review = audio_review(&link.candidates[0], sha, AudioVerdict::Supports);
+        review.surface = "本".into();
+        review.reading = "ほん".into();
+        batch.audio_reviews.push(review);
+    });
+    let removed = {
+        let runtime = SafeBatchRuntime::open(store.root(), "sel").unwrap();
+        let blob = link.candidates[0].audio.as_ref().unwrap().blob.clone();
+        let bytes = runtime.read_blob(&blob).unwrap();
+        runtime.remove_blob(&blob).unwrap();
+        bytes
+    };
+    let result = decide(
+        &store,
+        "sel",
+        DecideRequest {
+            surface: "本".into(),
+            reading: "ほん".into(),
+            action: DecideAction::Select {
+                candidate_id: link.candidates[0].candidate_id.clone(),
+                expected_sha256: sha.clone(),
+            },
+            authority: DecisionAuthority::AgentAudioModel {
+                agent: "agent".into(),
+                audio_review_id: "a-1".into(),
+                backend: ops::LOCAL_AUDIO_BACKEND.into(),
+            },
+            reason: "экспертиза".into(),
+            expected_fingerprint: None,
+        },
+    );
+    assert!(result.is_err());
+    SafeBatchRuntime::open(store.root(), "sel")
+        .unwrap()
+        .persist_blob_with_limit(&removed, "mp3", crate::pronunciation::MAX_AUDIO_BYTES)
+        .unwrap();
+    assert!(load(&store, "sel").decisions.is_empty());
+}
+
+#[test]
+fn review_reject_replay_is_idempotent_and_cannot_add_actions() {
+    let fixture = review_fixture();
+    let store = &fixture.store;
+    let export = review::export(store, "sel", GroupFilter::All, 0, 10).unwrap();
+    let directory = Path::new(&export.directory);
+    let rows = snapshot_rows(directory);
+    let decisions = directory.join("decisions.tsv");
+    let candidate = &fixture.nama.candidates[0].candidate_id;
+    let number = option_number(&rows, "なま", candidate);
+    set_action(&decisions, &rows, "なま", &format!("r{number}"));
+    assert_eq!(
+        review::apply(store, "sel", &export.review_id)
+            .unwrap()
+            .rejected,
+        1
+    );
+    let again = review::apply(store, "sel", &export.review_id).unwrap();
+    assert_eq!(again.already_applied, 1);
+    assert!(!again.changed);
+    set_action(&decisions, &rows, "せい", "defer");
+    assert!(review::apply(store, "sel", &export.review_id).is_err());
+    assert_eq!(load(store, "sel").decisions.len(), 1);
+    assert!(review::export(store, "sel", GroupFilter::All, usize::MAX, 2).is_err());
+}
+
+#[test]
+fn system_recording_time_is_explicit_and_legacy_decisions_deserialize() {
+    assert_eq!(
+        ops::recorded_at(std::time::UNIX_EPOCH + std::time::Duration::from_millis(1234)).unwrap(),
+        1234
+    );
+    let source = fake_source(1, "本", false);
+    let link = whole_link(&source, "本", "ほん", "ほん");
+    let batch = batch_with(vec![source], vec![link]);
+    let (decisions, _) = ops::plan_auto_select(&batch, None);
+    let json = serde_json::to_value(&decisions[0]).unwrap();
+    assert!(json.get("recorded_at_unix_ms").is_none());
+    assert_eq!(
+        serde_json::from_value::<SelectionDecision>(json)
+            .unwrap()
+            .recorded_at_unix_ms,
+        None
     );
 }

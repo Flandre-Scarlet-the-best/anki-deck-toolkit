@@ -60,6 +60,10 @@ pub(crate) fn valid_token(text: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 // ---------------------------------------------------------------------------
 // Исходный ассет
 // ---------------------------------------------------------------------------
@@ -75,6 +79,10 @@ pub enum SourceOrigin {
     },
     ForvoBatch {
         batch_id: String,
+        /// Написание страницы данного происхождения. В старых пакетах оно
+        /// хранится в общем surface_hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface: Option<String>,
         /// Полное проверенное свидетельство Forvo для точного SHA.
         evidence: ForvoEvidence,
         /// Чтение из плана загрузки: подсказка, не подтверждение.
@@ -118,6 +126,29 @@ impl AudioSource {
             .find(|candidate| candidate.record_id == evidence.selected_record_id)
             .and_then(|candidate| candidate.votes)
     }
+
+    pub fn forvo_for(&self, surface: &str) -> Option<(&ForvoEvidence, &str)> {
+        self.origins.iter().find_map(|origin| match origin {
+            SourceOrigin::ForvoBatch {
+                evidence,
+                batch_id,
+                surface: origin_surface,
+                ..
+            } if origin_surface.as_deref().or(self.surface_hint.as_deref()) == Some(surface) => {
+                Some((evidence, batch_id.as_str()))
+            }
+            _ => None,
+        })
+    }
+
+    pub fn forvo_votes_for(&self, surface: &str) -> Option<i64> {
+        let (evidence, _) = self.forvo_for(surface)?;
+        evidence
+            .candidates
+            .iter()
+            .find(|c| c.record_id == evidence.selected_record_id)
+            .and_then(|c| c.votes)
+    }
 }
 
 /// Свободный анализ без цели: что услышали модели во всей записи.
@@ -158,6 +189,9 @@ pub struct RecognitionSummary {
     pub selected_occurrence: Option<usize>,
     pub post_validation_passed: Option<bool>,
     pub post_validation_failed_checks: Vec<String>,
+    /// Доступные метрики обработки; в старых состояниях их могло не быть.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_details: Option<serde_json::Value>,
     /// Выдаваемый кандидат — фрагмент записи, а не вся запись.
     pub fragment_mode: bool,
     /// Модели не услышали речи на части активности: другая речь не исключена.
@@ -285,6 +319,9 @@ pub struct TargetLink {
     pub source_sha256: String,
     pub surface: String,
     pub reading: String,
+    /// Поколение контекста распознавания и идентичности кандидатов.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub generation: u64,
     pub competing_readings: Vec<String>,
     /// Моры чтения, явно отмеченные как грамматические частицы.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -327,6 +364,8 @@ pub struct AudioReview {
     pub candidate_id: String,
     pub surface: String,
     pub reading: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub link_generation: u64,
     pub competitors: Vec<String>,
     pub outcome: RecognitionOutcome,
     pub verdict: AudioVerdict,
@@ -452,6 +491,7 @@ pub enum ReasonCode {
     AudioReviewSupports,
     AudioReviewContradicts,
     AudioReviewInconclusive,
+    RejectedByDecision,
     PitchAccentNotAssessed,
     HomonymsNotDistinguished,
 }
@@ -590,6 +630,8 @@ pub enum DecisionAction {
         addressed_sha256: String,
         source_sha256: String,
         span: Option<CandidateSpan>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        link_generation: u64,
     },
     /// Отклонён точный кандидат; исходник при этом не удаляется.
     RejectCandidate {
@@ -613,6 +655,9 @@ pub struct SelectionDecision {
     /// Отпечаток группы, по которой принято решение.
     pub group_fingerprint: String,
     pub state_revision: u64,
+    /// Момент записи решения системой, не время исходной реплики пользователя.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at_unix_ms: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -791,10 +836,11 @@ impl RuntimeBatchState for SelectionBatch {
                         batch_id,
                         evidence,
                         plan_reading,
+                        surface: origin_surface,
                     } => {
-                        let surface = source
-                            .surface_hint
+                        let surface = origin_surface
                             .as_deref()
+                            .or(source.surface_hint.as_deref())
                             .ok_or_else(|| corrupt("исходник Forvo без написания"))?;
                         let request = Pronunciation::new(surface, plan_reading)?;
                         evidence.validate(&request, &source.sha256)?;
@@ -814,6 +860,10 @@ impl RuntimeBatchState for SelectionBatch {
                 || !valid_token(&link.link_id)
                 || !valid_text(&link.origin.key, MAX_TEXT)
                 || link.competing_readings.len() > 16
+                || link
+                    .occurrences
+                    .iter()
+                    .any(|o| o.span.sample_rate == 0 || o.span.start_frame >= o.span.end_frame)
             {
                 return Err(corrupt("некорректная связь с целью"));
             }
@@ -833,7 +883,9 @@ impl RuntimeBatchState for SelectionBatch {
                     || candidate
                         .occurrence
                         .is_some_and(|i| !link.occurrences.iter().any(|o| o.index == i))
-                    || candidate.span.is_some_and(|s| s.start_frame >= s.end_frame)
+                    || candidate
+                        .span
+                        .is_some_and(|s| s.sample_rate == 0 || s.start_frame >= s.end_frame)
                 {
                     return Err(corrupt("некорректный кандидат произношения"));
                 }

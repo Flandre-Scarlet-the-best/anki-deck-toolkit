@@ -3,6 +3,7 @@ use super::*;
 fn snapshot() -> ReviewSnapshot {
     ReviewSnapshot {
         schema_version: SCHEMA,
+        batch_revision: None,
         batch_id: "review-test".into(),
         validator: crate::kanji_validator::KanjiImageValidator::validator_identity(),
         rows: ['保', '倉', '点', '門']
@@ -54,7 +55,7 @@ fn only_explicit_y_confirms_and_windows_text_is_accepted() {
             candidate_sha256: snapshot.rows[1].sha256.clone(),
             action: HumanBatchAction::RejectAndHold,
             reason: format!(
-                "review:{}; unusable_image; explicit retry required",
+                "review:{}; unusable_image; требуется явный повтор",
                 "b".repeat(64)
             ),
         })

@@ -184,6 +184,7 @@ pub(crate) fn prepare(
     rows.sort_by_key(|row| row.ocr.as_ref().map_or(3, |ocr| ocr.group()));
     let snapshot = ReviewSnapshot {
         schema_version: SCHEMA,
+        batch_revision: None,
         batch_id: state.batch_id.clone(),
         validator: state.policy.validator.clone(),
         rows,
@@ -247,7 +248,7 @@ fn decide(
             ),
             "e" => (
                 HumanBatchAction::RejectAndHold,
-                "unusable_image; explicit retry required".to_owned(),
+                "unusable_image; требуется явный повтор".to_owned(),
             ),
             other => {
                 let character = parse_kanji_character(other)
@@ -259,7 +260,7 @@ fn decide(
                 }
                 (
                     HumanBatchAction::RejectAndHold,
-                    format!("actual_character={character}; explicit retry required"),
+                    format!("actual_character={character}; требуется явный повтор"),
                 )
             }
         };

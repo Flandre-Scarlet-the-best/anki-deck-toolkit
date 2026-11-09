@@ -19,7 +19,7 @@
 //!   потребить; интервал, пересекающийся с вхождением другого чтения той же
 //!   записи, требует пользователя.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::model::*;
 use super::phonetic::{self, Comparison, DivergenceClass};
@@ -117,6 +117,7 @@ fn audio_review_for<'a>(
             && review.audio_sha256 == sha
             && review.surface == link.surface
             && review.reading == link.reading
+            && review.link_generation == link.generation
     })
 }
 
@@ -138,13 +139,16 @@ pub(crate) fn assess_candidate(
     candidate: &PronunciationCandidate,
 ) -> CandidateAssessment {
     let source = batch.source(&link.source_sha256);
-    let forvo = source.is_some_and(|s| s.forvo().is_some());
+    let forvo = source.is_some_and(|s| s.forvo_for(&link.surface).is_some());
     let mut reasons = vec![if forvo {
         ReasonCode::ProvenanceForvo
     } else {
         ReasonCode::ProvenanceUnverified
     }];
-    if source.and_then(AudioSource::forvo_votes).is_some() {
+    if source
+        .and_then(|s| s.forvo_votes_for(&link.surface))
+        .is_some()
+    {
         reasons.push(ReasonCode::ForvoVotesPrior);
     }
     let occurrence = candidate
@@ -352,28 +356,78 @@ fn kind_rank(kind: CandidateKind) -> u8 {
 }
 
 /// Рекомендация для одной цели по всем её связям.
+type RejectedCandidates = BTreeSet<(String, String, String, String)>;
+
+fn rejected_candidates(batch: &SelectionBatch) -> RejectedCandidates {
+    let mut rejected = BTreeSet::new();
+    for decision in &batch.decisions {
+        let (id, sha, is_rejection) = match &decision.action {
+            DecisionAction::RejectCandidate {
+                candidate_id,
+                addressed_sha256,
+            } => (candidate_id, addressed_sha256, true),
+            DecisionAction::Select {
+                candidate_id,
+                addressed_sha256,
+                ..
+            } => (candidate_id, addressed_sha256, false),
+            DecisionAction::Defer => continue,
+        };
+        let key = (
+            decision.surface.clone(),
+            decision.reading.clone(),
+            id.clone(),
+            sha.clone(),
+        );
+        if is_rejection {
+            rejected.insert(key);
+        } else {
+            rejected.remove(&key);
+        }
+    }
+    rejected
+}
+
 pub(crate) fn recommend(
     batch: &SelectionBatch,
     surface: &str,
     reading: &str,
 ) -> GroupRecommendation {
+    recommend_with_rejections(batch, surface, reading, &rejected_candidates(batch))
+}
+
+fn recommend_with_rejections(
+    batch: &SelectionBatch,
+    surface: &str,
+    reading: &str,
+    rejected_candidates: &RejectedCandidates,
+) -> GroupRecommendation {
     let mut ranked = Vec::new();
     for link in batch.links_of(surface, reading) {
         let source = batch.source(&link.source_sha256);
-        let votes = source.and_then(AudioSource::forvo_votes);
+        let votes = source.and_then(|s| s.forvo_votes_for(surface));
         for candidate in &link.candidates {
-            let assessment = assess_candidate(batch, link, candidate);
+            let mut assessment = assess_candidate(batch, link, candidate);
+            let rejected = rejected_candidates.contains(&(
+                surface.to_owned(),
+                reading.to_owned(),
+                candidate.candidate_id.clone(),
+                candidate.addressed_sha(&link.source_sha256).to_owned(),
+            ));
+            if rejected {
+                assessment.reasons.push(ReasonCode::RejectedByDecision);
+            }
             let snr = candidate
                 .occurrence
                 .and_then(|i| link.occurrences.iter().find(|o| o.index == i))
                 .and_then(|o| o.snr_db)
                 .unwrap_or(f64::NEG_INFINITY);
-            ranked.push((assessment, kind_rank(candidate.kind), votes, snr));
+            ranked.push((assessment, kind_rank(candidate.kind), votes, snr, rejected));
         }
     }
     ranked.sort_by(|a, b| {
-        a.0.class
-            .cmp(&b.0.class)
+        a.4.cmp(&b.4)
+            .then_with(|| a.0.class.cmp(&b.0.class))
             .then_with(|| b.0.consumable.cmp(&a.0.consumable))
             .then_with(|| a.0.proof.cmp(&b.0.proof))
             .then_with(|| a.1.cmp(&b.1))
@@ -382,14 +436,27 @@ pub(crate) fn recommend(
             .then_with(|| a.0.candidate_id.cmp(&b.0.candidate_id))
     });
     let candidates: Vec<CandidateAssessment> = ranked.into_iter().map(|r| r.0).collect();
-    let best = candidates.first();
-    let class = best.map_or(SelectionClass::Deferred, |c| c.class);
+    let best = candidates
+        .iter()
+        .find(|c| !c.reasons.contains(&ReasonCode::RejectedByDecision));
+    let class = best.map_or(
+        if candidates.is_empty() {
+            SelectionClass::Deferred
+        } else {
+            SelectionClass::Rejected
+        },
+        |c| c.class,
+    );
     let recommended = best
         .filter(|c| c.class <= SelectionClass::NeedsUserConfirmation)
         .map(|c| c.candidate_id.clone());
-    let reasons = best
-        .map(|c| c.reasons.clone())
-        .unwrap_or_else(|| vec![ReasonCode::NoAcousticEvidence]);
+    let reasons = best.map(|c| c.reasons.clone()).unwrap_or_else(|| {
+        vec![if candidates.is_empty() {
+            ReasonCode::NoAcousticEvidence
+        } else {
+            ReasonCode::RejectedByDecision
+        }]
+    });
     let fingerprint = group_fingerprint(batch, surface, reading, &candidates, class);
     GroupRecommendation {
         surface: surface.into(),
@@ -414,6 +481,13 @@ fn group_fingerprint(
     class: SelectionClass,
 ) -> String {
     let links: Vec<&TargetLink> = batch.links_of(surface, reading).collect();
+    let sources: Vec<&AudioSource> = links
+        .iter()
+        .map(|link| link.source_sha256.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|sha| batch.source(sha))
+        .collect();
     let reviews: Vec<&AudioReview> = batch
         .audio_reviews
         .iter()
@@ -425,6 +499,7 @@ fn group_fingerprint(
             surface,
             reading,
             &links,
+            &sources,
             &reviews,
             assessments,
             class,
@@ -437,11 +512,12 @@ fn group_fingerprint(
 pub(crate) fn recommend_all(
     batch: &SelectionBatch,
 ) -> BTreeMap<(String, String), GroupRecommendation> {
+    let rejected = rejected_candidates(batch);
     batch
         .identities()
         .into_iter()
         .map(|(surface, reading)| {
-            let recommendation = recommend(batch, &surface, &reading);
+            let recommendation = recommend_with_rejections(batch, &surface, &reading, &rejected);
             ((surface, reading), recommendation)
         })
         .collect()

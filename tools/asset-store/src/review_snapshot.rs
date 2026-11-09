@@ -10,7 +10,7 @@
 //! - редактируемый `decisions.tsv`, где человек меняет только первую колонку,
 //!   а подпись, схема, пакет, идентичность и остальные колонки неизменны;
 //! - повторный export того же снимка не перезаписывает заполненный файл решений;
-//! - чтение отклоняет файл целиком при подмене снимка, копии изображения,
+//! - чтение отклоняет файл целиком при подмене снимка, копии кандидата,
 //!   подписи, колонки, порядка или числа строк.
 //!
 //! Слой не знает ни браузера, ни провайдера, ни уровня доверия. Необязательные
@@ -57,6 +57,9 @@ pub(crate) struct ReviewSnapshot<R> {
     pub schema_version: u32,
     pub batch_id: String,
     pub validator: ValidatorIdentity,
+    /// Ревизия владельца, если предметный адаптер её проверяет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_revision: Option<u64>,
     pub rows: Vec<R>,
 }
 
@@ -115,13 +118,13 @@ fn decisions_template<R: ReviewRow>(
 }
 
 /// Создаёт или повторно открывает снимок. Каталог открывает владелец runtime
-/// пакета под своей блокировкой; `read_image` возвращает проверенные байты
+/// пакета под своей блокировкой; `read_candidate` возвращает проверенные байты
 /// названной копии строки из сохранённого состояния.
 pub(crate) fn export<R: ReviewRow>(
     open_directory: impl FnOnce(&str) -> Result<ArtifactDirectory, AssetError>,
     snapshot: &ReviewSnapshot<R>,
     format: &ReviewFormat,
-    mut read_image: impl FnMut(&R, &str) -> Result<Vec<u8>, AssetError>,
+    mut read_candidate: impl FnMut(&R, &str) -> Result<Vec<u8>, AssetError>,
 ) -> Result<(ReviewBundle, ArtifactDirectory), AssetError> {
     if snapshot.schema_version != format.schema {
         return Err(invalid("схема снимка review не совпадает с форматом"));
@@ -136,15 +139,15 @@ pub(crate) fn export<R: ReviewRow>(
                 for (filename, sha256) in row.files() {
                     match directory.read(filename) {
                         Ok(bytes) if sha256_hex(&bytes) == sha256 => {}
-                        Ok(_) => return Err(invalid("копия изображения review изменена")),
+                        Ok(_) => return Err(invalid("копия файла review изменена")),
                         Err(error) if error.code == ErrorCode::MissingAssetFile => {
-                            let bytes = read_image(row, filename)?;
+                            let bytes = read_candidate(row, filename)?;
                             if sha256_hex(&bytes) != sha256 {
                                 return Err(invalid("исходный кандидат review изменён"));
                             }
                             directory.write_if_absent(filename, &bytes)?;
                             if sha256_hex(&directory.read(filename)?) != sha256 {
-                                return Err(invalid("копия изображения review изменена"));
+                                return Err(invalid("копия файла review изменена"));
                             }
                         }
                         Err(error) => return Err(error),
@@ -167,7 +170,7 @@ pub(crate) fn export<R: ReviewRow>(
         Err(error) if error.code == ErrorCode::MissingAssetFile => {
             for row in &snapshot.rows {
                 for (filename, sha256) in row.files() {
-                    let bytes = read_image(row, filename)?;
+                    let bytes = read_candidate(row, filename)?;
                     if sha256_hex(&bytes) != sha256 {
                         return Err(invalid("исходный кандидат review изменён"));
                     }
@@ -213,7 +216,7 @@ pub(crate) fn read<R: ReviewRow>(
         row.validate()?;
         for (filename, sha256) in row.files() {
             if sha256_hex(&directory.read(filename)?) != sha256 {
-                return Err(invalid("SHA копии изображения review не совпадает"));
+                return Err(invalid("SHA копии файла review не совпадает"));
             }
         }
     }

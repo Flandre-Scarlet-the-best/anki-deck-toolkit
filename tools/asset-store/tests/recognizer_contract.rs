@@ -982,7 +982,7 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
         "{deferred}"
     );
 
-    // Пустой файл решений применяется без изменений.
+    // Снимок до решений и аудиоэкспертизы устарел, даже если все строки пусты.
     let review_id = export["result"]["review_id"].as_str().unwrap();
     let applied = json(&selection(
         &f,
@@ -993,6 +993,18 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
             "--review-id",
             review_id,
         ],
+    ));
+    assert_eq!(applied["outcome"], "error", "{applied}");
+    // Новый пустой снимок текущей ревизии применяется без изменений.
+    let fresh = json(&selection(
+        &f,
+        &["review-export", "--batch-id", "sel", "--filter", "all"],
+    ));
+    assert_eq!(fresh["outcome"], "ok", "{fresh}");
+    let fresh_id = fresh["result"]["review_id"].as_str().unwrap();
+    let applied = json(&selection(
+        &f,
+        &["review-apply", "--batch-id", "sel", "--review-id", fresh_id],
     ));
     assert_eq!(applied["outcome"], "ok", "{applied}");
     assert_eq!(applied["result"]["changed"], false);

@@ -17,7 +17,9 @@ use sha2::{Digest, Sha256};
 
 use super::engine;
 use super::model::*;
-use super::ops::{DecideAction, GroupFilter, candidate_bytes, group_view, validate_decision};
+use super::ops::{
+    DecideAction, GroupFilter, candidate_bytes, group_view, recorded_at, validate_decision,
+};
 use crate::batch::html_escape;
 use crate::batch_runtime::{RuntimeBatchState, SafeBatchRuntime};
 use crate::error::{AssetError, ErrorCode};
@@ -27,13 +29,13 @@ use crate::pronunciation::Pronunciation;
 use crate::review_snapshot::{ReviewCell, ReviewFormat, ReviewSnapshot};
 use crate::store::AssetStore;
 
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 pub const MAX_PAGE_SIZE: usize = 500;
 
 const FORMAT: ReviewFormat = ReviewFormat {
     schema: SCHEMA,
     comments: &[
-        "# Обзор аудиокандидатов произношения, формат v1",
+        "# Обзор аудиокандидатов произношения, формат v2",
         "# Первая колонка: N = выбрать вариант N; heard:N = выбрать вариант N, я прослушал запись;",
         "#   rN = отклонить вариант N (исходник не удаляется); defer = отложить; - или пусто = без решения.",
         "# Остальные колонки неизменны; разделитель TAB. Изменение HTML ничего не применяет.",
@@ -161,19 +163,15 @@ fn rows_for(
     let recommendations = engine::recommend_all(batch);
     let selected: Vec<&GroupRecommendation> = recommendations
         .values()
-        .filter(|r| {
-            let decided = batch.current_decision(&r.surface, &r.reading).is_some();
-            match filter {
-                GroupFilter::All => true,
-                GroupFilter::Undecided => !decided,
-                GroupFilter::Unresolved => !decided && r.class > SelectionClass::AgentSelectable,
-                GroupFilter::Class(class) => r.class == class,
-            }
-        })
+        .filter(|r| filter.accepts(batch, r, batch.current_decision(&r.surface, &r.reading)))
         .collect();
     let matched = selected.len();
     let mut rows = Vec::new();
-    for recommendation in selected.into_iter().skip(page * page_size).take(page_size) {
+    for recommendation in selected
+        .into_iter()
+        .skip(page.saturating_mul(page_size))
+        .take(page_size)
+    {
         let mut options = Vec::new();
         for assessment in &recommendation.candidates {
             let (link, candidate) = batch
@@ -237,6 +235,7 @@ pub fn export(
         schema_version: SCHEMA,
         batch_id: batch.batch_id.clone(),
         validator: validator(),
+        batch_revision: Some(batch.revision),
         rows,
     };
     let (bundle, directory) = crate::review_snapshot::export(
@@ -356,20 +355,62 @@ pub fn apply(
     if snapshot.validator != validator() {
         return Err(invalid("политика обзора устарела"));
     }
+    let snapshot_revision = snapshot
+        .batch_revision
+        .ok_or_else(|| invalid("обзор устарел: ревизия пакета отсутствует"))?;
+    let subsequent: Vec<_> = batch
+        .decisions
+        .iter()
+        .filter(|d| d.state_revision > snapshot_revision)
+        .collect();
+    let replay = snapshot_revision.checked_add(1) == Some(batch.revision)
+        && !subsequent.is_empty()
+        && subsequent.iter().all(|d| {
+            matches!(&d.authority,
+            DecisionAuthority::UserDirectReview { review_id: id, .. } if id == review_id)
+        });
+    if batch.revision != snapshot_revision && !replay {
+        return Err(invalid("обзор устарел: ревизия пакета изменилась"));
+    }
+    // При replay восстанавливаем состояние до единственного атомарного apply.
+    // Любая иная ревизия запрещена; новые действия в старом TSV запрещены ниже.
+    let base_on_replay = replay.then(|| {
+        let mut base = batch.clone();
+        base.decisions
+            .retain(|d| d.state_revision <= snapshot_revision);
+        base.revision = snapshot_revision;
+        base
+    });
+    let base = base_on_replay.as_ref().unwrap_or(&batch);
     let mut report = ApplyReport::default();
     let mut decisions = Vec::new();
     for (row, cell) in snapshot.rows.iter().zip(cells) {
-        let Some(cell) = parse_cell(row, cell)? else {
-            report.skipped += 1;
-            continue;
-        };
-        let recommendation = engine::recommend(&batch, &row.surface, &row.reading);
+        let recommendation = engine::recommend(base, &row.surface, &row.reading);
         if recommendation.fingerprint != row.fingerprint {
             return Err(invalid(format!(
                 "{}: обзор устарел: кандидаты, свидетельства или экспертизы цели изменились",
                 row.identity.key
             )));
         }
+        // Целостность исходных blob относится ко всему снимку, даже если в
+        // строке пока нет решения. Копии проверяет общий review_snapshot.
+        for option in &row.options {
+            let (link, candidate) = batch
+                .find_candidate(&option.candidate_id)
+                .ok_or_else(|| invalid("кандидат обзора отсутствует"))?;
+            if sha256_hex(&candidate_bytes(&runtime, &batch, link, candidate)?)
+                != option.file_sha256
+            {
+                return Err(AssetError::new(
+                    ErrorCode::IntegrityMismatch,
+                    "байты кандидата изменились относительно снимка",
+                ));
+            }
+        }
+        let Some(cell) = parse_cell(row, cell)? else {
+            report.skipped += 1;
+            continue;
+        };
         let option = |number: u32| &row.options[number as usize - 1];
         let (action, heard) = match &cell {
             Cell::Select { number, heard } => (
@@ -392,28 +433,18 @@ pub fn apply(
             review_id: review_id.into(),
             user_listened: heard,
         };
-        let decision_action = validate_decision(&batch, &recommendation, &action, &authority)?;
-        // Точные байты варианта сверяются с хранимым blob до записи.
-        if let Cell::Select { number, .. } | Cell::Reject(number) = &cell {
-            let option = option(*number);
-            let (link, candidate) = batch
-                .find_candidate(&option.candidate_id)
-                .ok_or_else(|| invalid("кандидат обзора отсутствует"))?;
-            if sha256_hex(&candidate_bytes(&runtime, &batch, link, candidate)?)
-                != option.file_sha256
-            {
-                return Err(AssetError::new(
-                    ErrorCode::IntegrityMismatch,
-                    "байты кандидата изменились относительно снимка",
-                ));
-            }
-        }
+        let decision_action = validate_decision(base, &recommendation, &action, &authority)?;
         if let Some(current) = batch.current_decision(&row.surface, &row.reading)
             && current.action == decision_action
             && current.authority == authority
         {
             report.already_applied += 1;
             continue;
+        }
+        if replay {
+            return Err(invalid(
+                "повторное применение не совпадает с прежним решением",
+            ));
         }
         match &cell {
             Cell::Select { .. } => report.selected += 1,
@@ -430,13 +461,19 @@ pub fn apply(
             reason: format!("review:{review_id}"),
             group_fingerprint: row.fingerprint.clone(),
             state_revision: 0,
+            recorded_at_unix_ms: None,
         });
+    }
+    if replay && report.already_applied != subsequent.len() {
+        return Err(invalid("повторное применение пропускает прежнее решение"));
     }
     if !decisions.is_empty() {
         let revision = batch.revision + 1;
+        let timestamp = recorded_at(std::time::SystemTime::now())?;
         for mut decision in decisions {
             decision.decision_id = batch.next_decision_id();
             decision.state_revision = revision;
+            decision.recorded_at_unix_ms = Some(timestamp);
             batch.decisions.push(decision);
         }
         batch.revision = revision;
@@ -471,28 +508,14 @@ fn render(
         script_hash(),
         html_escape(review_id),
         html_escape(&snapshot.batch_id),
-        page + 1,
+        page.saturating_add(1),
         matched.div_ceil(page_size).max(1),
         matched,
     );
     for (row_index, row) in snapshot.rows.iter().enumerate() {
         let display = &row.display;
-        let recognition: Vec<serde_json::Value> = display["links"]
-            .as_array()
-            .map(|links| {
-                links
-                    .iter()
-                    .map(|l| {
-                        serde_json::json!({
-                            "source_sha256": l["source_sha256"],
-                            "target_origin": l["origin"],
-                            "competing_readings": l["competing_readings"],
-                            "recognition": l["recognition"],
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let recognition = serde_json::json!({"links": display["links"], "sources": display["sources"],
+            "примечание": "null означает: нет данных; голоса Forvo не подтверждают фонемы"});
         write!(
             html,
             "<article id=\"row-{row_index}\"><h2>{} · {}</h2><p>Класс: <code>{}</code>; рекомендован: <code>{}</code></p><p>Причины: <code>{}</code></p><details><summary>Распознавание и происхождение</summary><pre>{}</pre></details>",
@@ -501,7 +524,7 @@ fn render(
             row.class.as_str(),
             html_escape(row.recommended.as_deref().unwrap_or("нет")),
             html_escape(&display["recommendation"]["reasons"].to_string()),
-            html_escape(&json_text(&serde_json::Value::Array(recognition))),
+            html_escape(&json_text(&recognition)),
         )
         .expect("запись в String");
         for option in &row.options {
@@ -570,6 +593,7 @@ mod tests {
             schema_version: SCHEMA,
             batch_id: "b".into(),
             validator: validator(),
+            batch_revision: Some(0),
             rows: Vec::new(),
         };
         let html = render(&snapshot, &"0".repeat(64), 0, 0, 10);
