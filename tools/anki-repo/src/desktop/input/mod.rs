@@ -110,11 +110,17 @@ pub(super) fn run(
         let result = export_one(&target, o, &catalog, &deck, &key, &mut store, wait_seconds);
         match result {
             Ok(value) => outcomes.push(value),
-            Err(e) => outcomes.push(json!({"name":deck["name"],"state":"failed",
+            Err(e) => {
+                // Отказ из-за незавершённой публикации выдаётся до экспорта:
+                // экспорт мог выполниться только по ранее сохранённому заданию.
+                let may_have_completed =
+                    e.details["reason"] != "publication_pending" || store.pending(&key).is_some();
+                outcomes.push(json!({"name":deck["name"],"state":"failed",
                 "reason":e.details["reason"],"message":e.message,
                 "job_id":e.details.get("job_id").cloned().unwrap_or_else(|| json!(store.pending(&key).map(|p| p.id.clone()))),
                 "attempt_closed":e.details["attempt_closed"],
-                "anki_export_may_have_completed":true,"input_confirmed":false})),
+                "anki_export_may_have_completed":may_have_completed,"input_confirmed":false}));
+            }
         }
     }
     let succeeded = outcomes.iter().all(|v| v["state"] == "published");

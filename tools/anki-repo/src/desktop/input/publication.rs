@@ -395,7 +395,9 @@ pub(super) fn plan(repository: &Path, outputs: &[String]) -> Value {
                 Err(name) => json!({"output_directory":name,"state":"blocked","reason":"output_not_registered"}),
             });
         }
-        let ok = decks.iter().all(|d| d["state"] == "planned");
+        let ok = decks
+            .iter()
+            .all(|d| matches!(d["state"].as_str(), Some("planned" | "nothing_to_publish")));
         Ok(
             json!({"state":if ok {"publish_plan"} else {"publish_plan_blocked"},"apply":false,"decks":decks,
             "consequences":"Импорт выполняет оригинальный CrowdAnki с видимым диалогом и backup коллекции. Отсутствующие в JSON заметки не удаляются из Anki; ошибка может оставить частичные изменения. Перед импортом выполняется свежий экспорт для проверки актуальности, после — readback"}),
@@ -588,6 +590,15 @@ pub(super) fn apply_one(
             value["state"] = json!("nothing_to_publish");
             return Ok(value);
         }
+        // Сохранённое задание экспорта возобновилось бы вместо нового и выдало
+        // прежнее состояние Anki за свежее; сначала его завершает sync-input.
+        if store.pending(&job_key).is_some() {
+            return blocked(
+                value,
+                "freshness_unconfirmed",
+                "Есть незавершённое задание экспорта этой колоды: выполните sync-input, затем повторите publish-output",
+            );
+        }
         // Свежий живой экспорт тем же доверенным путём sync-input.
         let fresh = match port.fresh(store, catalog, &deck, &job_key) {
             Ok(fresh) => fresh,
@@ -601,6 +612,15 @@ pub(super) fn apply_one(
             }
         };
         value["fresh_input"] = json!({"source_sequence":fresh["source_sequence"],"revision":fresh["revision"],"job_id":fresh["job_id"]});
+        // Неубранное задание свежего экспорта readback переиспользовал бы вместо
+        // экспорта после импорта; импорт не отправляется.
+        if store.pending(&job_key).is_some() {
+            return blocked(
+                value,
+                "freshness_unconfirmed",
+                "Уборка задания свежего экспорта не подтверждена: выполните sync-input, затем повторите publish-output",
+            );
+        }
         let permit = match store.exchange().plan_publication(&identity) {
             Ok(permit) => permit,
             Err(ExchangeError::Blocked(_)) => {

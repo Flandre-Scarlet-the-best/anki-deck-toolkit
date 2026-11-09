@@ -361,6 +361,8 @@ fn concurrent_export_lock_holder_delays_refresh_and_sees_replaced_directory() {
     store.publish(&v2).unwrap();
     let lock = crate::write::ExportLock::acquire(&path).unwrap();
     let original = fs::read(path.join("deck.json")).unwrap();
+    // Блокировка input освобождается до потока: ждать он должен только ExportLock.
+    drop(store);
     let handle = std::thread::spawn({
         let root = tmp.path().to_path_buf();
         move || {
@@ -379,7 +381,6 @@ fn concurrent_export_lock_holder_delays_refresh_and_sees_replaced_directory() {
     });
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert!(!handle.is_finished(), "подготовка ждёт ExportLock");
-    drop(store);
     // Держатель блокировки (как edit) после замены видит смену каталога.
     drop(lock);
     let state = handle.join().unwrap().unwrap();
@@ -994,6 +995,7 @@ fn command_entry_points_report_per_deck_outcomes_without_anki() {
     let prefixed = [format!("decks/output/{name}")];
     let nothing = publication::plan(root, &prefixed);
     assert_eq!(nothing["decks"][0]["state"], "nothing_to_publish");
+    assert_eq!(nothing["state"], "publish_plan");
     fs::write(
         root.join("decks/output").join(&name).join("deck.json"),
         deck("agent"),
@@ -1044,6 +1046,7 @@ struct Scripted {
     submits: Cell<u32>,
     fresh: RefCell<VecDeque<crate::desktop::Result<VerifiedExport>>>,
     readback: RefCell<VecDeque<crate::desktop::Result<VerifiedExport>>>,
+    fresh_leftover: RefCell<Option<source::PendingJob>>,
 }
 
 impl Scripted {
@@ -1057,6 +1060,7 @@ impl Scripted {
             submits: Cell::new(0),
             fresh: RefCell::new(VecDeque::new()),
             readback: RefCell::new(VecDeque::new()),
+            fresh_leftover: RefCell::new(None),
         }
     }
     fn fresh(self, export: crate::desktop::Result<VerifiedExport>) -> Self {
@@ -1126,9 +1130,15 @@ impl Port for Scripted {
             .borrow_mut()
             .pop_front()
             .expect("свежий экспорт задан")?;
-        store
+        let published = store
             .publish(&export)
-            .map_err(|e| unavailable(&e.to_string()))
+            .map_err(|e| unavailable(&e.to_string()))?;
+        if let Some(job) = self.fresh_leftover.borrow_mut().take() {
+            store
+                .save_job(&job.key(), job)
+                .map_err(|e| unavailable(&e.to_string()))?;
+        }
+        Ok(published)
     }
     fn readback(
         &self,
@@ -1320,4 +1330,49 @@ fn proven_unsubmitted_import_closes_journal_and_ticket() {
         publish_with(&mut store, &v1, &again, &catalog())["reason"],
         "prepare_recovery_pending"
     );
+}
+
+fn pending_export_job() -> source::PendingJob {
+    source::PendingJob {
+        id: "export-left".into(),
+        profile_id: PROFILE.into(),
+        profile: "Synthetic".into(),
+        deck_id: "7".into(),
+        deck: "Test::Deck".into(),
+        deck_uuid: Some("deck-uuid-1".into()),
+        process: "process-1".into(),
+        admission_started: true,
+    }
+}
+
+#[test]
+fn pending_export_job_blocks_import_before_and_after_fresh_export() {
+    let tmp = TempDir::new("orchestrate-pending-export");
+    let (mut store, v1, _) = edited(&tmp);
+    // Каталог с ID колоды-строкой, как у живой Anki: ключ задания совпадает.
+    let mut live = catalog();
+    live["decks"][0]["id"] = json!("7");
+
+    // Сохранённое задание возобновилось бы вместо нового экспорта.
+    let job = pending_export_job();
+    store.save_job(&job.key(), job.clone()).unwrap();
+    let port = Scripted::new(&tmp, &["unavailable"]);
+    let before = publish_with(&mut store, &v1, &port, &live);
+    assert_eq!(before["reason"], "freshness_unconfirmed", "{before}");
+    assert!(
+        before.get("fresh_input").is_none(),
+        "свежий экспорт не запрошен"
+    );
+    store.finish_job(&job.key()).unwrap();
+
+    // Задание свежего экспорта не убрано: readback взял бы его байты.
+    let port = Scripted::new(&tmp, &["unavailable"]).fresh(Ok(export("v1", "fresh-1")));
+    *port.fresh_leftover.borrow_mut() = Some(job);
+    let after = publish_with(&mut store, &v1, &port, &live);
+    assert_eq!(after["reason"], "freshness_unconfirmed", "{after}");
+    assert!(after.get("fresh_input").is_some());
+
+    assert_eq!(port.submits.get(), 0);
+    assert!(port.jobs().is_empty(), "spool не тронут");
+    assert!(work_names(tmp.path(), &v1).is_empty());
 }
