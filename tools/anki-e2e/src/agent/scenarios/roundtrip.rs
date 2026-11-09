@@ -428,8 +428,16 @@ pub(super) fn run(c: &mut Ctx, fx: &mut Fixtures) -> Outcome {
     // Сначала штатная правка канонического экспорта, затем удаление заметки в JSON.
     edit(c, &second_dir, &keep, "kept-back", "second V2")?;
     let mut deck = read_json(&second_dir.join("deck.json"))?;
-    if let Some(notes) = deck["notes"].as_array_mut() {
-        notes.retain(|n| n["fields"][0] != "second drop");
+    let notes = deck["notes"]
+        .as_array_mut()
+        .ok_or_else(|| Fail::failed("roundtrip_notes_missing", "Нет списка notes"))?;
+    let before = notes.len();
+    notes.retain(|n| n["fields"][0] != "second drop");
+    if before - notes.len() != 1 {
+        return Err(Fail::failed(
+            "roundtrip_note_missing",
+            "Заметка second drop не удалена ровно один раз",
+        ));
     }
     fs::write(
         second_dir.join("deck.json"),

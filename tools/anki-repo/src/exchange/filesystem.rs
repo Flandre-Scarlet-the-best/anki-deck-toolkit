@@ -350,12 +350,14 @@ impl Directory {
     /// SHA-256 и размер файла ограниченным буфером, без удержания байтов в памяти.
     pub fn stream_hash(&self, name: &str) -> Result<(String, u64)> {
         use sha2::Digest;
-        let (mut file, before) = self.open_regular(name)?;
+        let (file, before) = self.open_regular(name)?;
         let mut hasher = sha2::Sha256::new();
         let mut buffer = vec![0_u8; 1 << 20];
         let mut total = 0_u64;
+        // Растущий во время чтения файл читается не дальше одного лишнего байта.
+        let mut limited = (&file).take(before.len() + 1);
         loop {
-            let read = file.read(&mut buffer)?;
+            let read = limited.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
@@ -375,7 +377,7 @@ impl Directory {
         use sha2::Digest;
         use std::io::Write;
         plain_filename(target_name)?;
-        let (mut source, before) = self.open_regular(name)?;
+        let (source, before) = self.open_regular(name)?;
         let mut output: File = openat(
             &target.0,
             target_name,
@@ -387,8 +389,10 @@ impl Directory {
         let mut hasher = sha2::Sha256::new();
         let mut buffer = vec![0_u8; 1 << 20];
         let mut total = 0_u64;
+        // Растущий источник не копируется дальше одного лишнего байта.
+        let mut limited = (&source).take(before.len() + 1);
         loop {
-            let read = source.read(&mut buffer)?;
+            let read = limited.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
