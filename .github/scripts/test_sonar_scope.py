@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 
-from sonar_scope import read_properties, scope, sonar_match
+from sonar_scope import codecov_ignore, coverage_excluded, read_properties, scope, sonar_match
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -141,6 +141,89 @@ class SonarScopeTest(unittest.TestCase):
             path = "tools/synthetic/" + suffix
             with self.subTest(path=path):
                 self.assertEqual(scope(self.properties, path), (True, False))
+
+
+def e2e_scenario(path):
+    """Независимое соглашение: файл сценария opt-in стенда anki-e2e."""
+    if not (path.startswith("tools/anki-e2e/src/") and path.endswith(".rs")):
+        return False
+    parts = path.split("/")
+    return parts[-1].endswith("scenarios.rs") or parts[3:5] == ["agent", "scenarios"]
+
+
+class CoverageExclusionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.properties = read_properties(ROOT / "sonar-project.properties")
+        cls.paths = tracked_paths()
+
+    def test_only_e2e_scenarios_are_excluded_from_coverage(self):
+        excluded = set()
+        production = 0
+        for path in self.paths:
+            if not path.startswith("tools/"):
+                continue
+            with self.subTest(path=path):
+                self.assertEqual(coverage_excluded(self.properties, path), e2e_scenario(path), path)
+            if coverage_excluded(self.properties, path):
+                excluded.add(path)
+                # Исключено только покрытие: файл остаётся исходником для анализа замечаний.
+                self.assertEqual(scope(self.properties, path), (True, False), path)
+            elif scope(self.properties, path)[0] and path.endswith(".rs"):
+                production += 1
+        # Вложенные сценарии и сценарии верхнего уровня обоих наборов стенда.
+        for nested in ("tools/anki-e2e/src/agent/scenarios/input_export.rs",
+                       "tools/anki-e2e/src/agent/scenarios/roundtrip.rs",
+                       "tools/anki-e2e/src/agent/scenarios.rs",
+                       "tools/anki-e2e/src/browser/scenarios.rs"):
+            self.assertIn(nested, excluded)
+        self.assertGreater(production, 100, "Производственные файлы Rust должны учитываться")
+
+    def test_production_controls_remain_measured(self):
+        for path in (
+            "tools/anki-repo/src/desktop/input/publication.rs",
+            "tools/anki-repo/src/desktop/input/prepare.rs",
+            "tools/anki-repo/src/exchange/state.rs",
+            "tools/anki-e2e/src/agent/ctx.rs",
+            "tools/anki-e2e/src/agent/ui.rs",
+            "tools/anki-e2e/src/host.rs",
+            "tools/anki-e2e/src/main.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, self.paths)
+                self.assertFalse(coverage_excluded(self.properties, path))
+                self.assertEqual(scope(self.properties, path), (True, False))
+
+    def test_synthetic_boundaries(self):
+        for path, expected in [
+            ("tools/anki-e2e/src/agent/scenarios/deep/nested.rs", True),
+            ("tools/anki-e2e/src/browser/new_scenarios.rs", True),
+            ("tools/anki-e2e/src/agent/scenarios_helper.rs", False),
+            ("tools/anki-e2e/src/agent/scenario.rs", False),
+            ("tools/anki-repo/src/scenarios.rs", False),
+            ("tools/anki-repo/src/desktop/scenarios/roundtrip.rs", False),
+            ("tools/asset-store/src/agent/scenarios/x.rs", False),
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(coverage_excluded(self.properties, path), expected)
+                self.assertEqual(e2e_scenario(path), expected)
+
+    def test_codecov_ignore_matches_sonar_and_has_no_other_settings(self):
+        self.assertEqual(
+            codecov_ignore(ROOT / "codecov.yml"),
+            [part.strip() for part in self.properties["sonar.coverage.exclusions"].split(",")],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "codecov.yml"
+            for contents in (
+                'coverage:\n  status:\n    patch: off\n',
+                'ignore:\n  - "a"\ncomment: false\n',
+                'ignore:\n  - unquoted\n',
+                'ignore:\n  - "a"\nignore:\n  - "b"\n',
+            ):
+                with self.subTest(contents=contents), self.assertRaises(ValueError):
+                    path.write_text(contents, encoding="utf-8")
+                    codecov_ignore(path)
 
 
 if __name__ == "__main__":

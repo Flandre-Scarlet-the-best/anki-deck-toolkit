@@ -54,6 +54,35 @@ def matches_any(path, globs):
     return any(sonar_match(pattern, path) for pattern in globs)
 
 
+def coverage_excluded(properties, path):
+    """Исходник, покрытие которого не учитывается (sonar.coverage.exclusions)."""
+    return matches_any(path, patterns(properties, "sonar.coverage.exclusions"))
+
+
+def codecov_ignore(path):
+    """Минимальный разбор codecov.yml: допустим только плоский список `ignore`.
+
+    Любая другая структура — отказ, чтобы проверка не пропустила новые
+    настройки статусов или порогов незамеченными.
+    """
+    entries = []
+    in_ignore = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line == "ignore:":
+            if in_ignore or entries:
+                raise ValueError("Повторный раздел ignore")
+            in_ignore = True
+            continue
+        match = re.fullmatch(r'  - "([^"]+)"', line)
+        if not in_ignore or match is None:
+            raise ValueError(f"Неподдерживаемая строка codecov.yml: {raw!r}")
+        entries.append(match.group(1))
+    return entries
+
+
 def scope(properties, path):
     """Рассчитать фильтры исходников и тестов как отдельные множества."""
     inclusions = patterns(properties, "sonar.test.inclusions")
