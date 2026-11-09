@@ -382,6 +382,33 @@ pub(super) fn synthetic(
     }
 }
 
+/// Синтетический проверенный экспорт выбранного профиля, с необязательным YAML.
+#[cfg(test)]
+pub(super) fn synthetic_for(
+    profile: &str,
+    bytes: &[u8],
+    media: &BTreeMap<String, Vec<u8>>,
+    config: Option<&[u8]>,
+    evidence: &str,
+) -> VerifiedExport {
+    let snapshot = Snapshot::from_bytes(ProfileId::new(profile).unwrap(), bytes, media).unwrap();
+    let mut files = BTreeMap::from([("deck.json".into(), bytes.to_vec())]);
+    files.extend(media.iter().map(|(n, b)| (format!("media/{n}"), b.clone())));
+    if let Some(config) = config {
+        files.insert("import_config.yaml".into(), config.to_vec());
+    }
+    let inventory = files
+        .iter()
+        .map(|(n, b)| (n.clone(), asset_store::hashing::sha256_hex(b)))
+        .collect();
+    VerifiedExport {
+        snapshot,
+        files,
+        inventory,
+        evidence: evidence.into(),
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

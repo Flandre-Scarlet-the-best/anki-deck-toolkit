@@ -17,7 +17,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Полный набор на чистом контейнере: smoke, addons, patch, crowdanki, input_export, process, errors.
+    /// Полный набор на чистом контейнере: smoke, addons, patch, crowdanki, input_export, roundtrip, process, errors.
     Full(RunArgs),
     /// Обнаружение Anki, первый запуск, doctor, launch/stop без аддонов.
     Smoke(RunArgs),
@@ -142,6 +142,7 @@ pub const FULL: &[&str] = &[
     "patch",
     "crowdanki",
     "input_export",
+    "roundtrip",
     "process",
     "errors",
 ];
