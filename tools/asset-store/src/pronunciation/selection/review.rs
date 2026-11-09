@@ -182,7 +182,7 @@ fn rows_for(
     {
         let mut options = Vec::new();
         for assessment in &recommendation.candidates {
-            let (link, candidate) = batch
+            let (link, candidate) = index
                 .find_candidate(&assessment.candidate_id)
                 .expect("оценка ссылается на кандидата пакета");
             let file_sha = candidate
@@ -404,7 +404,7 @@ pub fn apply(
         // Целостность исходных blob относится ко всему снимку, даже если в
         // строке пока нет решения. Копии проверяет общий review_snapshot.
         for option in &row.options {
-            let (link, candidate) = batch
+            let (link, candidate) = index
                 .find_candidate(&option.candidate_id)
                 .ok_or_else(|| invalid("кандидат обзора отсутствует"))?;
             if sha256_hex(&candidate_bytes(&runtime, &batch, link, candidate)?)

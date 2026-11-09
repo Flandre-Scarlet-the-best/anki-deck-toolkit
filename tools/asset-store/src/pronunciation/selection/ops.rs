@@ -482,6 +482,9 @@ pub struct LinkReport {
     pub sources_intaken: usize,
     /// Результаты по SHA, которых нет в пакете выбора (без `--intake-missing`).
     pub missing_sources: Vec<String>,
+    /// Отказы отдельных исходников при `--intake-missing`: остальные результаты
+    /// обрабатываются, а не отменяются целиком.
+    pub sources_rejected: Vec<IntakeRejection>,
     pub candidates: usize,
     pub revision: u64,
 }
@@ -793,13 +796,30 @@ pub fn link_recognizer(
             match read_source.as_mut() {
                 Some(read) => {
                     let file = Path::new(&recognizer.input_root).join(path);
-                    let bytes = read(&file)?;
-                    if sha256_hex(&bytes) != *sha256 {
-                        return Err(AssetError::new(
-                            ErrorCode::IntegrityMismatch,
-                            "исходник входа распознавания изменился после инвентаризации",
-                        ));
-                    }
+                    // Отказ одного файла не отменяет остальные результаты: он
+                    // получает собственный исход, как при обычном приёме.
+                    let source_name = Path::new(path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("source.mp3")
+                        .to_owned();
+                    let bytes = match read(&file) {
+                        Ok(bytes) if sha256_hex(&bytes) == *sha256 => bytes,
+                        Ok(_) => {
+                            return Err(AssetError::new(
+                                ErrorCode::IntegrityMismatch,
+                                "исходник входа распознавания изменился после инвентаризации",
+                            ));
+                        }
+                        Err(error) => {
+                            report.sources_rejected.push(IntakeRejection {
+                                source_name,
+                                code: error.code.as_str().into(),
+                                message: error.message,
+                            });
+                            continue;
+                        }
+                    };
                     // Имя проверяется так же, как при приёме: иначе негодное имя
                     // отвергло бы сохранение всего пакета вместо одного исходника.
                     let name = Path::new(path)
@@ -809,16 +829,45 @@ pub fn link_recognizer(
                         .unwrap_or("source.mp3")
                         .to_owned();
                     let mut intake = IntakeReport::default();
-                    let added = add_source(
+                    match add_source(
                         &runtime,
                         &mut batch,
                         &bytes,
                         SourceOrigin::LocalFile { source_name: name },
                         None,
                         &mut intake,
-                    )?;
-                    rechanged |= added;
-                    report.sources_intaken += intake.added.len();
+                    ) {
+                        Ok(added) => {
+                            rechanged |= added;
+                            report.sources_intaken += intake.added.len();
+                        }
+                        // Граница, предел пакета и целостность хранилища — ошибка
+                        // операции; отказ проверки одного файла — его собственный исход.
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                ErrorCode::BoundaryViolation
+                                    | ErrorCode::PathTraversal
+                                    | ErrorCode::InvalidTransition
+                                    | ErrorCode::IntegrityMismatch
+                                    | ErrorCode::StoreMissing
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => {
+                            report.sources_rejected.push(IntakeRejection {
+                                source_name: Path::new(path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("source.mp3")
+                                    .to_owned(),
+                                code: error.code.as_str().into(),
+                                message: error.message,
+                            });
+                            continue;
+                        }
+                    }
                 }
                 None => {
                     missing.insert(sha256.clone());
@@ -1013,7 +1062,7 @@ pub struct StatusView<'a> {
 pub const PERCEPTION_NOTICE: &str = "evidence_bundle_text_and_metrics_only: получатель видит транскрипции, метрики и SHA; это не прослушивание записи";
 
 pub(crate) fn group_view<'a>(
-    index: &SelectionIndex,
+    index: &SelectionIndex<'a>,
     batch: &'a SelectionBatch,
     recommendation: &'a GroupRecommendation,
 ) -> GroupView<'a> {
@@ -1021,7 +1070,7 @@ pub(crate) fn group_view<'a>(
         .candidates
         .iter()
         .filter_map(|assessment| {
-            let (link, candidate) = batch.find_candidate(&assessment.candidate_id)?;
+            let (link, candidate) = index.find_candidate(&assessment.candidate_id)?;
             Some(CandidateView {
                 assessment,
                 kind: candidate.kind,
@@ -1505,7 +1554,7 @@ pub(crate) fn trustworthy_audio_review(review: &AudioReview) -> bool {
 
 /// Общая проверка действующего решения перед чтением и публикацией.
 fn validate_effective_selection<'a>(
-    index: &SelectionIndex,
+    index: &SelectionIndex<'a>,
     batch: &'a SelectionBatch,
     decision: &SelectionDecision,
     request: &Pronunciation,
@@ -1527,7 +1576,7 @@ fn validate_effective_selection<'a>(
     else {
         return Err(invalid("текущее решение цели — не выбор кандидата"));
     };
-    let (link, candidate) = batch
+    let (link, candidate) = index
         .find_candidate(candidate_id)
         .ok_or_else(|| invalid("выбранный кандидат больше не существует; решение устарело"))?;
     if decision.surface != request.surface

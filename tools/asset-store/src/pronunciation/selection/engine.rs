@@ -113,6 +113,7 @@ fn proof_class(proof: PhoneticProof, forvo: bool) -> SelectionClass {
 /// сохраняется, поэтому выбор кандидата не меняется.
 pub(crate) struct SelectionIndex<'a> {
     sources: BTreeMap<&'a str, &'a AudioSource>,
+    candidates: BTreeMap<&'a str, (&'a TargetLink, &'a PronunciationCandidate)>,
     links_by_surface: BTreeMap<&'a str, Vec<&'a TargetLink>>,
     links_by_source: BTreeMap<&'a str, Vec<&'a TargetLink>>,
     reviews_by_candidate: BTreeMap<&'a str, Vec<&'a AudioReview>>,
@@ -128,6 +129,8 @@ impl<'a> SelectionIndex<'a> {
         }
         let mut links_by_surface: BTreeMap<&str, Vec<&TargetLink>> = BTreeMap::new();
         let mut links_by_source: BTreeMap<&str, Vec<&TargetLink>> = BTreeMap::new();
+        let mut candidates: BTreeMap<&str, (&TargetLink, &PronunciationCandidate)> =
+            BTreeMap::new();
         for link in &batch.links {
             links_by_surface
                 .entry(link.surface.as_str())
@@ -137,6 +140,12 @@ impl<'a> SelectionIndex<'a> {
                 .entry(link.source_sha256.as_str())
                 .or_default()
                 .push(link);
+            for candidate in &link.candidates {
+                // Первый кандидат с этим идентификатором — как у `find_candidate`.
+                candidates
+                    .entry(candidate.candidate_id.as_str())
+                    .or_insert((link, candidate));
+            }
         }
         let mut reviews_by_candidate: BTreeMap<&str, Vec<&AudioReview>> = BTreeMap::new();
         let mut reviews_by_surface: BTreeMap<&str, Vec<&AudioReview>> = BTreeMap::new();
@@ -152,6 +161,7 @@ impl<'a> SelectionIndex<'a> {
         }
         Self {
             sources,
+            candidates,
             links_by_surface,
             links_by_source,
             reviews_by_candidate,
@@ -161,6 +171,14 @@ impl<'a> SelectionIndex<'a> {
 
     fn source(&self, sha: &str) -> Option<&'a AudioSource> {
         self.sources.get(sha).copied()
+    }
+
+    /// Связь и кандидат по идентификатору, в порядке пакета.
+    pub(crate) fn find_candidate(
+        &self,
+        candidate_id: &str,
+    ) -> Option<(&'a TargetLink, &'a PronunciationCandidate)> {
+        self.candidates.get(candidate_id).copied()
     }
 
     /// Связи цели в порядке пакета.
