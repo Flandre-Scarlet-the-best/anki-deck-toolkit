@@ -1054,6 +1054,132 @@ fn add_recognized_link(
     created.unwrap()
 }
 
+/// Экспорт выбранных байтов — отдельное явное действие: без разрешающей
+/// политики ничего не пишется, повтор идемпотентен, а чужой файл, symlink и
+/// путь с `..` отвергаются.
+#[test]
+fn explicit_export_writes_only_authorized_bytes_and_never_replaces_files() {
+    let (workspace, store) = store();
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "本.mp3".into(),
+            bytes: mp3(440),
+        }],
+        None,
+    )
+    .unwrap();
+    let processed = mp3(660);
+    add_recognized_link(
+        &store,
+        "sel",
+        &intake.added[0],
+        "本",
+        "ほん",
+        "ほん",
+        &processed,
+    );
+    assert_eq!(
+        auto_select(&store, "sel", None)
+            .unwrap()
+            .selected_deterministic,
+        1
+    );
+    let requests = [Pronunciation::new("本", "ほん").unwrap()];
+    let directory = workspace.path().join("out");
+    let refused = export_selected(
+        store.root(),
+        "sel",
+        &requests,
+        ConsumerTrustPolicy::HumanDecision,
+        &directory,
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::InvalidValidationEvidence);
+    assert!(!directory.exists(), "отказ не создаёт каталог вывода");
+
+    let exported = export_selected(
+        store.root(),
+        "sel",
+        &requests,
+        ConsumerTrustPolicy::AgentSelected,
+        &directory,
+    )
+    .unwrap();
+    assert_eq!(exported.len(), 1);
+    assert!(exported[0].written);
+    assert_eq!(exported[0].consumer_filename, "本.mp3");
+    let written = std::fs::read(directory.join("本.mp3")).unwrap();
+    assert_eq!(
+        written, processed,
+        "экспортированы байты выбранного варианта"
+    );
+    assert_eq!(sha256_hex(&written), exported[0].sha256);
+    let again = export_selected(
+        store.root(),
+        "sel",
+        &requests,
+        ConsumerTrustPolicy::AgentSelected,
+        &directory,
+    )
+    .unwrap();
+    assert!(
+        !again[0].written,
+        "повторный экспорт не перезаписывает файл"
+    );
+
+    let foreign = mp3(990);
+    std::fs::write(directory.join("本.mp3"), &foreign).unwrap();
+    let conflict = export_selected(
+        store.root(),
+        "sel",
+        &requests,
+        ConsumerTrustPolicy::AgentSelected,
+        &directory,
+    )
+    .unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::IdentityConflict);
+    assert_eq!(
+        std::fs::read(directory.join("本.mp3")).unwrap(),
+        foreign,
+        "чужой файл с тем же именем остаётся нетронутым"
+    );
+    std::fs::remove_file(directory.join("本.mp3")).unwrap();
+    #[cfg(unix)]
+    {
+        let outside = workspace.path().join("outside.mp3");
+        std::fs::write(&outside, &processed).unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("本.mp3")).unwrap();
+        assert_eq!(
+            export_selected(
+                store.root(),
+                "sel",
+                &requests,
+                ConsumerTrustPolicy::AgentSelected,
+                &directory,
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::PathTraversal
+        );
+        std::fs::remove_file(directory.join("本.mp3")).unwrap();
+    }
+    let traversal = workspace.path().join("out").join("..");
+    assert_eq!(
+        export_selected(
+            store.root(),
+            "sel",
+            &requests,
+            ConsumerTrustPolicy::AgentSelected,
+            &traversal,
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::PathTraversal
+    );
+}
+
 #[test]
 fn agent_selected_audio_needs_explicit_consumer_policy_and_stays_out_of_verified() {
     let (_workspace, store) = store();
@@ -1187,6 +1313,92 @@ fn foreign_batch_kind_is_refused() {
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::IdentityConflict);
+}
+
+/// Потоковый приём: файл читается ровно перед своей обработкой, поэтому
+/// отказ чтения одного MP3 не отменяет остальные и не требует держать байты
+/// всего набора в памяти.
+#[test]
+fn streamed_intake_reads_one_file_at_a_time_and_isolates_read_failures() {
+    let (workspace, store) = store();
+    let directory = workspace.path().join("in");
+    std::fs::create_dir_all(&directory).unwrap();
+    let first = mp3(440);
+    let third = mp3(660);
+    std::fs::write(directory.join("a.mp3"), &first).unwrap();
+    std::fs::write(directory.join("bad.mp3"), &third).unwrap();
+    std::fs::write(directory.join("b.mp3"), &third).unwrap();
+    let paths = vec![
+        directory.join("a.mp3"),
+        directory.join("bad.mp3"),
+        directory.join("b.mp3"),
+    ];
+    let blobs = store
+        .root()
+        .join(".runtime")
+        .join("batches")
+        .join("sel")
+        .join("candidates");
+    let mut order: Vec<String> = Vec::new();
+    let mut blobs_at_read: Vec<usize> = Vec::new();
+    let mut reader = |path: &Path| {
+        order.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        blobs_at_read.push(
+            std::fs::read_dir(&blobs)
+                .map(|entries| entries.filter_map(Result::ok).count())
+                .unwrap_or(0),
+        );
+        if path.file_name().unwrap() == "bad.mp3" {
+            return Err(crate::AssetError::new(
+                ErrorCode::InvalidTransition,
+                "файл не читается",
+            ));
+        }
+        Ok(std::fs::read(path).unwrap())
+    };
+    let report = intake_paths(&store, "sel", &paths, &mut reader, Some("生")).unwrap();
+    assert_eq!(
+        order,
+        ["a.mp3", "bad.mp3", "b.mp3"],
+        "порядок входа сохранён"
+    );
+    assert_eq!(
+        blobs_at_read,
+        [0, 1, 1],
+        "к моменту чтения следующего файла байты предыдущего уже сохранены как blob"
+    );
+    assert_eq!(report.added, [sha256_hex(&first), sha256_hex(&third)]);
+    assert_eq!(report.rejected.len(), 1);
+    assert_eq!(report.rejected[0].source_name, "bad.mp3");
+    assert_eq!(report.rejected[0].code, "invalid_transition");
+    assert_eq!(report.sources, 2);
+    // Предел одного файла остаётся у защищённой границы: слишком большая
+    // запись отвергается адресно, а не как отказ всего пакета.
+    let mut oversized = |_path: &Path| {
+        Err(crate::AssetError::new(
+            ErrorCode::InvalidTransition,
+            "файл больше предела",
+        ))
+    };
+    let only = vec![directory.join("a.mp3")];
+    let report = intake_paths(&store, "sel", &only, &mut oversized, None).unwrap();
+    assert_eq!(report.added.len(), 0);
+    assert_eq!(report.rejected.len(), 1);
+    assert_eq!(report.sources, 2);
+    // Попытка выйти за защищённую границу — ошибка операции, а не отказ файла.
+    let mut forbidden = |_path: &Path| {
+        Err(crate::AssetError::new(
+            ErrorCode::BoundaryViolation,
+            "decks/** не читается",
+        ))
+    };
+    assert_eq!(
+        intake_paths(&store, "sel", &only, &mut forbidden, None)
+            .unwrap_err()
+            .code,
+        ErrorCode::BoundaryViolation
+    );
+    assert_eq!(load(&store, "sel").sources.len(), 2, "пакет не изменён");
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1778,54 @@ fn forvo_batch_sources_keep_plan_reading_as_hint_and_promote_with_forvo_evidence
     let promoted = promote(&store, "sel", "生", "なま", None, true).unwrap();
     assert_eq!(promoted.asset.provenance.source_kind, "forvo_web");
     assert_eq!(promoted.asset.lifecycle, LifecycleState::Verified);
+
+    // Приём не закреплял ни одного чтения как подтверждённое: тот же принятый
+    // исходник независимо связывается со вторым чтением и получает собственное
+    // решение, а копия байтов остаётся одна.
+    let second = link_target(&store, "sel", &sha, "生", "せい", vec![], vec![]).unwrap();
+    decide(
+        &store,
+        "sel",
+        DecideRequest {
+            surface: "生".into(),
+            reading: "せい".into(),
+            action: DecideAction::Select {
+                candidate_id: second.candidates[0].candidate_id.clone(),
+                expected_sha256: sha.clone(),
+            },
+            authority: user("для せい тоже этот файл", false),
+            reason: "адресный ответ по второму чтению".into(),
+            expected_fingerprint: None,
+        },
+    )
+    .unwrap();
+    let batch = load(&store, "sel");
+    assert_eq!(batch.sources.len(), 1, "исходник сохранён один раз");
+    assert_eq!(
+        batch
+            .links
+            .iter()
+            .filter(|link| link.source_sha256 == sha)
+            .count(),
+        2,
+        "одна запись обслуживает два чтения независимыми связями"
+    );
+    let seiselected = read_selected(
+        store.root(),
+        "sel",
+        &[Pronunciation::new("生", "せい").unwrap()],
+        ConsumerTrustPolicy::HumanDecision,
+    )
+    .unwrap();
+    assert_eq!(seiselected[0].sha256, sha);
+    assert!(
+        seiselected[0].authority.is_user(),
+        "второе чтение имеет собственное решение пользователя"
+    );
+    assert!(
+        !seiselected[0].authority.human_listened(),
+        "про второе чтение пользователь прослушивание не заявлял"
+    );
 }
 
 fn recognizer_occurrence(
@@ -2353,6 +2613,37 @@ fn audio_authority_requires_matching_latest_backend_and_target() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn invalid_audio_review_does_not_authorize_selection_or_block_other_targets() {
+    let source = fake_source(1, "橋", true);
+    let link = whole_link(&source, "橋", "はし", "はち");
+    let candidate = link.candidates[1].clone();
+    let sha = candidate.audio.as_ref().unwrap().sha256.clone();
+    let other = fake_source(2, "本", false);
+    let other_link = whole_link(&other, "本", "ほん", "ほん");
+    let mut batch = batch_with(vec![source, other], vec![link, other_link]);
+    let mut review = audio_review(&candidate, &sha, AudioVerdict::Supports);
+    review.backend = "other-backend".into();
+    batch.audio_reviews.push(review);
+    let recommendation = engine::recommend(&batch, "橋", "はし");
+    assert!(recommendation.candidates.iter().any(|candidate| {
+        candidate
+            .reasons
+            .contains(&ReasonCode::AudioReviewInvalidProvenance)
+    }));
+    let view = serde_json::to_value(ops::group_view(&batch, &recommendation)).unwrap();
+    assert_eq!(view["audio_reviews"][0]["backend"], "other-backend");
+    let (decisions, report) = ops::plan_auto_select(
+        &batch,
+        Some(&AgentPolicy {
+            agent: "agent".into(),
+        }),
+    );
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].surface, "本");
+    assert_eq!(report.pending.values().map(Vec::len).sum::<usize>(), 1);
 }
 
 #[test]

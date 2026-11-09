@@ -491,6 +491,7 @@ pub enum ReasonCode {
     AudioReviewSupports,
     AudioReviewContradicts,
     AudioReviewInconclusive,
+    AudioReviewInvalidProvenance,
     RejectedByDecision,
     PitchAccentNotAssessed,
     HomonymsNotDistinguished,

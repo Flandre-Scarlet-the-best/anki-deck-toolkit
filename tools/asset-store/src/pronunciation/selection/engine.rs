@@ -194,6 +194,12 @@ pub(crate) fn assess_candidate(
         && candidate.technical.usable
     {
         match review.verdict {
+            AudioVerdict::Supports if !super::ops::trustworthy_audio_review(review) => {
+                reasons.push(ReasonCode::AudioReviewInvalidProvenance);
+                if class <= SelectionClass::NeedsAudioAnalysis {
+                    class = SelectionClass::NeedsUserConfirmation;
+                }
+            }
             AudioVerdict::Supports => {
                 reasons.push(ReasonCode::AudioReviewSupports);
                 if matches!(

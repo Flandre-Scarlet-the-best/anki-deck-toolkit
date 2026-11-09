@@ -26,9 +26,10 @@ pub mod review;
 pub use model::*;
 pub use ops::{
     AgentPolicy, AutoSelectReport, ConsumerTrustPolicy, DecideAction, DecideReport, DecideRequest,
-    GroupFilter, IntakeFile, IntakeReport, LinkReport, PERCEPTION_NOTICE, PromoteReport,
-    SelectedAudio, auto_select, decide, intake_files, intake_forvo_batch, link_recognizer,
-    link_target, promote, read_selected, status_value,
+    ExportedAudio, GroupFilter, IntakeFile, IntakeReport, LinkReport, PERCEPTION_NOTICE,
+    PromoteReport, SelectedAudio, auto_select, decide, export_selected, intake_files,
+    intake_forvo_batch, intake_paths, link_recognizer, link_target, promote, read_selected,
+    status_value,
 };
 
 #[cfg(test)]

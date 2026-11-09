@@ -193,17 +193,22 @@ pub(crate) enum SelectionAction {
         #[arg(long, value_enum)]
         policy: PolicyArg,
     },
+    /// Явно записывает выбранные байты в каталог потребителя.
+    Export {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long)]
+        requests: PathBuf,
+        #[arg(long, value_enum)]
+        policy: PolicyArg,
+        /// Каталог вывода: запись сюда и есть разрешение потребить байты.
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
 }
 
 fn input_error(message: impl Into<String>) -> AssetError {
     AssetError::new(ErrorCode::InvalidIdentity, message)
-}
-
-fn file_name(path: &Path) -> Result<String, AssetError> {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(str::to_owned)
-        .ok_or_else(|| input_error("нет имени файла UTF-8"))
 }
 
 pub(crate) fn needs_store_creation(action: &SelectionAction) -> bool {
@@ -256,17 +261,14 @@ pub(crate) fn execute(
                 if paths.is_empty() {
                     return Err(input_error("нужны --file, --dir или --from-forvo-batch"));
                 }
-                let mut files = Vec::with_capacity(paths.len());
-                for path in &paths {
-                    files.push(IntakeFile {
-                        source_name: file_name(path)?,
-                        bytes: read(path)?,
-                    });
-                }
-                serde_json::json!(selection::intake_files(
+                // Файлы читаются по одному перед своей обработкой: набор не
+                // требует держать байты всех MP3 в памяти одновременно.
+                let mut reader = |path: &Path| read(path);
+                serde_json::json!(selection::intake_paths(
                     store,
                     batch_id,
-                    files,
+                    &paths,
+                    &mut reader,
                     surface.as_deref()
                 )?)
             }
@@ -465,30 +467,64 @@ pub(crate) fn execute(
             requests,
             policy,
         } => {
-            #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Requests {
-                schema_version: u32,
-                items: Vec<Pronunciation>,
-            }
-            let parsed: Requests = serde_json::from_slice(&crate::pronunciation_cli::read_local(
-                requests,
-                protected,
-                1024 * 1024,
-            )?)
-            .map_err(|e| input_error(e.to_string()))?;
-            if parsed.schema_version != 1 || parsed.items.len() > MAX_SOURCES {
-                return Err(AssetError::new(
-                    ErrorCode::UnsupportedSchemaVersion,
-                    "неподдерживаемая схема/размер выбора",
-                ));
-            }
-            let policy = match policy {
-                PolicyArg::HumanDecision => ConsumerTrustPolicy::HumanDecision,
-                PolicyArg::HumanOrAudioModel => ConsumerTrustPolicy::HumanOrAudioModel,
-                PolicyArg::AgentSelected => ConsumerTrustPolicy::AgentSelected,
-            };
-            serde_json::json!({"assets": selection::read_selected(store.root(), batch_id, &parsed.items, policy)?})
+            let items = read_requests(requests, protected)?;
+            let policy = trust_policy(*policy);
+            serde_json::json!({"assets": selection::read_selected(store.root(), batch_id, &items, policy)?})
+        }
+        SelectionAction::Export {
+            batch_id,
+            requests,
+            policy,
+            out_dir,
+        } => {
+            let items = read_requests(requests, protected)?;
+            let policy = trust_policy(*policy);
+            let directory = crate::pronunciation::normalizer_batch::ensure_outside(
+                out_dir,
+                &crate::pronunciation::normalizer_batch::protected_roots(protected),
+                "выбранные аудио не записываются в decks/**",
+            )?;
+            serde_json::json!({"exported": selection::export_selected(
+                store.root(),
+                batch_id,
+                &items,
+                policy,
+                &directory,
+            )?})
         }
     })
+}
+
+/// Файл запросов потребителя: явный список точных пар, не «всё подряд».
+fn read_requests(
+    path: &Path,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<Vec<Pronunciation>, AssetError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Requests {
+        schema_version: u32,
+        items: Vec<Pronunciation>,
+    }
+    let parsed: Requests = serde_json::from_slice(&crate::pronunciation_cli::read_local(
+        path,
+        protected,
+        1024 * 1024,
+    )?)
+    .map_err(|e| input_error(e.to_string()))?;
+    if parsed.schema_version != 1 || parsed.items.len() > MAX_SOURCES {
+        return Err(AssetError::new(
+            ErrorCode::UnsupportedSchemaVersion,
+            "неподдерживаемая схема/размер выбора",
+        ));
+    }
+    Ok(parsed.items)
+}
+
+fn trust_policy(policy: PolicyArg) -> ConsumerTrustPolicy {
+    match policy {
+        PolicyArg::HumanDecision => ConsumerTrustPolicy::HumanDecision,
+        PolicyArg::HumanOrAudioModel => ConsumerTrustPolicy::HumanOrAudioModel,
+        PolicyArg::AgentSelected => ConsumerTrustPolicy::AgentSelected,
+    }
 }

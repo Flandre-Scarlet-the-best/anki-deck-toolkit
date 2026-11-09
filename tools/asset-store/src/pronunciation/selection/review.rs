@@ -515,6 +515,7 @@ fn render(
     for (row_index, row) in snapshot.rows.iter().enumerate() {
         let display = &row.display;
         let recognition = serde_json::json!({"links": display["links"], "sources": display["sources"],
+            "audio_reviews": display["audio_reviews"],
             "примечание": "null означает: нет данных; голоса Forvo не подтверждают фонемы"});
         write!(
             html,

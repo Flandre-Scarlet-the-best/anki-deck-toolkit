@@ -4,6 +4,7 @@
 //! повторяются, кэш результатов переиспользуется без вызова моделей, отчёт и
 //! повторная проверка входа. Настоящий инференс проверяют тесты
 //! `tools/speech-recognize`, решения распознавания — модульные тесты.
+use asset_store::hashing::sha256_hex;
 use asset_store::temp_workspace::TempWorkspace;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -856,6 +857,78 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
     ));
     assert_eq!(read["outcome"], "ok", "{read}");
     assert_eq!(read["result"]["assets"][0]["consumer_filename"], "生.mp3");
+    assert!(
+        read["result"]["assets"][0].get("bytes").is_none(),
+        "JSON просмотра не содержит байтов"
+    );
+    // Байты выдаются отдельной явной командой: каталог вывода — само
+    // разрешение потребить запись, повтор идемпотентен, `decks/**` запрещён.
+    let chosen = f.root.join("chosen");
+    let exported = json(&selection(
+        &f,
+        &[
+            "export",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+            "--out-dir",
+            chosen.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(exported["outcome"], "ok", "{exported}");
+    assert_eq!(
+        exported["result"]["exported"][0]["consumer_filename"],
+        "生.mp3"
+    );
+    assert_eq!(exported["result"]["exported"][0]["written"], true);
+    let written = fs::read(chosen.join("生.mp3")).unwrap();
+    assert_eq!(
+        sha256_hex(&written),
+        exported["result"]["exported"][0]["sha256"]
+            .as_str()
+            .unwrap()
+    );
+    assert_eq!(
+        exported["result"]["exported"][0]["sha256"],
+        read["result"]["assets"][0]["sha256"]
+    );
+    let repeated = json(&selection(
+        &f,
+        &[
+            "export",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+            "--out-dir",
+            chosen.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(repeated["result"]["exported"][0]["written"], false);
+    let refused_export = selection(
+        &f,
+        &[
+            "export",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+            "--out-dir",
+            "decks/chosen",
+        ],
+    );
+    assert!(
+        !refused_export.status.success(),
+        "decks/** не каталог вывода"
+    );
+    assert!(!f.root.join("decks/chosen").exists());
     // Явная связь без распознавания и локальная экспертиза на фейковом воркере
     // (нулевые эмиссии): вердикт не «поддерживает», цель ждёт пользователя.
     let sha = candidate["source_sha256"].as_str().unwrap();

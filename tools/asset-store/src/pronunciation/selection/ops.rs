@@ -13,8 +13,10 @@ use serde::Serialize;
 use super::engine;
 use super::model::*;
 use crate::batch_runtime::{RuntimeBatchState, SafeBatchRuntime};
+use crate::domain::validate_safe_consumer_filename;
 use crate::error::{AssetError, ErrorCode};
 use crate::hashing::sha256_hex;
+use crate::model::DetectedFormat;
 use crate::pronunciation::recognizer::{
     Evidence, RecognitionAction, RecognitionOutcome, TargetIdentity, TargetSource, TargetSourceKind,
 };
@@ -123,6 +125,77 @@ fn add_source(
     Ok(())
 }
 
+/// Один вход приёма: прочитанный файл или отказ чтения, который не мешает
+/// остальным файлам пакета.
+enum IntakeInput {
+    File(IntakeFile),
+    Unreadable {
+        source_name: String,
+        error: AssetError,
+    },
+}
+
+/// Общий приём: вход перебирается лениво, поэтому одновременно в памяти
+/// находится не больше одного MP3, а состояние сохраняется одной записью.
+fn intake_inputs(
+    store: &AssetStore,
+    batch_id: &str,
+    inputs: impl IntoIterator<Item = IntakeInput>,
+    hint: Option<&str>,
+) -> Result<IntakeReport, AssetError> {
+    let mut runtime = open(store.root(), batch_id)?;
+    let mut batch = runtime
+        .load::<SelectionBatch>()?
+        .unwrap_or_else(|| SelectionBatch::new(batch_id));
+    let mut report = IntakeReport::default();
+    for input in inputs {
+        let (source_name, bytes) = match input {
+            IntakeInput::File(file) => (file.source_name, file.bytes),
+            IntakeInput::Unreadable { source_name, error } => {
+                // Попытка выйти за защищённую границу — не отказ одного файла,
+                // а ошибка операции: пакет не принимается вовсе.
+                if matches!(
+                    error.code,
+                    ErrorCode::BoundaryViolation | ErrorCode::PathTraversal
+                ) {
+                    return Err(error);
+                }
+                report.rejected.push(IntakeRejection {
+                    source_name,
+                    code: error.code.as_str().into(),
+                    message: error.message,
+                });
+                continue;
+            }
+        };
+        if !valid_text(&source_name, 255) || source_name.contains(['/', '\\']) {
+            report.rejected.push(IntakeRejection {
+                source_name,
+                code: "invalid_source_name".into(),
+                message: "нужно одноуровневое имя файла".into(),
+            });
+            continue;
+        }
+        let origin = SourceOrigin::LocalFile {
+            source_name: source_name.clone(),
+        };
+        if let Err(error) = add_source(&runtime, &mut batch, &bytes, origin, hint, &mut report) {
+            if error.code == ErrorCode::InvalidTransition {
+                return Err(error);
+            }
+            report.rejected.push(IntakeRejection {
+                source_name,
+                code: error.code.as_str().into(),
+                message: error.message,
+            });
+        }
+    }
+    save(&mut runtime, &mut batch)?;
+    report.sources = batch.sources.len();
+    report.revision = batch.revision;
+    Ok(report)
+}
+
 /// Принимает локальные MP3 без чтения и без связи с карточкой. Технически
 /// непригодный файл получает собственный исход и не сохраняется; остальные
 /// файлы принимаются.
@@ -133,45 +206,45 @@ pub fn intake_files(
     surface_hint: Option<&str>,
 ) -> Result<IntakeReport, AssetError> {
     let hint = surface_hint.map(normalize_surface).transpose()?;
-    let mut runtime = open(store.root(), batch_id)?;
-    let mut batch = runtime
-        .load::<SelectionBatch>()?
-        .unwrap_or_else(|| SelectionBatch::new(batch_id));
-    let mut report = IntakeReport::default();
-    for file in files {
-        if !valid_text(&file.source_name, 255) || file.source_name.contains(['/', '\\']) {
-            report.rejected.push(IntakeRejection {
-                source_name: file.source_name.clone(),
-                code: "invalid_source_name".into(),
-                message: "нужно одноуровневое имя файла".into(),
-            });
-            continue;
-        }
-        let origin = SourceOrigin::LocalFile {
-            source_name: file.source_name.clone(),
+    intake_inputs(
+        store,
+        batch_id,
+        files.into_iter().map(IntakeInput::File),
+        hint.as_deref(),
+    )
+}
+
+/// Потоковый приём по путям: файл читается ровно перед своей обработкой через
+/// защищённую границу вызывающего, поэтому набор из тысяч MP3 не требует
+/// держать их байты в памяти одновременно. Нечитаемый файл получает
+/// собственный отказ в отчёте, а не отменяет остальные.
+pub fn intake_paths(
+    store: &AssetStore,
+    batch_id: &str,
+    paths: &[std::path::PathBuf],
+    read: &mut dyn FnMut(&std::path::Path) -> Result<Vec<u8>, AssetError>,
+    surface_hint: Option<&str>,
+) -> Result<IntakeReport, AssetError> {
+    let hint = surface_hint.map(normalize_surface).transpose()?;
+    let inputs = paths.iter().map(|path| {
+        let Some(source_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return IntakeInput::Unreadable {
+                source_name: "без_имени".into(),
+                error: AssetError::new(ErrorCode::InvalidIdentity, "нет имени файла UTF-8"),
+            };
         };
-        if let Err(error) = add_source(
-            &runtime,
-            &mut batch,
-            &file.bytes,
-            origin,
-            hint.as_deref(),
-            &mut report,
-        ) {
-            if error.code == ErrorCode::InvalidTransition {
-                return Err(error);
-            }
-            report.rejected.push(IntakeRejection {
-                source_name: file.source_name,
-                code: error.code.as_str().into(),
-                message: error.message,
-            });
+        match read(path) {
+            Ok(bytes) => IntakeInput::File(IntakeFile {
+                source_name: source_name.to_owned(),
+                bytes,
+            }),
+            Err(error) => IntakeInput::Unreadable {
+                source_name: source_name.to_owned(),
+                error,
+            },
         }
-    }
-    save(&mut runtime, &mut batch)?;
-    report.sources = batch.sources.len();
-    report.revision = batch.revision;
-    Ok(report)
+    });
+    intake_inputs(store, batch_id, inputs, hint.as_deref())
 }
 
 /// Принимает исходники завершённых получений Forvo-пакета того же хранилища.
@@ -190,23 +263,28 @@ pub fn intake_forvo_batch(
     let forvo: crate::forvo::batch::ForvoBatch = forvo_runtime
         .load()?
         .ok_or_else(|| invalid("Forvo-пакет не найден"))?;
+    // Свидетельства всех получений проверяются до первой записи, а байты
+    // читаются по одному: набор не требует держать все MP3 в памяти.
     let mut acquisitions = Vec::new();
     for item in &forvo.items {
         if let Some(acquisition) = &item.acquisition {
-            let bytes = forvo_runtime.read_blob_with_limit(&acquisition.blob, MAX_AUDIO_BYTES)?;
             acquisition
                 .evidence
                 .validate(&item.request, &acquisition.blob.sha256)?;
-            acquisitions.push((item.request.clone(), acquisition.evidence.clone(), bytes));
+            acquisitions.push((
+                item.request.clone(),
+                acquisition.evidence.clone(),
+                acquisition.blob.clone(),
+            ));
         }
     }
-    drop(forvo_runtime);
     let mut runtime = open(store.root(), batch_id)?;
     let mut batch = runtime
         .load::<SelectionBatch>()?
         .unwrap_or_else(|| SelectionBatch::new(batch_id));
     let mut report = IntakeReport::default();
-    for (request, evidence, bytes) in acquisitions {
+    for (request, evidence, blob) in acquisitions {
+        let bytes = forvo_runtime.read_blob_with_limit(&blob, MAX_AUDIO_BYTES)?;
         let origin = SourceOrigin::ForvoBatch {
             batch_id: forvo_batch_id.into(),
             evidence,
@@ -864,6 +942,7 @@ pub struct GroupView<'a> {
     pub candidates: Vec<CandidateView<'a>>,
     pub links: Vec<serde_json::Value>,
     pub sources: Vec<SourceView<'a>>,
+    pub audio_reviews: Vec<&'a AudioReview>,
 }
 
 /// Проверяемое происхождение без внутренних путей blob-хранилища.
@@ -961,6 +1040,13 @@ pub(crate) fn group_view<'a>(
                 origins: &s.origins,
                 surface_hint: &s.surface_hint,
                 free_analysis: &s.free_analysis,
+            })
+            .collect(),
+        audio_reviews: batch
+            .audio_reviews
+            .iter()
+            .filter(|review| {
+                review.surface == recommendation.surface && review.reading == recommendation.reading
             })
             .collect(),
     }
@@ -1354,14 +1440,7 @@ fn validate_agent_authority(
         if !latest.is_some_and(|r| {
             &r.review_id == audio_review_id
                 && &r.backend == backend
-                && r.backend == LOCAL_AUDIO_BACKEND
-                && r.local
-                && !r.independent_of_triage
-                && !r.model_fingerprints.is_empty()
-                && r.model_fingerprints
-                    .iter()
-                    .all(|fingerprint| valid_sha(fingerprint))
-                && valid_sha(&r.config_sha256)
+                && trustworthy_audio_review(r)
                 && r.verdict == AudioVerdict::Supports
         }) {
             return Err(AssetError::new(
@@ -1371,6 +1450,19 @@ fn validate_agent_authority(
         }
     }
     Ok(())
+}
+
+/// Только свидетельство штатного локального вызова может повышать доверие.
+pub(crate) fn trustworthy_audio_review(review: &AudioReview) -> bool {
+    review.backend == LOCAL_AUDIO_BACKEND
+        && review.local
+        && !review.independent_of_triage
+        && !review.model_fingerprints.is_empty()
+        && review
+            .model_fingerprints
+            .iter()
+            .all(|fingerprint| valid_sha(fingerprint))
+        && valid_sha(&review.config_sha256)
 }
 
 /// Общая проверка действующего решения перед чтением и публикацией.
@@ -1911,4 +2003,161 @@ pub fn read_selected(
         });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Явный экспорт выбранных байтов
+// ---------------------------------------------------------------------------
+
+/// Записанный файл выбранного кандидата: имя потребителя и подтверждённый SHA.
+#[derive(Debug, Serialize)]
+pub struct ExportedAudio {
+    pub consumer_filename: String,
+    pub sha256: String,
+    /// `true` — файл создан этим вызовом; `false` — уже существовал с теми же байтами.
+    pub written: bool,
+}
+
+/// Явный экспорт выбранных байтов в каталог потребителя. Запись сюда — само
+/// разрешение потребить байты, поэтому отдельная команда, а не побочный эффект
+/// просмотра метаданных.
+///
+/// Проверки те же, что у [`read_selected`]: явная [`ConsumerTrustPolicy`],
+/// действующее решение, точная пара и SHA, техническая пригодность, целость
+/// blob. Затем имя потребителя проверяется как одноуровневое безопасное имя,
+/// файл пишется атомарно, а его байты на диске сверяются по SHA-256 и снова
+/// декодируются. Существующий файл с другим содержимым не заменяется, symlink
+/// и не-файл по пути вывода отвергаются. Каталог вывода обязан быть вне
+/// `decks/**`: эту границу проверяет вызывающий до вызова.
+pub fn export_selected(
+    store_root: &Path,
+    batch_id: &str,
+    requests: &[Pronunciation],
+    policy: ConsumerTrustPolicy,
+    directory: &Path,
+) -> Result<Vec<ExportedAudio>, AssetError> {
+    let selected = read_selected(store_root, batch_id, requests, policy)?;
+    prepare_export_directory(directory)?;
+    let mut exported = Vec::with_capacity(selected.len());
+    for audio in selected {
+        validate_safe_consumer_filename(&audio.consumer_filename, DetectedFormat::Mp3)?;
+        let written = persist_selected_file(directory, &audio)?;
+        exported.push(ExportedAudio {
+            consumer_filename: audio.consumer_filename,
+            sha256: audio.sha256,
+            written,
+        });
+    }
+    Ok(exported)
+}
+
+fn prepare_export_directory(directory: &Path) -> Result<(), AssetError> {
+    if directory.is_empty()
+        || directory.components().any(|component| {
+            !matches!(component, std::path::Component::Normal(_))
+                && !matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+        })
+    {
+        return Err(AssetError::new(
+            ErrorCode::PathTraversal,
+            "каталог вывода должен быть обычным путём без . и ..",
+        ));
+    }
+    match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AssetError::new(
+            ErrorCode::PathTraversal,
+            "каталог вывода не может быть symlink",
+        )),
+        Ok(metadata) if !metadata.is_dir() => Err(AssetError::new(
+            ErrorCode::PathTraversal,
+            "по пути вывода уже есть не каталог",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(directory)
+                .map_err(|error| AssetError::io("каталог вывода", error))
+        }
+        Err(error) => Err(AssetError::io("каталог вывода", error)),
+    }
+}
+
+fn persist_selected_file(directory: &Path, audio: &SelectedAudio) -> Result<bool, AssetError> {
+    let target = directory.join(&audio.consumer_filename);
+    match std::fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(AssetError::new(
+                ErrorCode::PathTraversal,
+                "symlink вместо файла вывода запрещён",
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(AssetError::new(
+                ErrorCode::PathTraversal,
+                "по пути вывода не обычный файл",
+            ));
+        }
+        Ok(_) => {
+            let existing =
+                std::fs::read(&target).map_err(|error| AssetError::io("файл вывода", error))?;
+            if sha256_hex(&existing) == audio.sha256 {
+                return Ok(false);
+            }
+            return Err(AssetError::new(
+                ErrorCode::IdentityConflict,
+                "в каталоге вывода уже есть другой файл с этим именем",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AssetError::io("файл вывода", error)),
+    }
+    let suffix: String = audio.sha256.chars().take(16).collect();
+    let temporary = directory.join(format!(".tmp-export-{}-{suffix}", std::process::id()));
+    if let Err(error) = write_export_temporary(&temporary, &audio.bytes) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    // `hard_link` не заменяет существующий файл: гонка двух экспортов не
+    // приводит к тихой подмене байтов.
+    let linked = publish_export_file(&temporary, &target);
+    let _ = std::fs::remove_file(&temporary);
+    linked.map_err(|error| AssetError::io("запись файла вывода", error))?;
+    let written = std::fs::read(&target).map_err(|error| AssetError::io("файл вывода", error))?;
+    if sha256_hex(&written) != audio.sha256 {
+        let _ = std::fs::remove_file(&target);
+        return Err(AssetError::new(
+            ErrorCode::IntegrityMismatch,
+            "записанные байты не совпали с SHA-256 выбранного кандидата",
+        ));
+    }
+    probe_mp3(&written)?;
+    Ok(true)
+}
+
+fn write_export_temporary(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| AssetError::io("временный файл вывода", error))?;
+    file.write_all(bytes)
+        .map_err(|error| AssetError::io("временный файл вывода", error))?;
+    file.sync_all()
+        .map_err(|error| AssetError::io("временный файл вывода", error))
+}
+
+/// Публикует подготовленный файл под именем потребителя, не заменяя чужой
+/// файл. Основной путь — жёсткая ссылка (атомарна и не перезаписывает);
+/// на файловых системах без жёстких ссылок Windows используется переименование
+/// с повторной проверкой отсутствия цели.
+fn publish_export_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(temporary, target) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(_) if std::fs::symlink_metadata(target).is_err() => std::fs::rename(temporary, target),
+        Err(error) => Err(error),
+    }
 }
