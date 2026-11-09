@@ -31,6 +31,14 @@ pub(crate) enum PolicyArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum ReviewModeArg {
+    /// Агент сам принимает допустимые решения в пределах --agent-trust.
+    Delegated,
+    /// Пользователь сам слушает и решает через review-export.
+    Manual,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum AgentPolicyArg {
     #[value(name = "agent-evidence-v1")]
     AgentEvidenceV1,
@@ -168,8 +176,39 @@ pub(crate) enum SelectionAction {
         batch_id: String,
         #[arg(long)]
         review_id: String,
+        /// Файл решений, сохранённый страницей обзора (`decisions-<id>.tsv`);
+        /// без него читается `decisions.tsv` каталога снимка.
+        #[arg(long)]
+        decisions_file: Option<PathBuf>,
     },
-    /// Явный перенос выбранного исходника в канонический pronunciation_audio.
+    /// Фиксирует выбранный пользователем режим проверки пакета.
+    ReviewMode {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long, value_enum)]
+        mode: ReviewModeArg,
+        /// Агент, которому делегированы решения (только delegated).
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Верхняя граница полномочий агента (только delegated).
+        #[arg(long, value_enum)]
+        agent_trust: Option<PolicyArg>,
+        #[arg(long, default_value = "agent-dialog")]
+        channel: String,
+        /// Точная реплика пользователя с выбором режима (хранится SHA-256).
+        #[arg(long)]
+        statement: String,
+    },
+    /// Материализует выбранные интервалы в самостоятельные проверенные MP3.
+    Materialize {
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long, requires = "reading")]
+        surface: Option<String>,
+        #[arg(long, requires = "surface")]
+        reading: Option<String>,
+    },
+    /// Явная публикация выбранного готового MP3 в канонический pronunciation_audio.
     Promote {
         #[arg(long)]
         batch_id: String,
@@ -180,9 +219,13 @@ pub(crate) enum SelectionAction {
         #[arg(long)]
         replace_expected_sha256: Option<String>,
         /// Создать HumanAttestation — только для решения пользователя,
-        /// заявившего прослушивание.
+        /// заявившего прослушивание именно публикуемых байтов.
         #[arg(long)]
         attest_heard_decision: bool,
+        /// Политика полномочий решения; по умолчанию — прежнее поведение
+        /// (любое действующее решение). Запись не становится `Verified`.
+        #[arg(long, value_enum, default_value = "agent-selected")]
+        policy: PolicyArg,
     },
     /// Проверяет выдачу выбранных кандидатов по явной политике потребителя.
     Read {
@@ -449,13 +492,61 @@ pub(crate) fn execute(
         SelectionAction::ReviewApply {
             batch_id,
             review_id,
-        } => serde_json::json!(review::apply(store, batch_id, review_id)?),
+            decisions_file,
+        } => {
+            let text = decisions_file
+                .as_ref()
+                .map(|path| {
+                    let bytes =
+                        crate::pronunciation_cli::read_local(path, protected, 4 * 1024 * 1024)?;
+                    String::from_utf8(bytes)
+                        .map_err(|_| input_error("файл решений должен быть UTF-8"))
+                })
+                .transpose()?;
+            serde_json::json!(review::apply_with(
+                store,
+                batch_id,
+                review_id,
+                text.as_deref()
+            )?)
+        }
+        SelectionAction::ReviewMode {
+            batch_id,
+            mode,
+            agent_id,
+            agent_trust,
+            channel,
+            statement,
+        } => serde_json::json!(selection::set_review_mode(
+            store,
+            batch_id,
+            ReviewModeRequest {
+                mode: match mode {
+                    ReviewModeArg::Delegated => ReviewMode::DelegatedAgent,
+                    ReviewModeArg::Manual => ReviewMode::ManualUser,
+                },
+                agent: agent_id.clone(),
+                agent_trust: agent_trust.map(trust_policy),
+                channel: channel.clone(),
+                statement: statement.clone(),
+            },
+        )?),
+        SelectionAction::Materialize {
+            batch_id,
+            surface,
+            reading,
+        } => serde_json::json!(selection::materialize::materialize(
+            store,
+            batch_id,
+            surface.as_deref().zip(reading.as_deref()),
+        )?),
         SelectionAction::Promote {
             batch_id,
             surface,
             reading,
             replace_expected_sha256,
             attest_heard_decision,
+            policy,
         } => serde_json::json!(selection::promote(
             store,
             batch_id,
@@ -463,6 +554,7 @@ pub(crate) fn execute(
             reading,
             replace_expected_sha256.clone(),
             *attest_heard_decision,
+            trust_policy(*policy),
         )?),
         SelectionAction::Read {
             batch_id,

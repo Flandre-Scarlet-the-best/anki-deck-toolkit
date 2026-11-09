@@ -1,8 +1,8 @@
 use super::*;
 use crate::temp_workspace::TempWorkspace;
 
-fn request() -> Pronunciation {
-    Pronunciation::new("元気", "げんき").unwrap()
+fn request() -> &'static str {
+    "元気"
 }
 
 fn item(state: &str) -> ItemFacts {
@@ -62,7 +62,7 @@ fn facts_with_bound_elapsed(
 }
 
 fn classify_default(facts: &StatusFacts) -> Progress {
-    classify(facts, &request(), "3661006", &Limits::default())
+    classify(facts, request(), "3661006", &Limits::default())
 }
 
 #[test]

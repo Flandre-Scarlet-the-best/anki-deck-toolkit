@@ -73,6 +73,7 @@ fn forvo_evidence(surface: &str, sha: &str, votes: i64) -> ForvoEvidence {
             record_id: "123".into(),
             code: "downloaded".into(),
         }],
+        acquisition_mode: None,
     }
 }
 
@@ -83,7 +84,7 @@ fn fake_source(n: u32, surface: &str, forvo: bool) -> AudioSource {
             batch_id: "forvo".into(),
             surface: Some(surface.into()),
             evidence: forvo_evidence(surface, &sha, 4),
-            plan_reading: "なま".into(),
+            plan_reading: Some("なま".into()),
         }
     } else {
         SourceOrigin::LocalFile {
@@ -170,6 +171,7 @@ fn candidate(
         audio: audio.map(fake_audio),
         span: window.map(|w| span(w.0, w.1)),
         occurrence,
+        derivation: None,
         technical: TechnicalGate {
             usable,
             code: if usable {
@@ -1000,9 +1002,27 @@ fn audio_is_staged_without_reading_or_deck_and_promoted_only_explicitly() {
     assert!(read_trusted(store.root(), &requests).is_err());
 
     // HumanAttestation без заявленного прослушивания не создаётся.
-    let refused = promote(&store, "sel", "生", "なま", None, true).unwrap_err();
+    let refused = promote(
+        &store,
+        "sel",
+        "生",
+        "なま",
+        None,
+        true,
+        ConsumerTrustPolicy::AgentSelected,
+    )
+    .unwrap_err();
     assert_eq!(refused.code, ErrorCode::InvalidValidationEvidence);
-    let promoted = promote(&store, "sel", "生", "なま", None, false).unwrap();
+    let promoted = promote(
+        &store,
+        "sel",
+        "生",
+        "なま",
+        None,
+        false,
+        ConsumerTrustPolicy::AgentSelected,
+    )
+    .unwrap();
     assert!(!promoted.human_attestation_created);
     assert_ne!(promoted.asset.lifecycle, LifecycleState::Verified);
     assert!(promoted.asset.human_attestation.is_none());
@@ -1018,7 +1038,16 @@ fn audio_is_staged_without_reading_or_deck_and_promoted_only_explicitly() {
         },
     )
     .unwrap();
-    let attested = promote(&store, "sel", "生", "なま", None, true).unwrap();
+    let attested = promote(
+        &store,
+        "sel",
+        "生",
+        "なま",
+        None,
+        true,
+        ConsumerTrustPolicy::AgentSelected,
+    )
+    .unwrap();
     assert!(attested.human_attestation_created);
     assert_eq!(attested.asset.lifecycle, LifecycleState::Verified);
     assert!(
@@ -1112,8 +1141,8 @@ fn explicit_export_writes_only_authorized_bytes_and_never_replaces_files() {
     .unwrap();
     assert_eq!(exported.len(), 1);
     assert!(exported[0].written);
-    assert_eq!(exported[0].consumer_filename, "本.mp3");
-    let written = std::fs::read(directory.join("本.mp3")).unwrap();
+    assert_eq!(exported[0].consumer_filename, "本_ほん.mp3");
+    let written = std::fs::read(directory.join("本_ほん.mp3")).unwrap();
     assert_eq!(
         written, processed,
         "экспортированы байты выбранного варианта"
@@ -1133,7 +1162,7 @@ fn explicit_export_writes_only_authorized_bytes_and_never_replaces_files() {
     );
 
     let foreign = mp3(990);
-    std::fs::write(directory.join("本.mp3"), &foreign).unwrap();
+    std::fs::write(directory.join("本_ほん.mp3"), &foreign).unwrap();
     let conflict = export_selected(
         store.root(),
         "sel",
@@ -1144,16 +1173,16 @@ fn explicit_export_writes_only_authorized_bytes_and_never_replaces_files() {
     .unwrap_err();
     assert_eq!(conflict.code, ErrorCode::IdentityConflict);
     assert_eq!(
-        std::fs::read(directory.join("本.mp3")).unwrap(),
+        std::fs::read(directory.join("本_ほん.mp3")).unwrap(),
         foreign,
         "чужой файл с тем же именем остаётся нетронутым"
     );
-    std::fs::remove_file(directory.join("本.mp3")).unwrap();
+    std::fs::remove_file(directory.join("本_ほん.mp3")).unwrap();
     #[cfg(unix)]
     {
         let outside = workspace.path().join("outside.mp3");
         std::fs::write(&outside, &processed).unwrap();
-        std::os::unix::fs::symlink(&outside, directory.join("本.mp3")).unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("本_ほん.mp3")).unwrap();
         assert_eq!(
             export_selected(
                 store.root(),
@@ -1166,7 +1195,7 @@ fn explicit_export_writes_only_authorized_bytes_and_never_replaces_files() {
             .code,
             ErrorCode::PathTraversal
         );
-        std::fs::remove_file(directory.join("本.mp3")).unwrap();
+        std::fs::remove_file(directory.join("本_ほん.mp3")).unwrap();
     }
     let traversal = workspace.path().join("out").join("..");
     assert_eq!(
@@ -1254,13 +1283,51 @@ fn agent_selected_audio_needs_explicit_consumer_policy_and_stays_out_of_verified
     assert_eq!(selected[0].info.kind, CandidateKind::ProcessedWhole);
     assert_eq!(selected[0].info.proof, PhoneticProof::AsrConsensus);
     assert!(read_trusted(store.root(), &requests).is_err());
-    // Производный фрагмент в канонический домен не переносится.
+    // Технически готовый производный MP3 публикуется по явной политике:
+    // со свидетельством цепочки, без Verified и без прослушивания.
     assert_eq!(
-        promote(&store, "sel", "本", "ほん", None, false)
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidTransition
+        promote(
+            &store,
+            "sel",
+            "本",
+            "ほん",
+            None,
+            false,
+            ConsumerTrustPolicy::HumanDecision
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::InvalidValidationEvidence
     );
+    let promoted = promote(
+        &store,
+        "sel",
+        "本",
+        "ほん",
+        None,
+        false,
+        ConsumerTrustPolicy::AgentSelected,
+    )
+    .unwrap();
+    assert_eq!(promoted.kind, CandidateKind::ProcessedWhole);
+    assert_eq!(
+        promoted.asset.provenance.source_kind,
+        "selection_derivative"
+    );
+    assert_eq!(promoted.asset.consumer_filename, "本_ほん.mp3");
+    assert_eq!(promoted.asset.sha256, sha256_hex(&processed));
+    assert_ne!(promoted.asset.lifecycle, LifecycleState::Verified);
+    assert!(promoted.asset.human_attestation.is_none());
+    let metadata = promoted.asset.domain_metadata.as_ref().unwrap();
+    assert_eq!(
+        metadata["selection_derivative"]["source_sha256"],
+        serde_json::json!(intake.added[0])
+    );
+    assert_eq!(
+        metadata["selection_derivative"]["selection"]["authority"],
+        "deterministic_automation"
+    );
+    assert!(read_trusted(store.root(), &requests).is_err());
 
     // Новое противоречащее свидетельство отзывает агентское право чтения.
     let processed_candidate = hon.candidates[1].clone();
@@ -1737,7 +1804,10 @@ fn forvo_batch_sources_keep_plan_reading_as_hint_and_promote_with_forvo_evidence
                 cancelled: false,
                 paused: None,
                 items: vec![Item {
-                    request: request.clone(),
+                    request: Some(request.clone()),
+                    surface: None,
+                    collected: Vec::new(),
+                    collection: None,
                     replace_expected_sha256: None,
                     acquisition: Some(StoredAcquisition {
                         blob,
@@ -1757,7 +1827,7 @@ fn forvo_batch_sources_keep_plan_reading_as_hint_and_promote_with_forvo_evidence
     assert_eq!(source.forvo_votes(), Some(4));
     assert!(matches!(
         &source.origins[0],
-        SourceOrigin::ForvoBatch { plan_reading, .. } if plan_reading == "なま"
+        SourceOrigin::ForvoBatch { plan_reading, .. } if plan_reading.as_deref() == Some("なま")
     ));
     // Чтение плана — подсказка: без связи целей нет.
     let index = engine::SelectionIndex::new(&batch);
@@ -1779,7 +1849,16 @@ fn forvo_batch_sources_keep_plan_reading_as_hint_and_promote_with_forvo_evidence
         },
     )
     .unwrap();
-    let promoted = promote(&store, "sel", "生", "なま", None, true).unwrap();
+    let promoted = promote(
+        &store,
+        "sel",
+        "生",
+        "なま",
+        None,
+        true,
+        ConsumerTrustPolicy::AgentSelected,
+    )
+    .unwrap();
     assert_eq!(promoted.asset.provenance.source_kind, "forvo_web");
     assert_eq!(promoted.asset.lifecycle, LifecycleState::Verified);
 
@@ -2159,7 +2238,16 @@ fn revoked_agent_selection_cannot_be_read_or_promoted_but_user_can_reconfirm() {
             .bytes,
         bytes
     );
-    let promoted = promote(&store, "sel", "本", "ほん", None, false).unwrap();
+    let promoted = promote(
+        &store,
+        "sel",
+        "本",
+        "ほん",
+        None,
+        false,
+        ConsumerTrustPolicy::AgentSelected,
+    )
+    .unwrap();
     assert!(!promoted.human_attestation_created);
     mutate(&store, "sel", |batch, _| {
         let mut review = audio_review(&link.candidates[0], sha, AudioVerdict::Contradicts);
@@ -2176,7 +2264,18 @@ fn revoked_agent_selection_cannot_be_read_or_promoted_but_user_can_reconfirm() {
         )
         .is_err()
     );
-    assert!(promote(&store, "sel", "本", "ほん", Some(sha.clone()), false).is_err());
+    assert!(
+        promote(
+            &store,
+            "sel",
+            "本",
+            "ほん",
+            Some(sha.clone()),
+            false,
+            ConsumerTrustPolicy::AgentSelected
+        )
+        .is_err()
+    );
     let pending = ops::status_value(&store, "sel", GroupFilter::Unresolved, 10).unwrap();
     assert_eq!(pending["matched"], 1);
     assert_eq!(pending["items"][0]["selection_effective"], false);
@@ -2201,7 +2300,18 @@ fn revoked_agent_selection_cannot_be_read_or_promoted_but_user_can_reconfirm() {
             .bytes,
         bytes
     );
-    assert!(promote(&store, "sel", "本", "ほん", Some(sha.clone()), true).is_err());
+    assert!(
+        promote(
+            &store,
+            "sel",
+            "本",
+            "ほん",
+            Some(sha.clone()),
+            true,
+            ConsumerTrustPolicy::AgentSelected
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2487,7 +2597,10 @@ fn identical_forvo_bytes_keep_surface_specific_provenance() {
         let items = [("生", "なま"), ("本", "ほん")]
             .into_iter()
             .map(|(surface, reading)| Item {
-                request: Pronunciation::new(surface, reading).unwrap(),
+                request: Some(Pronunciation::new(surface, reading).unwrap()),
+                surface: None,
+                collected: Vec::new(),
+                collection: None,
                 replace_expected_sha256: None,
                 acquisition: Some(StoredAcquisition {
                     blob: blob.clone(),
@@ -2543,7 +2656,16 @@ fn identical_forvo_bytes_keep_surface_specific_provenance() {
             },
         )
         .unwrap();
-        let promoted = promote(&store, "sel", surface, reading, None, false).unwrap();
+        let promoted = promote(
+            &store,
+            "sel",
+            surface,
+            reading,
+            None,
+            false,
+            ConsumerTrustPolicy::AgentSelected,
+        )
+        .unwrap();
         assert_eq!(promoted.asset.provenance.source_kind, "forvo_web");
     }
 }
@@ -3054,3 +3176,5 @@ fn missing_source_intake_aborts_on_boundary_and_records_single_file_refusal() {
     assert!(report.sources_intaken >= 1);
     assert!(batch.source(&sha).is_some());
 }
+
+mod canonical;

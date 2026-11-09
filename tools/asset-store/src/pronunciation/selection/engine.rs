@@ -17,7 +17,10 @@
 //!   повышают класс; имя файла и словарь в рекомендации не участвуют;
 //! - найденный интервал без извлечённых байтов можно выбрать, но не
 //!   потребить; интервал, пересекающийся с вхождением другого чтения той же
-//!   записи, требует пользователя.
+//!   записи, требует пользователя;
+//! - материализованный интервал — не самостоятельный кандидат рекомендации, а
+//!   готовые байты уже выбранного интервала: его готовность к выдаче
+//!   проверяет `ops::selection_readiness`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -314,7 +317,9 @@ pub(crate) fn assess_candidate_with(
     if let Some(span) = candidate.span.as_ref().filter(|_| {
         matches!(
             candidate.kind,
-            CandidateKind::OccurrenceInterval | CandidateKind::ExtractedFragment
+            CandidateKind::OccurrenceInterval
+                | CandidateKind::ExtractedFragment
+                | CandidateKind::MaterializedInterval
         )
     }) && index.overlaps_other_reading(link, span)
         && class < SelectionClass::NeedsUserConfirmation
@@ -391,7 +396,7 @@ fn classify_by_outcome(
         O::TargetWhole | O::TargetExtracted => {
             reasons.push(ReasonCode::RecognizerUseFinalCandidate);
             let whole_material = match candidate.kind {
-                K::ExtractedFragment | K::ProcessedWhole => true,
+                K::ExtractedFragment | K::ProcessedWhole | K::MaterializedInterval => true,
                 K::SourceOriginal | K::ProcessedFullRecord => {
                     recognition.outcome == O::TargetWhole && !recognition.unrecognized_activity
                 }
@@ -494,6 +499,7 @@ fn kind_rank(kind: CandidateKind) -> u8 {
         CandidateKind::SourceOriginal => 2,
         CandidateKind::ProcessedFullRecord => 3,
         CandidateKind::OccurrenceInterval => 4,
+        CandidateKind::MaterializedInterval => 5,
     }
 }
 
@@ -550,7 +556,11 @@ fn recommend_with_index(
     for link in index.links_of(surface, reading) {
         let source = index.source(&link.source_sha256);
         let votes = source.and_then(|s| s.forvo_votes_for(surface));
-        for candidate in &link.candidates {
+        for candidate in link
+            .candidates
+            .iter()
+            .filter(|c| c.kind != CandidateKind::MaterializedInterval)
+        {
             let mut assessment = assess_candidate_with(index, link, candidate);
             let rejected = rejected_candidates.contains(&(
                 surface.to_owned(),

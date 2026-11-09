@@ -152,7 +152,9 @@ impl AudioDerivation {
                 {
                     return Err(invalid("происхождение Forvo исходника противоречиво"));
                 }
-                parsed.forvo.validate(request, &self.source_sha256)?;
+                parsed
+                    .forvo
+                    .validate(&request.surface, &self.source_sha256)?;
             }
             _ => return Err(invalid("неподдерживаемое происхождение исходника")),
         }
@@ -835,5 +837,173 @@ mod tests {
         assert_eq!(derivation["schema_version"], DERIVATION_SCHEMA_VERSION);
         assert_eq!(derivation["gate"]["next_action"], "use_processed");
         assert_eq!(derivation["config_sha256"], processed.result.config_sha256);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Производный MP3 пакета выбора
+// ---------------------------------------------------------------------------
+
+/// Происхождение производного MP3, опубликованного из пакета выбора.
+pub const SELECTION_SOURCE_KIND: &str = "selection_derivative";
+pub const SELECTION_DERIVATIVE_SCHEMA_VERSION: u32 = 1;
+
+/// Известные преобразования пакета выбора и вид кандидата, которому они
+/// принадлежат.
+const SELECTION_TRANSFORMS: &[(&str, &str)] = &[
+    ("interval_extraction_v1", "materialized_interval"),
+    ("recognizer_target_fragment", "extracted_fragment"),
+    ("recognizer_processed_whole", "processed_whole"),
+    ("balanced_full_record", "processed_full_record"),
+];
+
+/// Полуоткрытый интервал кадров исходника.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameSpan {
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub sample_rate: u32,
+}
+
+/// Решение пакета выбора, по которому опубликованы байты. Полномочия —
+/// вид решения (`agent_evidence`, `user_direct_review` …), а не утверждение
+/// о прослушивании.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionReference {
+    pub batch_id: String,
+    pub decision_id: String,
+    /// Кандидат, выбранный решением (у материализации — интервал).
+    pub decision_candidate_id: String,
+    /// Кандидат, байты которого опубликованы.
+    pub candidate_id: String,
+    #[serde(default)]
+    pub link_generation: u64,
+    pub authority: String,
+    /// Степень фонетической доказанности на момент публикации.
+    pub proof: String,
+}
+
+/// Свидетельство производного MP3 конкретного чтения: точный исходник,
+/// границы, цепочка обработки, отпечатки конфигурации и инструментов, SHA
+/// результата и решение. Обработанный звук не выдаётся за оригинал:
+/// происхождение записи — `selection_derivative`, а исходник описан отдельно.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectionDerivative {
+    pub schema_version: u32,
+    /// Вид кандидата (`materialized_interval`, `extracted_fragment` …).
+    pub kind: String,
+    pub transform: String,
+    pub source_sha256: String,
+    pub source_provenance: Provenance,
+    /// Для Forvo — `{surface, forvo}` (чтения у исходника нет); для
+    /// локального файла — `{source_name}`.
+    pub source_metadata: serde_json::Value,
+    pub output_sha256: String,
+    pub span: Option<FrameSpan>,
+    pub chain: Vec<String>,
+    pub toolchain: Vec<String>,
+    pub config_sha256: String,
+    /// Сведения распознавателя об обработке, если байты получены им.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processing: Option<serde_json::Value>,
+    pub selection: SelectionReference,
+}
+
+pub fn selection_source_name(transform: &str, source_sha256: &str) -> String {
+    format!("selection-{transform}-{}.mp3", &source_sha256[..16])
+}
+
+fn valid_token(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 128
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
+impl SelectionDerivative {
+    pub fn validate(
+        &self,
+        request: &Pronunciation,
+        record_sha: &str,
+        provenance: &Provenance,
+    ) -> Result<(), AssetError> {
+        let bad = || invalid("неполное или противоречивое свидетельство производного MP3 выбора");
+        if self.schema_version != SELECTION_DERIVATIVE_SCHEMA_VERSION {
+            return Err(AssetError::new(
+                ErrorCode::UnsupportedSchemaVersion,
+                "неподдерживаемая версия свидетельства производного MP3 выбора",
+            ));
+        }
+        let transform_ok = SELECTION_TRANSFORMS
+            .iter()
+            .any(|(transform, kind)| *transform == self.transform && *kind == self.kind);
+        let span_ok = match (&self.span, self.kind.as_str()) {
+            (None, "materialized_interval" | "extracted_fragment") => false,
+            (Some(span), _) => span.sample_rate > 0 && span.start_frame < span.end_frame,
+            (None, _) => true,
+        };
+        let text_ok = |items: &[String]| {
+            !items.is_empty()
+                && items.len() <= 64
+                && items
+                    .iter()
+                    .all(|t| !t.is_empty() && t.len() <= 1024 && !t.chars().any(char::is_control))
+        };
+        let selection = &self.selection;
+        if !transform_ok
+            || !span_ok
+            || !valid_sha(&self.source_sha256)
+            || !valid_sha(&self.config_sha256)
+            || self.output_sha256 != record_sha
+            || self.source_sha256 == record_sha
+            || provenance.source_kind != SELECTION_SOURCE_KIND
+            || provenance.source_name != selection_source_name(&self.transform, &self.source_sha256)
+            || !text_ok(&self.chain)
+            || !text_ok(&self.toolchain)
+            || !valid_token(&selection.batch_id)
+            || !valid_token(&selection.decision_id)
+            || !valid_token(&selection.candidate_id)
+            || !valid_token(&selection.decision_candidate_id)
+            || !valid_token(&selection.authority)
+            || !valid_token(&selection.proof)
+        {
+            return Err(bad());
+        }
+        match self.source_provenance.source_kind.as_str() {
+            "forvo_web" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ForvoSource {
+                    surface: String,
+                    forvo: crate::forvo::ForvoEvidence,
+                }
+                let parsed: ForvoSource = serde_json::from_value(self.source_metadata.clone())
+                    .map_err(|_| invalid("неполное происхождение Forvo исходника"))?;
+                if parsed.surface != request.surface
+                    || self.source_provenance.source_name
+                        != format!("forvo-ja-{}.mp3", parsed.forvo.selected_record_id)
+                {
+                    return Err(invalid("происхождение Forvo исходника противоречиво"));
+                }
+                parsed
+                    .forvo
+                    .validate(&parsed.surface, &self.source_sha256)?;
+            }
+            "local_import" => {
+                if self.source_metadata
+                    != serde_json::json!({"source_name": self.source_provenance.source_name})
+                    || self.source_provenance.source_name.is_empty()
+                    || self.source_provenance.source_name.contains(['/', '\\'])
+                {
+                    return Err(invalid("происхождение локального исходника противоречиво"));
+                }
+            }
+            _ => return Err(invalid("неподдерживаемое происхождение исходника")),
+        }
+        Ok(())
     }
 }

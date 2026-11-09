@@ -2,6 +2,12 @@
 //! `review-<review_id>/{snapshot.json,index.html,items.jsonl,decisions.tsv,<sha>.mp3}`
 //! → `review-apply`.
 //!
+//! Страница позволяет отметить выбор прямо рядом с плеером и сохранить файл
+//! решений того же формата (`decisions-<review_id>.tsv`); `review-apply
+//! --decisions-file` проверяет его теми же правилами, что и `decisions.tsv`.
+//! Ни страница, ни её скрипт не источник доверия: решение — только явная
+//! первая колонка, сверенная с текущим состоянием пакета.
+//!
 //! Жизненный цикл снимка (адресация, точные копии, неизменяемые колонки,
 //! повторный export без перезаписи решений) принадлежит общему
 //! `review_snapshot`. HTML — только просмотр: он не источник доверия, ничего
@@ -148,10 +154,25 @@ pub struct ExportReport {
     pub directory: String,
     pub decisions: String,
     pub index: String,
+    /// Путь страницы для браузера Windows, если команда выполнена в WSL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_windows: Option<String>,
     pub rows: usize,
     pub matched: usize,
     pub page: usize,
     pub pages: usize,
+    /// Короткая инструкция пользователю ручного режима.
+    pub user_instructions: Vec<String>,
+}
+
+/// Путь `\\wsl.localhost\<distro>\…` для браузера Windows.
+fn windows_path(path: &std::path::Path) -> Option<String> {
+    let distro = std::env::var("WSL_DISTRO_NAME")
+        .ok()
+        .filter(|d| !d.is_empty())?;
+    let text = path.to_str()?;
+    text.starts_with('/')
+        .then(|| format!("\\\\wsl.localhost\\{distro}{}", text.replace('/', "\\")))
 }
 
 fn rows_for(
@@ -268,19 +289,37 @@ pub fn export(
         items.push('\n');
     }
     directory.write("items.jsonl", items.as_bytes())?;
+    let template = crate::review_snapshot::decisions_template(&snapshot, &FORMAT, &bundle.id);
     directory.write(
         "index.html",
-        render(&snapshot, &bundle.id, page, matched, page_size).as_bytes(),
+        render(&snapshot, &bundle.id, page, matched, page_size, &template).as_bytes(),
     )?;
+    let index = bundle.directory.join("index.html");
+    let index_windows = windows_path(&index);
+    let user_instructions = vec![
+        format!(
+            "Откройте в браузере: {}",
+            index_windows
+                .clone()
+                .unwrap_or_else(|| index.display().to_string())
+        ),
+        "Прослушайте варианты каждой цели и отметьте «выбрать», «отклонить» или «отложить»; «я прослушал» — только если действительно слушали.".into(),
+        format!(
+            "Нажмите «Завершить и сохранить решения»: браузер сохранит decisions-{}.tsv. Сообщите агенту путь к этому файлу — агент применит только отмеченное.",
+            &bundle.id
+        ),
+    ];
     Ok(ExportReport {
         review_id: bundle.id,
         decisions: bundle.decisions.display().to_string(),
-        index: bundle.directory.join("index.html").display().to_string(),
+        index: index.display().to_string(),
+        index_windows,
         directory: bundle.directory.display().to_string(),
         rows: snapshot.rows.len(),
         matched,
         page,
         pages: matched.div_ceil(page_size),
+        user_instructions,
     })
 }
 
@@ -350,15 +389,27 @@ pub fn apply(
     batch_id: &str,
     review_id: &str,
 ) -> Result<ApplyReport, AssetError> {
+    apply_with(store, batch_id, review_id, None)
+}
+
+/// Как [`apply`], но решения берутся из отдельного файла, сохранённого
+/// страницей обзора (тот же формат и те же проверки снимка).
+pub fn apply_with(
+    store: &AssetStore,
+    batch_id: &str,
+    review_id: &str,
+    decisions: Option<&str>,
+) -> Result<ApplyReport, AssetError> {
     let mut runtime = SafeBatchRuntime::open(store.root(), batch_id)?;
     let mut batch: SelectionBatch = runtime
         .load()?
         .ok_or_else(|| invalid("пакет выбора не найден"))?;
-    let (snapshot, cells) = crate::review_snapshot::read::<AudioReviewRow>(
+    let (snapshot, cells) = crate::review_snapshot::read_with_decisions::<AudioReviewRow>(
         |name| runtime.artifact_directory(name),
         runtime.batch_id(),
         review_id,
         &FORMAT,
+        decisions,
     )?;
     if snapshot.validator != validator() {
         return Err(invalid("политика обзора устарела"));
@@ -494,8 +545,10 @@ pub fn apply(
     Ok(report)
 }
 
-/// Скрипт повторов и замедления; CSP разрешает только его точный SHA-256.
-const PLAYER_SCRIPT: &str = "document.addEventListener('click',function(e){var b=e.target.closest('button[data-for]');if(!b)return;var a=document.getElementById(b.getAttribute('data-for'));if(!a)return;var r=b.getAttribute('data-rate');if(r){a.playbackRate=parseFloat(r);return;}if(b.hasAttribute('data-loop')){a.loop=!a.loop;b.setAttribute('aria-pressed',a.loop?'true':'false');return;}a.currentTime=parseFloat(a.getAttribute('data-start')||'0');a.play();});";
+/// Скрипт повторов, замедления и сборки файла решений; CSP разрешает только
+/// его точный SHA-256. Скрипт заполняет первую колонку встроенного шаблона
+/// `decisions.tsv` и отдаёт файл браузеру; сам он ничего не применяет.
+const PLAYER_SCRIPT: &str = "document.addEventListener('click',function(e){var b=e.target.closest('button[data-for]');if(!b)return;var a=document.getElementById(b.getAttribute('data-for'));if(!a)return;var r=b.getAttribute('data-rate');if(r){a.playbackRate=parseFloat(r);return;}if(b.hasAttribute('data-loop')){a.loop=!a.loop;b.setAttribute('aria-pressed',a.loop?'true':'false');return;}a.currentTime=parseFloat(a.getAttribute('data-start')||'0');a.play();});(function(){var t=document.getElementById('decisions-template'),s=document.getElementById('save-decisions');if(!t||!s)return;var tpl=JSON.parse(t.textContent);function build(){var lines=tpl.split('\n'),row=-1,out=[];for(var i=0;i<lines.length;i++){var l=lines[i];if(l.trim()===''||l.charAt(0)==='#'){out.push(l);continue;}if(row<0){row=0;out.push(l);continue;}var c=document.querySelector('input[name=d-'+row+']:checked'),v=c?c.value:'',h=document.getElementById('heard-'+row);if(/^[0-9]+$/.test(v)&&h&&h.checked)v='heard:'+v;var k=l.indexOf('\t');out.push(v+l.slice(k));row++;}return out.join('\n');}s.addEventListener('click',function(){var text=build(),o=document.getElementById('decisions-output');o.value=text;o.hidden=false;var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/tab-separated-values'}));a.download=s.getAttribute('data-file');document.body.appendChild(a);a.click();a.remove();});})();";
 
 fn script_hash() -> String {
     STANDARD.encode(Sha256::digest(PLAYER_SCRIPT.as_bytes()))
@@ -511,15 +564,17 @@ fn render(
     page: usize,
     matched: usize,
     page_size: usize,
+    template: &str,
 ) -> String {
     let mut html = format!(
-        "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; media-src 'self' file:; style-src 'unsafe-inline'; script-src 'sha256-{}'; base-uri 'none'; form-action 'none'\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Обзор аудиокандидатов</title><style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:auto;padding:1rem;color:#202124;background:#fff}}article{{border:1px solid #9aa0a6;border-radius:.5rem;padding:1rem;margin:1rem 0}}.opt{{border-top:1px solid #dadce0;padding:.75rem 0}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f7;padding:.5rem;border-radius:.35rem;font-size:.85rem}}code{{overflow-wrap:anywhere}}.rec{{font-weight:700}}button{{margin-right:.25rem}}details{{margin:.5rem 0}}@media (prefers-color-scheme: dark){{body{{background:#1f1f1f;color:#e8eaed}}pre{{background:#2b2b2b}}}}</style></head><body><h1>Обзор аудиокандидатов</h1><p>Снимок <code>{}</code>; пакет <code>{}</code>; страница {} из {} ({} целей под фильтром).</p><p>Страница только для прослушивания. Решения записываются в первую колонку <code>decisions.tsv</code> рядом с этим файлом и применяются командой <code>selection review-apply</code>. Изменение этой страницы ничего не делает. Тон и омонимы не проверяются.</p>",
+        "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; media-src 'self' file:; style-src 'unsafe-inline'; script-src 'sha256-{}'; base-uri 'none'; form-action 'none'\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Обзор аудиокандидатов</title><style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:auto;padding:1rem;color:#202124;background:#fff}}article{{border:1px solid #9aa0a6;border-radius:.5rem;padding:1rem;margin:1rem 0}}.opt{{border-top:1px solid #dadce0;padding:.75rem 0}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f7;padding:.5rem;border-radius:.35rem;font-size:.85rem}}code{{overflow-wrap:anywhere}}.rec{{font-weight:700}}button{{margin-right:.25rem}}details{{margin:.5rem 0}}@media (prefers-color-scheme: dark){{body{{background:#1f1f1f;color:#e8eaed}}pre{{background:#2b2b2b}}}}</style></head><body><h1>Обзор аудиокандидатов</h1><p>Снимок <code>{}</code>; пакет <code>{}</code>; страница {} из {} ({} целей под фильтром).</p><p>Прослушайте варианты и отметьте решение у каждой нужной цели. Кнопка внизу сохранит файл решений <code>decisions-{}.tsv</code>; его применяет только <code>selection review-apply --decisions-file</code> после сверки со снимком. Пустая отметка — без решения. Можно и вручную заполнить первую колонку <code>decisions.tsv</code> рядом с этим файлом. Тон и омонимы не проверяются.</p>",
         script_hash(),
         html_escape(review_id),
         html_escape(&snapshot.batch_id),
         page.saturating_add(1),
         matched.div_ceil(page_size).max(1),
         matched,
+        html_escape(review_id),
     );
     for (row_index, row) in snapshot.rows.iter().enumerate() {
         let display = &row.display;
@@ -587,9 +642,36 @@ fn render(
             )
             .expect("запись в String");
         }
-        html.push_str("</article>");
+        write!(
+            html,
+            "<fieldset><legend>Решение</legend><label><input type=\"radio\" name=\"d-{row_index}\" value=\"\" checked> без решения</label>",
+        )
+        .expect("запись в String");
+        for option in &row.options {
+            write!(
+                html,
+                " <label><input type=\"radio\" name=\"d-{row_index}\" value=\"{n}\"> выбрать {n}</label> <label><input type=\"radio\" name=\"d-{row_index}\" value=\"r{n}\"> отклонить {n}</label>",
+                n = option.number
+            )
+            .expect("запись в String");
+        }
+        write!(
+            html,
+            " <label><input type=\"radio\" name=\"d-{row_index}\" value=\"defer\"> отложить</label><br><label><input type=\"checkbox\" id=\"heard-{row_index}\"> я прослушал выбранный вариант</label></fieldset></article>",
+        )
+        .expect("запись в String");
     }
-    write!(html, "<script>{PLAYER_SCRIPT}</script></body></html>").expect("запись в String");
+    let template_json = serde_json::to_string(template)
+        .expect("строка сериализуема")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026");
+    write!(
+        html,
+        "<p><button type=\"button\" id=\"save-decisions\" data-file=\"decisions-{id}.tsv\">Завершить и сохранить решения</button></p><textarea id=\"decisions-output\" rows=\"8\" cols=\"100\" readonly hidden></textarea><script type=\"application/json\" id=\"decisions-template\">{template_json}</script><script>{PLAYER_SCRIPT}</script></body></html>",
+        id = html_escape(review_id),
+    )
+    .expect("запись в String");
     html
 }
 
@@ -606,8 +688,9 @@ mod tests {
             batch_revision: Some(0),
             rows: Vec::new(),
         };
-        let html = render(&snapshot, &"0".repeat(64), 0, 0, 10);
+        let html = render(&snapshot, &"0".repeat(64), 0, 0, 10, "# </script><x>\n");
         assert_eq!(html.matches("<script>").count(), 1);
+        assert!(!html.contains("</script><x>"));
         assert!(html.contains(&format!("'sha256-{}'", script_hash())));
         assert!(!html.contains("http://") && !html.contains("https://"));
         assert!(!html.contains("autoplay"));

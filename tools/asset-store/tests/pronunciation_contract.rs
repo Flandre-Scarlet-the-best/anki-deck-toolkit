@@ -78,6 +78,7 @@ fn web_acquisition(bytes: &[u8], request: &Pronunciation) -> asset_store::forvo:
     Acquisition {
         bytes: bytes.to_vec(),
         evidence: ForvoEvidence {
+            acquisition_mode: None,
             schema_version: 1,
             page_url: word_url(&request.surface),
             downloaded_sha256: sha256_hex(bytes),
@@ -108,7 +109,7 @@ fn forvo_provenance_uses_the_existing_uncertain_and_trusted_boundary() {
     let acquisition = web_acquisition(audio(), &request);
     let record = import_acquisition(&store, &request, &acquisition, None).unwrap();
     assert_eq!(record.provenance.source_kind, "forvo_web");
-    assert_eq!(record.consumer_filename, "こいつ.mp3");
+    assert_eq!(record.consumer_filename, "こいつ_こいつ.mp3");
     assert_eq!(record.lifecycle, LifecycleState::Quarantined);
     assert_eq!(
         record.validation.as_ref().unwrap().status,
@@ -196,7 +197,7 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
         schema_version: 1,
         items: vec![web_batch::FetchItem {
             surface: request.surface.clone(),
-            reading: request.reading.clone(),
+            reading: Some(request.reading.clone()),
             replace_expected_sha256: None,
         }],
     };
@@ -324,8 +325,13 @@ fn japanese_identity_nfc_only_and_safe_filename() {
             "{surface:?}"
         );
     }
-    assert!(Pronunciation::new("a", &"\"".repeat(180)).is_ok());
-    assert_eq!(request().consumer_filename(), "こいつ.mp3");
+    // Чтение входит в имя файла: символы пути и разделитель `_` в нём запрещены.
+    for reading in ["\"", "a_b", "a/b", "a\\b", "a:b", "a.", "a?"] {
+        assert!(Pronunciation::new("a", reading).is_err(), "{reading:?}");
+    }
+    assert!(Pronunciation::new("a", &"あ".repeat(60)).is_ok());
+    assert_eq!(request().consumer_filename(), "こいつ_こいつ.mp3");
+    assert_eq!(request().legacy_consumer_filename(), "こいつ.mp3");
     let generic = GenericDomainPolicy;
     assert!(generic.validate_identity(&request().identity()).is_err());
 }
@@ -443,7 +449,7 @@ fn candidate_requires_human_and_returns_original_bytes_and_surface_name() {
         .pop()
         .unwrap();
     assert_eq!(trusted.bytes, audio());
-    assert_eq!(trusted.record.consumer_filename, "こいつ.mp3");
+    assert_eq!(trusted.record.consumer_filename, "こいつ_こいつ.mp3");
     assert_eq!(
         trusted.record.validation.as_ref().unwrap().status,
         SemanticStatus::Uncertain
@@ -463,18 +469,18 @@ fn readings_and_equivalent_names_store_independently_but_conflict_on_consumer_se
     let first = import(&store, &a);
     let second = import(&store, &b);
     assert_ne!(first.storage_path, second.storage_path);
-    assert_eq!(first.consumer_filename, second.consumer_filename);
+    assert_eq!(first.consumer_filename, "生_なま.mp3");
+    assert_eq!(second.consumer_filename, "生_せい.mp3");
     attest(&store, &a, &first.sha256, HumanDecision::Approve).unwrap();
     attest(&store, &b, &second.sha256, HumanDecision::Approve).unwrap();
     assert_eq!(store.verify_integrity().unwrap().len(), 2);
     assert!(read_trusted(store.root(), std::slice::from_ref(&a)).is_ok());
     assert!(read_trusted(store.root(), std::slice::from_ref(&b)).is_ok());
-    assert_eq!(
-        read_trusted(store.root(), &[a, b]).unwrap_err().code,
-        ErrorCode::IdentityConflict
-    );
+    // Разные чтения одного написания дают разные файлы и выдаются вместе.
+    assert_eq!(read_trusted(store.root(), &[a, b]).unwrap().len(), 2);
+    // Имена, равные с точностью до регистра (Windows), по-прежнему конфликтуют.
     let a = Pronunciation::new("Voice", "a").unwrap();
-    let b = Pronunciation::new("voice", "b").unwrap();
+    let b = Pronunciation::new("voice", "a").unwrap();
     for r in [&a, &b] {
         let record = import(&store, r);
         attest(&store, r, &record.sha256, HumanDecision::Approve).unwrap();
@@ -1127,7 +1133,7 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
             schema_version: 1,
             items: vec![web::FetchItem {
                 surface: request.surface.clone(),
-                reading: request.reading.clone(),
+                reading: Some(request.reading.clone()),
                 replace_expected_sha256: None,
             }],
         },
@@ -1339,7 +1345,10 @@ fn cli_real_local_import_attest_read_and_resume() {
     let imported = cli(&ws, &args);
     assert!(imported.status.success(), "{:?}", json(&imported));
     let value = json(&imported);
-    assert_eq!(value["result"]["asset"]["consumer_filename"], "こいつ.mp3");
+    assert_eq!(
+        value["result"]["asset"]["consumer_filename"],
+        "こいつ_こいつ.mp3"
+    );
     assert_eq!(value["result"]["asset"]["lifecycle"], "quarantined");
     let sha = value["result"]["asset"]["sha256"].as_str().unwrap();
     let accepted = cli(
@@ -1369,7 +1378,7 @@ fn cli_real_local_import_attest_read_and_resume() {
     assert!(read.status.success(), "{:?}", json(&read));
     assert_eq!(
         json(&read)["result"]["assets"][0]["consumer_filename"],
-        "こいつ.mp3"
+        "こいつ_こいつ.mp3"
     );
     let plan_path = ws.path().join("plan.json");
     fs::write(
@@ -1831,11 +1840,16 @@ fn cli_read_streams_metadata_in_order_and_fails_as_a_whole() {
     );
     fs::write(&manifest_path, original).unwrap();
 
-    let conflict = Pronunciation::new("こいつ", "べつ").unwrap();
-    let candidate = import(&store, &conflict);
-    attest(&store, &conflict, &candidate.sha256, HumanDecision::Approve).unwrap();
+    // Конфликт имён потребителя: `Voice_a.mp3` и `voice_a.mp3` совпадают без
+    // учёта регистра.
+    let cased = Pronunciation::new("Voice", "a").unwrap();
+    let conflict = Pronunciation::new("voice", "a").unwrap();
+    for item in [&cased, &conflict] {
+        let candidate = import(&store, item);
+        attest(&store, item, &candidate.sha256, HumanDecision::Approve).unwrap();
+    }
     assert_eq!(
-        fail(read(&[second.clone(), first.clone(), conflict.clone()]))["error"]["code"],
+        fail(read(&[second.clone(), cased.clone(), conflict.clone()]))["error"]["code"],
         "identity_conflict"
     );
     let mut visits = 0;
@@ -1843,7 +1857,7 @@ fn cli_read_streams_metadata_in_order_and_fails_as_a_whole() {
         store.root(),
         &[
             (second.identity(), DetectedFormat::Mp3),
-            (first.identity(), DetectedFormat::Mp3),
+            (cased.identity(), DetectedFormat::Mp3),
             (conflict.identity(), DetectedFormat::Mp3),
         ],
         &technical_validator_identity(),

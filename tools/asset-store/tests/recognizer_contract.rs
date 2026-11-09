@@ -877,7 +877,10 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
         ],
     ));
     assert_eq!(read["outcome"], "ok", "{read}");
-    assert_eq!(read["result"]["assets"][0]["consumer_filename"], "生.mp3");
+    assert_eq!(
+        read["result"]["assets"][0]["consumer_filename"],
+        "生_なま.mp3"
+    );
     assert!(
         read["result"]["assets"][0].get("bytes").is_none(),
         "JSON просмотра не содержит байтов"
@@ -902,10 +905,10 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
     assert_eq!(exported["outcome"], "ok", "{exported}");
     assert_eq!(
         exported["result"]["exported"][0]["consumer_filename"],
-        "生.mp3"
+        "生_なま.mp3"
     );
     assert_eq!(exported["result"]["exported"][0]["written"], true);
-    let written = fs::read(chosen.join("生.mp3")).unwrap();
+    let written = fs::read(chosen.join("生_なま.mp3")).unwrap();
     assert_eq!(
         sha256_hex(&written),
         exported["result"]["exported"][0]["sha256"]

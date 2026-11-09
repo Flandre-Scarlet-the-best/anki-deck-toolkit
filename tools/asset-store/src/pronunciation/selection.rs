@@ -18,6 +18,7 @@
 //! (`.runtime/batches/<batch-id>/`), байты — в его неизменяемых blob.
 
 mod engine;
+pub mod materialize;
 pub mod model;
 pub mod ops;
 pub mod phonetic;
@@ -27,9 +28,10 @@ pub use model::*;
 pub use ops::{
     AgentPolicy, AutoSelectReport, ConsumerTrustPolicy, DecideAction, DecideReport, DecideRequest,
     ExportedAudio, GroupFilter, IntakeFile, IntakeReport, LinkReport, PERCEPTION_NOTICE,
-    PromoteReport, SelectedAudio, SelectedAudioInfo, auto_select, decide, export_selected,
-    intake_files, intake_forvo_batch, intake_paths, link_recognizer, link_target, promote,
-    read_selected, read_selected_info, status_value,
+    PromoteReport, Readiness, ReviewModeReport, ReviewModeRequest, SelectedAudio,
+    SelectedAudioInfo, auto_select, decide, export_selected, intake_files, intake_forvo_batch,
+    intake_paths, link_recognizer, link_target, promote, read_selected, read_selected_info,
+    set_review_mode, status_value,
 };
 
 #[cfg(test)]

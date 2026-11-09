@@ -430,11 +430,11 @@ async fn first_candidate_succeeds_with_single_download_and_release() {
     )]);
     let request = Pronunciation::new("元気", "げんき").unwrap();
     let mut session = BraveSession::connect(&h.options).await.unwrap();
-    let acquisition = acquire(&mut session, &request).await.unwrap();
+    let acquisition = acquire(&mut session, &request.surface).await.unwrap();
     assert_eq!(acquisition.bytes, mp3);
     acquisition
         .evidence
-        .validate(&request, &sha256_hex(&mp3))
+        .validate(&request.surface, &sha256_hex(&mp3))
         .unwrap();
     assert_eq!(acquisition.evidence.attempts.len(), 1);
     assert_eq!(
@@ -463,7 +463,7 @@ async fn rejected_candidate_falls_back_and_changed_row_pauses() {
     )]);
     let request = Pronunciation::new("元気", "げんき").unwrap();
     let mut session = BraveSession::connect(&h.options).await.unwrap();
-    let first = acquire(&mut session, &request).await.unwrap();
+    let first = acquire(&mut session, &request.surface).await.unwrap();
     assert_eq!(
         first
             .evidence
@@ -486,7 +486,7 @@ async fn rejected_candidate_falls_back_and_changed_row_pauses() {
         w.inspect_override.insert("元気".into(), changed);
         w.begins.clear();
     }
-    let second = acquire(&mut session, &request).await.err().unwrap();
+    let second = acquire(&mut session, &request.surface).await.err().unwrap();
     assert_eq!(provider_code(&second), "candidate_changed");
     assert!(pauses_batch(&second));
     // Одиночная операция: пакета нет, `batch-resume` не предлагается.
@@ -514,16 +514,10 @@ async fn exhausted_candidates_and_missing_word_are_item_outcomes() {
         ],
     )]);
     let mut session = BraveSession::connect(&h.options).await.unwrap();
-    let error = acquire(&mut session, &Pronunciation::new("元気", "げんき").unwrap())
-        .await
-        .err()
-        .unwrap();
+    let error = acquire(&mut session, "元気").await.err().unwrap();
     assert_eq!(provider_code(&error), "candidates_exhausted");
     assert!(!pauses_batch(&error));
-    let missing = acquire(&mut session, &Pronunciation::new("無語", "むご").unwrap())
-        .await
-        .err()
-        .unwrap();
+    let missing = acquire(&mut session, "無語").await.err().unwrap();
     assert_eq!(provider_code(&missing), "word_not_found");
     assert!(!pauses_batch(&missing));
     assert_eq!(lock(&h.world).releases.len(), 2);
@@ -542,13 +536,13 @@ async fn blockers_pause_without_trying_next_candidate() {
     )]);
     let request = Pronunciation::new("元気", "げんき").unwrap();
     let mut session = BraveSession::connect(&h.options).await.unwrap();
-    let error = acquire(&mut session, &request).await.err().unwrap();
+    let error = acquire(&mut session, &request.surface).await.err().unwrap();
     assert_eq!(provider_code(&error), "save_as_required");
     assert!(pauses_batch(&error));
     assert_eq!(error.details["attempts"][0]["code"], "save_as_required");
     assert_eq!(lock(&h.world).begins, ["10"]);
     lock(&h.world).challenge = true;
-    let challenge = acquire(&mut session, &request).await.err().unwrap();
+    let challenge = acquire(&mut session, &request.surface).await.err().unwrap();
     assert_eq!(provider_code(&challenge), "challenge_required");
     assert!(pauses_batch(&challenge));
     // Одиночная сессия без пакета: продолжать нечего, совет — повторить команду.
@@ -558,7 +552,7 @@ async fn blockers_pause_without_trying_next_candidate() {
     assert_eq!(lock(&h.world).begins, ["10"]);
     // Сессия пакета ведёт к продолжению именно этого пакета своей цели.
     session.set_batch("forvo-batch-1");
-    let challenge = acquire(&mut session, &request).await.err().unwrap();
+    let challenge = acquire(&mut session, &request.surface).await.err().unwrap();
     let action = challenge.details["next_action"].as_str().unwrap();
     assert!(
         action.contains("forvo brave batch-resume --batch-id forvo-batch-1"),
@@ -574,7 +568,7 @@ async fn interrupt_releases_in_progress_own_download() {
     let mut session = BraveSession::connect(&h.options).await.unwrap();
     session.set_interrupt(Some(rx));
     let request = Pronunciation::new("元気", "げんき").unwrap();
-    let (result, ()) = tokio::join!(acquire(&mut session, &request), async {
+    let (result, ()) = tokio::join!(acquire(&mut session, &request.surface), async {
         tokio::time::sleep(Duration::from_millis(700)).await;
         let _ = tx.send(true);
     });
@@ -595,7 +589,7 @@ async fn unknown_release_after_download_requires_recovery() {
     lock(&h.world).unknown_release = true;
     let mut session = BraveSession::connect(&h.options).await.unwrap();
     let request = Pronunciation::new("元気", "げんき").unwrap();
-    assert!(acquire(&mut session, &request).await.is_ok());
+    assert!(acquire(&mut session, &request.surface).await.is_ok());
     assert!(session.recovery_required());
     assert_eq!(
         session.summary()["operations"][0]["release"]["error"],
@@ -610,7 +604,7 @@ fn plan(words: &[(&str, &str)]) -> FetchPlan {
             .iter()
             .map(|(s, r)| FetchItem {
                 surface: (*s).into(),
-                reading: (*r).into(),
+                reading: Some((*r).into()),
                 replace_expected_sha256: None,
             })
             .collect(),

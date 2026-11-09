@@ -11,7 +11,7 @@ use super::acceptance::observed_url;
 use super::{Bridge, Platform, bridge_error, browser_path_to_local};
 use crate::forvo::{Candidate, download::matches_download, provider_code};
 use crate::hashing::sha256_hex;
-use crate::pronunciation::{AudioProbe, MAX_AUDIO_BYTES, Pronunciation, probe_mp3};
+use crate::pronunciation::{AudioProbe, MAX_AUDIO_BYTES, probe_mp3};
 use crate::{AssetError, ErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -168,12 +168,7 @@ fn failed(code: &str) -> AssetError {
 
 /// Решение по фактам расширения. Порядок важен: любой признак неоднозначности
 /// владения останавливает операцию раньше, чем её состояние загрузки.
-pub fn classify(
-    facts: &StatusFacts,
-    request: &Pronunciation,
-    record_id: &str,
-    limits: &Limits,
-) -> Progress {
+pub fn classify(facts: &StatusFacts, surface: &str, record_id: &str, limits: &Limits) -> Progress {
     if facts.code != "status" {
         return Progress::Failed("operation_lost");
     }
@@ -208,8 +203,8 @@ pub fn classify(
     if !facts.ownership_proven {
         return Progress::Failed("ownership_unproven");
     }
-    let address_ok = observed_url(&item.url)
-        .is_some_and(|url| matches_download(&url, &request.surface, record_id));
+    let address_ok =
+        observed_url(&item.url).is_some_and(|url| matches_download(&url, surface, record_id));
     if !address_ok
         || item.by_extension
         || !item.referrer_is_own_page
@@ -368,7 +363,7 @@ async fn status(bridge: &mut Bridge, op_id: &str) -> Result<StatusFacts, AssetEr
 pub async fn acquire(
     bridge: &mut Bridge,
     platform: Platform,
-    request: &Pronunciation,
+    surface: &str,
     candidate: &Candidate,
     op_id: &str,
     limits: &Limits,
@@ -377,7 +372,7 @@ pub async fn acquire(
     probed(
         op_id,
         acquire_bytes(
-            bridge, platform, request, candidate, op_id, limits, interrupt,
+            bridge, platform, surface, candidate, op_id, limits, interrupt,
         )
         .await?,
     )
@@ -407,7 +402,7 @@ pub fn probed(op_id: &str, downloaded: Downloaded) -> Result<Acquired, AssetErro
 pub async fn acquire_bytes(
     bridge: &mut Bridge,
     platform: Platform,
-    request: &Pronunciation,
+    surface: &str,
     candidate: &Candidate,
     op_id: &str,
     limits: &Limits,
@@ -417,7 +412,7 @@ pub async fn acquire_bytes(
     let begun = bridge
         .call(
             "download_begin",
-            json!({"op_id":op_id,"surface":request.surface,"record_id":candidate.record_id}),
+            json!({"op_id":op_id,"surface":surface,"record_id":candidate.record_id}),
             Duration::from_secs(20),
         )
         .await
@@ -478,7 +473,7 @@ pub async fn acquire_bytes(
             }
             Err(e) => return Err(e),
         };
-        match classify(&facts, request, &candidate.record_id, limits) {
+        match classify(&facts, surface, &candidate.record_id, limits) {
             Progress::Waiting(state) => {
                 if state != last {
                     tracing::info!(event = "brave_download_state", stage = "download", operation_id = op_id, state,

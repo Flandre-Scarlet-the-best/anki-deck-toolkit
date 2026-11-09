@@ -12,18 +12,14 @@ struct FakeSource {
     candidate_error: Option<&'static str>,
 }
 impl evidence::CandidateSource for FakeSource {
-    async fn candidates(&mut self, _: &Pronunciation) -> Result<Vec<Candidate>, AssetError> {
+    async fn candidates(&mut self, _: &str) -> Result<Vec<Candidate>, AssetError> {
         self.candidate_calls += 1;
         match self.candidate_error {
             Some(code) => Err(error(code, "Повторите позже")),
             None => Ok(self.candidates.clone()),
         }
     }
-    async fn download(
-        &mut self,
-        _: &Pronunciation,
-        candidate: &Candidate,
-    ) -> Result<Vec<u8>, AssetError> {
+    async fn download(&mut self, _: &str, candidate: &Candidate) -> Result<Vec<u8>, AssetError> {
         self.calls.push(candidate.record_id.clone());
         self.responses.pop_front().expect("запланированный исход")
     }
@@ -73,7 +69,9 @@ async fn fallback_rejects_aborted_download_and_html_before_accepting_original_mp
         Ok(bytes.clone()),
     ]);
     let request = Pronunciation::new("こいつ", "こいつ").unwrap();
-    let result = evidence::acquire_from(&mut source, &request).await.unwrap();
+    let result = evidence::acquire_from(&mut source, &request.surface)
+        .await
+        .unwrap();
     assert_eq!(source.calls, ["1", "2", "3"]);
     assert_eq!(result.bytes, bytes);
     assert_eq!(
@@ -87,13 +85,13 @@ async fn fallback_rejects_aborted_download_and_html_before_accepting_original_mp
     );
     result
         .evidence
-        .validate(&request, &crate::hashing::sha256_hex(&bytes))
+        .validate(&request.surface, &crate::hashing::sha256_hex(&bytes))
         .unwrap();
 }
 #[tokio::test]
 async fn blocked_session_stops_candidates_and_retains_attempt_report() {
     let mut source = source(vec![Err(error("session_expired", "Повторите login"))]);
-    let error = evidence::acquire_from(&mut source, &Pronunciation::new("元気", "げんき").unwrap())
+    let error = evidence::acquire_from(&mut source, "元気")
         .await
         .err()
         .expect("блокер");
@@ -134,7 +132,7 @@ async fn cancelled_shutdown_future_is_awaited_by_session_close() {
 async fn throttling_has_bounded_retries_and_never_becomes_not_found() {
     let mut source = source(Vec::new());
     source.candidate_error = Some("rate_limited");
-    let error = evidence::acquire_from(&mut source, &Pronunciation::new("元気", "げんき").unwrap())
+    let error = evidence::acquire_from(&mut source, "元気")
         .await
         .err()
         .expect("блокер");
@@ -157,7 +155,7 @@ async fn cancellation_reloads_revision_without_rehashing_unchanged_blobs() {
         .into_iter()
         .map(|word| FetchItem {
             surface: word.into(),
-            reading: word.into(),
+            reading: Some(word.into()),
             replace_expected_sha256: None,
         })
         .collect();
@@ -180,7 +178,7 @@ async fn cancellation_reloads_revision_without_rehashing_unchanged_blobs() {
         item.acquisition = Some(StoredAcquisition {
             evidence: ForvoEvidence {
                 schema_version: 1,
-                page_url: word_url(&item.request.surface),
+                page_url: word_url(item.surface()),
                 downloaded_sha256: blob.sha256.clone(),
                 selected_record_id: "1".into(),
                 ranking_policy: RANKING.into(),
@@ -189,6 +187,7 @@ async fn cancellation_reloads_revision_without_rehashing_unchanged_blobs() {
                     record_id: "1".into(),
                     code: "downloaded".into(),
                 }],
+                acquisition_mode: None,
             },
             blob,
         });
@@ -237,7 +236,7 @@ fn resume_reload_after_acquisition_reuses_verified_blob_cache() {
             schema_version: 1,
             items: vec![FetchItem {
                 surface: "あ".into(),
-                reading: "あ".into(),
+                reading: Some("あ".into()),
                 replace_expected_sha256: None,
             }],
         },
@@ -249,7 +248,7 @@ fn resume_reload_after_acquisition_reuses_verified_blob_cache() {
     let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
     let bytes = vec![0x5a; 1024];
     let blob = runtime.persist_blob(&bytes, "mp3").unwrap();
-    let item_evidence = evidence(&bytes, &state.items[0].request);
+    let item_evidence = evidence(&bytes, state.items[0].surface());
     state.items[0].acquisition = Some(StoredAcquisition {
         evidence: item_evidence,
         blob,
@@ -288,12 +287,12 @@ async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
             items: vec![
                 FetchItem {
                     surface: "あ".into(),
-                    reading: "あ".into(),
+                    reading: Some("あ".into()),
                     replace_expected_sha256: None,
                 },
                 FetchItem {
                     surface: "え".into(),
-                    reading: "え".into(),
+                    reading: Some("え".into()),
                     replace_expected_sha256: Some("0".repeat(64)),
                 },
             ],
@@ -310,7 +309,7 @@ async fn invalid_mp3_and_cas_conflict_are_terminal_after_checkpoint() {
     {
         let blob = runtime.persist_blob(bytes, "mp3").unwrap();
         item.acquisition = Some(StoredAcquisition {
-            evidence: evidence(bytes, &item.request),
+            evidence: evidence(bytes, item.surface()),
             blob,
         });
     }
@@ -518,10 +517,11 @@ fn download_needs_exact_button_url_guid_and_completed_event() {
     event.received_bytes = crate::pronunciation::MAX_AUDIO_BYTES as f64 + 1.0;
     assert!(tracker.progress(&event).is_err());
 }
-pub(crate) fn evidence(bytes: &[u8], request: &Pronunciation) -> ForvoEvidence {
+pub(crate) fn evidence(bytes: &[u8], surface: &str) -> ForvoEvidence {
     ForvoEvidence {
+        acquisition_mode: None,
         schema_version: 1,
-        page_url: word_url(&request.surface),
+        page_url: word_url(surface),
         downloaded_sha256: crate::hashing::sha256_hex(bytes),
         selected_record_id: "101".into(),
         ranking_policy: RANKING.into(),
@@ -540,25 +540,28 @@ pub(crate) fn evidence(bytes: &[u8], request: &Pronunciation) -> ForvoEvidence {
 #[test]
 fn evidence_binds_surface_sha_selected_record_and_order() {
     let request = Pronunciation::new("元気", "げんき").unwrap();
-    let e = evidence(b"bytes", &request);
-    e.validate(&request, &e.downloaded_sha256).unwrap();
+    let e = evidence(b"bytes", &request.surface);
+    e.validate(&request.surface, &e.downloaded_sha256).unwrap();
     let mut bad = e.clone();
     bad.selected_record_id = "102".into();
-    assert!(bad.validate(&request, &e.downloaded_sha256).is_err());
+    assert!(
+        bad.validate(&request.surface, &e.downloaded_sha256)
+            .is_err()
+    );
     bad = e.clone();
     bad.page_url.push_str("?auth=secret");
-    assert!(bad.validate(&request, &e.downloaded_sha256).is_err());
     assert!(
-        e.validate(
-            &Pronunciation::new("幽霊", "ゆうれい").unwrap(),
-            &e.downloaded_sha256
-        )
-        .is_err()
+        bad.validate(&request.surface, &e.downloaded_sha256)
+            .is_err()
     );
-    assert!(e.validate(&request, &"0".repeat(64)).is_err());
+    assert!(e.validate("幽霊", &e.downloaded_sha256).is_err());
+    assert!(e.validate(&request.surface, &"0".repeat(64)).is_err());
     bad = e.clone();
     bad.attempts.clear();
-    assert!(bad.validate(&request, &e.downloaded_sha256).is_err());
+    assert!(
+        bad.validate(&request.surface, &e.downloaded_sha256)
+            .is_err()
+    );
 }
 
 /// Chromium без внешней сети: выполняет тот же адаптер над минимизированным наблюдённым DOM.
@@ -633,6 +636,14 @@ async fn browser_multilingual_dom_and_view_all_are_structural() {
     let result = scan(browser.page()).await;
     assert_eq!(result.code, "ok");
     assert_eq!(result.candidates.len(), 3);
+    // Полный сбор берёт только основной японский блок точного слова: фразы,
+    // другие языки и связанные написания («Related words») не участвуют.
+    let ids: Vec<_> = result
+        .candidates
+        .iter()
+        .map(|c| c.record_id.as_str())
+        .collect();
+    assert_eq!(ids, ["101", "102", "103"]);
     assert_eq!(result.candidates[0].votes, Some(-1));
     assert_eq!(result.candidates[1].votes, Some(0));
     assert_eq!(result.candidates[2].votes, None);
@@ -750,7 +761,9 @@ async fn successful_acquisition_and_import_keep_two_independent_full_checks() {
     )
     .unwrap();
     crate::pronunciation::FULL_PROBES.with(|count| count.set(0));
-    let acquired = evidence::acquire_from(&mut source, &request).await.unwrap();
+    let acquired = evidence::acquire_from(&mut source, &request.surface)
+        .await
+        .unwrap();
     crate::pronunciation::FULL_PROBES.with(|count| assert_eq!(count.get(), 1));
     let record = import_acquisition(&store, &request, &acquired, None).unwrap();
     crate::pronunciation::FULL_PROBES.with(|count| assert_eq!(count.get(), 2));
@@ -803,7 +816,7 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
                 schema_version: 1,
                 items: vec![batch::FetchItem {
                     surface: "あ".into(),
-                    reading: "あ".into(),
+                    reading: Some("あ".into()),
                     replace_expected_sha256: None,
                 }],
             },
@@ -816,7 +829,7 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
         ))]);
         let mut runtime = SafeBatchRuntime::open(store.root(), "recovery").unwrap();
         let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
-        let result = evidence::acquire_from(&mut source, &state.items[0].request).await;
+        let result = evidence::acquire_from(&mut source, state.items[0].surface()).await;
         assert_eq!(source.calls, ["1"], "{code}");
         assert!(matches!(
             batch::checkpoint_acquisition(&mut runtime, &mut state, 0, result).unwrap(),
@@ -833,7 +846,7 @@ async fn download_infrastructure_pauses_unfinished_item_and_can_resume_after_rep
         // После ремонта окружения получаем исходные байты и сохраняем штатный checkpoint.
         let bytes = synthetic_mp3();
         source.responses.push_back(Ok(bytes.clone()));
-        let result = evidence::acquire_from(&mut source, &state.items[0].request).await;
+        let result = evidence::acquire_from(&mut source, state.items[0].surface()).await;
         assert_eq!(source.calls, ["1", "1"]);
         let mut runtime = SafeBatchRuntime::open(store.root(), "recovery").unwrap();
         state = runtime.load().unwrap().unwrap();
@@ -878,7 +891,7 @@ async fn candidate_failures_exhaust_records_but_unknown_errors_keep_their_code()
                 .map(|_| Err(error(code, "Запись отклонена")))
                 .collect(),
         );
-        let failure = evidence::acquire_from(&mut source, &request)
+        let failure = evidence::acquire_from(&mut source, &request.surface)
             .await
             .err()
             .unwrap();
@@ -891,10 +904,234 @@ async fn candidate_failures_exhaust_records_but_unknown_errors_keep_their_code()
         "unexpected_failure",
         "Отдельная диагностика",
     ))]);
-    let failure = evidence::acquire_from(&mut source, &request)
+    let failure = evidence::acquire_from(&mut source, &request.surface)
         .await
         .err()
         .unwrap();
     assert_eq!(provider_code(&failure), "unexpected_failure");
     assert_eq!(source.calls, ["1"]);
+}
+
+// ---------------------------------------------------------------------------
+// Полный сбор японского блока точного слова без чтения
+// ---------------------------------------------------------------------------
+
+fn collection_source(responses: Vec<Result<Vec<u8>, AssetError>>) -> FakeSource {
+    let mut source = source(responses);
+    source.candidates.push(Candidate {
+        download_available: false,
+        ..candidate("4", Some(0), None, None)
+    });
+    source
+}
+
+#[tokio::test]
+async fn collection_downloads_every_available_record_and_keeps_each_provenance() {
+    let first = synthetic_mp3();
+    // Два диктора могли загрузить одинаковые байты: это две записи, а не одна.
+    let mut source = collection_source(vec![
+        Ok(first.clone()),
+        Err(error("download_aborted", "Загрузка отменена")),
+        Ok(first.clone()),
+    ]);
+    let collection = evidence::collect_from(&mut source, "生", &Default::default()).await;
+    assert!(collection.stop.is_none());
+    // Недоступная для загрузки запись не скачивается, но остаётся в наблюдениях.
+    assert_eq!(source.calls, ["1", "2", "3"]);
+    assert_eq!(collection.candidates.as_ref().unwrap().len(), 4);
+    let ids: Vec<_> = collection
+        .records
+        .iter()
+        .map(|r| r.evidence.selected_record_id.as_str())
+        .collect();
+    assert_eq!(ids, ["1", "3"]);
+    assert_eq!(collection.rejected.len(), 1);
+    assert_eq!(collection.rejected[0].code, "download_aborted");
+    for record in &collection.records {
+        let sha = crate::hashing::sha256_hex(&record.bytes);
+        record.evidence.validate("生", &sha).unwrap();
+        assert_eq!(record.evidence.schema_version, 2);
+        assert_eq!(
+            record.evidence.acquisition_mode.as_deref(),
+            Some(COLLECT_ALL_MODE)
+        );
+        assert_eq!(record.evidence.page_url, word_url("生"));
+        // Свидетельство привязано к написанию страницы, а не к чтению.
+        assert!(record.evidence.validate("生（セイ）", &sha).is_err());
+    }
+}
+
+#[tokio::test]
+async fn collection_stop_keeps_partial_records_and_resume_skips_them() {
+    let bytes = synthetic_mp3();
+    let mut source = collection_source(vec![
+        Ok(bytes.clone()),
+        Err(error("session_expired", "Повторите вход")),
+    ]);
+    let collection = evidence::collect_from(&mut source, "生", &Default::default()).await;
+    assert_eq!(collection.records.len(), 1);
+    assert_eq!(
+        provider_code(collection.stop.as_ref().unwrap()),
+        "session_expired"
+    );
+    let skip = ["1".to_owned()].into_iter().collect();
+    let mut source = collection_source(vec![Ok(bytes.clone()), Ok(bytes)]);
+    let resumed = evidence::collect_from(&mut source, "生", &skip).await;
+    assert_eq!(
+        source.calls,
+        ["2", "3"],
+        "собранная запись не скачивается повторно"
+    );
+    assert_eq!(resumed.records.len(), 2);
+    // Страница без японского блока — остановка без записей.
+    let mut missing = collection_source(Vec::new());
+    missing.candidate_error = Some("japanese_pronunciation_not_found");
+    let collection = evidence::collect_from(&mut missing, "生", &Default::default()).await;
+    assert!(collection.records.is_empty() && collection.candidates.is_none());
+    assert_eq!(
+        provider_code(collection.stop.as_ref().unwrap()),
+        "japanese_pronunciation_not_found"
+    );
+}
+
+#[test]
+fn evidence_schema_and_mode_must_agree() {
+    let mut e = evidence(b"bytes", "生");
+    e.validate("生", &e.downloaded_sha256).unwrap();
+    e.acquisition_mode = Some(COLLECT_ALL_MODE.into());
+    assert!(e.validate("生", &e.downloaded_sha256).is_err());
+    e.schema_version = 2;
+    e.validate("生", &e.downloaded_sha256).unwrap();
+    e.attempts.insert(
+        0,
+        Attempt {
+            record_id: "99".into(),
+            code: "download_aborted".into(),
+        },
+    );
+    assert!(e.validate("生", &e.downloaded_sha256).is_err());
+    let mut e = evidence(b"bytes", "生");
+    e.schema_version = 2;
+    assert!(
+        e.validate("生", &e.downloaded_sha256).is_err(),
+        "схема 2 без режима"
+    );
+}
+
+#[test]
+fn surface_only_batch_item_collects_without_reading_and_without_import() {
+    use super::batch::{FetchItem, FetchPlan};
+    use crate::batch_runtime::SafeBatchRuntime;
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-collect").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    // Чтение без пары и замена без импорта запрещены до создания пакета.
+    let replace = batch::start(
+        &store,
+        "bad",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![FetchItem {
+                surface: "生".into(),
+                reading: None,
+                replace_expected_sha256: Some("0".repeat(64)),
+            }],
+        },
+        batch::Transport::CdpChromium,
+    );
+    assert!(replace.is_err());
+    let state = batch::start(
+        &store,
+        "collect",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![
+                FetchItem {
+                    surface: "生".into(),
+                    reading: None,
+                    replace_expected_sha256: None,
+                },
+                FetchItem {
+                    surface: "水".into(),
+                    reading: Some("みず".into()),
+                    replace_expected_sha256: None,
+                },
+            ],
+        },
+        batch::Transport::CdpChromium,
+    )
+    .unwrap();
+    assert!(state.items[0].collects() && !state.items[1].collects());
+    assert_eq!(state.items[0].surface(), "生");
+    let encoded = serde_json::to_value(&state.items[0]).unwrap();
+    assert!(encoded.get("request").is_none(), "чтение не выдумывается");
+
+    let bytes = synthetic_mp3();
+    let mut source = collection_source(vec![Ok(bytes.clone()), Ok(bytes.clone()), Ok(bytes)]);
+    let collection = futures::executor::block_on(evidence::collect_from(
+        &mut source,
+        "生",
+        &Default::default(),
+    ));
+    let mut runtime = SafeBatchRuntime::open(store.root(), "collect").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    batch::checkpoint_collection(&mut runtime, &mut state, 0, collection).unwrap();
+    drop(runtime);
+    let state = batch::status(&store, "collect").unwrap();
+    let item = &state.items[0];
+    assert_eq!(item.outcome.as_ref().unwrap().code, "collected");
+    assert_eq!(item.collected.len(), 3);
+    assert_eq!(
+        item.collected_ids(),
+        ["1", "2", "3"].map(str::to_owned).into_iter().collect()
+    );
+    // Канонический домен не тронут: импорта без чтения нет.
+    assert!(
+        crate::pronunciation::derivation::current_record(
+            &store,
+            &Pronunciation::new("生", "せい").unwrap()
+        )
+        .unwrap()
+        .is_none()
+    );
+    // Приём в пакет выбора: одинаковые байты — один исходник с тремя
+    // происхождениями, у каждого свой ID записи и нет чтения плана.
+    let report =
+        crate::pronunciation::selection::intake_forvo_batch(&store, "sel", "collect").unwrap();
+    assert_eq!(report.added.len(), 1);
+    assert_eq!(report.already_present.len(), 2);
+    let mut runtime = SafeBatchRuntime::open(store.root(), "sel").unwrap();
+    let selection: crate::pronunciation::selection::SelectionBatch =
+        runtime.load().unwrap().unwrap();
+    let origins = &selection.sources[0].origins;
+    assert_eq!(origins.len(), 3);
+    for origin in origins {
+        assert!(matches!(
+            origin,
+            crate::pronunciation::selection::SourceOrigin::ForvoBatch {
+                plan_reading: None,
+                ..
+            }
+        ));
+    }
+    assert!(
+        selection.links.is_empty(),
+        "чтения не установлены до анализа"
+    );
+}
+
+#[test]
+fn legacy_batch_item_state_is_still_readable() {
+    let legacy = serde_json::json!({
+        "request": {"surface": "水", "reading": "みず"},
+        "replace_expected_sha256": null,
+        "acquisition": null,
+        "outcome": null,
+    });
+    let item: batch::Item = serde_json::from_value(legacy).unwrap();
+    assert!(!item.collects());
+    assert_eq!(item.surface(), "水");
 }

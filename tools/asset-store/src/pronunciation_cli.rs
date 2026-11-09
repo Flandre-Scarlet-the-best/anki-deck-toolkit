@@ -205,11 +205,14 @@ enum ForvoAction {
         surface: Option<String>,
     },
     Check,
+    /// Записи японского блока точной страницы слова. Поиск — только по
+    /// написанию; `--reading` прежних сценариев принимается, но в запросе к
+    /// Forvo не участвует.
     Candidates {
         #[arg(long)]
         surface: String,
         #[arg(long)]
-        reading: String,
+        reading: Option<String>,
     },
     Fetch {
         #[arg(long)]
@@ -1011,7 +1014,7 @@ fn execute_forvo(
                     return Err(forvo::route::cdp_disabled(match action {ForvoAction::Login{..}=>"login",ForvoAction::Check=>"check",_=>"candidates"}));
                 }
                 // Проверяем входные пары до запуска браузера.
-                let request=match action {ForvoAction::Candidates{surface,reading}=>Some(Pronunciation::new(surface,reading)?),_=>None};
+                let request=match action {ForvoAction::Candidates{surface,reading}=>{if let Some(reading)=reading {Pronunciation::new(surface,reading)?;} Some(crate::pronunciation::selection::normalize_forvo_surface(surface)?)},_=>None};
                 let mut session=if matches!(action,ForvoAction::Login{..}) { ForvoSession::launch_interactive(profile).await? } else { ForvoSession::launch(profile).await? };
                 let result=tokio::select! {
                     result=async {
@@ -1030,12 +1033,12 @@ fn execute_forvo(
                                 if state!=AuthState::Authenticated {return Err(forvo::auth_error(state));}
                                 Ok(serde_json::json!({"auth_state":state}))
                             }
-                            ForvoAction::Candidates{..}=>Ok(serde_json::json!({"ranking_policy":forvo::RANKING,"candidates":session.candidates(request.as_ref().expect("request")).await?})),
+                            ForvoAction::Candidates{..}=>Ok(serde_json::json!({"ranking_policy":forvo::RANKING,"candidates":session.candidates(request.as_deref().expect("request")).await?})),
                             _=>unreachable!(),
                         }}.await;
                         match attempt {
                             Err(error) if !retried && !matches!(action, ForvoAction::Login{..}) && forvo::requires_interaction(&error) => {
-                                if !session.recover_interactively(request.as_ref().map(|r|r.surface.as_str())).await? { break Err(error); }
+                                if !session.recover_interactively(request.as_deref()).await? { break Err(error); }
                                 retried = true;
                             }
                             other => break other,
@@ -1102,7 +1105,7 @@ async fn cdp_fetch(
         })?;
     let result = tokio::select! {
         result = async {
-            let acquisition = forvo::acquire(&mut session, request).await?;
+            let acquisition = forvo::acquire(&mut session, &request.surface).await?;
             let asset = forvo::import_acquisition(store, request, &acquisition, replace)?;
             Ok(serde_json::json!({"asset":asset,"acquisition":acquisition.evidence}))
         } => result,

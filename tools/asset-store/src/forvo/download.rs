@@ -1,8 +1,5 @@
 use super::{Candidate, ForvoSession, error};
-use crate::{
-    AssetError,
-    pronunciation::{MAX_AUDIO_BYTES, Pronunciation},
-};
+use crate::{AssetError, pronunciation::MAX_AUDIO_BYTES};
 use chromiumoxide::cdp::browser_protocol::browser::{
     CancelDownloadParams, DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
@@ -123,16 +120,16 @@ impl DownloadTracker {
 impl ForvoSession {
     pub(crate) async fn download(
         &mut self,
-        request: &Pronunciation,
+        surface: &str,
         candidate: &Candidate,
     ) -> Result<Vec<u8>, AssetError> {
         // У предыдущей попытки могли остаться незавершённые CDP-загрузки.
         // Следующая попытка возможна только после остановки всего процесса.
         self.recycle_after_download().await?;
         if self.browser().page().url().await.ok().flatten().as_deref()
-            != Some(super::word_url(&request.surface).as_str())
+            != Some(super::word_url(surface).as_str())
         {
-            self.navigate(&super::word_url(&request.surface)).await?;
+            self.navigate(&super::word_url(surface)).await?;
         }
         self.require_authenticated().await?;
         tracing::info!(event = "forvo_download_started", record_id = %candidate.record_id, "Начата загрузка записи Forvo");
@@ -194,16 +191,14 @@ impl ForvoSession {
             .collect::<std::collections::HashSet<_>>();
         let mut tracker = DownloadTracker::default();
         let result = async {
-            let before = self.dom(&request.surface, "inspect", "").await?;
+            let before = self.dom(surface, "inspect", "").await?;
             if before.code != "ok" || !before.candidates.contains(candidate) {
                 return Err(error(
                     "candidate_changed",
                     "Строка кандидата изменилась; повторите выбор",
                 ));
             }
-            let clicked = self
-                .dom(&request.surface, "click", &candidate.record_id)
-                .await?;
+            let clicked = self.dom(surface, "click", &candidate.record_id).await?;
             if clicked.code != "prepared" {
                 return Err(error(
                     &clicked.code,
@@ -277,7 +272,7 @@ impl ForvoSession {
                             }
                         }
                         if !owned_frame {let _=browser.execute(CancelDownloadParams::new(begin.guid.clone())).await;return Err(error("download_mismatch","Загрузка начата чужой вкладкой; файл отклонён"));}
-                        if let Err(e)=tracker.begin(&begin,&request.surface,&candidate.record_id) {let _=browser.execute(CancelDownloadParams::new(begin.guid.clone())).await;return Err(e);}
+                        if let Err(e)=tracker.begin(&begin,surface,&candidate.record_id) {let _=browser.execute(CancelDownloadParams::new(begin.guid.clone())).await;return Err(e);}
                     },
                     progress=progresses.next()=>{
                         let progress=progress.ok_or_else(||error("browser_recovery_required","Поток прогресса Chromium закрыт"))?;

@@ -12,7 +12,7 @@ pub mod kana;
 pub mod normalizer;
 pub mod normalizer_batch;
 pub mod normalizer_report;
-mod probe;
+pub(crate) mod probe;
 pub mod recognizer;
 pub mod recognizer_backend;
 pub mod recognizer_batch;
@@ -74,6 +74,22 @@ impl Pronunciation {
         {
             return Err(invalid("surface не представима безопасным именем Anki"));
         }
+        // Чтение входит в имя потребителя `<surface>_<reading>.mp3`. Без `_`
+        // в чтении граница однозначна (последний `_`), поэтому разные пары
+        // не дают одного имени.
+        if value
+            .reading
+            .contains(['<', '>', '"', '|', '?', '*', '[', ']', '_', '/', '\\', ':'])
+            || value.reading.ends_with(['.', ' '])
+        {
+            return Err(invalid(
+                "reading не представимо однозначной частью имени файла (запрещены _ и символы пути)",
+            ));
+        }
+        // Прежнее имя `<surface>.mp3` тоже обязано быть безопасным: так
+        // написание остаётся под теми же правилами, что и до добавления чтения
+        // в имя (например, `CON` по-прежнему недопустимо).
+        validate_safe_consumer_filename(&value.legacy_consumer_filename(), DetectedFormat::Mp3)?;
         validate_safe_consumer_filename(&value.consumer_filename(), DetectedFormat::Mp3)?;
         value.identity().validate().map_err(invalid)?;
         Ok(value)
@@ -86,7 +102,17 @@ impl Pronunciation {
         }
     }
 
+    /// Имя готового MP3 этой пары у потребителя: `<surface>_<reading>.mp3`
+    /// (`生_せい.mp3`, `生_なま.mp3`). Два чтения одного написания не
+    /// конфликтуют. Это имя результата, а не запрос Forvo.
     pub fn consumer_filename(&self) -> String {
+        format!("{}_{}.mp3", self.surface, self.reading)
+    }
+
+    /// Прежнее имя `<surface>.mp3`. Сохраняется у исторических записей
+    /// домена как есть; новые записи его не получают, а ссылки колод
+    /// переводятся явным `migrate-media`.
+    pub fn legacy_consumer_filename(&self) -> String {
         format!("{}.mp3", self.surface)
     }
 
@@ -168,6 +194,17 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
     fn consumer_name_key(&self, name: &str) -> String {
         name.nfc().collect::<String>().to_lowercase()
     }
+    fn proves_legacy_consumer_filename(&self, identity: &AssetIdentity, filename: &str) -> bool {
+        Pronunciation::from_identity(identity)
+            .is_ok_and(|request| request.legacy_consumer_filename() == filename)
+    }
+    fn accepts_historical_consumer_filename(
+        &self,
+        identity: &AssetIdentity,
+        filename: &str,
+    ) -> bool {
+        self.proves_legacy_consumer_filename(identity, filename)
+    }
     fn trust_semantics(&self) -> TrustSemantics {
         TrustSemantics::HUMAN_WITH_CURRENT_VALIDATION
     }
@@ -192,7 +229,24 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
             .domain_metadata
             .as_ref()
             .ok_or_else(|| invalid("нет метаданных произношения"))?;
-        if metadata != &serde_json::json!(request) && metadata.get("derivation").is_some() {
+        if metadata != &serde_json::json!(request) && metadata.get("selection_derivative").is_some()
+        {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct SelectionMetadata {
+                surface: String,
+                reading: String,
+                selection_derivative: derivation::SelectionDerivative,
+            }
+            let parsed: SelectionMetadata = serde_json::from_value(metadata.clone())
+                .map_err(|_| invalid("неподдерживаемые метаданные производного MP3 выбора"))?;
+            if parsed.surface != request.surface || parsed.reading != request.reading {
+                return Err(invalid("метаданные не совпадают с идентичностью"));
+            }
+            parsed
+                .selection_derivative
+                .validate(&request, &record.sha256, &record.provenance)?;
+        } else if metadata != &serde_json::json!(request) && metadata.get("derivation").is_some() {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct DerivedMetadata {
@@ -228,12 +282,14 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
                     "метаданные не совпадают с идентичностью/происхождением",
                 ));
             }
-            parsed.forvo.validate(&request, &record.sha256)?;
+            parsed.forvo.validate(&request.surface, &record.sha256)?;
         } else if record.provenance.source_kind == "forvo_web" {
             return Err(invalid(
                 "Forvo требует полного происхождения для конкретного SHA",
             ));
-        } else if record.provenance.source_kind == derivation::DERIVED_SOURCE_KIND {
+        } else if record.provenance.source_kind == derivation::DERIVED_SOURCE_KIND
+            || record.provenance.source_kind == derivation::SELECTION_SOURCE_KIND
+        {
             return Err(invalid(
                 "производный MP3 требует полного свидетельства обработки",
             ));
@@ -403,11 +459,41 @@ pub(crate) fn import_derived_bytes(
     )
 }
 
+/// Производный MP3 пакета выбора: фрагмент, материализованный интервал или
+/// обработанная запись конкретного чтения со свидетельством цепочки.
+pub(crate) fn import_selection_derived_bytes(
+    store: &AssetStore,
+    request: &Pronunciation,
+    bytes: &[u8],
+    derivative: &derivation::SelectionDerivative,
+    replace_expected: Option<String>,
+) -> Result<AssetRecord, AssetError> {
+    let source_name =
+        derivation::selection_source_name(&derivative.transform, &derivative.source_sha256);
+    derivative.validate(
+        request,
+        &sha256_hex(bytes),
+        &Provenance {
+            source_kind: derivation::SELECTION_SOURCE_KIND.into(),
+            source_name: source_name.clone(),
+        },
+    )?;
+    import_source(
+        store,
+        request,
+        bytes,
+        &source_name,
+        replace_expected,
+        Origin::Selection(derivative),
+    )
+}
+
 #[derive(Clone, Copy)]
 enum Origin<'a> {
     Local,
     Forvo(&'a crate::forvo::ForvoEvidence),
     Derived(&'a derivation::AudioDerivation, bool),
+    Selection(&'a derivation::SelectionDerivative),
 }
 
 pub(crate) fn import_forvo_bytes(
@@ -417,7 +503,7 @@ pub(crate) fn import_forvo_bytes(
     evidence: &crate::forvo::ForvoEvidence,
     replace_expected: Option<String>,
 ) -> Result<AssetRecord, AssetError> {
-    evidence.validate(request, &sha256_hex(bytes))?;
+    evidence.validate(&request.surface, &sha256_hex(bytes))?;
     import_source(
         store,
         request,
@@ -471,7 +557,9 @@ fn import_source(
                 crate::store::VerifiedReplacement::Forbidden
             },
         ),
-        Origin::Forvo(_) if replacing => store.ingest_with_metadata_cas(request, provenance),
+        Origin::Forvo(_) | Origin::Selection(_) if replacing => {
+            store.ingest_with_metadata_cas(request, provenance)
+        }
         _ => store.ingest_with_provenance(request, provenance),
     };
     let outcome = ingest(
@@ -487,6 +575,9 @@ fn import_source(
                 Origin::Derived(derivation, _) => {
                     serde_json::json!({"surface":request.surface,"reading":request.reading,"derivation":derivation})
                 }
+                Origin::Selection(derivative) => {
+                    serde_json::json!({"surface":request.surface,"reading":request.reading,"selection_derivative":derivative})
+                }
                 Origin::Local => serde_json::json!(request),
             }),
             replace_expected_sha256: replace_expected,
@@ -495,6 +586,7 @@ fn import_source(
             source_kind: match origin {
                 Origin::Forvo(_) => "forvo_web",
                 Origin::Derived(..) => derivation::DERIVED_SOURCE_KIND,
+                Origin::Selection(_) => derivation::SELECTION_SOURCE_KIND,
                 Origin::Local => "local_import",
             }
             .into(),
@@ -505,6 +597,7 @@ fn import_source(
         && outcome.asset.provenance.source_kind
             != match origin {
                 Origin::Forvo(_) => "forvo_web",
+                Origin::Selection(_) => derivation::SELECTION_SOURCE_KIND,
                 _ => derivation::DERIVED_SOURCE_KIND,
             }
     {

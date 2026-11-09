@@ -74,7 +74,7 @@ pub struct BraveOptions {
 pub async fn download_candidate(
     bridge: &mut Bridge,
     platform: Platform,
-    request: &Pronunciation,
+    surface: &str,
     candidate: &Candidate,
     op_id: &str,
     limits: &Limits,
@@ -83,7 +83,7 @@ pub async fn download_candidate(
     let before = bridge
         .call(
             "dom",
-            json!({"surface":request.surface,"action":"inspect"}),
+            json!({"surface":surface,"action":"inspect"}),
             Duration::from_secs(15),
         )
         .await?;
@@ -96,7 +96,7 @@ pub async fn download_candidate(
         ));
     }
     download::acquire_bytes(
-        bridge, platform, request, candidate, op_id, limits, interrupt,
+        bridge, platform, surface, candidate, op_id, limits, interrupt,
     )
     .await
 }
@@ -314,10 +314,10 @@ impl BraveSession {
         unreachable!("ограниченные попытки")
     }
 
-    async fn ranked(&mut self, request: &Pronunciation) -> Result<Vec<Candidate>, AssetError> {
+    async fn ranked(&mut self, surface: &str) -> Result<Vec<Candidate>, AssetError> {
         for attempt in 0..2 {
-            self.open_page(&request.surface).await?;
-            match acceptance::candidates(&mut self.connection.bridge, request).await {
+            self.open_page(surface).await?;
+            match acceptance::candidates(&mut self.connection.bridge, surface).await {
                 Err(e) if attempt == 0 && reconnectable(&e) => self.reconnect().await?,
                 other => return other,
             }
@@ -348,11 +348,11 @@ impl BraveSession {
 
     async fn download_one(
         &mut self,
-        request: &Pronunciation,
+        surface: &str,
         candidate: &Candidate,
     ) -> Result<Vec<u8>, AssetError> {
-        if self.fresh_page.as_deref() != Some(request.surface.as_str()) {
-            self.open_page(&request.surface).await?;
+        if self.fresh_page.as_deref() != Some(surface) {
+            self.open_page(surface).await?;
         }
         // Вкладка, нажавшая кнопку, больше не считается свежей.
         self.fresh_page = None;
@@ -362,7 +362,7 @@ impl BraveSession {
         let outcome = download_candidate(
             &mut self.connection.bridge,
             platform,
-            request,
+            surface,
             candidate,
             &op_id,
             &self.limits,
@@ -424,33 +424,39 @@ impl BraveSession {
 }
 
 impl CandidateSource for BraveSession {
-    async fn candidates(&mut self, request: &Pronunciation) -> Result<Vec<Candidate>, AssetError> {
+    async fn candidates(&mut self, surface: &str) -> Result<Vec<Candidate>, AssetError> {
         let mut interrupt = self.interrupt.clone();
         tokio::select! {
-            result = self.ranked(request) => result,
+            result = self.ranked(surface) => result,
             _ = download::interrupted(&mut interrupt) => Err(interrupted_error()),
         }
     }
     async fn download(
         &mut self,
-        request: &Pronunciation,
+        surface: &str,
         candidate: &Candidate,
     ) -> Result<Vec<u8>, AssetError> {
         if self.interrupt.as_ref().is_some_and(|rx| *rx.borrow()) {
             return Err(interrupted_error());
         }
         // Прерывание наблюдает сама операция загрузки и освобождает её до выхода.
-        self.download_one(request, candidate).await
+        self.download_one(surface, candidate).await
     }
 }
 
 /// Тот же результат получения, что `forvo::acquire`: `Acquisition` с единым
 /// `ForvoEvidence`. Вход и проверку сайта пользователь выполняет в Brave сам.
-pub async fn acquire(
+pub async fn acquire(session: &mut BraveSession, surface: &str) -> Result<Acquisition, AssetError> {
+    acquire_from(session, surface).await
+}
+
+/// Полный сбор записей японского блока точного слова тем же транспортом.
+pub async fn acquire_collection(
     session: &mut BraveSession,
-    request: &Pronunciation,
-) -> Result<Acquisition, AssetError> {
-    acquire_from(session, request).await
+    surface: &str,
+    skip: &std::collections::BTreeSet<String>,
+) -> super::super::Collection {
+    super::super::collect_from(session, surface, skip).await
 }
 
 /// Одиночный fetch: одно сопряжение, кандидаты, загрузка выбранного
@@ -465,7 +471,7 @@ pub async fn fetch(
     let mut session = BraveSession::connect(options).await?;
     session.set_interrupt(interrupt);
     let before = session.snapshot().await;
-    let acquired = acquire(&mut session, request).await;
+    let acquired = acquire(&mut session, &request.surface).await;
     let after = session.snapshot().await;
     let summary = session.summary();
     let closed = session.close().await;
