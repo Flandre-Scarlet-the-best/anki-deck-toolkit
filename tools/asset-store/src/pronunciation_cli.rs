@@ -65,6 +65,13 @@ enum Action {
         #[command(subcommand)]
         action: crate::pronunciation_recognizer_cli::RecognizerAction,
     },
+    /// Выбор аудиокандидатов без обязательного прослушивания: приём MP3 без
+    /// чтения и колоды, связь с распознаванием, пакетный выбор по явным
+    /// политикам, адресные решения, офлайн-обзор и явная публикация.
+    Selection {
+        #[command(subcommand)]
+        action: crate::pronunciation_selection_cli::SelectionAction,
+    },
     Init,
     Inspect,
     Verify,
@@ -684,10 +691,14 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
         .fold(StoreOptions::new(&root), |options, path| {
             options.protect_from(path)
         });
-    let store = if matches!(
-        cli.command,
-        Action::Init | Action::Import { .. } | Action::BatchStart { .. }
-    ) {
+    let creates_store = match &cli.command {
+        Action::Init | Action::Import { .. } | Action::BatchStart { .. } => true,
+        Action::Selection { action } => {
+            crate::pronunciation_selection_cli::needs_store_creation(action)
+        }
+        _ => false,
+    };
+    let store = if creates_store {
         AssetStore::open_with_policy(options, PronunciationDomainPolicy)?
     } else {
         AssetStore::open_existing_with_policy(options, PronunciationDomainPolicy)?
@@ -699,6 +710,11 @@ fn execute(cli: &Cli) -> Result<serde_json::Value, AssetError> {
         Action::Enhancer { .. } => unreachable!("улучшение обработано до открытия хранилища"),
         Action::Recognizer { .. } => {
             unreachable!("распознавание обработано до открытия хранилища")
+        }
+        Action::Selection { action } => {
+            return crate::pronunciation_selection_cli::execute(action, &store, &protected).map(
+                |result| serde_json::json!({"schema_version":1,"outcome":"ok","result":result}),
+            );
         }
         Action::Init => {
             serde_json::json!({"store_id":store.store_id(),"initialized":store.initialized_on_open()})

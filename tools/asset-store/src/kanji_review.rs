@@ -184,6 +184,7 @@ pub(crate) fn prepare(
     rows.sort_by_key(|row| row.ocr.as_ref().map_or(3, |ocr| ocr.group()));
     let snapshot = ReviewSnapshot {
         schema_version: SCHEMA,
+        batch_revision: None,
         batch_id: state.batch_id.clone(),
         validator: state.policy.validator.clone(),
         rows,
@@ -192,7 +193,7 @@ pub(crate) fn prepare(
         |name| runtime.artifact_directory(name),
         &snapshot,
         &FORMAT,
-        |row| runtime.read_candidate(candidate(state, row)?),
+        |row, _| runtime.read_candidate(candidate(state, row)?),
     )?;
     write_preview(&directory, &snapshot)?;
     Ok(bundle)
