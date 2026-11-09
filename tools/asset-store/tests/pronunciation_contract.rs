@@ -109,7 +109,7 @@ fn forvo_provenance_uses_the_existing_uncertain_and_trusted_boundary() {
     let acquisition = web_acquisition(audio(), &request);
     let record = import_acquisition(&store, &request, &acquisition, None).unwrap();
     assert_eq!(record.provenance.source_kind, "forvo_web");
-    assert_eq!(record.consumer_filename, "こいつ_こいつ.mp3");
+    assert_eq!(record.consumer_filename, "こいつ.mp3");
     assert_eq!(record.lifecycle, LifecycleState::Quarantined);
     assert_eq!(
         record.validation.as_ref().unwrap().status,
@@ -325,13 +325,25 @@ fn japanese_identity_nfc_only_and_safe_filename() {
             "{surface:?}"
         );
     }
-    // Чтение входит в имя файла: символы пути и разделитель `_` в нём запрещены.
+    // Слово: имя `<surface>.mp3`, чтение в имя не входит и не ограничивается.
+    assert!(Pronunciation::new("a", &"\"".repeat(180)).is_ok());
+    assert_eq!(request().consumer_filename(), "こいつ.mp3");
+    // Одиночный кандзи: чтение входит в имя, символы пути и `_` в нём запрещены.
     for reading in ["\"", "a_b", "a/b", "a\\b", "a:b", "a.", "a?"] {
-        assert!(Pronunciation::new("a", reading).is_err(), "{reading:?}");
+        assert!(Pronunciation::new("生", reading).is_err(), "{reading:?}");
     }
-    assert!(Pronunciation::new("a", &"あ".repeat(60)).is_ok());
-    assert_eq!(request().consumer_filename(), "こいつ_こいつ.mp3");
-    assert_eq!(request().legacy_consumer_filename(), "こいつ.mp3");
+    assert_eq!(
+        Pronunciation::new("生", "せい")
+            .unwrap()
+            .consumer_filename(),
+        "生_せい.mp3"
+    );
+    assert_eq!(
+        Pronunciation::new("生き", "いき")
+            .unwrap()
+            .consumer_filename(),
+        "生き.mp3"
+    );
     let generic = GenericDomainPolicy;
     assert!(generic.validate_identity(&request().identity()).is_err());
 }
@@ -449,7 +461,7 @@ fn candidate_requires_human_and_returns_original_bytes_and_surface_name() {
         .pop()
         .unwrap();
     assert_eq!(trusted.bytes, audio());
-    assert_eq!(trusted.record.consumer_filename, "こいつ_こいつ.mp3");
+    assert_eq!(trusted.record.consumer_filename, "こいつ.mp3");
     assert_eq!(
         trusted.record.validation.as_ref().unwrap().status,
         SemanticStatus::Uncertain
@@ -478,7 +490,19 @@ fn readings_and_equivalent_names_store_independently_but_conflict_on_consumer_se
     assert!(read_trusted(store.root(), std::slice::from_ref(&b)).is_ok());
     // Разные чтения одного написания дают разные файлы и выдаются вместе.
     assert_eq!(read_trusted(store.root(), &[a, b]).unwrap().len(), 2);
-    // Имена, равные с точностью до регистра (Windows), по-прежнему конфликтуют.
+    // Слово (не одиночный кандзи): чтения делят имя `<surface>.mp3`.
+    let a = Pronunciation::new("生物", "せいぶつ").unwrap();
+    let b = Pronunciation::new("生物", "いきもの").unwrap();
+    for r in [&a, &b] {
+        let record = import(&store, r);
+        assert_eq!(record.consumer_filename, "生物.mp3");
+        attest(&store, r, &record.sha256, HumanDecision::Approve).unwrap();
+    }
+    assert_eq!(
+        read_trusted(store.root(), &[a, b]).unwrap_err().code,
+        ErrorCode::IdentityConflict
+    );
+    // Имена, равные с точностью до регистра, конфликтуют.
     let a = Pronunciation::new("Voice", "a").unwrap();
     let b = Pronunciation::new("voice", "a").unwrap();
     for r in [&a, &b] {
@@ -1345,10 +1369,7 @@ fn cli_real_local_import_attest_read_and_resume() {
     let imported = cli(&ws, &args);
     assert!(imported.status.success(), "{:?}", json(&imported));
     let value = json(&imported);
-    assert_eq!(
-        value["result"]["asset"]["consumer_filename"],
-        "こいつ_こいつ.mp3"
-    );
+    assert_eq!(value["result"]["asset"]["consumer_filename"], "こいつ.mp3");
     assert_eq!(value["result"]["asset"]["lifecycle"], "quarantined");
     let sha = value["result"]["asset"]["sha256"].as_str().unwrap();
     let accepted = cli(
@@ -1378,7 +1399,7 @@ fn cli_real_local_import_attest_read_and_resume() {
     assert!(read.status.success(), "{:?}", json(&read));
     assert_eq!(
         json(&read)["result"]["assets"][0]["consumer_filename"],
-        "こいつ_こいつ.mp3"
+        "こいつ.mp3"
     );
     let plan_path = ws.path().join("plan.json");
     fs::write(

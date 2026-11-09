@@ -74,22 +74,19 @@ impl Pronunciation {
         {
             return Err(invalid("surface не представима безопасным именем Anki"));
         }
-        // Чтение входит в имя потребителя `<surface>_<reading>.mp3`. Без `_`
-        // в чтении граница однозначна (последний `_`), поэтому разные пары
-        // не дают одного имени.
-        if value
-            .reading
-            .contains(['<', '>', '"', '|', '?', '*', '[', ']', '_', '/', '\\', ':'])
-            || value.reading.ends_with(['.', ' '])
+        // У одиночного кандзи чтение входит в имя `<surface>_<reading>.mp3`.
+        // Без `_` в чтении граница однозначна, поэтому разные пары не дают
+        // одного имени.
+        if value.reading_in_consumer_filename()
+            && (value
+                .reading
+                .contains(['<', '>', '"', '|', '?', '*', '[', ']', '_', '/', '\\', ':'])
+                || value.reading.ends_with(['.', ' ']))
         {
             return Err(invalid(
-                "reading не представимо однозначной частью имени файла (запрещены _ и символы пути)",
+                "reading одиночного кандзи не представимо однозначной частью имени файла (запрещены _ и символы пути)",
             ));
         }
-        // Прежнее имя `<surface>.mp3` тоже обязано быть безопасным: так
-        // написание остаётся под теми же правилами, что и до добавления чтения
-        // в имя (например, `CON` по-прежнему недопустимо).
-        validate_safe_consumer_filename(&value.legacy_consumer_filename(), DetectedFormat::Mp3)?;
         validate_safe_consumer_filename(&value.consumer_filename(), DetectedFormat::Mp3)?;
         value.identity().validate().map_err(invalid)?;
         Ok(value)
@@ -102,16 +99,27 @@ impl Pronunciation {
         }
     }
 
-    /// Имя готового MP3 этой пары у потребителя: `<surface>_<reading>.mp3`
-    /// (`生_せい.mp3`, `生_なま.mp3`). Два чтения одного написания не
-    /// конфликтуют. Это имя результата, а не запрос Forvo.
-    pub fn consumer_filename(&self) -> String {
-        format!("{}_{}.mp3", self.surface, self.reading)
+    /// Написание — одиночный кандзи: только у него разные чтения одного
+    /// написания реально встречаются как отдельные карточки.
+    fn reading_in_consumer_filename(&self) -> bool {
+        crate::kanji_domain::parse_kanji_character(&self.surface).is_ok()
     }
 
-    /// Прежнее имя `<surface>.mp3`. Сохраняется у исторических записей
-    /// домена как есть; новые записи его не получают, а ссылки колод
-    /// переводятся явным `migrate-media`.
+    /// Имя готового MP3 этой пары у потребителя. Одиночный кандзи —
+    /// `<surface>_<reading>.mp3` (`生_せい.mp3`, `生_なま.mp3`): его чтения не
+    /// конфликтуют. Любое другое написание — `<surface>.mp3` (`こいつ.mp3`).
+    /// Это имя результата, а не запрос Forvo.
+    pub fn consumer_filename(&self) -> String {
+        if self.reading_in_consumer_filename() {
+            format!("{}_{}.mp3", self.surface, self.reading)
+        } else {
+            self.legacy_consumer_filename()
+        }
+    }
+
+    /// Имя `<surface>.mp3`. Для слов это и есть текущее имя; у исторических
+    /// записей одиночного кандзи оно сохраняется как есть без молчаливого
+    /// переименования.
     pub fn legacy_consumer_filename(&self) -> String {
         format!("{}.mp3", self.surface)
     }
