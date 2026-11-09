@@ -14,7 +14,7 @@ import stat
 import time
 import uuid
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CONNECT = "2055492159"
 CROWD = "1788670778"
 ROOT = Path(__file__).parent
@@ -339,6 +339,97 @@ def import_preflight(mw, deck, path):
                 raise ValueError("unsafe_media_entry")
 
 
+# Поля, которые меняет повторение карточек или синхронизация без изменения
+# содержимого; в отпечаток не входят, иначе обычная учёба блокировала бы импорт.
+VOLATILE = ("usn", "mod", "newToday", "revToday", "lrnToday", "timeToday", "collapsed", "browserCollapsed")
+
+
+def stable(value):
+    return {k: v for k, v in value.items() if k not in VOLATILE}
+
+
+def deck_state(mw, deck_id, scoped=None):
+    # Отпечаток Anki → Anki для обнаружения изменений колоды между свежим
+    # экспортом и записью CrowdAnki. Содержимое C он не описывает и не заменяет.
+    col = mw.col
+    ids = sorted(int(i) for i in col.decks.deck_and_child_ids(int(deck_id)))
+    inside = ",".join(str(i) for i in ids)
+    digest = hashlib.sha256()
+    def add(*item):
+        digest.update(json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+    for did in ids:
+        deck = col.decks.get(did, default=False)
+        if not deck:
+            raise ValueError("deck_not_found")
+        add("deck", stable(deck))
+        if not deck.get("dyn"):
+            add("config", stable(col.decks.config_dict_for_deck_id(did)))
+    for row in col.db.all("select id, nid, did, odid, ord from cards where did in (%s) or odid in (%s) order by id" % (inside, inside)):
+        add("card", list(row))
+    models = set()
+    for row in col.db.all("select id, guid, mid, tags, flds, flags, data from notes where id in "
+                          "(select nid from cards where did in (%s) or odid in (%s)) order by id" % (inside, inside)):
+        add("note", list(row))
+        models.add(row[2])
+        if scoped is not None:
+            scoped.add(row[0])
+    for mid in sorted(models):
+        add("model", stable(col.models.get(mid)))
+    return digest.hexdigest()
+
+
+def import_guard(ticket):
+    guard = ticket.get("expected")
+    if (not isinstance(guard, dict) or not isinstance(guard.get("collection_state"), str)
+            or not isinstance(guard.get("deck_id"), str) or not isinstance(guard.get("deck_uuid"), str)
+            or not isinstance(guard.get("media"), dict)):
+        raise ValueError("freshness_guard_missing: импорт без проверенного состояния C не выполняется")
+    return guard
+
+
+def note_guids(deck):
+    guids = {note.get("guid") for note in deck.get("notes", [])}
+    for child in deck.get("children", []):
+        guids.update(note_guids(child))
+    guids.discard(None)
+    return guids
+
+
+def file_sha(path):
+    with safe_path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_unchanged(mw, guard, payload, source):
+    # Fail-closed: любое расхождение с состоянием, снятым при свежем экспорте C,
+    # отменяет импорт до резервной копии и записи CrowdAnki.
+    deck = mw.col.decks.get(int(guard["deck_id"]), default=False)
+    if not deck or deck.get("crowdanki_uuid") != guard["deck_uuid"] or payload.get("crowdanki_uuid") != guard["deck_uuid"]:
+        raise ValueError("anki_changed_before_import: колода с проверенным UUID изменилась")
+    scoped = set()
+    if deck_state(mw, guard["deck_id"], scoped) != guard["collection_state"]:
+        raise ValueError("anki_changed_before_import: колода изменилась после свежего экспорта")
+    guids = sorted(note_guids(payload))
+    for start in range(0, len(guids), 500):
+        chunk = guids[start:start + 500]
+        rows = mw.col.db.all("select id from notes where guid in (%s)" % ",".join("?" * len(chunk)), *chunk)
+        if any(row[0] not in scoped for row in rows):
+            raise ValueError("import_scope_conflict: GUID из B принадлежит заметке вне проверенной колоды")
+    incoming = source / "media"
+    if incoming.exists():
+        target = Path(mw.col.media.dir())
+        for file in safe_path(incoming).iterdir():
+            name = media_name(file.name)
+            current = safe_path(target / name)
+            expected = guard["media"].get(name)
+            if not current.exists():
+                if expected is not None:
+                    raise ValueError("anki_changed_before_import: media удалено после свежего экспорта")
+                continue
+            if file_sha(current) not in (expected, file_sha(file)):
+                raise ValueError("anki_changed_before_import: media изменено после свежего экспорта")
+
+
 def execute_job(identifier, mw, action, path, ticket):
     global BUSY
     value = dict(id=identifier, state="running", process=PROCESS, profile=ticket["profile"], action=action)
@@ -383,6 +474,10 @@ def execute_job(identifier, mw, action, path, ticket):
             mw.create_backup_now()
             exporter = CheckedExporter(mw.col, config.ConfigSettings.get_instance())
             exporter.export_to_directory(adapters.AnkiDeck(deck), output, copy_media=True, create_deck_subdirectory=False)
+            # Снимается после экспорта в том же потоке GUI: CrowdAnki при экспорте
+            # сам дописывает crowdanki_uuid в колоду, модели и настройки, и C
+            # описывает именно это состояние.
+            state = deck_state(mw, deck["id"])
             payload = json.loads((output / "deck.json").read_text("utf-8"))
             for name in media_names(payload):
                 if not safe_path(output / "media" / name).is_file():
@@ -393,16 +488,31 @@ def execute_job(identifier, mw, action, path, ticket):
                     raise ValueError("export_uuid_mismatch")
                 value.update(profile_id=ticket["profile_id"], deck_id=ticket["deck_id"],
                              deck_name=ticket["deck"], deck_uuid=payload["crowdanki_uuid"],
-                             inventory=export_inventory(output))
+                             inventory=export_inventory(output), collection_state=state)
         else:
             source = safe_path(path / "source")
             payload = json.loads(safe_path(source / "deck.json").read_text("utf-8"))
             import_preflight(mw, payload, source)
-            importer = importlib.import_module(CROWD + ".importer.anki_importer")
+            guard = import_guard(ticket)
+            verify_unchanged(mw, guard, payload, source)
+            module = importlib.import_module(CROWD + ".importer.anki_importer")
             # Оригинальный загрузчик с диалогом конфигурации и резервным копированием.
             # Выполняется в потоке GUI после завершения принятия задания по HTTP.
-            partial_changes_possible = True
-            ok = importer.AnkiJsonImporter(mw.col).load_deck(source)
+            importer = module.AnkiJsonImporter(mw.col)
+            dialog = importer.read_import_config
+            def confirmed(directory, deck):
+                nonlocal partial_changes_possible
+                config = dialog(directory, deck)
+                if config is not None:
+                    # load_deck вызывает это сразу после модального диалога и до
+                    # create_backup_now/save_to_collection, без возврата в цикл событий:
+                    # последний момент отказа без изменения коллекции. Повторная
+                    # проверка ловит правки, сохранённые во время диалога.
+                    verify_unchanged(mw, guard, payload, source)
+                    partial_changes_possible = True
+                return config
+            importer.read_import_config = confirmed
+            ok = importer.load_deck(source)
             value["state"] = "succeeded" if ok else "cancelled"
         mw.reset()
     except Exception as exc:

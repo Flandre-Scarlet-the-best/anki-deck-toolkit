@@ -1089,6 +1089,10 @@ struct Scripted {
     fresh: RefCell<VecDeque<crate::desktop::Result<VerifiedExport>>>,
     readback: RefCell<VecDeque<crate::desktop::Result<VerifiedExport>>>,
     fresh_leftover: RefCell<Option<source::PendingJob>>,
+    /// Адаптер без отпечатка коллекции (устаревшая версия).
+    unguarded: Cell<bool>,
+    /// Дополнительные поля терминального задания (error, partial_changes_possible).
+    job_extra: RefCell<Value>,
 }
 
 impl Scripted {
@@ -1103,6 +1107,8 @@ impl Scripted {
             fresh: RefCell::new(VecDeque::new()),
             readback: RefCell::new(VecDeque::new()),
             fresh_leftover: RefCell::new(None),
+            unguarded: Cell::new(false),
+            job_extra: RefCell::new(json!({})),
         }
     }
     fn fresh(self, export: crate::desktop::Result<VerifiedExport>) -> Self {
@@ -1114,10 +1120,19 @@ impl Scripted {
         self
     }
     fn jobs(&self) -> Vec<PathBuf> {
-        fs::read_dir(&self.spool)
+        let mut jobs: Vec<_> = fs::read_dir(&self.spool)
             .unwrap()
             .map(|e| e.unwrap().path())
-            .collect()
+            .collect();
+        jobs.sort();
+        jobs
+    }
+    /// Полные копии B, оставшиеся в spool.
+    fn copies(&self) -> usize {
+        self.jobs()
+            .iter()
+            .filter(|j| j.join("source").exists())
+            .count()
     }
 }
 
@@ -1136,16 +1151,26 @@ impl Bridge for Scripted {
         if state == "unavailable" {
             return Err(unavailable("API недоступен"));
         }
-        Ok(
-            json!({"state":state,"job":{"id":id,"action":"import","state":state,
-            "observer_process":"process-1","process":"process-1"}}),
-        )
+        let mut job = json!({"id":id,"action":"import","state":state,
+            "observer_process":"process-1","process":"process-1"});
+        for (k, v) in self.job_extra.borrow().as_object().unwrap() {
+            job[k] = v.clone();
+        }
+        Ok(json!({"state":state,"job":job}))
     }
-    fn submit(&self, _id: &str) -> crate::desktop::Result<Value> {
+    fn submit(&self, id: &str) -> crate::desktop::Result<Value> {
         self.submits.set(self.submits.get() + 1);
         match self.submit_error.borrow_mut().take() {
             Some(e) => Err(e),
-            None => Ok(json!({"state":"queued"})),
+            None => {
+                // Как адаптер: admission записывает result.json до планирования.
+                fs::write(
+                    self.spool.join(id).join("result.json"),
+                    br#"{"state":"queued"}"#,
+                )
+                .unwrap();
+                Ok(json!({"state":"queued"}))
+            }
         }
     }
     fn renew(&self, _journal: &ImportJournal) -> crate::desktop::Result<()> {
@@ -1166,7 +1191,7 @@ impl Port for Scripted {
         _catalog: &Value,
         _deck: &Value,
         _key: &str,
-    ) -> crate::desktop::Result<Value> {
+    ) -> crate::desktop::Result<(Value, Option<Value>)> {
         let export = self
             .fresh
             .borrow_mut()
@@ -1180,7 +1205,10 @@ impl Port for Scripted {
                 .save_job(&job.key(), job)
                 .map_err(|e| unavailable(&e.to_string()))?;
         }
-        Ok(published)
+        let guard = (!self.unguarded.get())
+            .then(|| export.import_guard())
+            .flatten();
+        Ok((published, guard))
     }
     fn readback(
         &self,
@@ -1219,21 +1247,23 @@ fn apply_sends_exact_working_copy_once_and_publishes_only_after_matching_readbac
     assert_eq!(result["published"], true);
     assert_eq!(result["fresh_input"]["source_sequence"], 2);
     assert_eq!(port.submits.get(), 1);
-    // В spool ушли ровно байты B и билет, привязанный к profile_id.
+    assert!(result.get("spool_cleanup").is_none(), "{result}");
+    // Исход зафиксирован и журнал закрыт: полная копия B убрана из spool, а
+    // принятое задание остаётся доступным для `anki-repo job` (только метаданные).
     let jobs = port.jobs();
     assert_eq!(jobs.len(), 1);
-    assert_eq!(
-        result["job_id"],
-        jobs[0].file_name().unwrap().to_str().unwrap()
+    assert_eq!(port.copies(), 0, "копия B не остаётся после публикации");
+    let mut left: Vec<_> = fs::read_dir(&jobs[0])
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["request.json", "result.json"]);
+    assert!(path.join("deck.json").is_file(), "рабочая копия не тронута");
+    assert!(
+        work_names(tmp.path(), &v1).is_empty(),
+        "журнал и маркер закрыты"
     );
-    assert_eq!(tree(&jobs[0].join("source")), tree(&path));
-    let ticket: Value =
-        serde_json::from_slice(&fs::read(jobs[0].join("request.json")).unwrap()).unwrap();
-    assert_eq!(ticket["action"], "import");
-    assert_eq!(ticket["profile"], "Synthetic");
-    assert_eq!(ticket["profile_id"], PROFILE);
-    assert_eq!(ticket["process"], "process-1");
-    assert!(work_names(tmp.path(), &v1).is_empty(), "журнал закрыт");
     assert!(!store.publication_pending(&key).unwrap());
     audit_consistent(&store, &key);
     // Опубликованное B стало базой: повтор ничего не отправляет.
@@ -1310,12 +1340,42 @@ fn pending_import_resumes_the_same_job_without_resubmission() {
     assert_eq!(first["state"], "pending", "{first}");
     assert_eq!(first["reason"], "import_awaiting_user");
     assert_eq!(port.submits.get(), 1);
-    assert_eq!(work_names(tmp.path(), &v1), ["publish.json"]);
+    assert_eq!(
+        work_names(tmp.path(), &v1),
+        ["publish-spool.json", "publish.json"]
+    );
     let saved = work::load::<ImportJournal>(&work_dir(&store, &v1), PUBLISH)
         .unwrap()
         .unwrap();
     assert!(saved.admission_started);
     assert_eq!(saved.job_id, first["job_id"].as_str().unwrap());
+    // Пока исход не определён, в spool ровно байты B и билет с охраной C.
+    let jobs = port.jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        first["job_id"],
+        jobs[0].file_name().unwrap().to_str().unwrap()
+    );
+    let working = output(tmp.path(), &stream(&store, &v1));
+    assert_eq!(tree(&jobs[0].join("source")), tree(&working));
+    let ticket: Value =
+        serde_json::from_slice(&fs::read(jobs[0].join("request.json")).unwrap()).unwrap();
+    assert_eq!(ticket["action"], "import");
+    assert_eq!(ticket["profile"], "Synthetic");
+    assert_eq!(ticket["profile_id"], PROFILE);
+    assert_eq!(ticket["process"], "process-1");
+    let fresh = export("v1", "fresh-1");
+    assert_eq!(ticket["expected"]["deck_id"], "7");
+    assert_eq!(ticket["expected"]["deck_uuid"], "deck-uuid-1");
+    assert_eq!(
+        ticket["expected"]["collection_state"],
+        "synthetic-state:fresh-1"
+    );
+    assert_eq!(ticket["expected"]["revision"], fresh.snapshot().revision());
+    assert_eq!(
+        ticket["expected"]["media"],
+        json!({"a.mp3":fresh.inventory()["media/a.mp3"],"b.png":fresh.inventory()["media/b.png"]})
+    );
 
     // Повтор: тот же job, без свежего экспорта и без отправки; readback пока недоступен.
     let resumed = Scripted::new(&tmp, &["succeeded"]).readback(Err(unavailable("нет API")));
@@ -1451,5 +1511,250 @@ fn refused_staging_before_journal_removes_spool_job() {
     assert_eq!(refused.details["reason"], "invalid_export_catalog");
     assert!(port.jobs().is_empty(), "брошенная копия B убрана из spool");
     assert!(work_names(tmp.path(), &v1).is_empty(), "журнал не создан");
+    assert_eq!(port.submits.get(), 0);
+}
+
+// ---- Матрица исхода задания × readback ----
+
+/// Только доказанный `succeeded` с readback == B даёт published. Отмена, ошибка
+/// и неизвестный исход при том же readback сохраняют лишь наблюдённый C.
+#[test]
+fn terminal_job_and_readback_matrix_never_infers_success_from_snapshot() {
+    let cases: [(&str, Option<bool>, Option<&str>); 5] = [
+        ("succeeded", Some(true), None),
+        ("cancelled", Some(false), None),
+        (
+            "failed",
+            Some(false),
+            Some("anki_changed_before_import: колода"),
+        ),
+        ("failed", Some(true), Some("import_error")),
+        ("unknown_after_restart", Some(true), None),
+    ];
+    for (state, partial, error) in cases {
+        for readback in ["B", "C", "other"] {
+            let label = format!("{state}/{partial:?}/{readback}");
+            let tmp = TempDir::new("publish-matrix");
+            let (store, v1, path) = edited(&tmp);
+            let key = v1.snapshot().identity().key();
+            let mut journal = journal(&store, &v1, Some(state));
+            journal.partial_changes_possible = partial;
+            journal.import_error = error.map(str::to_owned);
+            let dir = work_dir(&store, &v1);
+            work::save(&dir, PUBLISH, &journal).unwrap();
+            let sent = export("agent V2", "sent").snapshot().clone();
+            let observed = match readback {
+                "B" => export("agent V2", "rb"),
+                "C" => export("v1", "rb"),
+                _ => export("anki edit", "rb"),
+            };
+            let outcome = publication::conclude(&store, &dir, &journal, &observed, &sent).unwrap();
+            let published = state == "succeeded" && readback == "B";
+            assert_eq!(outcome["published"], published, "{label}: {outcome}");
+            let expected = match (state, readback) {
+                ("succeeded", "B") => "published",
+                ("succeeded", _) => "readback_mismatch",
+                (_, "B") => "import_outcome_unconfirmed",
+                (_, "C") => "import_not_applied",
+                (_, _) if partial == Some(false) => "import_not_applied",
+                _ => "readback_mismatch",
+            };
+            assert_eq!(outcome["state"], expected, "{label}: {outcome}");
+            if error.is_some_and(|e| e.starts_with("anki_changed")) {
+                assert_eq!(outcome["reason"], "anki_changed_before_import", "{label}");
+            }
+            let state_view = store.exchange().read().unwrap();
+            let s = &state_view.streams[&key];
+            assert_eq!(s.published.is_some(), published, "{label}");
+            // Наблюдённое состояние Anki сохранено как C в любом случае.
+            assert_eq!(s.current.snapshot, *observed.snapshot(), "{label}");
+            if !published {
+                assert_eq!(s.base.as_ref().unwrap().source_sequence, 1, "{label}");
+                assert_eq!(
+                    fs::read(path.join("deck.json")).unwrap(),
+                    deck("agent V2"),
+                    "{label}: B не тронут"
+                );
+            }
+            drop(state_view);
+            assert!(!store.publication_pending(&key).unwrap(), "{label}");
+            audit_consistent(&store, &key);
+            // Восстановление после сбоя до удаления журнала не выводит успех
+            // из совпадения: published записан только для succeeded.
+            assert_eq!(
+                publication::already_published(&store, &journal).unwrap(),
+                published,
+                "{label}"
+            );
+        }
+    }
+}
+
+// ---- Охрана актуальности на стороне Anki ----
+
+#[test]
+fn import_is_refused_without_a_guard_for_the_checked_c() {
+    let tmp = TempDir::new("orchestrate-unguarded");
+    let (mut store, v1, _) = edited(&tmp);
+    let port = Scripted::new(&tmp, &["unavailable"]).fresh(Ok(export("v1", "fresh-1")));
+    port.unguarded.set(true);
+    let result = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(result["state"], "blocked", "{result}");
+    assert_eq!(result["reason"], "freshness_unconfirmed");
+    assert_eq!(port.submits.get(), 0);
+    assert!(port.jobs().is_empty());
+    assert!(work_names(tmp.path(), &v1).is_empty());
+}
+
+/// Пользователь правит Anki после свежего экспорта и параллельно меняется B:
+/// адаптер отказывает до записи, правка сохраняется как новый C, B не тронут,
+/// повторная попытка требует prepare-output, а не принудительного merge.
+#[test]
+fn anki_edit_caught_by_the_adapter_guard_is_kept_and_never_overwritten() {
+    let tmp = TempDir::new("orchestrate-guard-race");
+    let (mut store, v1, path) = edited(&tmp);
+    let key = v1.snapshot().identity().key();
+    let port = Scripted::new(&tmp, &["prepared", "failed"])
+        .fresh(Ok(export("v1", "fresh-1")))
+        .readback(Ok(export("anki edit", "rb-1")));
+    *port.job_extra.borrow_mut() = json!({
+        "error":"anki_changed_before_import: колода изменилась после свежего экспорта",
+        "partial_changes_possible":false});
+    let result = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(result["state"], "import_not_applied", "{result}");
+    assert_eq!(result["reason"], "anki_changed_before_import");
+    assert_eq!(result["anki_changed_independently"], true);
+    assert_eq!(result["published"], false);
+    assert_eq!(port.submits.get(), 1);
+    let s = stream(&store, &v1);
+    assert_eq!(s.current.snapshot, *export("anki edit", "x").snapshot());
+    assert!(s.published.is_none());
+    assert_eq!(fs::read(path.join("deck.json")).unwrap(), deck("agent V2"));
+    assert_eq!(
+        port.jobs().len(),
+        1,
+        "принятое задание доступно для диагностики"
+    );
+    assert_eq!(port.copies(), 0, "копия B закрытого задания убрана");
+    assert!(work_names(tmp.path(), &v1).is_empty());
+    audit_consistent(&store, &key);
+    // Новая попытка без согласования невозможна: база A устарела.
+    let again = Scripted::new(&tmp, &["unavailable"]);
+    let blocked = publish_with(&mut store, &v1, &again, &catalog());
+    assert_eq!(blocked["reason"], "publication_blocked", "{blocked}");
+    assert_eq!(again.submits.get(), 0);
+}
+
+// ---- Жизненный цикл spool ----
+
+#[test]
+fn repeated_publications_do_not_accumulate_working_copies_in_spool() {
+    let tmp = TempDir::new("orchestrate-repeated");
+    let (mut store, v1, path) = edited(&tmp);
+    let mut base = "v1".to_string();
+    for (published, version) in ["agent V2", "agent V3", "agent V4"].into_iter().enumerate() {
+        fs::write(path.join("deck.json"), deck(version)).unwrap();
+        let port = Scripted::new(&tmp, &["prepared", "succeeded"])
+            .fresh(Ok(export(&base, &format!("fresh-{version}"))))
+            .readback(Ok(export(version, &format!("rb-{version}"))));
+        let result = publish_with(&mut store, &v1, &port, &catalog());
+        assert_eq!(result["state"], "published", "{version}: {result}");
+        // Полных копий B нет; остаются только метаданные принятых заданий.
+        assert_eq!(port.copies(), 0, "{version}: копии B не накапливаются");
+        assert_eq!(port.jobs().len(), published + 1, "{version}");
+        assert!(work_names(tmp.path(), &v1).is_empty(), "{version}");
+        base = version.to_string();
+    }
+}
+
+#[test]
+fn spool_survives_every_lifecycle_fault_and_is_cleaned_only_by_ownership() {
+    // Сбой до сохранения журнала: копия B и маркер есть, журнала нет —
+    // задание не отправлялось; следующий вызов убирает его и работает штатно.
+    let tmp = TempDir::new("orchestrate-spool-faults");
+    let (mut store, v1, _) = edited(&tmp);
+    let foreign = tmp
+        .path()
+        .join("anki-data/toolkit-desktop/spool")
+        .join("f".repeat(64));
+    fs::create_dir_all(foreign.join("source")).unwrap();
+    let port = Scripted::new(&tmp, &["unavailable"]).fresh(Ok(export("v1", "fresh-1")));
+    publication::fault::set(Some("before_journal"));
+    let stream_state = stream(&store, &v1);
+    let crashed = publication::apply_one(&port, &mut store, &catalog(), &stream_state, 1);
+    publication::fault::set(None);
+    assert!(crashed.is_err());
+    assert_eq!(port.jobs().len(), 2, "брошенная копия и чужой каталог");
+    assert_eq!(work_names(tmp.path(), &v1), ["publish-spool.json"]);
+    assert_eq!(port.submits.get(), 0);
+
+    let next = Scripted::new(&tmp, &["prepared", "succeeded"])
+        .fresh(Ok(export("v1", "fresh-2")))
+        .readback(Err(unavailable("нет API")));
+    let pending = publish_with(&mut store, &v1, &next, &catalog());
+    assert_eq!(pending["reason"], "readback_unconfirmed", "{pending}");
+    // Брошенная убрана; новое задание и чужой каталог на месте; readback ещё нужен.
+    let jobs = next.jobs();
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert!(foreign.is_dir(), "чужой каталог spool не тронут");
+    assert!(
+        jobs.iter()
+            .any(|j| j.ends_with(pending["job_id"].as_str().unwrap()))
+    );
+
+    // Сбой уборки после фиксации: исход опубликован, маркер ведёт уборку дальше.
+    let finish = Scripted::new(&tmp, &["unavailable"]).readback(Ok(export("agent V2", "rb")));
+    publication::fault::set(Some("spool_cleanup"));
+    let done = publish_with(&mut store, &v1, &finish, &catalog());
+    publication::fault::set(None);
+    assert_eq!(done["state"], "published", "{done}");
+    assert_eq!(done["spool_cleanup"], "pending");
+    assert_eq!(work_names(tmp.path(), &v1), ["publish-spool.json"]);
+    let job = finish
+        .jobs()
+        .into_iter()
+        .find(|j| j.ends_with(pending["job_id"].as_str().unwrap()))
+        .unwrap();
+    assert!(job.join("source").is_dir(), "копия ещё не убрана");
+
+    // Повтор идемпотентно завершает уборку без новой отправки.
+    let retry = Scripted::new(&tmp, &["unavailable"]);
+    let again = publish_with(&mut store, &v1, &retry, &catalog());
+    assert_eq!(again["state"], "nothing_to_publish", "{again}");
+    assert_eq!(retry.submits.get(), 0);
+    assert_eq!(retry.jobs().len(), 2);
+    assert!(!job.join("source").exists(), "копия B убрана");
+    assert!(job.join("result.json").is_file(), "исход задания доступен");
+    assert!(foreign.join("source").is_dir(), "чужой каталог не тронут");
+    assert!(work_names(tmp.path(), &v1).is_empty());
+}
+
+#[test]
+fn marker_of_another_job_beside_an_open_journal_is_refused_and_kept() {
+    let tmp = TempDir::new("orchestrate-marker-mismatch");
+    let (mut store, v1, _) = edited(&tmp);
+    let dir = work_dir(&store, &v1);
+    work::save(&dir, PUBLISH, &journal(&store, &v1, None)).unwrap();
+    let marker = tmp
+        .path()
+        .join("decks/.roundtrip")
+        .join(v1.snapshot().identity().key())
+        .join("publish-spool.json");
+    let record = json!({"job_id":"2".repeat(64)});
+    let checksum = asset_store::hashing::sha256_hex(serde_json::to_vec(&record).unwrap());
+    fs::write(
+        &marker,
+        serde_json::to_vec(&json!({"checksum":checksum,"record":record})).unwrap(),
+    )
+    .unwrap();
+    let port = Scripted::new(&tmp, &["unavailable"]);
+    let stream_state = stream(&store, &v1);
+    assert!(publication::apply_one(&port, &mut store, &catalog(), &stream_state, 1).is_err());
+    assert!(marker.is_file());
+    assert!(
+        store
+            .publication_pending(&v1.snapshot().identity().key())
+            .unwrap()
+    );
     assert_eq!(port.submits.get(), 0);
 }

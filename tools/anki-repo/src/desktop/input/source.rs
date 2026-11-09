@@ -60,6 +60,10 @@ pub(super) struct VerifiedExport {
     files: BTreeMap<String, Vec<u8>>,
     inventory: BTreeMap<String, String>,
     evidence: String,
+    /// Отпечаток состояния колоды в коллекции, снятый адаптером в том же
+    /// потоке GUI, что и сам экспорт. Это детектор изменений Anki → Anki,
+    /// а не второй источник истины о содержимом.
+    collection_state: Option<String>,
 }
 
 impl VerifiedExport {
@@ -74,6 +78,20 @@ impl VerifiedExport {
     }
     pub fn evidence(&self) -> &str {
         &self.evidence
+    }
+    /// Ожидаемое состояние для охраны импорта: отпечаток коллекции и хеши
+    /// media проверенного C. Без отпечатка охрану построить нельзя, и импорт
+    /// не отправляется.
+    pub fn import_guard(&self) -> Option<Value> {
+        let state = self.collection_state.as_ref()?;
+        let media: BTreeMap<&str, &str> = self
+            .inventory
+            .iter()
+            .filter_map(|(name, hash)| name.strip_prefix("media/").map(|n| (n, hash.as_str())))
+            .collect();
+        Some(serde_json::json!({"collection_state":state,
+            "deck_uuid":self.snapshot.identity().crowdanki_uuid.as_str(),
+            "revision":self.snapshot.revision(),"media":media}))
     }
 }
 
@@ -253,6 +271,7 @@ pub(super) fn verify(t: &Target, job: &PendingJob, result: &Value) -> Result<Ver
         files,
         inventory,
         evidence,
+        collection_state: value["collection_state"].as_str().map(str::to_owned),
     })
 }
 
@@ -379,6 +398,7 @@ pub(super) fn synthetic(
         files,
         inventory,
         evidence: evidence.into(),
+        collection_state: Some(format!("synthetic-state:{evidence}")),
     }
 }
 
@@ -406,6 +426,7 @@ pub(super) fn synthetic_for(
         files,
         inventory,
         evidence: evidence.into(),
+        collection_state: Some(format!("synthetic-state:{evidence}")),
     }
 }
 

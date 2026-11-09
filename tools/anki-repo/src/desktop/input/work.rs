@@ -14,6 +14,8 @@ pub(super) const CONFIG: &str = "import_config.yaml";
 pub(super) const MEDIA: &str = "media";
 pub(super) const PREPARE: &str = "prepare.json";
 pub(super) const PUBLISH: &str = "publish.json";
+/// Маркер владения каталогом `spool/<job_id>` импорта; см. `publication`.
+pub(super) const SPOOL: &str = "publish-spool.json";
 pub(super) const STAGE: &str = "stage";
 pub(super) const PREVIOUS: &str = "previous";
 
@@ -72,7 +74,7 @@ pub(super) fn stream_dir(area: &Directory, key: &str) -> Result<Directory> {
         return Err(ExchangeError::UnsafePath("каталог потока подменён".into()));
     }
     for name in dir.names()? {
-        let known = matches!(name.as_str(), PREPARE | PUBLISH | STAGE | PREVIOUS)
+        let known = matches!(name.as_str(), PREPARE | PUBLISH | SPOOL | STAGE | PREVIOUS)
             || is_journal_temporary(&name);
         if !known {
             return Err(blocked("unknown_work_entries"));
@@ -88,7 +90,7 @@ pub(super) fn stream_dir(area: &Directory, key: &str) -> Result<Directory> {
 }
 
 fn is_journal_temporary(name: &str) -> bool {
-    super::publish::is_temporary(name, &[PREPARE, PUBLISH])
+    super::publish::is_temporary(name, &[PREPARE, PUBLISH, SPOOL])
 }
 
 /// Потоковое чтение полного экспорта без advisory-блокировки: вызывающий

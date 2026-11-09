@@ -244,6 +244,21 @@ fn export_one(
     store: &mut publish::Store,
     wait_seconds: u64,
 ) -> Result<Value> {
+    export_guarded(t, o, catalog, deck, key, store, wait_seconds).map(|(published, _)| published)
+}
+
+/// Тот же путь `sync-input`, плюс охрана импорта из этого же живого экспорта:
+/// отпечаток коллекции и media подтверждённого C (`None`, если адаптер его не
+/// дал — тогда импорт не отправляется).
+fn export_guarded(
+    t: &Target,
+    o: &Options,
+    catalog: &Value,
+    deck: &Value,
+    key: &str,
+    store: &mut publish::Store,
+    wait_seconds: u64,
+) -> Result<(Value, Option<Value>)> {
     if let Some(uuid) = deck["crowdanki_uuid"].as_str()
         && let Ok(profile) =
             crate::exchange::ProfileId::new(catalog["profile_id"].as_str().unwrap_or_default())
@@ -268,7 +283,7 @@ fn export_one(
         published["pending_cleanup"] = json!("unknown");
         published["next"] = json!("Повторите sync-input для проверки завершения служебной записи");
     }
-    Ok(published)
+    Ok((published, verified.import_guard()))
 }
 
 /// Живой экспорт до проверенных байтов. Pending job остаётся сохранённым:

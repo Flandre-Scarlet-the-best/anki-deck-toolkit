@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub const CONNECT: &str = "2055492159";
 pub const CROWD: &str = "1788670778";
-pub const PATCH_VERSION: &str = "1.1.0";
+pub const PATCH_VERSION: &str = "1.2.0";
 pub(crate) const COMPATIBILITY: &str = include_str!("compatibility.json");
 pub(crate) type Result<T> = std::result::Result<T, DomainError>;
 
@@ -264,7 +264,7 @@ pub fn execute(options: &Options) -> Result<Value> {
         Action::InputStatus { .. }
         | Action::ExchangeStatus { .. }
         | Action::PrepareOutput { .. } => {
-            unreachable!("handled before Desktop discovery")
+            unreachable!("команда обрабатывается до обнаружения Desktop")
         }
     }
 }

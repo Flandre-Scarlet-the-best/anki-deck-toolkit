@@ -1,7 +1,9 @@
 """Изолированные контракты адаптера; не являются живым подтверждением Anki."""
 import copy
+import hashlib
 import json
 import pickle
+import shutil
 import sqlite3
 from pathlib import Path
 import tempfile
@@ -10,6 +12,25 @@ import unittest
 from unittest.mock import patch
 
 PAYLOAD = Path(__file__).resolve().parents[2] / 'tools/anki-repo/src/desktop/payload.py'
+GUARD = {'collection_state': 'state-1', 'deck_id': '1', 'deck_uuid': 'deck-uuid', 'media': {}}
+
+
+def fake_importer(outcome, config=object()):
+    # Имитирует только внешний CrowdAnki: как оригинальный load_deck, сначала
+    # read_import_config (диалог), затем запись в коллекцию.
+    class Importer:
+        def __init__(self, col):
+            pass
+
+        @staticmethod
+        def read_import_config(directory, deck):
+            return config
+
+        def load_deck(self, directory):
+            if self.read_import_config(directory, {}) is None:
+                return False
+            return outcome()
+    return SimpleNamespace(AnkiJsonImporter=Importer)
 
 
 class BridgeContract(unittest.TestCase):
@@ -64,6 +85,11 @@ class BridgeContract(unittest.TestCase):
         self.addCleanup(self.mock_modules.stop)
         exec(compile(PAYLOAD.read_text(), str(PAYLOAD), 'exec'), self.g)
         self.client = Connect()
+        # Охрана коллекции проверяется отдельными тестами ниже; здесь — её вызовы.
+        self.real_verify, self.real_state = self.g['verify_unchanged'], self.g['deck_state']
+        self.guard_checks = []
+        self.g['verify_unchanged'] = lambda mw, guard, payload, source: self.guard_checks.append(guard)
+        self.g['deck_state'] = lambda mw, deck_id, scoped=None: 'state-1'
 
     def call(self, action, **params):
         default = {'token': self.secret, 'installation': str(self.base), 'profile': 'Synthetic'}
@@ -74,7 +100,10 @@ class BridgeContract(unittest.TestCase):
         identifier = 'b' * 64
         path = self.base / 'toolkit-desktop/spool' / identifier
         path.mkdir(parents=True)
-        (path / 'request.json').write_text(json.dumps({'approved': True, 'expires': 99999999999, 'profile': 'Synthetic', 'action': kind, 'deck': 'Synthetic'}))
+        ticket = {'approved': True, 'expires': 99999999999, 'profile': 'Synthetic', 'action': kind, 'deck': 'Synthetic'}
+        if kind == 'import':
+            ticket['expected'] = GUARD
+        (path / 'request.json').write_text(json.dumps(ticket))
         return identifier, path
 
     def test_upstream_is_forwarded_unchanged(self):
@@ -230,7 +259,7 @@ class BridgeContract(unittest.TestCase):
         self.mw.reset = lambda: None
         self.assertEqual(self.call('toolkitJob', profile='Renamed', id=identifier)['result']['state'], 'prepared')
         self.assertEqual(self.call('toolkitImport', profile='Renamed', id=identifier)['result']['state'], 'queued')
-        importer = SimpleNamespace(AnkiJsonImporter=lambda col: SimpleNamespace(load_deck=lambda directory: False))
+        importer = fake_importer(lambda: True, config=None)
         with patch('importlib.import_module', return_value=importer):
             self.scheduled[0]()
         self.assertEqual(self.call('toolkitJob', profile='Renamed', id=identifier)['result']['state'], 'cancelled')
@@ -324,7 +353,7 @@ class BridgeContract(unittest.TestCase):
         result = self.call('toolkitStatus', nonce='challenge')['result']
         self.assertEqual(result['nonce'], 'challenge')
         self.assertEqual(result['upstream_api_version'], 6)
-        self.assertEqual(result['patch_version'], '1.1.0')
+        self.assertEqual(result['patch_version'], '1.2.0')
         for params, reason in [({'token': 'bad'}, 'unauthorized'), ({'profile': 'Other'}, 'wrong_profile'), ({'installation': '/'}, 'wrong_installation')]:
             self.assertIn(reason, self.call('toolkitStatus', **params)['error'])
         req = {'action': 'toolkitStatus', 'params': {'token': self.secret}, 'key': 'bad'}
@@ -483,7 +512,7 @@ class BridgeContract(unittest.TestCase):
         (source / 'deck.json').write_text(json.dumps({'children': [], 'note_models': [], 'media_files': []}))
         self.mw.col = SimpleNamespace(models=SimpleNamespace(all=lambda: []))
         self.mw.reset = lambda: None
-        imported = SimpleNamespace(AnkiJsonImporter=lambda col: SimpleNamespace(load_deck=lambda directory: False))
+        imported = fake_importer(lambda: True, config=None)
         self.assertEqual(self.call('toolkitImport', id=identifier)['result']['state'], 'queued')
         with patch('importlib.import_module', return_value=imported):
             self.scheduled[0]()
@@ -547,11 +576,11 @@ class BridgeContract(unittest.TestCase):
                 (path / 'source/deck.json').write_text('{}')
                 self.mw.col = SimpleNamespace(models=SimpleNamespace(all=lambda: []))
                 self.mw.reset = lambda: None
-                def load_deck(directory):
+                def write():
                     if operation_state == 'failed':
                         raise ValueError('import_error')
-                    return operation_state == 'succeeded'
-                imported = SimpleNamespace(AnkiJsonImporter=lambda col: SimpleNamespace(load_deck=load_deck))
+                    return True
+                imported = fake_importer(write, config=None if operation_state == 'cancelled' else object())
                 original_save = self.g['save_result']
                 def fail_final(path, value):
                     if value['state'] != 'running':
@@ -561,7 +590,7 @@ class BridgeContract(unittest.TestCase):
                 self.g['save_result'] = fail_final
                 try:
                     with patch('sys.stderr') as stderr, patch('importlib.import_module', return_value=imported):
-                        self.g['execute_job']('job', self.mw, 'import', path, {'profile': 'Synthetic'})
+                        self.g['execute_job']('job', self.mw, 'import', path, {'profile': 'Synthetic', 'expected': GUARD})
                     self.assertTrue(stderr.write.called)
                 finally:
                     self.g['save_result'] = original_save
@@ -570,7 +599,8 @@ class BridgeContract(unittest.TestCase):
                 self.assertEqual(value['state'], 'interrupted')
                 self.assertEqual(value['operation_state'], operation_state)
                 self.assertFalse(value['result_persisted'])
-                self.assertTrue(value['partial_changes_possible'])
+                # Отмена диалога CrowdAnki происходит до резервной копии и записи.
+                self.assertEqual(value['partial_changes_possible'], operation_state != 'cancelled')
                 self.assertEqual(json.loads((path / 'result.json').read_text())['state'], 'running')
                 self.assertEqual(self.g['EVIDENCE'], {})
                 # Перезапуск читает старый running консервативно; операция не запускается повторно.
@@ -584,6 +614,180 @@ class BridgeContract(unittest.TestCase):
         self.assertFalse((path / 'result.json').exists())
         self.assertEqual(self.scheduled, [])
 
+
+    def run_import(self, ticket_update=None, importer=None, deck=None):
+        shutil.rmtree(self.base / 'toolkit-desktop/spool', ignore_errors=True)
+        self.g['JOBS'].clear()
+        identifier, path = self.ticket('import')
+        if ticket_update is not None:
+            ticket = json.loads((path / 'request.json').read_text())
+            ticket_update(ticket)
+            (path / 'request.json').write_text(json.dumps(ticket))
+        (path / 'source').mkdir()
+        (path / 'source/deck.json').write_text(json.dumps(deck or {'children': [], 'note_models': [], 'media_files': []}))
+        self.mw.col = SimpleNamespace(models=SimpleNamespace(all=lambda: []))
+        self.mw.reset = lambda: None
+        self.assertEqual(self.call('toolkitImport', id=identifier)['result']['state'], 'queued')
+        with patch('importlib.import_module', return_value=importer or fake_importer(lambda: True)) as loader:
+            self.scheduled[0]()
+        return self.call('toolkitJob', id=identifier)['result'], loader
+
+    def test_import_without_checked_collection_state_is_refused_before_crowdanki(self):
+        value, loader = self.run_import(lambda ticket: ticket.pop('expected'))
+        self.assertEqual(value['state'], 'failed')
+        self.assertIn('freshness_guard_missing', value['error'])
+        self.assertFalse(value['partial_changes_possible'])
+        loader.assert_not_called()
+
+    def test_guard_runs_before_dialog_and_again_after_it_before_any_write(self):
+        value, _ = self.run_import()
+        self.assertEqual(value['state'], 'succeeded')
+        self.assertEqual(self.guard_checks, [GUARD, GUARD])
+
+        # Правка, сохранённая во время модального диалога: отказ до backup и записи.
+        self.scheduled.clear()
+        writes = []
+        def verify(mw, guard, payload, source):
+            self.guard_checks.append(guard)
+            if len(self.guard_checks) > 3:
+                raise ValueError('anki_changed_before_import: колода изменилась после свежего экспорта')
+        self.g['verify_unchanged'] = verify
+        value, _ = self.run_import(importer=fake_importer(lambda: writes.append('write') or True))
+        self.assertEqual(value['state'], 'failed')
+        self.assertTrue(value['error'].startswith('anki_changed_before_import'))
+        self.assertFalse(value['partial_changes_possible'])
+        self.assertEqual(writes, [])
+
+    def collection(self):
+        # Минимальная коллекция с настоящим SQL: колода 1 (с подколодой 2) и чужая 3.
+        self.g['deck_state'] = self.real_state
+        db = sqlite3.connect(':memory:')
+        self.addCleanup(db.close)
+        db.executescript("""
+            create table notes (id integer primary key, guid text, mid integer, mod integer, usn integer,
+                                tags text, flds text, sfld text, csum integer, flags integer, data text);
+            create table cards (id integer primary key, nid integer, did integer, odid integer, ord integer);
+            insert into notes values (10, 'g1', 100, 1, 0, ' t ', 'ab', '', 0, 0, '');
+            insert into notes values (11, 'g2', 100, 1, 0, '', 'cd', '', 0, 0, '');
+            insert into notes values (12, 'g3', 100, 1, 0, '', 'xy', '', 0, 0, '');
+            insert into cards values (1000, 10, 1, 0, 0);
+            insert into cards values (1001, 11, 2, 0, 0);
+            insert into cards values (1002, 12, 3, 0, 0);
+        """)
+        decks = {1: {'id': 1, 'name': 'Root', 'conf': 1, 'crowdanki_uuid': 'deck-uuid', 'newToday': [0, 0], 'mod': 1, 'usn': 0},
+                 2: {'id': 2, 'name': 'Root::Child', 'conf': 1, 'newToday': [0, 0], 'mod': 1, 'usn': 0}}
+        config = {'id': 1, 'new': {'perDay': 20}, 'mod': 1, 'usn': 0}
+        model = {'id': 100, 'name': 'Basic', 'flds': [{'name': 'Front', 'ord': 0}], 'mod': 1, 'usn': 0}
+        media = self.base / 'collection.media'
+        media.mkdir()
+        self.mw.col = SimpleNamespace(
+            decks=SimpleNamespace(deck_and_child_ids=lambda did: [1, 2] if did == 1 else [did],
+                                  get=lambda did, default=True: decks.get(did),
+                                  config_dict_for_deck_id=lambda did: config),
+            models=SimpleNamespace(get=lambda mid: model),
+            db=SimpleNamespace(all=lambda sql, *args: db.execute(sql, args).fetchall()),
+            media=SimpleNamespace(dir=lambda: str(media)))
+        return db, decks, config, model, media
+
+    def test_collection_state_ignores_study_but_detects_every_overwritable_change(self):
+        db, decks, config, model, _ = self.collection()
+        state = lambda: self.real_state(self.mw, '1')
+        before = state()
+        # Учёба и синхронизация без изменения содержимого не блокируют импорт.
+        decks[1]['newToday'] = [5, 3]
+        decks[1]['mod'] = decks[2]['usn'] = 99
+        db.execute("update notes set mod = 2, usn = 5 where id = 10")
+        self.assertEqual(state(), before)
+        # Изменение в чужой колоде не входит в проверенный C.
+        db.execute("update notes set flds = 'z' where id = 12")
+        self.assertEqual(state(), before)
+        changes = [
+            lambda: db.execute("update notes set flds = 'aUSER' where id = 11"),
+            lambda: db.execute("update notes set tags = ' t user ' where id = 10"),
+            lambda: db.execute("update cards set did = 3 where id = 1001"),
+            lambda: db.execute("insert into cards values (1003, 12, 1, 0, 0)"),
+            lambda: model['flds'].append({'name': 'Back', 'ord': 1}),
+            lambda: config['new'].update(perDay=50),
+            lambda: decks[2].update(name='Root::Renamed'),
+        ]
+        for change in changes:
+            change()
+            after = state()
+            self.assertNotEqual(after, before)
+            before = after
+
+    def test_verify_unchanged_refuses_changed_notes_media_and_foreign_guids(self):
+        db, decks, _, _, media = self.collection()
+        source = self.base / 'incoming'
+        (source / 'media').mkdir(parents=True)
+        (source / 'media/a.png').write_bytes(b'incoming')
+        (media / 'a.png').write_bytes(b'checked')
+        sha = lambda data: hashlib.sha256(data).hexdigest()
+        guard = dict(GUARD, collection_state=self.real_state(self.mw, '1'), media={'a.png': sha(b'checked')})
+        payload = {'crowdanki_uuid': 'deck-uuid', 'notes': [{'guid': 'g1'}], 'children': [{'notes': [{'guid': 'g2'}, {'guid': 'new'}]}]}
+        verify = lambda: self.real_verify(self.mw, guard, payload, source)
+        verify()
+        # Файл совпадает с входящим — перезапись безвредна.
+        (media / 'a.png').write_bytes(b'incoming')
+        verify()
+        cases = [
+            ('anki_changed_before_import: media', lambda: (media / 'a.png').write_bytes(b'user')),
+            ('anki_changed_before_import: media', lambda: (media / 'a.png').unlink()),
+        ]
+        for message, change in cases:
+            with self.subTest(message=message):
+                change()
+                with self.assertRaisesRegex(ValueError, message):
+                    verify()
+                (media / 'a.png').write_bytes(b'checked')
+        (source / 'media/b.png').write_bytes(b'incoming')
+        (media / 'b.png').write_bytes(b'foreign')
+        with self.assertRaisesRegex(ValueError, 'anki_changed_before_import: media'):
+            verify()
+        (media / 'b.png').unlink()
+        verify()
+        payload['notes'].append({'guid': 'g3'})
+        with self.assertRaisesRegex(ValueError, 'import_scope_conflict'):
+            verify()
+        payload['notes'].pop()
+        db.execute("update notes set flds = 'a\x1fUSER' where id = 10")
+        with self.assertRaisesRegex(ValueError, 'anki_changed_before_import: колода изменилась'):
+            verify()
+        guard['collection_state'] = self.real_state(self.mw, '1')
+        verify()
+        decks[1]['crowdanki_uuid'] = 'other'
+        with self.assertRaisesRegex(ValueError, 'anki_changed_before_import: колода с проверенным UUID'):
+            verify()
+
+    def test_export_reports_collection_state_after_crowdanki_assigns_identities(self):
+        self.profile_manager()
+        identity = self.call('toolkitBindProfile', approved=True)['result']['profile_id']
+        identifier, path = self.ticket()
+        ticket = json.loads((path / 'request.json').read_text())
+        ticket.update(profile_id=identity, deck_id='1', deck_uuid=None, process=self.g['PROCESS'])
+        (path / 'request.json').write_text(json.dumps(ticket))
+        deck = {'id': 1, 'name': 'Synthetic'}
+        self.mw.col = SimpleNamespace(decks=SimpleNamespace(by_name=lambda name: deck))
+        self.mw.create_backup_now = self.mw.reset = lambda: None
+        # Отпечаток зависит от UUID, которые CrowdAnki дописывает при экспорте.
+        self.g['deck_state'] = lambda mw, deck_id, scoped=None: 'state:' + str(deck.get('crowdanki_uuid'))
+        class Exporter:
+            def __init__(self, col, config):
+                self.last_exported_count = 0
+            def export_to_directory(self, source, output, **kwargs):
+                source['crowdanki_uuid'] = 'assigned'
+                (output / 'deck.json').write_text(json.dumps({'crowdanki_uuid': 'assigned'}))
+        modules = {
+            '1788670778.export.anki_exporter': SimpleNamespace(AnkiJsonExporter=Exporter),
+            '1788670778.anki.adapters.anki_deck': SimpleNamespace(AnkiDeck=lambda deck: deck),
+            '1788670778.config.config_settings': SimpleNamespace(ConfigSettings=SimpleNamespace(get_instance=lambda: None)),
+        }
+        self.call('toolkitExport', id=identifier)
+        with patch('importlib.import_module', side_effect=lambda name: modules[name]):
+            self.scheduled[0]()
+        value = self.call('toolkitJob', id=identifier)['result']
+        self.assertEqual(value['state'], 'succeeded')
+        self.assertEqual(value['collection_state'], 'state:assigned')
 
 if __name__ == '__main__':
     unittest.main()

@@ -6,14 +6,21 @@
 //! 2. свежий живой экспорт той же колоды через существующий путь `sync-input`:
 //!    подтверждённый C обязан остаться семантически прежним, иначе Anki
 //!    изменилась после подготовки и импорт останавливается;
-//! 3. повторный `plan_publication`; B копируется в приватный spool под
+//! 3. повторный `plan_publication`; маркер `publish-spool.json` с ID задания
+//!    сохраняется ДО создания каталога spool; B копируется в приватный spool под
 //!    `ExportLock` и сверяется с ревизией разрешения;
-//! 4. до HTTP надёжно сохраняется журнал `publish.json` с признаком отправки;
-//! 5. оригинальный CrowdAnki importer через `toolkitImport`, опрос того же job;
-//! 6. readback — новый живой экспорт той же колоды того же профиля;
-//! 7. readback == B: тем же протоколом публикации input фиксируется
-//!    `record_published` (intent переживает сбой); иначе readback сохраняется как
-//!    наблюдённый C без ложного published, B не трогается.
+//! 4. билет несёт охрану из того же свежего экспорта: отпечаток состояния колоды
+//!    в коллекции и хеши media C. Адаптер сверяет его до диалога и повторно сразу
+//!    после диалога CrowdAnki, до резервной копии и первой записи в коллекцию;
+//! 5. до HTTP надёжно сохраняется журнал `publish.json` с признаком отправки;
+//! 6. оригинальный CrowdAnki importer через `toolkitImport`, опрос того же job;
+//! 7. readback — новый живой экспорт той же колоды того же профиля;
+//! 8. только доказанный `succeeded` и readback == B фиксируются через
+//!    `record_published` (intent переживает сбой); любой другой исход сохраняет
+//!    readback как наблюдённый C без ложного published, B не трогается;
+//! 9. после закрытия журнала из spool удаляется полная копия B (`source`), затем
+//!    маркер; маркер без журнала доказывает, что задание закрыто либо никогда
+//!    не отправлялось.
 //!
 //! Неопределённый исход никогда не отправляет импорт повторно: следующий вызов
 //! опрашивает прежний job, а фактическое состояние Anki определяет readback.
@@ -25,7 +32,7 @@ use serde_json::{Value, json};
 
 use super::publish::{PublicationRecord, Store};
 use super::source::VerifiedExport;
-use super::work::{self, Inventory, PREPARE, PUBLISH, read_inventory};
+use super::work::{self, Inventory, PREPARE, PUBLISH, SPOOL, read_inventory};
 use super::{Options, Result, environment::Target, error, external_error, patch, transport};
 use crate::exchange::{DeckIdentity, ExchangeError, Snapshot, StreamState, filesystem::Directory};
 
@@ -50,6 +57,15 @@ pub(super) struct ImportJournal {
     pub partial_changes_possible: Option<bool>,
 }
 
+/// Владение каталогом `spool/<job_id>`: сохраняется ДО его создания и удаляется
+/// последним. Без `publish.json` маркер означает, что задание либо закрыто,
+/// либо не отправлялось (журнал — обязательное условие отправки).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpoolMarker {
+    job_id: String,
+}
+
 /// Живые операции Anki; тесты подменяют их, не трогая журнал и решения.
 pub(super) trait Bridge {
     fn status(&self, id: &str) -> Result<Value>;
@@ -63,8 +79,15 @@ pub(super) trait Port: Bridge {
     fn profile(&self) -> &str;
     /// Приватный `toolkit-desktop/spool` выбранной базы Anki.
     fn spool(&self) -> Result<Directory>;
-    /// Свежий живой экспорт, подтверждённый тем же путём, что `sync-input`.
-    fn fresh(&self, store: &mut Store, catalog: &Value, deck: &Value, key: &str) -> Result<Value>;
+    /// Свежий живой экспорт, подтверждённый тем же путём, что `sync-input`, и
+    /// охрана импорта из того же экспорта (см. `VerifiedExport::import_guard`).
+    fn fresh(
+        &self,
+        store: &mut Store,
+        catalog: &Value,
+        deck: &Value,
+        key: &str,
+    ) -> Result<(Value, Option<Value>)>;
     /// Живой экспорт без публикации; pending job завершает вызывающий.
     fn readback(
         &self,
@@ -99,8 +122,14 @@ impl Port for Live<'_> {
         })?;
         Ok(state.ensure_child("spool").map_err(super::io_error)?.0)
     }
-    fn fresh(&self, store: &mut Store, catalog: &Value, deck: &Value, key: &str) -> Result<Value> {
-        super::export_one(
+    fn fresh(
+        &self,
+        store: &mut Store,
+        catalog: &Value,
+        deck: &Value,
+        key: &str,
+    ) -> Result<(Value, Option<Value>)> {
+        super::export_guarded(
             self.target,
             self.options,
             catalog,
@@ -273,10 +302,15 @@ pub(super) fn drive(
 }
 
 /// Уже ли exchange подтвердил именно эту попытку (повтор после сбоя записи журнала).
+/// Published записывает только `conclude` при доказанном `succeeded`, поэтому
+/// журнал без него не может быть распознан как подтверждённый.
 pub(super) fn already_published(
     store: &Store,
     journal: &ImportJournal,
 ) -> std::result::Result<bool, ExchangeError> {
+    if journal.import_state.as_deref() != Some("succeeded") {
+        return Ok(false);
+    }
     let state = store.exchange().read()?;
     Ok(state
         .streams
@@ -301,11 +335,31 @@ pub(super) fn conclude(
         return Err(ExchangeError::IdentityMismatch);
     }
     let matches = readback.snapshot().revision() == journal.working_revision;
+    let unchanged = readback.snapshot().revision() == journal.checked_input_revision;
+    let state = journal.import_state.as_deref();
+    let succeeded = state == Some("succeeded");
+    // Доказанно не дошедший до записи импорт: отмена диалога или отказ до записи.
+    let not_applied = matches!(state, Some("cancelled" | "failed"))
+        && journal.partial_changes_possible == Some(false);
+    let reason = match state {
+        Some("cancelled") => "import_cancelled",
+        Some("failed")
+            if journal
+                .import_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("anki_changed_before_import")) =>
+        {
+            "anki_changed_before_import"
+        }
+        Some("failed") => "import_failed",
+        Some("succeeded") => "readback_differs_from_sent",
+        _ => "import_outcome_unknown",
+    };
     let mut outcome = json!({"job_id":journal.job_id,"import_state":journal.import_state,
         "import_error":journal.import_error,"partial_changes_possible":journal.partial_changes_possible,
         "working_revision":journal.working_revision,"readback_revision":readback.snapshot().revision(),
         "readback_matches":matches});
-    if matches {
+    if matches && succeeded {
         let result = store.publish_readback(
             readback,
             PublicationRecord {
@@ -330,26 +384,31 @@ pub(super) fn conclude(
             );
         }
     } else {
+        // Совпадение снимка не доказывает исполнение импорта: при отмене, ошибке
+        // или неизвестном исходе readback сохраняется только как наблюдённый C.
         let result = store.publish(readback)?;
         let comparison = crate::exchange::compare(sent, readback.snapshot(), sent)?;
         outcome["published"] = json!(false);
         outcome["source_sequence"] = result["source_sequence"].clone();
         outcome["differences"] = work::difference_summary(&comparison);
-        if readback.snapshot().revision() == journal.checked_input_revision {
-            outcome["state"] = json!("import_not_applied");
-            outcome["reason"] = json!(match journal.import_state.as_deref() {
-                Some("cancelled") => "import_cancelled",
-                Some("failed") => "import_failed",
-                _ => "import_not_applied",
-            });
+        outcome["reason"] = json!(reason);
+        if matches {
+            outcome["state"] = json!("import_outcome_unconfirmed");
             outcome["next"] = json!(
-                "Anki не изменилась: B сохранён, следующий явный publish-output --apply создаст новую попытку"
+                "Anki совпала с B, но успешное завершение импорта не доказано (отмена, ошибка или неизвестный исход): readback сохранён как C, published не установлен, импорт не повторяется. Проверьте Anki и согласуйте базу явно"
             );
+        } else if !succeeded && (unchanged || not_applied) {
+            outcome["state"] = json!("import_not_applied");
+            outcome["anki_changed_independently"] = json!(!unchanged);
+            outcome["next"] = json!(if unchanged {
+                "Anki не изменилась: B сохранён, следующий явный publish-output --apply создаст новую попытку"
+            } else {
+                "Импорт не записывал в коллекцию, но Anki изменилась независимо от него: изменения сохранены как новый C, B не изменён. Выполните prepare-output"
+            });
         } else {
             outcome["state"] = json!("readback_mismatch");
-            outcome["reason"] = json!("readback_differs_from_sent");
             outcome["next"] = json!(
-                "Фактическое состояние Anki отличается от B (например, CrowdAnki не удаляет отсутствующие заметки). Readback сохранён как C, B не изменён; требуется явное согласование"
+                "Фактическое состояние Anki отличается от B (например, CrowdAnki не удаляет отсутствующие заметки, или импорт применён частично). Readback сохранён как C, B не изменён; требуется явное согласование"
             );
         }
     }
@@ -540,6 +599,26 @@ pub(super) fn apply_one(
         );
     }
     let mut journal = work::load::<ImportJournal>(&dir, PUBLISH).map_err(ex)?;
+    let marker = work::load::<SpoolMarker>(&dir, SPOOL).map_err(ex)?;
+    match (&journal, &marker) {
+        (Some(journal), Some(marker)) if marker.job_id != journal.job_id => {
+            return Err(ex(work::corrupt(
+                "маркер spool не совпадает с журналом импорта",
+            )));
+        }
+        // Закрытое или так и не отправленное задание: прежний сбой уборки.
+        (None, Some(_)) => {
+            if let Err(e) = release_spool(port, &dir) {
+                value["spool_cleanup_error"] = json!(e.message);
+                return blocked(
+                    value,
+                    "import_spool_cleanup_pending",
+                    "Не удалось убрать копию B прежнего закрытого задания из spool: повторите команду",
+                );
+            }
+        }
+        _ => {}
+    }
     let deck = catalog["decks"]
         .as_array()
         .and_then(|decks| {
@@ -567,6 +646,7 @@ pub(super) fn apply_one(
                 store.finish_job(&job_key).map_err(ex)?;
             }
             dir.remove_file(PUBLISH).map_err(ex)?;
+            note_cleanup(&mut value, finish_spool(port, &dir, &existing.job_id));
             value["state"] = json!("published");
             value["published"] = json!(true);
             value["job_id"] = json!(existing.job_id);
@@ -600,7 +680,7 @@ pub(super) fn apply_one(
             );
         }
         // Свежий живой экспорт тем же доверенным путём sync-input.
-        let fresh = match port.fresh(store, catalog, &deck, &job_key) {
+        let (fresh, guard) = match port.fresh(store, catalog, &deck, &job_key) {
             Ok(fresh) => fresh,
             Err(e) => {
                 value["fresh_export_error"] = json!(e.message);
@@ -641,6 +721,17 @@ pub(super) fn apply_one(
         }
         let state = store.exchange().read().map_err(ex)?;
         let current = &state.streams[&key].current;
+        // Охрана описывает именно подтверждённый C, на котором основано разрешение.
+        let Some(mut guard) =
+            guard.filter(|g| g["revision"].as_str() == Some(current.snapshot.revision()))
+        else {
+            return blocked(
+                value,
+                "freshness_unconfirmed",
+                "Свежий экспорт не дал проверяемого состояния коллекции для подтверждённого C: обновите адаптер (anki setup) и повторите; импорт не отправлен",
+            );
+        };
+        guard["deck_id"] = json!(deck_id(&deck)?);
         let staged = stage_import(
             port,
             store,
@@ -648,6 +739,7 @@ pub(super) fn apply_one(
             &permit,
             stream,
             current.snapshot.revision(),
+            guard,
         )?;
         journal = Some(staged);
     }
@@ -675,9 +767,7 @@ pub(super) fn apply_one(
                 let _ = job.remove_file("request.json");
             }
             dir.remove_file(PUBLISH).map_err(ex)?;
-            if let Ok(spool) = port.spool() {
-                let _ = spool.remove_tree(&journal.job_id);
-            }
+            note_cleanup(&mut value, finish_spool(port, &dir, &journal.job_id));
             value["state"] = json!("import_not_submitted");
             value["reason"] = json!("import_not_submitted");
             value["detail"] = json!(detail);
@@ -705,10 +795,15 @@ pub(super) fn apply_one(
         .map_err(super::io_error)?
         .ok_or_else(|| error("import_spool_missing", "Нет отправленной копии B в spool"))?;
     let (sent, _) = read_inventory(&source, identity.profile.clone()).map_err(ex)?;
+    drop(source);
+    drop(job);
     let outcome = conclude(store, &dir, &journal, &readback, &sent).map_err(ex)?;
     if store.finish_job(&job_key).is_err() {
         value["pending_cleanup"] = json!("unknown");
     }
+    // Исход определён и надёжно зафиксирован, журнал закрыт: копия B больше
+    // никому не нужна. Сбой уборки оставляет маркер, следующий вызов её завершит.
+    note_cleanup(&mut value, finish_spool(port, &dir, &journal.job_id));
     // A/C/published после фиксации, а не снимок до импорта.
     if let Some(current) = store.exchange().read().map_err(ex)?.streams.get(&key) {
         for (k, v) in super::prepare::describe(current)
@@ -731,6 +826,7 @@ fn stage_import(
     permit: &crate::exchange::Publication,
     stream: &StreamState,
     checked_revision: &str,
+    guard: Value,
 ) -> Result<ImportJournal> {
     let identity = permit.identity().clone();
     let output = store
@@ -738,10 +834,23 @@ fn stage_import(
         .child("output")
         .map_err(ex)?
         .ok_or_else(|| error("working_missing", "Нет decks/output"))?;
+    let area = store.work_area(true).map_err(ex)?.expect("создана");
+    let dir = work::stream_dir(&area, &identity.key()).map_err(ex)?;
     let id = patch::random_id()?;
     let spool = port.spool()?;
-    let (job, created) = spool.ensure_child(&id).map_err(super::io_error)?;
+    // Владение фиксируется ДО создания каталога: брошенная копия B всегда
+    // находится по маркеру, а чужие каталоги spool не угадываются.
+    work::save(&dir, SPOOL, &SpoolMarker { job_id: id.clone() }).map_err(ex)?;
+    let (job, created) = match spool.ensure_child(&id) {
+        Ok(created) => created,
+        Err(e) => {
+            let _ = dir.remove_file(SPOOL);
+            return Err(super::io_error(e));
+        }
+    };
     if !created {
+        // Чужой каталог с тем же ID не принадлежит этому маркеру.
+        let _ = dir.remove_file(SPOOL);
         return Err(error(
             "import_job_id_collision",
             "Каталог нового job уже существует",
@@ -764,7 +873,8 @@ fn stage_import(
             ));
         }
         let ticket = json!({"approved":true,"action":"import","profile":port.profile(),
-            "profile_id":identity.profile.as_str(),"process":catalog["process"],"expires":expiry()?});
+            "profile_id":identity.profile.as_str(),"process":catalog["process"],"expires":expiry()?,
+            "expected":guard});
         job.publish(
             "request.json",
             &serde_json::to_vec(&ticket).map_err(super::io_error)?,
@@ -798,14 +908,103 @@ fn stage_import(
         Ok(journal) => journal,
         Err(e) => {
             drop(job);
-            let _ = spool.remove_tree(&id);
+            // Сбой уборки оставляет маркер: следующий вызов уберёт по нему.
+            if spool.remove_tree(&id).is_ok() {
+                let _ = dir.remove_file(SPOOL);
+            }
             return Err(e);
         }
     };
-    // Исход записи журнала может остаться неизвестным: job после этой точки
-    // не удаляется, его судьбу решает сохранённый журнал.
-    let area = store.work_area(true).map_err(ex)?.expect("создана");
-    let dir = work::stream_dir(&area, &identity.key()).map_err(ex)?;
+    // Исход записи журнала может остаться неизвестным. Если журнал на диске,
+    // им управляет он; если нет — задание не отправлялось и маркер разрешает
+    // уборку. Сам job здесь не удаляется.
+    #[cfg(test)]
+    fault::hit("before_journal")?;
     work::save(&dir, PUBLISH, &journal).map_err(ex)?;
     Ok(journal)
+}
+
+/// Уборка задания по маркеру без журнала: закрытого либо не отправленного.
+fn release_spool(port: &dyn Port, dir: &Directory) -> Result<()> {
+    if dir.entry_is_dir(PUBLISH).map_err(ex)?.is_some() {
+        return Err(ex(work::corrupt("уборка spool при открытом журнале")));
+    }
+    match work::load::<SpoolMarker>(dir, SPOOL).map_err(ex)? {
+        Some(marker) => finish_spool(port, dir, &marker.job_id),
+        None => Ok(()),
+    }
+}
+
+/// Освобождает полную копию B задания и затем удаляет маркер. Вызывать только
+/// после закрытия журнала (или когда журнал не сохранялся). Повтор после сбоя
+/// идемпотентен.
+///
+/// Задание, принятое Anki (`result.json` записан адаптером при admission),
+/// остаётся в spool по общему контракту jobs: `request.json` и `result.json`
+/// (килобайты) отвечают на `anki-repo job <id>`. Удаляется только `source`.
+/// Без `result.json` задание не принималось — каталог убирается целиком, как
+/// в `jobs::discard_unsubmitted`.
+fn finish_spool(port: &dyn Port, dir: &Directory, job_id: &str) -> Result<()> {
+    // Тот же формат, что принимает адаптер (`job_path`): 64 строчных hex.
+    if job_id.len() != 64
+        || !job_id
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(ex(work::corrupt("ID задания импорта")));
+    }
+    #[cfg(test)]
+    fault::hit("spool_cleanup")?;
+    let spool = port.spool()?;
+    if let Some(job) = spool.child(job_id).map_err(super::io_error)? {
+        if job.entry_is_dir("result.json").map_err(super::io_error)? == Some(false) {
+            job.remove_tree("source").map_err(super::io_error)?;
+        } else {
+            drop(job);
+            spool.remove_tree(job_id).map_err(super::io_error)?;
+        }
+    }
+    if dir.entry_is_dir(SPOOL).map_err(ex)?.is_some() {
+        dir.remove_file(SPOOL).map_err(ex)?;
+    }
+    Ok(())
+}
+
+fn note_cleanup(value: &mut Value, result: Result<()>) {
+    if let Err(e) = result {
+        value["spool_cleanup"] = json!("pending");
+        value["spool_cleanup_error"] = json!(e.message);
+    }
+}
+
+fn deck_id(deck: &Value) -> Result<String> {
+    deck["id"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| deck["id"].as_i64().map(|id| id.to_string()))
+        .ok_or_else(|| error("invalid_export_catalog", "Нет ID колоды в каталоге"))
+}
+
+/// Точечные отказы для тестов границ жизненного цикла spool.
+#[cfg(test)]
+pub(super) mod fault {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static POINT: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+    }
+
+    pub fn set(point: Option<&'static str>) {
+        POINT.with(|p| *p.borrow_mut() = point);
+    }
+
+    pub(super) fn hit(point: &str) -> crate::desktop::Result<()> {
+        if POINT.with(|p| *p.borrow() == Some(point)) {
+            return Err(crate::desktop::external_error(
+                "injected_fault",
+                format!("сбой в точке {point}"),
+            ));
+        }
+        Ok(())
+    }
 }

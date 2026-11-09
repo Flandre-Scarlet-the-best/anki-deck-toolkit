@@ -302,6 +302,19 @@ pub(super) fn run(c: &mut Ctx, fx: &mut Fixtures) -> Outcome {
         job.state() == "succeeded" && job.result()["job"]["action"] == "import",
         job.json.clone(),
     )?;
+    let spooled = c.base.join("toolkit-desktop/spool").join(&job_id);
+    c.check(
+        "Полная копия B убрана из spool, исход задания остался доступен",
+        !spooled.join("source").exists()
+            && spooled.join("result.json").is_file()
+            && outcome.get("spool_cleanup").is_none()
+            && fs::read_dir(repo.join("decks/.roundtrip"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .all(|d| !d.path().join("publish-spool.json").exists()),
+        json!({"job_id":job_id,"source_exists":spooled.join("source").exists()}),
+    )?;
     let back = anki_back(c, DECK, NOTES[0].front)?;
     c.check("AnkiConnect видит поле V2", back == "agent V2", json!(back))?;
     let after = status(c, &repo, &identity)?;
