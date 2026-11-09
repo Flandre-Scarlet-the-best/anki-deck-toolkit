@@ -1007,3 +1007,91 @@ impl SelectionDerivative {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod selection_derivative_tests {
+    use super::*;
+
+    fn sample() -> (SelectionDerivative, Pronunciation, Provenance, String) {
+        let source = "a".repeat(64);
+        let output = "b".repeat(64);
+        let derivative = SelectionDerivative {
+            schema_version: SELECTION_DERIVATIVE_SCHEMA_VERSION,
+            kind: "materialized_interval".into(),
+            transform: "interval_extraction_v1".into(),
+            source_sha256: source.clone(),
+            source_provenance: Provenance {
+                source_kind: "local_import".into(),
+                source_name: "生.mp3".into(),
+            },
+            source_metadata: serde_json::json!({"source_name": "生.mp3"}),
+            output_sha256: output.clone(),
+            span: Some(FrameSpan {
+                start_frame: 0,
+                end_frame: 4410,
+                sample_rate: 44100,
+            }),
+            chain: vec!["slice".into()],
+            toolchain: vec!["ffmpeg".into()],
+            config_sha256: "c".repeat(64),
+            processing: None,
+            selection: SelectionReference {
+                batch_id: "s1".into(),
+                decision_id: "d-1".into(),
+                decision_candidate_id: "c-1".into(),
+                candidate_id: "c-2".into(),
+                link_generation: 0,
+                authority: "user_via_agent".into(),
+                proof: "user_decision".into(),
+            },
+        };
+        let provenance = Provenance {
+            source_kind: SELECTION_SOURCE_KIND.into(),
+            source_name: selection_source_name("interval_extraction_v1", &source),
+        };
+        (
+            derivative,
+            Pronunciation::new("生", "なま").unwrap(),
+            provenance,
+            output,
+        )
+    }
+
+    #[test]
+    fn selection_derivative_rejects_inconsistent_source_provenance() {
+        let (valid, request, provenance, output) = sample();
+        valid.validate(&request, &output, &provenance).unwrap();
+        let check = |mutate: &dyn Fn(&mut SelectionDerivative)| {
+            let mut d = valid.clone();
+            mutate(&mut d);
+            d.validate(&request, &output, &provenance).unwrap_err().code
+        };
+        assert_eq!(
+            check(&|d| d.schema_version = 99),
+            ErrorCode::UnsupportedSchemaVersion
+        );
+        // Интервал без отсчётов недопустим.
+        assert_eq!(check(&|d| d.span = None), ErrorCode::InvalidIdentity);
+        // Локальный исходник: метаданные обязаны совпадать с именем.
+        assert_eq!(
+            check(&|d| d.source_metadata = serde_json::json!({"source_name": "другое.mp3"})),
+            ErrorCode::InvalidIdentity
+        );
+        // Неизвестный вид происхождения исходника.
+        assert_eq!(
+            check(&|d| d.source_provenance.source_kind = "unknown".into()),
+            ErrorCode::InvalidIdentity
+        );
+        // Forvo: неполные метаданные и написание другой пары.
+        assert_eq!(
+            check(&|d| {
+                d.source_provenance = Provenance {
+                    source_kind: "forvo_web".into(),
+                    source_name: "forvo-ja-1.mp3".into(),
+                };
+                d.source_metadata = serde_json::json!({"surface": "生"});
+            }),
+            ErrorCode::InvalidIdentity
+        );
+    }
+}

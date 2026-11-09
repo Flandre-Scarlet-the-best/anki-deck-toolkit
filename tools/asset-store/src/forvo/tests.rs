@@ -1124,6 +1124,118 @@ fn surface_only_batch_item_collects_without_reading_and_without_import() {
 }
 
 #[test]
+fn collection_checkpoint_pauses_rejects_and_merges_without_duplicates() {
+    use super::batch::{AcquisitionProgress, FetchItem, FetchPlan};
+    use crate::batch_runtime::SafeBatchRuntime;
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-collect-cp").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let item = |surface: &str| FetchItem {
+        surface: surface.into(),
+        reading: None,
+        replace_expected_sha256: None,
+    };
+    batch::start(
+        &store,
+        "cp",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![item("生"), item("水"), item("火")],
+        },
+        batch::Transport::CdpChromium,
+    )
+    .unwrap();
+    let collect = |responses: Vec<Result<Vec<u8>, AssetError>>, surface: &str| {
+        let mut source = collection_source(responses);
+        futures::executor::block_on(evidence::collect_from(
+            &mut source,
+            surface,
+            &Default::default(),
+        ))
+    };
+    let bytes = synthetic_mp3();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "cp").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+
+    // Остановка сессии: собранное сохраняется, пакет на паузе.
+    let first = collect(
+        vec![
+            Ok(bytes.clone()),
+            Err(error("download_aborted", "Отмена")),
+            Err(error("session_expired", "Повторите вход")),
+        ],
+        "生",
+    );
+    assert!(matches!(
+        batch::checkpoint_collection(&mut runtime, &mut state, 0, first).unwrap(),
+        AcquisitionProgress::Paused
+    ));
+    assert_eq!(state.paused.as_ref().unwrap().code, "session_expired");
+    assert_eq!(state.items[0].collected.len(), 1);
+    assert!(state.items[0].outcome.is_none());
+
+    // Повтор той же записи и того же отказа не дублирует их.
+    let again = collect(
+        vec![
+            Ok(bytes.clone()),
+            Err(error("download_aborted", "Отмена")),
+            Ok(bytes.clone()),
+        ],
+        "生",
+    );
+    assert!(matches!(
+        batch::checkpoint_collection(&mut runtime, &mut state, 0, again).unwrap(),
+        AcquisitionProgress::Ready
+    ));
+    let item0 = &state.items[0];
+    assert!(state.paused.is_none());
+    assert_eq!(item0.collected.len(), 2, "запись 1 не сохраняется дважды");
+    assert_eq!(item0.collection.as_ref().unwrap().rejected.len(), 1);
+    assert_eq!(item0.outcome.as_ref().unwrap().code, "collected");
+
+    // Ошибка страницы, не требующая паузы, — отказ элемента.
+    let mut missing = collection_source(Vec::new());
+    missing.candidate_error = Some("japanese_pronunciation_not_found");
+    let missing = futures::executor::block_on(evidence::collect_from(
+        &mut missing,
+        "水",
+        &Default::default(),
+    ));
+    assert!(matches!(
+        batch::checkpoint_collection(&mut runtime, &mut state, 1, missing).unwrap(),
+        AcquisitionProgress::Rejected
+    ));
+    assert_eq!(
+        state.items[1].outcome.as_ref().unwrap().code,
+        "japanese_pronunciation_not_found"
+    );
+
+    // Ни одной пригодной записи без остановки — явный отказ с отчётом.
+    let empty = collect(
+        vec![
+            Err(error("download_aborted", "Отмена")),
+            Err(error("download_aborted", "Отмена")),
+            Err(error("download_aborted", "Отмена")),
+        ],
+        "火",
+    );
+    assert!(matches!(
+        batch::checkpoint_collection(&mut runtime, &mut state, 2, empty).unwrap(),
+        AcquisitionProgress::Rejected
+    ));
+    let outcome = state.items[2].outcome.as_ref().unwrap();
+    assert_eq!(outcome.code, "no_records_collected");
+    assert_eq!(outcome.report.as_ref().unwrap().attempts.len(), 3);
+    drop(runtime);
+    let saved = batch::status(&store, "cp").unwrap();
+    assert_eq!(saved.items[0].collected.len(), 2);
+    assert_eq!(saved.revision, state.revision);
+}
+
+#[test]
 fn legacy_batch_item_state_is_still_readable() {
     let legacy = serde_json::json!({
         "request": {"surface": "水", "reading": "みず"},
