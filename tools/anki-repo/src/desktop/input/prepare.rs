@@ -444,9 +444,12 @@ fn rollback(store: &Store, dir: &Directory, intent: &PrepareIntent) -> Result<()
     if let Some((working, lock)) = work::lock_export(&output, name)? {
         let ours = read_inventory(&working, profile.clone())
             .is_ok_and(|(_, inventory)| inventory == intent.inventory);
-        if ours && dir.entry_is_dir(STAGE)?.is_none() {
+        // Без stage каталог уже переключён: несовпадение инвентаря означает правку
+        // после переключения и при первой подготовке (без previous).
+        let staged = dir.entry_is_dir(STAGE)?.is_some();
+        if ours && !staged {
             output.rename_into(name, dir, STAGE)?;
-        } else if has_previous || ours {
+        } else if has_previous || ours || !staged {
             return Err(blocked("working_changed_after_swap"));
         }
         drop(lock);

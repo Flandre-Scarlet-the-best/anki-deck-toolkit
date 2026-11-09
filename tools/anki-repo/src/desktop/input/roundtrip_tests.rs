@@ -350,6 +350,29 @@ fn edit_between_swap_and_base_commit_is_preserved_for_manual_review() {
 }
 
 #[test]
+fn edit_after_first_swap_keeps_intent_and_working_copy() {
+    let tmp = TempDir::new("prepare-first-race");
+    let store = open(tmp.path());
+    let v1 = export("v1", "job-1");
+    store.publish(&v1).unwrap();
+    store.fault.set(Some("prepare_visible"));
+    assert!(apply(&store, &v1).is_err());
+    let path = output(tmp.path(), &stream(&store, &v1));
+    fs::write(path.join("deck.json"), deck("concurrent edit")).unwrap();
+    let blocked = apply(&store, &v1).unwrap_err();
+    assert_eq!(
+        blocked.to_string(),
+        "операция заблокирована: working_changed_after_swap"
+    );
+    assert_eq!(
+        fs::read(path.join("deck.json")).unwrap(),
+        deck("concurrent edit")
+    );
+    assert_eq!(base_sequence(&store, &v1), None);
+    assert_eq!(work_names(tmp.path(), &v1), ["prepare.json"]);
+}
+
+#[test]
 fn concurrent_export_lock_holder_delays_refresh_and_sees_replaced_directory() {
     let tmp = TempDir::new("prepare-lock");
     let store = open(tmp.path());
