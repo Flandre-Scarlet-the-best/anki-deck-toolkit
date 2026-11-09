@@ -733,12 +733,10 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
         "{}",
         String::from_utf8_lossy(&refused.stdout)
     );
+    // Хранилище по умолчанию: `--repository-root` = текущий каталог, без `--store`.
     assert!(
-        !f.state
-            .join(".runtime")
-            .join("batches")
-            .join("sel")
-            .join("state.json")
+        !f.root
+            .join(".asset-store/pronunciation-audio/.runtime/batches/sel/state.json")
             .exists(),
         "отвергнутый приём не создаёт пакет"
     );
@@ -754,6 +752,12 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
         ],
     ));
     assert_eq!(intake["outcome"], "ok", "{intake}");
+    assert!(
+        f.root
+            .join(".asset-store/pronunciation-audio/.runtime/batches/sel/state.json")
+            .exists(),
+        "проверяемый путь пакета принадлежит фактическому хранилищу"
+    );
     assert_eq!(
         intake["result"]["added"].as_array().unwrap().len(),
         2,

@@ -2986,3 +2986,71 @@ fn empty_occurrences_do_not_produce_agent_selectable() {
     assert_eq!(report.selected_agent_evidence, 0);
     assert_eq!(report.selected_agent_audio, 0);
 }
+
+/// При `--intake-missing` ошибка границы прерывает операцию, а отказ чтения
+/// одного файла остаётся его собственным исходом.
+#[test]
+fn missing_source_intake_aborts_on_boundary_and_records_single_file_refusal() {
+    let (_workspace, store) = store();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "sel").unwrap();
+    let mut batch: SelectionBatch = runtime
+        .load()
+        .unwrap()
+        .unwrap_or_else(|| SelectionBatch::new("sel"));
+    let bytes = mp3(440);
+    let sha = sha256_hex(&bytes);
+    let mut report = ops::LinkReport::default();
+
+    let mut boundary = |_path: &Path| {
+        Err(crate::AssetError::new(
+            ErrorCode::BoundaryViolation,
+            "источник в decks/** запрещён",
+        ))
+    };
+    let error = ops::accept_missing_source(
+        &runtime,
+        &mut batch,
+        "/input",
+        "nama.mp3",
+        &sha,
+        &mut boundary,
+        &mut report,
+    )
+    .expect_err("граница обязана прервать операцию");
+    assert_eq!(error.code, ErrorCode::BoundaryViolation);
+    assert!(
+        report.sources_rejected.is_empty(),
+        "граница не превращается в отказ файла"
+    );
+
+    let mut unreadable =
+        |_path: &Path| Err(crate::AssetError::new(ErrorCode::IoFailure, "нет доступа"));
+    let added = ops::accept_missing_source(
+        &runtime,
+        &mut batch,
+        "/input",
+        "nama.mp3",
+        &sha,
+        &mut unreadable,
+        &mut report,
+    )
+    .expect("отказ файла не прерывает операцию");
+    assert!(!added);
+    assert_eq!(report.sources_rejected.len(), 1);
+    assert_eq!(report.sources_rejected[0].code, "io_failure");
+
+    let mut readable = move |_path: &Path| Ok(bytes.clone());
+    let added = ops::accept_missing_source(
+        &runtime,
+        &mut batch,
+        "/input",
+        "nama.mp3",
+        &sha,
+        &mut readable,
+        &mut report,
+    )
+    .unwrap();
+    assert!(added, "исходник принят");
+    assert!(report.sources_intaken >= 1);
+    assert!(batch.source(&sha).is_some());
+}

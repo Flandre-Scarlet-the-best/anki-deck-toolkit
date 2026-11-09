@@ -767,6 +767,95 @@ pub(crate) fn build_link_for_test(
 /// Чтение исходника входа распознавания (с границами вызывающего CLI).
 pub type SourceReader<'a> = dyn FnMut(&Path) -> Result<Vec<u8>, AssetError> + 'a;
 
+/// Попытка выйти за защищённую область — ошибка операции, а не исход файла.
+pub(crate) fn is_boundary_refusal(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::BoundaryViolation | ErrorCode::PathTraversal
+    )
+}
+
+/// Отказ, относящийся ко всему пакету, а не к одному файлу: граница, предел
+/// пакета, целостность хранилища и его отсутствие.
+pub(crate) fn aborts_linking(code: ErrorCode) -> bool {
+    is_boundary_refusal(code)
+        || matches!(
+            code,
+            ErrorCode::InvalidTransition | ErrorCode::IntegrityMismatch | ErrorCode::StoreMissing
+        )
+}
+
+/// Принимает исходник входа распознавания, которого ещё нет в пакете.
+///
+/// Ошибка границы и расхождение SHA прерывают операцию; отказ отдельного файла
+/// (чтение, проверка MP3) попадает в `sources_rejected`, а остальные результаты
+/// продолжают обрабатываться. Возвращает `true`, если состояние изменилось.
+pub(crate) fn accept_missing_source(
+    runtime: &SafeBatchRuntime,
+    batch: &mut SelectionBatch,
+    input_root: &str,
+    path: &str,
+    sha256: &str,
+    read: &mut SourceReader<'_>,
+    report: &mut LinkReport,
+) -> Result<bool, AssetError> {
+    let source_name = valid_source_name(path).unwrap_or_else(|| "source.mp3".to_owned());
+    let bytes = match read(&Path::new(input_root).join(path)) {
+        Ok(bytes) if sha256_hex(&bytes) == sha256 => bytes,
+        Ok(_) => {
+            return Err(AssetError::new(
+                ErrorCode::IntegrityMismatch,
+                "исходник входа распознавания изменился после инвентаризации",
+            ));
+        }
+        Err(error) if is_boundary_refusal(error.code) => return Err(error),
+        Err(error) => {
+            report.sources_rejected.push(IntakeRejection {
+                source_name,
+                code: error.code.as_str().into(),
+                message: error.message,
+            });
+            return Ok(false);
+        }
+    };
+    // Имя проверяется так же, как при обычном приёме: иначе негодное имя
+    // отвергло бы сохранение всего пакета вместо одного исходника.
+    let mut intake = IntakeReport::default();
+    match add_source(
+        runtime,
+        batch,
+        &bytes,
+        SourceOrigin::LocalFile {
+            source_name: valid_source_name(path).unwrap_or_else(|| "source.mp3".to_owned()),
+        },
+        None,
+        &mut intake,
+    ) {
+        Ok(added) => {
+            report.sources_intaken += intake.added.len();
+            Ok(added)
+        }
+        Err(error) if aborts_linking(error.code) => Err(error),
+        Err(error) => {
+            report.sources_rejected.push(IntakeRejection {
+                source_name,
+                code: error.code.as_str().into(),
+                message: error.message,
+            });
+            Ok(false)
+        }
+    }
+}
+
+/// Одноуровневое имя файла из пути входа; `None`, если оно не годится.
+fn valid_source_name(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| valid_text(name, 255) && !name.contains(['/', '\\']))
+        .map(str::to_owned)
+}
+
 /// Связывает исходники пакета с готовыми результатами пакета распознавания.
 /// Модели не вызываются: используются только кэшированные результаты и их
 /// проверенные MP3.
@@ -795,79 +884,15 @@ pub fn link_recognizer(
         if batch.source(sha256).is_none() {
             match read_source.as_mut() {
                 Some(read) => {
-                    let file = Path::new(&recognizer.input_root).join(path);
-                    // Отказ одного файла не отменяет остальные результаты: он
-                    // получает собственный исход, как при обычном приёме.
-                    let source_name = Path::new(path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("source.mp3")
-                        .to_owned();
-                    let bytes = match read(&file) {
-                        Ok(bytes) if sha256_hex(&bytes) == *sha256 => bytes,
-                        Ok(_) => {
-                            return Err(AssetError::new(
-                                ErrorCode::IntegrityMismatch,
-                                "исходник входа распознавания изменился после инвентаризации",
-                            ));
-                        }
-                        Err(error) => {
-                            report.sources_rejected.push(IntakeRejection {
-                                source_name,
-                                code: error.code.as_str().into(),
-                                message: error.message,
-                            });
-                            continue;
-                        }
-                    };
-                    // Имя проверяется так же, как при приёме: иначе негодное имя
-                    // отвергло бы сохранение всего пакета вместо одного исходника.
-                    let name = Path::new(path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .filter(|n| valid_text(n, 255) && !n.contains(['/', '\\']))
-                        .unwrap_or("source.mp3")
-                        .to_owned();
-                    let mut intake = IntakeReport::default();
-                    match add_source(
+                    rechanged |= accept_missing_source(
                         &runtime,
                         &mut batch,
-                        &bytes,
-                        SourceOrigin::LocalFile { source_name: name },
-                        None,
-                        &mut intake,
-                    ) {
-                        Ok(added) => {
-                            rechanged |= added;
-                            report.sources_intaken += intake.added.len();
-                        }
-                        // Граница, предел пакета и целостность хранилища — ошибка
-                        // операции; отказ проверки одного файла — его собственный исход.
-                        Err(error)
-                            if matches!(
-                                error.code,
-                                ErrorCode::BoundaryViolation
-                                    | ErrorCode::PathTraversal
-                                    | ErrorCode::InvalidTransition
-                                    | ErrorCode::IntegrityMismatch
-                                    | ErrorCode::StoreMissing
-                            ) =>
-                        {
-                            return Err(error);
-                        }
-                        Err(error) => {
-                            report.sources_rejected.push(IntakeRejection {
-                                source_name: Path::new(path)
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("source.mp3")
-                                    .to_owned(),
-                                code: error.code.as_str().into(),
-                                message: error.message,
-                            });
-                            continue;
-                        }
-                    }
+                        &recognizer.input_root,
+                        path,
+                        sha256,
+                        read,
+                        &mut report,
+                    )?;
                 }
                 None => {
                     missing.insert(sha256.clone());
