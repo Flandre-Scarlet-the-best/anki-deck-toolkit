@@ -57,9 +57,77 @@ pub(super) trait Bridge {
     fn renew(&self, journal: &ImportJournal) -> Result<()>;
 }
 
+/// Все остальные живые обращения оркестрации: проверка актуальности, readback
+/// и приватный spool Desktop. Решения и журналы от реализации не зависят.
+pub(super) trait Port: Bridge {
+    fn profile(&self) -> &str;
+    /// Приватный `toolkit-desktop/spool` выбранной базы Anki.
+    fn spool(&self) -> Result<Directory>;
+    /// Свежий живой экспорт, подтверждённый тем же путём, что `sync-input`.
+    fn fresh(&self, store: &mut Store, catalog: &Value, deck: &Value, key: &str) -> Result<Value>;
+    /// Живой экспорт без публикации; pending job завершает вызывающий.
+    fn readback(
+        &self,
+        store: &mut Store,
+        catalog: &Value,
+        deck: &Value,
+        key: &str,
+    ) -> Result<VerifiedExport>;
+}
+
 struct Live<'a> {
     target: &'a Target,
     options: &'a Options,
+    wait_seconds: u64,
+}
+
+impl Port for Live<'_> {
+    fn profile(&self) -> &str {
+        self.options.profile.as_deref().unwrap_or_default()
+    }
+    fn spool(&self) -> Result<Directory> {
+        let data = Directory::open(&self.target.data).map_err(super::io_error)?;
+        let state = data
+            .ensure_child("toolkit-desktop")
+            .map_err(super::io_error)?
+            .0;
+        state.require_private().map_err(|_| {
+            error(
+                "export_spool_not_private",
+                "Каталог toolkit-desktop не обеспечивает приватность spool; импорт не отправлен",
+            )
+        })?;
+        Ok(state.ensure_child("spool").map_err(super::io_error)?.0)
+    }
+    fn fresh(&self, store: &mut Store, catalog: &Value, deck: &Value, key: &str) -> Result<Value> {
+        super::export_one(
+            self.target,
+            self.options,
+            catalog,
+            deck,
+            key,
+            store,
+            self.wait_seconds,
+        )
+    }
+    fn readback(
+        &self,
+        store: &mut Store,
+        catalog: &Value,
+        deck: &Value,
+        key: &str,
+    ) -> Result<VerifiedExport> {
+        super::obtain_export(
+            self.target,
+            self.options,
+            catalog,
+            deck,
+            key,
+            store,
+            self.wait_seconds,
+        )
+        .map(|(verified, _)| verified)
+    }
 }
 
 impl Bridge for Live<'_> {
@@ -73,7 +141,7 @@ impl Bridge for Live<'_> {
         transport::patched(&current, self.options, "toolkitImport", json!({"id":id}))
     }
     fn renew(&self, journal: &ImportJournal) -> Result<()> {
-        let job = spool_job(self.target, &journal.job_id)?;
+        let job = spool_job(self, &journal.job_id)?;
         let mut ticket: Value =
             serde_json::from_slice(&job.read("request.json").map_err(super::io_error)?)
                 .map_err(super::io_error)?;
@@ -289,10 +357,11 @@ pub(super) fn conclude(
     Ok(outcome)
 }
 
-fn spool_job(t: &Target, id: &str) -> Result<Directory> {
-    let path = t.state().join("spool").join(id);
-    crate::layout::guard_local_path(&path, "Задание импорта")?;
-    Directory::open(&path).map_err(super::io_error)
+fn spool_job(port: &dyn Port, id: &str) -> Result<Directory> {
+    port.spool()?
+        .child(id)
+        .map_err(super::io_error)?
+        .ok_or_else(|| error("import_spool_missing", "Нет каталога задания импорта"))
 }
 
 fn expiry() -> Result<u64> {
@@ -402,10 +471,15 @@ pub(super) fn apply(
     let selected = super::prepare::select(&state, outputs, false);
     let target = super::ready_target(t, o, true)?;
     let catalog = transport::patched(&target, o, "toolkitCatalog", json!({}))?;
+    let port = Live {
+        target: &target,
+        options: o,
+        wait_seconds,
+    };
     let mut decks = Vec::new();
     for item in selected {
         decks.push(match item {
-            Ok(stream) => apply_one(&target, o, &mut store, &catalog, &stream, wait_seconds)
+            Ok(stream) => apply_one(&port, &mut store, &catalog, &stream, wait_seconds)
                 .unwrap_or_else(|e| {
                     let mut v = super::prepare::describe(&stream);
                     v["state"] = json!("failed");
@@ -430,9 +504,8 @@ pub(super) fn apply(
     )
 }
 
-fn apply_one(
-    t: &Target,
-    o: &Options,
+pub(super) fn apply_one(
+    port: &dyn Port,
     store: &mut Store,
     catalog: &Value,
     stream: &StreamState,
@@ -516,7 +589,7 @@ fn apply_one(
             return Ok(value);
         }
         // Свежий живой экспорт тем же доверенным путём sync-input.
-        let fresh = match super::export_one(t, o, catalog, &deck, &job_key, store, wait_seconds) {
+        let fresh = match port.fresh(store, catalog, &deck, &job_key) {
             Ok(fresh) => fresh,
             Err(e) => {
                 value["fresh_export_error"] = json!(e.message);
@@ -549,8 +622,7 @@ fn apply_one(
         let state = store.exchange().read().map_err(ex)?;
         let current = &state.streams[&key].current;
         let staged = stage_import(
-            t,
-            o,
+            port,
             store,
             catalog,
             &permit,
@@ -561,17 +633,8 @@ fn apply_one(
     }
     let mut journal = journal.expect("журнал создан или восстановлен");
     value["job_id"] = json!(journal.job_id);
-    let bridge = Live {
-        target: t,
-        options: o,
-    };
-    let progress = drive(
-        &bridge,
-        &dir,
-        &mut journal,
-        Duration::from_secs(wait_seconds),
-    )
-    .map_err(ex)?;
+    let progress =
+        drive(port, &dir, &mut journal, Duration::from_secs(wait_seconds)).map_err(ex)?;
     match progress {
         Progress::Pending(reason, detail) => {
             value["state"] = json!("pending");
@@ -586,7 +649,7 @@ fn apply_one(
             return Ok(value);
         }
         Progress::NotSubmitted(detail) => {
-            if let Ok(job) = spool_job(t, &journal.job_id) {
+            if let Ok(job) = spool_job(port, &journal.job_id) {
                 let _ = job.remove_file("request.json");
             }
             dir.remove_file(PUBLISH).map_err(ex)?;
@@ -598,15 +661,7 @@ fn apply_one(
         }
         Progress::Terminal => {}
     }
-    let (readback, _job) = match super::obtain_export(
-        t,
-        o,
-        catalog,
-        &deck,
-        &job_key,
-        store,
-        wait_seconds,
-    ) {
+    let readback = match port.readback(store, catalog, &deck, &job_key) {
         Ok(result) => result,
         Err(e) => {
             value["state"] = json!("pending");
@@ -619,7 +674,7 @@ fn apply_one(
             return Ok(value);
         }
     };
-    let job = spool_job(t, &journal.job_id)?;
+    let job = spool_job(port, &journal.job_id)?;
     let source = job
         .child("source")
         .map_err(super::io_error)?
@@ -645,8 +700,7 @@ fn apply_one(
 }
 
 fn stage_import(
-    t: &Target,
-    o: &Options,
+    port: &dyn Port,
     store: &Store,
     catalog: &Value,
     permit: &crate::exchange::Publication,
@@ -660,18 +714,7 @@ fn stage_import(
         .map_err(ex)?
         .ok_or_else(|| error("working_missing", "Нет decks/output"))?;
     let id = patch::random_id()?;
-    let data = Directory::open(&t.data).map_err(super::io_error)?;
-    let state = data
-        .ensure_child("toolkit-desktop")
-        .map_err(super::io_error)?
-        .0;
-    state.require_private().map_err(|_| {
-        error(
-            "export_spool_not_private",
-            "Каталог toolkit-desktop не обеспечивает приватность spool; импорт не отправлен",
-        )
-    })?;
-    let spool = state.ensure_child("spool").map_err(super::io_error)?.0;
+    let spool = port.spool()?;
     let (job, created) = spool.ensure_child(&id).map_err(super::io_error)?;
     if !created {
         return Err(error(
@@ -692,7 +735,7 @@ fn stage_import(
             "Рабочая копия изменилась во время копирования; импорт не отправлен",
         ));
     }
-    let ticket = json!({"approved":true,"action":"import","profile":o.profile,
+    let ticket = json!({"approved":true,"action":"import","profile":port.profile(),
         "profile_id":identity.profile.as_str(),"process":catalog["process"],"expires":expiry()?});
     job.publish(
         "request.json",
@@ -702,7 +745,7 @@ fn stage_import(
     let journal = ImportJournal {
         job_id: id,
         identity: identity.clone(),
-        profile: o.profile.clone().unwrap_or_default(),
+        profile: port.profile().to_owned(),
         process: catalog["process"].as_str().unwrap_or_default().to_owned(),
         output_directory: stream.output_directory.clone(),
         working_revision: permit.working_revision().into(),

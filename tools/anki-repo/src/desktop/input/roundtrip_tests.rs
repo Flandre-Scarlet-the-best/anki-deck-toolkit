@@ -1,7 +1,7 @@
 //! Синтетические проверки цикла input → output → Anki без Docker и без
 //! пользовательских данных: подготовка, сбои на каждой границе, журнал импорта,
 //! решения по readback и согласованная фиксация публикации.
-use super::super::publication::{self, Bridge, ImportJournal, Progress};
+use super::super::publication::{self, Bridge, ImportJournal, Port, Progress};
 use super::super::source::{self, VerifiedExport};
 use super::*;
 use crate::exchange::ProfileId;
@@ -1032,4 +1032,292 @@ fn command_entry_points_report_per_deck_outcomes_without_anki() {
         "failed"
     );
     assert!(!empty.path().join("decks").exists());
+}
+
+// ---- Оркестрация publish-output --apply через подменяемый порт ----
+
+/// Сценарий живых зависимостей: статусы job, свежий экспорт и readback.
+struct Scripted {
+    spool: PathBuf,
+    statuses: RefCell<VecDeque<&'static str>>,
+    submit_error: RefCell<Option<crate::desktop::DomainError>>,
+    submits: Cell<u32>,
+    fresh: RefCell<VecDeque<crate::desktop::Result<VerifiedExport>>>,
+    readback: RefCell<VecDeque<crate::desktop::Result<VerifiedExport>>>,
+}
+
+impl Scripted {
+    fn new(tmp: &TempDir, statuses: &[&'static str]) -> Self {
+        let spool = tmp.path().join("anki-data/toolkit-desktop/spool");
+        fs::create_dir_all(&spool).unwrap();
+        Self {
+            spool,
+            statuses: RefCell::new(statuses.iter().copied().collect()),
+            submit_error: RefCell::new(None),
+            submits: Cell::new(0),
+            fresh: RefCell::new(VecDeque::new()),
+            readback: RefCell::new(VecDeque::new()),
+        }
+    }
+    fn fresh(self, export: crate::desktop::Result<VerifiedExport>) -> Self {
+        self.fresh.borrow_mut().push_back(export);
+        self
+    }
+    fn readback(self, export: crate::desktop::Result<VerifiedExport>) -> Self {
+        self.readback.borrow_mut().push_back(export);
+        self
+    }
+    fn jobs(&self) -> Vec<PathBuf> {
+        fs::read_dir(&self.spool)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    }
+}
+
+fn unavailable(message: &str) -> crate::desktop::DomainError {
+    crate::desktop::external_error("anki_unavailable", message)
+}
+
+impl Bridge for Scripted {
+    fn status(&self, id: &str) -> crate::desktop::Result<Value> {
+        let mut statuses = self.statuses.borrow_mut();
+        let state = if statuses.len() > 1 {
+            statuses.pop_front().unwrap()
+        } else {
+            *statuses.front().expect("статус задан")
+        };
+        if state == "unavailable" {
+            return Err(unavailable("API недоступен"));
+        }
+        Ok(
+            json!({"state":state,"job":{"id":id,"action":"import","state":state,
+            "observer_process":"process-1","process":"process-1"}}),
+        )
+    }
+    fn submit(&self, _id: &str) -> crate::desktop::Result<Value> {
+        self.submits.set(self.submits.get() + 1);
+        match self.submit_error.borrow_mut().take() {
+            Some(e) => Err(e),
+            None => Ok(json!({"state":"queued"})),
+        }
+    }
+    fn renew(&self, _journal: &ImportJournal) -> crate::desktop::Result<()> {
+        Ok(())
+    }
+}
+
+impl Port for Scripted {
+    fn profile(&self) -> &str {
+        "Synthetic"
+    }
+    fn spool(&self) -> crate::desktop::Result<Directory> {
+        Directory::open(&self.spool).map_err(|e| unavailable(&e.to_string()))
+    }
+    fn fresh(
+        &self,
+        store: &mut Store,
+        _catalog: &Value,
+        _deck: &Value,
+        _key: &str,
+    ) -> crate::desktop::Result<Value> {
+        let export = self
+            .fresh
+            .borrow_mut()
+            .pop_front()
+            .expect("свежий экспорт задан")?;
+        store
+            .publish(&export)
+            .map_err(|e| unavailable(&e.to_string()))
+    }
+    fn readback(
+        &self,
+        _store: &mut Store,
+        _catalog: &Value,
+        _deck: &Value,
+        _key: &str,
+    ) -> crate::desktop::Result<VerifiedExport> {
+        self.readback
+            .borrow_mut()
+            .pop_front()
+            .expect("readback задан")
+    }
+}
+
+fn catalog() -> Value {
+    json!({"profile_id":PROFILE,"process":"process-1",
+        "decks":[{"id":7,"name":"Test::Deck","crowdanki_uuid":"deck-uuid-1"}]})
+}
+
+fn publish_with(store: &mut Store, v1: &VerifiedExport, port: &Scripted, catalog: &Value) -> Value {
+    let stream = stream(store, v1);
+    publication::apply_one(port, store, catalog, &stream, 1).unwrap()
+}
+
+#[test]
+fn apply_sends_exact_working_copy_once_and_publishes_only_after_matching_readback() {
+    let tmp = TempDir::new("orchestrate-happy");
+    let (mut store, v1, path) = edited(&tmp);
+    let key = v1.snapshot().identity().key();
+    let port = Scripted::new(&tmp, &["prepared", "succeeded"])
+        .fresh(Ok(export("v1", "fresh-1")))
+        .readback(Ok(export("agent V2", "readback-1")));
+    let result = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(result["state"], "published", "{result}");
+    assert_eq!(result["published"], true);
+    assert_eq!(result["fresh_input"]["source_sequence"], 2);
+    assert_eq!(port.submits.get(), 1);
+    // В spool ушли ровно байты B и билет, привязанный к profile_id.
+    let jobs = port.jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(
+        result["job_id"],
+        jobs[0].file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(tree(&jobs[0].join("source")), tree(&path));
+    let ticket: Value =
+        serde_json::from_slice(&fs::read(jobs[0].join("request.json")).unwrap()).unwrap();
+    assert_eq!(ticket["action"], "import");
+    assert_eq!(ticket["profile"], "Synthetic");
+    assert_eq!(ticket["profile_id"], PROFILE);
+    assert_eq!(ticket["process"], "process-1");
+    assert!(work_names(tmp.path(), &v1).is_empty(), "журнал закрыт");
+    assert!(!store.publication_pending(&key).unwrap());
+    audit_consistent(&store, &key);
+    // Опубликованное B стало базой: повтор ничего не отправляет.
+    let again = Scripted::new(&tmp, &["unavailable"]);
+    assert_eq!(
+        publish_with(&mut store, &v1, &again, &catalog())["state"],
+        "nothing_to_publish"
+    );
+    assert_eq!(again.submits.get(), 0);
+}
+
+#[test]
+fn apply_refuses_before_any_import_when_preconditions_fail() {
+    let tmp = TempDir::new("orchestrate-blocked");
+    let mut store = open(tmp.path());
+    let v1 = export("v1", "job-1");
+    store.publish(&v1).unwrap();
+    // Без подготовленной базы публикация запрещена.
+    let port = Scripted::new(&tmp, &["unavailable"]);
+    let blocked = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(blocked["reason"], "publication_blocked");
+    apply(&store, &v1).unwrap();
+    assert_eq!(
+        publish_with(&mut store, &v1, &port, &catalog())["state"],
+        "nothing_to_publish"
+    );
+    fs::write(
+        output(tmp.path(), &stream(&store, &v1)).join("deck.json"),
+        deck("B"),
+    )
+    .unwrap();
+
+    let mut other = catalog();
+    other["profile_id"] = json!("other-profile");
+    assert_eq!(
+        publish_with(&mut store, &v1, &port, &other)["reason"],
+        "profile_mismatch"
+    );
+    let mut empty = catalog();
+    empty["decks"] = json!([]);
+    assert_eq!(
+        publish_with(&mut store, &v1, &port, &empty)["reason"],
+        "deck_not_found_in_anki"
+    );
+
+    // Свежий экспорт не получен — импорт не отправлен.
+    let failing = Scripted::new(&tmp, &["unavailable"]).fresh(Err(unavailable("нет API")));
+    let result = publish_with(&mut store, &v1, &failing, &catalog());
+    assert_eq!(result["reason"], "freshness_unconfirmed");
+    assert_eq!(result["fresh_export_error"], "нет API");
+
+    // Anki изменилась после подготовки: новый C записан, импорт запрещён.
+    let changed = Scripted::new(&tmp, &["unavailable"]).fresh(Ok(export("anki edit", "fresh-2")));
+    let result = publish_with(&mut store, &v1, &changed, &catalog());
+    assert_eq!(result["reason"], "anki_changed_since_input");
+    assert_eq!(
+        stream(&store, &v1).current.snapshot,
+        *export("anki edit", "x").snapshot()
+    );
+
+    for port in [&port, &failing, &changed] {
+        assert_eq!(port.submits.get(), 0);
+        assert!(port.jobs().is_empty(), "spool не тронут");
+    }
+    assert!(work_names(tmp.path(), &v1).is_empty());
+}
+
+#[test]
+fn pending_import_resumes_the_same_job_without_resubmission() {
+    let tmp = TempDir::new("orchestrate-pending");
+    let (mut store, v1, _) = edited(&tmp);
+    let port = Scripted::new(&tmp, &["prepared", "queued"]).fresh(Ok(export("v1", "fresh-1")));
+    let first = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(first["state"], "pending", "{first}");
+    assert_eq!(first["reason"], "import_awaiting_user");
+    assert_eq!(port.submits.get(), 1);
+    assert_eq!(work_names(tmp.path(), &v1), ["publish.json"]);
+    let saved = work::load::<ImportJournal>(&work_dir(&store, &v1), PUBLISH)
+        .unwrap()
+        .unwrap();
+    assert!(saved.admission_started);
+    assert_eq!(saved.job_id, first["job_id"].as_str().unwrap());
+
+    // Повтор: тот же job, без свежего экспорта и без отправки; readback пока недоступен.
+    let resumed = Scripted::new(&tmp, &["succeeded"]).readback(Err(unavailable("нет API")));
+    let pending = publish_with(&mut store, &v1, &resumed, &catalog());
+    assert_eq!(pending["reason"], "readback_unconfirmed", "{pending}");
+    assert_eq!(pending["job_id"], first["job_id"]);
+    assert_eq!(pending["import_state"], "succeeded");
+    assert_eq!(resumed.submits.get(), 0);
+    let journal = work::load::<ImportJournal>(&work_dir(&store, &v1), PUBLISH)
+        .unwrap()
+        .unwrap();
+
+    let finished = Scripted::new(&tmp, &["unavailable"]).readback(Ok(export("agent V2", "rb")));
+    let published = publish_with(&mut store, &v1, &finished, &catalog());
+    assert_eq!(published["state"], "published", "{published}");
+    assert_eq!(finished.submits.get(), 0);
+
+    // Сбой после фиксации, но до удаления журнала: повтор распознаёт публикацию.
+    work::save(&work_dir(&store, &v1), PUBLISH, &journal).unwrap();
+    let recovered = publish_with(&mut store, &v1, &finished, &catalog());
+    assert_eq!(recovered["state"], "published", "{recovered}");
+    assert_eq!(recovered["recovered"], true);
+    assert!(work_names(tmp.path(), &v1).is_empty());
+}
+
+#[test]
+fn proven_unsubmitted_import_closes_journal_and_ticket() {
+    let tmp = TempDir::new("orchestrate-unsubmitted");
+    let (mut store, v1, _) = edited(&tmp);
+    let port = Scripted::new(&tmp, &["prepared"]).fresh(Ok(export("v1", "fresh-1")));
+    *port.submit_error.borrow_mut() = Some(crate::desktop::external_error(
+        "addons_not_ready",
+        "addons_not_ready",
+    ));
+    let result = publish_with(&mut store, &v1, &port, &catalog());
+    assert_eq!(result["state"], "import_not_submitted", "{result}");
+    assert_eq!(port.submits.get(), 1);
+    let jobs = port.jobs();
+    assert_eq!(jobs.len(), 1);
+    assert!(!jobs[0].join("request.json").exists(), "билет отозван");
+    assert!(work_names(tmp.path(), &v1).is_empty());
+
+    // Незавершённая подготовка блокирует импорт до prepare-output.
+    fs::write(
+        tmp.path()
+            .join("decks/.roundtrip")
+            .join(v1.snapshot().identity().key())
+            .join(PREPARE),
+        b"{}",
+    )
+    .unwrap();
+    let again = Scripted::new(&tmp, &["unavailable"]);
+    assert_eq!(
+        publish_with(&mut store, &v1, &again, &catalog())["reason"],
+        "prepare_recovery_pending"
+    );
 }
