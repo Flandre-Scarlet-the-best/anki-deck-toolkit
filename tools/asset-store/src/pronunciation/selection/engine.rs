@@ -105,32 +105,126 @@ fn proof_class(proof: PhoneticProof, forvo: bool) -> SelectionClass {
     }
 }
 
-/// Последняя экспертиза точных байтов кандидата для этой цели.
-fn audio_review_for<'a>(
-    batch: &'a SelectionBatch,
-    link: &TargetLink,
-    candidate: &PronunciationCandidate,
-) -> Option<&'a AudioReview> {
-    let sha = candidate.addressed_sha(&link.source_sha256);
-    batch.audio_reviews.iter().rev().find(|review| {
-        review.candidate_id == candidate.candidate_id
-            && review.audio_sha256 == sha
-            && review.surface == link.surface
-            && review.reading == link.reading
-            && review.link_generation == link.generation
-    })
+/// Индексы пакета, построенные один раз на прогон рекомендаций.
+///
+/// Без них оценка каждого кандидата делает линейные проходы по всем связям,
+/// исходникам и аудиоэкспертизам пакета: на корпусе из тысяч исходников это
+/// миллионы сравнений строк на одну команду. Порядок элементов пакета
+/// сохраняется, поэтому выбор кандидата не меняется.
+struct SelectionIndex<'a> {
+    sources: BTreeMap<&'a str, &'a AudioSource>,
+    links_by_surface: BTreeMap<&'a str, Vec<&'a TargetLink>>,
+    links_by_source: BTreeMap<&'a str, Vec<&'a TargetLink>>,
+    reviews_by_candidate: BTreeMap<&'a str, Vec<&'a AudioReview>>,
+    reviews_by_surface: BTreeMap<&'a str, Vec<&'a AudioReview>>,
 }
 
-/// Вхождение другого чтения той же записи пересекает интервал кандидата.
-fn overlaps_other_reading(batch: &SelectionBatch, link: &TargetLink, span: &CandidateSpan) -> bool {
-    batch.links.iter().any(|other| {
-        other.source_sha256 == link.source_sha256
-            && (other.surface != link.surface || other.reading != link.reading)
-            && other
-                .occurrences
-                .iter()
-                .any(|o| o.evidence == Evidence::Match && o.span.overlaps(span))
-    })
+impl<'a> SelectionIndex<'a> {
+    fn new(batch: &'a SelectionBatch) -> Self {
+        let mut sources: BTreeMap<&str, &AudioSource> = BTreeMap::new();
+        for source in &batch.sources {
+            // Первый исходник с этим SHA — как и последовательный поиск.
+            sources.entry(source.sha256.as_str()).or_insert(source);
+        }
+        let mut links_by_surface: BTreeMap<&str, Vec<&TargetLink>> = BTreeMap::new();
+        let mut links_by_source: BTreeMap<&str, Vec<&TargetLink>> = BTreeMap::new();
+        for link in &batch.links {
+            links_by_surface
+                .entry(link.surface.as_str())
+                .or_default()
+                .push(link);
+            links_by_source
+                .entry(link.source_sha256.as_str())
+                .or_default()
+                .push(link);
+        }
+        let mut reviews_by_candidate: BTreeMap<&str, Vec<&AudioReview>> = BTreeMap::new();
+        let mut reviews_by_surface: BTreeMap<&str, Vec<&AudioReview>> = BTreeMap::new();
+        for review in &batch.audio_reviews {
+            reviews_by_candidate
+                .entry(review.candidate_id.as_str())
+                .or_default()
+                .push(review);
+            reviews_by_surface
+                .entry(review.surface.as_str())
+                .or_default()
+                .push(review);
+        }
+        Self {
+            sources,
+            links_by_surface,
+            links_by_source,
+            reviews_by_candidate,
+            reviews_by_surface,
+        }
+    }
+
+    fn source(&self, sha: &str) -> Option<&'a AudioSource> {
+        self.sources.get(sha).copied()
+    }
+
+    /// Связи цели в порядке пакета.
+    fn links_of<'b>(
+        &'b self,
+        surface: &str,
+        reading: &'b str,
+    ) -> impl Iterator<Item = &'a TargetLink> + 'b {
+        self.links_by_surface
+            .get(surface)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |link| link.reading == reading)
+    }
+
+    /// Аудиоэкспертизы цели в порядке пакета.
+    fn reviews_of<'b>(
+        &'b self,
+        surface: &str,
+        reading: &'b str,
+    ) -> impl Iterator<Item = &'a AudioReview> + 'b {
+        self.reviews_by_surface
+            .get(surface)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |review| review.reading == reading)
+    }
+
+    /// Последняя экспертиза точных байтов кандидата для этой цели.
+    fn audio_review_for(
+        &self,
+        link: &TargetLink,
+        candidate: &PronunciationCandidate,
+    ) -> Option<&'a AudioReview> {
+        let sha = candidate.addressed_sha(&link.source_sha256);
+        self.reviews_by_candidate
+            .get(candidate.candidate_id.as_str())?
+            .iter()
+            .rev()
+            .find(|review| {
+                review.audio_sha256 == sha
+                    && review.surface == link.surface
+                    && review.reading == link.reading
+                    && review.link_generation == link.generation
+            })
+            .copied()
+    }
+
+    /// Вхождение другого чтения той же записи пересекает интервал кандидата.
+    fn overlaps_other_reading(&self, link: &TargetLink, span: &CandidateSpan) -> bool {
+        self.links_by_source
+            .get(link.source_sha256.as_str())
+            .is_some_and(|links| {
+                links.iter().any(|other| {
+                    (other.surface != link.surface || other.reading != link.reading)
+                        && other
+                            .occurrences
+                            .iter()
+                            .any(|o| o.evidence == Evidence::Match && o.span.overlaps(span))
+                })
+            })
+    }
 }
 
 pub(crate) fn assess_candidate(
@@ -138,7 +232,16 @@ pub(crate) fn assess_candidate(
     link: &TargetLink,
     candidate: &PronunciationCandidate,
 ) -> CandidateAssessment {
-    let source = batch.source(&link.source_sha256);
+    assess_candidate_with(&SelectionIndex::new(batch), link, candidate)
+}
+
+/// Оценка кандидата по уже построенным индексам пакета.
+fn assess_candidate_with(
+    index: &SelectionIndex<'_>,
+    link: &TargetLink,
+    candidate: &PronunciationCandidate,
+) -> CandidateAssessment {
+    let source = index.source(&link.source_sha256);
     let forvo = source.is_some_and(|s| s.forvo_for(&link.surface).is_some());
     let mut reasons = vec![if forvo {
         ReasonCode::ProvenanceForvo
@@ -183,14 +286,14 @@ pub(crate) fn assess_candidate(
             candidate.kind,
             CandidateKind::OccurrenceInterval | CandidateKind::ExtractedFragment
         )
-    }) && overlaps_other_reading(batch, link, span)
+    }) && index.overlaps_other_reading(link, span)
         && class < SelectionClass::NeedsUserConfirmation
     {
         reasons.push(ReasonCode::OverlapsOtherReading);
         class = SelectionClass::NeedsUserConfirmation;
     }
     // Реальная аудиоэкспертиза точных байтов меняет только классы, где её ждут.
-    if let Some(review) = audio_review_for(batch, link, candidate)
+    if let Some(review) = index.audio_review_for(link, candidate)
         && candidate.technical.usable
     {
         match review.verdict {
@@ -399,21 +502,23 @@ pub(crate) fn recommend(
     surface: &str,
     reading: &str,
 ) -> GroupRecommendation {
-    recommend_with_rejections(batch, surface, reading, &rejected_candidates(batch))
+    let index = SelectionIndex::new(batch);
+    let rejected = rejected_candidates(batch);
+    recommend_with_index(&index, &rejected, surface, reading)
 }
 
-fn recommend_with_rejections(
-    batch: &SelectionBatch,
+fn recommend_with_index(
+    index: &SelectionIndex<'_>,
+    rejected_candidates: &RejectedCandidates,
     surface: &str,
     reading: &str,
-    rejected_candidates: &RejectedCandidates,
 ) -> GroupRecommendation {
     let mut ranked = Vec::new();
-    for link in batch.links_of(surface, reading) {
-        let source = batch.source(&link.source_sha256);
+    for link in index.links_of(surface, reading) {
+        let source = index.source(&link.source_sha256);
         let votes = source.and_then(|s| s.forvo_votes_for(surface));
         for candidate in &link.candidates {
-            let mut assessment = assess_candidate(batch, link, candidate);
+            let mut assessment = assess_candidate_with(index, link, candidate);
             let rejected = rejected_candidates.contains(&(
                 surface.to_owned(),
                 reading.to_owned(),
@@ -463,7 +568,7 @@ fn recommend_with_rejections(
             ReasonCode::RejectedByDecision
         }]
     });
-    let fingerprint = group_fingerprint(batch, surface, reading, &candidates, class);
+    let fingerprint = group_fingerprint(index, surface, reading, &candidates, class);
     GroupRecommendation {
         surface: surface.into(),
         reading: reading.into(),
@@ -480,25 +585,21 @@ fn recommend_with_rejections(
 /// Отпечаток группы: связи, кандидаты (с байтами), экспертизы и итог.
 /// Изменение любого из них делает прежний снимок и решение устаревшими.
 fn group_fingerprint(
-    batch: &SelectionBatch,
+    index: &SelectionIndex<'_>,
     surface: &str,
     reading: &str,
     assessments: &[CandidateAssessment],
     class: SelectionClass,
 ) -> String {
-    let links: Vec<&TargetLink> = batch.links_of(surface, reading).collect();
+    let links: Vec<&TargetLink> = index.links_of(surface, reading).collect();
     let sources: Vec<&AudioSource> = links
         .iter()
         .map(|link| link.source_sha256.as_str())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .filter_map(|sha| batch.source(sha))
+        .filter_map(|sha| index.source(sha))
         .collect();
-    let reviews: Vec<&AudioReview> = batch
-        .audio_reviews
-        .iter()
-        .filter(|r| r.surface == surface && r.reading == reading)
-        .collect();
+    let reviews: Vec<&AudioReview> = index.reviews_of(surface, reading).collect();
     sha256_hex(
         serde_json::to_vec(&(
             POLICY_VERSION,
@@ -518,12 +619,13 @@ fn group_fingerprint(
 pub(crate) fn recommend_all(
     batch: &SelectionBatch,
 ) -> BTreeMap<(String, String), GroupRecommendation> {
+    let index = SelectionIndex::new(batch);
     let rejected = rejected_candidates(batch);
     batch
         .identities()
         .into_iter()
         .map(|(surface, reading)| {
-            let recommendation = recommend_with_rejections(batch, &surface, &reading, &rejected);
+            let recommendation = recommend_with_index(&index, &rejected, &surface, &reading);
             ((surface, reading), recommendation)
         })
         .collect()
