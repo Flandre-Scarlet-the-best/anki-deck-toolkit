@@ -901,6 +901,8 @@ pub struct StatusReport {
     /// Изменяющая операция выполняется прямо сейчас.
     pub operation_in_progress: bool,
     pub untouched: Vec<PathBuf>,
+    /// ID в реестре, которых нет в каталоге словарей: делают `ok` ложным.
+    pub unknown_registry_entries: Vec<String>,
 }
 
 fn survey(
@@ -920,6 +922,7 @@ fn survey(
         leftovers: Vec::new(),
         operation_in_progress: false,
         untouched: Vec::new(),
+        unknown_registry_entries: Vec::new(),
     };
     // Реестр читается под `active.lock`: иначе параллельная активация может
     // удалить версию, на которую ссылается уже прочитанный реестр.
@@ -973,10 +976,14 @@ fn survey(
             matches!(store.lock_operations(), Err(e) if e.code == Code::Busy);
         report.leftovers = store.leftovers(registry)?;
         report.untouched = store.foreign_entries()?;
-        for id in registry.dictionaries.keys() {
-            if catalog::find(id).is_none() {
-                report.ok = false;
-            }
+        report.unknown_registry_entries = registry
+            .dictionaries
+            .keys()
+            .filter(|id| catalog::find(id).is_none())
+            .cloned()
+            .collect();
+        if !report.unknown_registry_entries.is_empty() {
+            report.ok = false;
         }
     }
     Ok(report)

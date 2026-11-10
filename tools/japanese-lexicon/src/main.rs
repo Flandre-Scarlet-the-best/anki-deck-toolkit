@@ -239,6 +239,9 @@ fn print_status(report: &StatusReport) {
     for path in &report.untouched {
         println!("посторонняя запись (не трогается): {}", path.display());
     }
+    for id in &report.unknown_registry_entries {
+        println!("реестр ссылается на неизвестный словарь: {id}");
+    }
 }
 
 fn print_lookup(r: &LookupResult) {

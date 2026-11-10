@@ -827,6 +827,24 @@ fn lookup_output_is_deterministic_and_paginated() {
 }
 
 #[test]
+fn unknown_registry_entry_is_reported() {
+    let tmp = TempDir::new("unknown-entry");
+    let root = tmp.path().join("data");
+    let (loc, _) = installed(&root);
+    let path = root.join(store::REGISTRY_FILE);
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let entry = registry["dictionaries"]["jitendex"].clone();
+    registry["dictionaries"]["mystery"] = entry;
+    std::fs::write(&path, serde_json::to_vec(&registry).unwrap()).unwrap();
+
+    let verify = manager::verify(&loc, &all()).unwrap();
+    assert!(!verify.ok);
+    assert_eq!(verify.unknown_registry_entries, vec!["mystery"]);
+    assert!(verify.dictionaries.iter().all(|d| d.state == State::Ok));
+}
+
+#[test]
 fn empty_data_dir_is_honest() {
     let tmp = TempDir::new("empty");
     let root = tmp.path().join("never-created");
