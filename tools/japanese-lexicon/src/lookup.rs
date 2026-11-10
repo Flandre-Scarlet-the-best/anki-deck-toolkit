@@ -448,11 +448,12 @@ impl Lexicon {
         let status = match distinct.len() {
             1 => Status::SingleReading,
             n if n > 1 => Status::MultipleReadings,
+            // Кана без вывода чтения сомнительна сама по себе: словари этого не исправят.
+            _ if kana_analysis.is_some() => Status::Ambiguous,
             _ if !self.available(Role::Lexicon) => Status::SourceMissing,
             _ if has(EvidenceClass::KanjiReference) => Status::KanjiReferenceOnly,
             _ if has(EvidenceClass::ProperName) => Status::ProperNameOnly,
             _ if !redirects.is_empty() => Status::RedirectOnly,
-            _ if kana_analysis.is_some() => Status::Ambiguous,
             _ => Status::NotFound,
         };
 

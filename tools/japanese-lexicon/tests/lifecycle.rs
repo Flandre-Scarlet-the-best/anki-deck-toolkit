@@ -522,6 +522,10 @@ fn remove_one_keeps_the_rest_and_reinstall_restores_it() {
     let r = lookup(&root, "がっこう");
     assert_eq!(r.status, Status::SingleReading);
     assert_eq!(r.readings[0].class, EvidenceClass::SurfaceKana);
+    // Сомнительная кана остаётся сомнительной: Jitendex её не исправит.
+    let r = lookup(&root, "ｶﾒﾗ");
+    assert_eq!(r.status, Status::Ambiguous);
+    assert!(!r.kana.as_ref().unwrap().issues.is_empty());
     let r = lookup(&root, "生");
     assert_eq!(r.status, Status::SourceMissing);
     assert!(
@@ -813,6 +817,7 @@ fn empty_data_dir_is_honest() {
     );
     assert_eq!(lookup(&root, "生").missing_sources.len(), 4);
     assert_eq!(lookup(&root, "かな").status, Status::SingleReading);
+    assert_eq!(lookup(&root, "ｶﾅ").status, Status::Ambiguous);
     let status = manager::status(&location(&root)).unwrap();
     assert!(!status.exists);
     assert!(!root.exists(), "status не создаёт каталог");

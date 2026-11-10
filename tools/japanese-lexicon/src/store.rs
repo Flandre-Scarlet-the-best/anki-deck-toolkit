@@ -301,7 +301,11 @@ impl Store {
                     .map_err(|e| Error::io(root.display(), e))?
                     .filter_map(|e| e.ok())
                     .all(|e| e.file_name().to_string_lossy().starts_with(&owner_tmp));
-                if !empty {
+                if empty {
+                    store.write_owner()?;
+                } else if store.check_owner().is_err() {
+                    // Маркер мог появиться после первой проверки от параллельной
+                    // инициализации; без корректного маркера каталог чужой.
                     return Err(Error::new(
                         Code::NotOwned,
                         format!(
@@ -310,7 +314,6 @@ impl Store {
                         ),
                     ));
                 }
-                store.write_owner()?;
             }
             store.check_owner()?;
         } else {
