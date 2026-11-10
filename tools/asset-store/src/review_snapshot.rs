@@ -99,7 +99,7 @@ fn signature<R>(snapshot: &ReviewSnapshot<R>, format: &ReviewFormat, id: &str) -
     format!("@review\t{}\t{}\t{id}", format.schema, snapshot.batch_id)
 }
 
-fn decisions_template<R: ReviewRow>(
+pub(crate) fn decisions_template<R: ReviewRow>(
     snapshot: &ReviewSnapshot<R>,
     format: &ReviewFormat,
     id: &str,
@@ -211,6 +211,19 @@ pub(crate) fn read<R: ReviewRow>(
     id: &str,
     format: &ReviewFormat,
 ) -> Result<(ReviewSnapshot<R>, Vec<ReviewCell>), AssetError> {
+    read_with_decisions(open_directory, batch_id, id, format, None)
+}
+
+/// Как [`read`], но текст решений может прийти из отдельного файла
+/// (например, сохранённого страницей обзора). Он проверяется теми же
+/// правилами: подпись снимка, неизменные колонки, порядок и число строк.
+pub(crate) fn read_with_decisions<R: ReviewRow>(
+    open_directory: impl FnOnce(&str) -> Result<ArtifactDirectory, AssetError>,
+    batch_id: &str,
+    id: &str,
+    format: &ReviewFormat,
+    decisions: Option<&str>,
+) -> Result<(ReviewSnapshot<R>, Vec<ReviewCell>), AssetError> {
     crate::batch_runtime::validate_hash(id)?;
     let directory = open_directory(&directory_name(id))?;
     let encoded = directory.read("snapshot.json")?;
@@ -230,10 +243,15 @@ pub(crate) fn read<R: ReviewRow>(
             }
         }
     }
-    let bytes = directory.read("decisions.tsv")?;
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| invalid("файл решений должен быть UTF-8"))?;
-    let cells = parse_cells(&snapshot, format, id, text)?;
+    let cells = match decisions {
+        Some(text) => parse_cells(&snapshot, format, id, text)?,
+        None => {
+            let bytes = directory.read("decisions.tsv")?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| invalid("файл решений должен быть UTF-8"))?;
+            parse_cells(&snapshot, format, id, text)?
+        }
+    };
     Ok((snapshot, cells))
 }
 

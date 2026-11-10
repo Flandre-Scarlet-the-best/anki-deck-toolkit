@@ -877,7 +877,10 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
         ],
     ));
     assert_eq!(read["outcome"], "ok", "{read}");
-    assert_eq!(read["result"]["assets"][0]["consumer_filename"], "生.mp3");
+    assert_eq!(
+        read["result"]["assets"][0]["consumer_filename"],
+        "生_なま.mp3"
+    );
     assert!(
         read["result"]["assets"][0].get("bytes").is_none(),
         "JSON просмотра не содержит байтов"
@@ -902,10 +905,10 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
     assert_eq!(exported["outcome"], "ok", "{exported}");
     assert_eq!(
         exported["result"]["exported"][0]["consumer_filename"],
-        "生.mp3"
+        "生_なま.mp3"
     );
     assert_eq!(exported["result"]["exported"][0]["written"], true);
-    let written = fs::read(chosen.join("生.mp3")).unwrap();
+    let written = fs::read(chosen.join("生_なま.mp3")).unwrap();
     assert_eq!(
         sha256_hex(&written),
         exported["result"]["exported"][0]["sha256"]
@@ -1102,6 +1105,70 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
     ));
     assert_eq!(applied["outcome"], "ok", "{applied}");
     assert_eq!(applied["result"]["changed"], false);
+    // Файл решений, сохранённый страницей вне каталога снимка, проходит те же
+    // проверки; не-UTF-8 файл отвергается до применения.
+    let saved = f.root.join(format!("decisions-{fresh_id}.tsv"));
+    fs::copy(
+        f.root.join(format!(
+            ".asset-store/pronunciation-audio/.runtime/batches/sel/review-{fresh_id}/decisions.tsv"
+        )),
+        &saved,
+    )
+    .unwrap();
+    let from_page = json(&selection(
+        &f,
+        &[
+            "review-apply",
+            "--batch-id",
+            "sel",
+            "--review-id",
+            fresh_id,
+            "--decisions-file",
+            saved.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(from_page["outcome"], "ok", "{from_page}");
+    assert_eq!(from_page["result"]["changed"], false);
+    fs::write(&saved, [0xff, 0xfe]).unwrap();
+    let broken = json(&selection(
+        &f,
+        &[
+            "review-apply",
+            "--batch-id",
+            "sel",
+            "--review-id",
+            fresh_id,
+            "--decisions-file",
+            saved.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(broken["outcome"], "error", "{broken}");
+    // Материализация без выбранных интервалов ничего не создаёт, а адресная
+    // для пары с выбранным исходником — отказ без изменений.
+    let materialized = json(&selection(&f, &["materialize", "--batch-id", "sel"]));
+    assert_eq!(materialized["outcome"], "ok", "{materialized}");
+    assert!(
+        materialized["result"]["materialized"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let addressed = json(&selection(
+        &f,
+        &[
+            "materialize",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "なま",
+        ],
+    ));
+    assert_eq!(
+        addressed["error"]["code"], "invalid_transition",
+        "{addressed}"
+    );
     // Явная публикация исходника без заявленного прослушивания: не Verified.
     let promoted = json(&selection(
         &f,
@@ -1145,6 +1212,54 @@ fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
         ],
     );
     assert_eq!(missing.status.code(), Some(2));
+
+    // Режим проверки фиксируется журналом; решение пользователя действует в
+    // любом режиме, а агентское в ручном режиме не применяется.
+    let delegated = json(&selection(
+        &f,
+        &[
+            "review-mode",
+            "--batch-id",
+            "sel",
+            "--mode",
+            "delegated",
+            "--agent-id",
+            "codex-agent",
+            "--agent-trust",
+            "agent-selected",
+            "--statement",
+            "решай сам",
+        ],
+    ));
+    assert_eq!(delegated["outcome"], "ok", "{delegated}");
+    assert_eq!(delegated["result"]["changed"], true);
+    let manual = json(&selection(
+        &f,
+        &[
+            "review-mode",
+            "--batch-id",
+            "sel",
+            "--mode",
+            "manual",
+            "--statement",
+            "проверю сам",
+        ],
+    ));
+    assert_eq!(manual["outcome"], "ok", "{manual}");
+    assert_eq!(manual["result"]["grant"]["mode"], "manual_user");
+    let still_read = json(&selection(
+        &f,
+        &[
+            "read",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+        ],
+    ));
+    assert_eq!(still_read["outcome"], "ok", "{still_read}");
 }
 
 /// Отказ отдельного файла при `link --intake-missing` остаётся исходом этого

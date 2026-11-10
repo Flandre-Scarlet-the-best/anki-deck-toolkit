@@ -3734,7 +3734,11 @@ fn validate_manifest(
                 &record.consumer_filename,
                 record.format,
             )?;
-            if record.consumer_filename != expected_location.consumer_filename {
+            if !policy.record_consumer_filename_matches(
+                &record.identity,
+                &record.consumer_filename,
+                &expected_location.consumer_filename,
+            ) {
                 return Err(AssetError::new(
                     ErrorCode::ManifestCorrupt,
                     format!(
@@ -3745,7 +3749,14 @@ fn validate_manifest(
             }
         }
         policy.validate_record_evidence(record)?;
-        if !consumer_names.insert(policy.consumer_name_key(&expected_location.consumer_filename))
+        // В схемах прежней раскладки `consumer_filename` может отсутствовать:
+        // имя записи там задаёт расположение домена.
+        let consumer_filename = if manifest.schema_version < NESTED_LAYOUT_SCHEMA_VERSION {
+            &expected_location.consumer_filename
+        } else {
+            &record.consumer_filename
+        };
+        if !consumer_names.insert(policy.consumer_name_key(consumer_filename))
             && !policy.allows_consumer_name_overlap()
         {
             return Err(AssetError::new(
@@ -4294,7 +4305,11 @@ fn remove_record_from_area(
     let (asset_parent, name) = open_storage_parent(root, &record.storage_path, false)?;
     let location = policy.canonical_location(&record.identity, &record.sha256, record.format)?;
     if record.storage_path != location.storage_path
-        || record.consumer_filename != location.consumer_filename
+        || !policy.record_consumer_filename_matches(
+            &record.identity,
+            &record.consumer_filename,
+            &location.consumer_filename,
+        )
     {
         return Err(AssetError::new(
             ErrorCode::ManifestCorrupt,
@@ -4833,7 +4848,11 @@ fn checked_asset_file(
     let expected = policy.canonical_location(&record.identity, &record.sha256, record.format)?;
     validate_relative_path(&record.storage_path, &expected.storage_path)?;
     validate_record_consumer_filename(record)?;
-    if record.consumer_filename != expected.consumer_filename {
+    if !policy.record_consumer_filename_matches(
+        &record.identity,
+        &record.consumer_filename,
+        &expected.consumer_filename,
+    ) {
         return Err(AssetError::new(
             ErrorCode::ManifestCorrupt,
             "consumer_filename не совпадает с каноническим расположением домена",
@@ -5655,9 +5674,12 @@ fn recover_removal(
         )
     })?;
     validate_relative_path(&transaction.record.storage_path, &expected.storage_path)?;
-    if transaction.record.consumer_filename != expected.consumer_filename
-        && !(manifest.schema_version < NESTED_LAYOUT_SCHEMA_VERSION
-            && transaction.record.consumer_filename.is_empty())
+    if !policy.record_consumer_filename_matches(
+        &transaction.record.identity,
+        &transaction.record.consumer_filename,
+        &expected.consumer_filename,
+    ) && !(manifest.schema_version < NESTED_LAYOUT_SCHEMA_VERSION
+        && transaction.record.consumer_filename.is_empty())
     {
         return Err(AssetError::new(
             ErrorCode::ManifestCorrupt,

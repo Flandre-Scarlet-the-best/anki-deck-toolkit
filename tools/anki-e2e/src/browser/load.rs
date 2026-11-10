@@ -227,8 +227,12 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             let bytes = runtime
                 .read_blob(&acquisition.blob)
                 .map_err(|e| e.message)?;
-            evidence_ok &= saved.request.surface == *surface
-                && saved.request.reading == *reading
+            let Some(request) = &saved.request else {
+                evidence_ok = false;
+                continue;
+            };
+            evidence_ok &= request.surface == *surface
+                && request.reading == *reading
                 && saved.outcome.as_ref().is_some_and(|o| o.code == "imported")
                 && acquisition.evidence.selected_record_id == *record
                 && acquisition.evidence.page_url == asset_store::forvo::word_url(surface)
@@ -239,7 +243,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
                 && acquisition.evidence.attempts[0].code == "downloaded"
                 && crate::util::sha256_hex(&bytes) == expected_sha
                 && integrity.iter().any(|r| {
-                    r.identity == saved.request.identity()
+                    r.identity == request.identity()
                         && r.sha256 == expected_sha
                         && r.lifecycle.as_str() != "verified"
                         && std::fs::read(store.root().join(".runtime").join(&r.storage_path))

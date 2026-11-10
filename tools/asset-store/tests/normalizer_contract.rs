@@ -1729,6 +1729,7 @@ fn derived_record_keeps_forvo_provenance_of_the_source() {
     let acquisition = Acquisition {
         bytes: padded().to_vec(),
         evidence: ForvoEvidence {
+            acquisition_mode: None,
             schema_version: 1,
             page_url: word_url(&request.surface),
             downloaded_sha256: sha256_hex(padded()),

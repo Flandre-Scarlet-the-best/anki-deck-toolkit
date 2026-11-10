@@ -259,8 +259,11 @@ pub fn intake_paths(
     intake_inputs(store, batch_id, inputs, hint.as_deref())
 }
 
-/// Принимает исходники завершённых получений Forvo-пакета того же хранилища.
-/// Чтение плана сохраняется только как подсказка.
+/// Принимает исходники Forvo-пакета того же хранилища: и запись прежнего
+/// пути с парой, и все записи полного сбора по написанию. Чтение плана
+/// прежнего пути сохраняется только как подсказка; у полного сбора чтения нет.
+/// Одинаковые байты разных записей становятся одним исходником с несколькими
+/// происхождениями (ID записи, диктор, свидетельство каждой сохраняются).
 pub fn intake_forvo_batch(
     store: &AssetStore,
     batch_id: &str,
@@ -279,12 +282,15 @@ pub fn intake_forvo_batch(
     // читаются по одному: набор не требует держать все MP3 в памяти.
     let mut acquisitions = Vec::new();
     for item in &forvo.items {
-        if let Some(acquisition) = &item.acquisition {
+        let surface = item.surface().to_owned();
+        let plan_reading = item.request.as_ref().map(|r| r.reading.clone());
+        for acquisition in item.acquisition.iter().chain(&item.collected) {
             acquisition
                 .evidence
-                .validate(&item.request, &acquisition.blob.sha256)?;
+                .validate(&surface, &acquisition.blob.sha256)?;
             acquisitions.push((
-                item.request.clone(),
+                surface.clone(),
+                plan_reading.clone(),
                 acquisition.evidence.clone(),
                 acquisition.blob.clone(),
             ));
@@ -296,27 +302,28 @@ pub fn intake_forvo_batch(
     let mut changed = false;
     let mut batch = stored.unwrap_or_else(|| SelectionBatch::new(batch_id));
     let mut report = IntakeReport::default();
-    for (request, evidence, blob) in acquisitions {
+    for (surface, plan_reading, evidence, blob) in acquisitions {
         let bytes = forvo_runtime.read_blob_with_limit(&blob, MAX_AUDIO_BYTES)?;
+        let record_id = evidence.selected_record_id.clone();
         let origin = SourceOrigin::ForvoBatch {
             batch_id: forvo_batch_id.into(),
             evidence,
-            plan_reading: request.reading.clone(),
-            surface: Some(request.surface.clone()),
+            plan_reading,
+            surface: Some(surface.clone()),
         };
         match add_source(
             &runtime,
             &mut batch,
             &bytes,
             origin,
-            Some(&request.surface),
+            Some(&surface),
             &mut report,
         ) {
             Ok(true) => changed = true,
             Ok(false) => {}
             Err(error) if error.code == ErrorCode::InvalidTransition => return Err(error),
             Err(error) => report.rejected.push(IntakeRejection {
-                source_name: format!("forvo:{}", request.surface),
+                source_name: format!("forvo:{surface}:{record_id}"),
                 code: error.code.as_str().into(),
                 message: error.message,
             }),
@@ -346,7 +353,7 @@ pub(crate) fn link_id(source_sha: &str, surface: &str, reading: &str) -> String 
 /// отменять точное решение пользователя. Вхождение остаётся в поле
 /// кандидата и учитывается при оценке, а интервал различает варианты
 /// `OccurrenceInterval` своими границами.
-fn candidate_id(
+pub(crate) fn candidate_id(
     link_id: &str,
     kind: CandidateKind,
     sha: &str,
@@ -455,6 +462,7 @@ pub fn link_target(
                     }),
                     span: None,
                     occurrence: None,
+                    derivation: None,
                     technical: TechnicalGate {
                         usable: true,
                         code: "source_probe_ok".into(),
@@ -611,6 +619,7 @@ fn build_link(
         }),
         span: None,
         occurrence: selected,
+        derivation: None,
         technical: TechnicalGate {
             usable: source_usable,
             code: if source_usable {
@@ -653,6 +662,7 @@ fn build_link(
             audio: Some(audio),
             span: None,
             occurrence: selected,
+            derivation: None,
             technical: TechnicalGate {
                 usable: true,
                 code: "balanced_selected".into(),
@@ -676,6 +686,7 @@ fn build_link(
             .and_then(|p| p.output_span)
             .filter(|s| s.start < s.end)
             .map(|s| span_of(s.start, s.end));
+        let technical = output_gate(kind, span.as_ref(), passed);
         candidates.push(PronunciationCandidate {
             candidate_id: candidate_id(&id, kind, &audio.sha256, span.as_ref()),
             kind,
@@ -684,15 +695,8 @@ fn build_link(
             occurrence: result
                 .selected_occurrence
                 .filter(|i| occurrences.iter().any(|o| o.index == *i)),
-            technical: TechnicalGate {
-                usable: passed,
-                code: if passed {
-                    "post_validation_passed"
-                } else {
-                    "post_validation_failed"
-                }
-                .into(),
-            },
+            derivation: None,
+            technical,
         });
     }
     if matches!(
@@ -711,6 +715,7 @@ fn build_link(
                 audio: None,
                 span: Some(occurrence.span),
                 occurrence: Some(occurrence.index),
+                derivation: None,
                 technical: TechnicalGate {
                     usable: true,
                     code: "interval_not_extracted".into(),
@@ -768,6 +773,51 @@ pub(crate) fn build_link_for_test(
 pub type SourceReader<'a> = dyn FnMut(&Path) -> Result<Vec<u8>, AssetError> + 'a;
 
 /// Попытка выйти за защищённую область — ошибка операции, а не исход файла.
+/// Технический гейт итогового кандидата распознавателя. Фрагмент без границ
+/// не доказывает свою производную и не может быть продвинут, поэтому он
+/// отклоняется до выбора, а не после него; исправляет это только пересчёт
+/// распознавания.
+pub(crate) fn output_gate(
+    kind: CandidateKind,
+    span: Option<&CandidateSpan>,
+    post_validation_passed: bool,
+) -> TechnicalGate {
+    let code = if kind == CandidateKind::ExtractedFragment && span.is_none() {
+        "fragment_span_missing"
+    } else if post_validation_passed {
+        "post_validation_passed"
+    } else {
+        "post_validation_failed"
+    };
+    TechnicalGate {
+        usable: code == "post_validation_passed",
+        code: code.into(),
+    }
+}
+
+/// Материализованные кандидаты прежней связи, интервал которых остался тем же
+/// кандидатом (те же связь, исходник и границы): их байты не теряются при
+/// повторном связывании. Идентификатор интервала не зависит от номера
+/// вхождения, а новый пакет распознавания может пронумеровать вхождения иначе,
+/// поэтому номер берётся из нового интервала.
+pub(crate) fn carried_materialized(
+    previous: &[PronunciationCandidate],
+    fresh: &[PronunciationCandidate],
+) -> Vec<PronunciationCandidate> {
+    previous
+        .iter()
+        .filter_map(|candidate| {
+            let derivation = candidate.derivation.as_ref()?;
+            let interval = fresh
+                .iter()
+                .find(|n| n.candidate_id == derivation.from_candidate_id)?;
+            let mut kept = candidate.clone();
+            kept.occurrence = interval.occurrence;
+            Some(kept)
+        })
+        .collect()
+}
+
 pub(crate) fn is_boundary_refusal(code: ErrorCode) -> bool {
     matches!(
         code,
@@ -956,6 +1006,8 @@ pub fn link_recognizer(
                         .checked_add(1)
                         .ok_or_else(|| invalid("исчерпаны поколения связи"))?;
                 }
+                let kept = carried_materialized(&existing.candidates, &link.candidates);
+                link.candidates.extend(kept);
                 if *existing != link {
                     rechanged = true;
                 }
@@ -1023,12 +1075,27 @@ impl GroupFilter {
         decision: Option<&SelectionDecision>,
     ) -> bool {
         let selected = decision.is_some_and(|d| decision_is_effective(index, batch, d));
+        let ready = selected
+            && decision
+                .and_then(|d| selection_readiness(index, batch, d))
+                .is_some_and(|r| r.is_ready());
         let deferred = decision.is_some_and(|d| matches!(d.action, DecisionAction::Defer));
         match self {
             Self::All => true,
             Self::Undecided => !selected,
+            // Выбранная, но ещё не готовая к выдаче цель (интервал без
+            // проверенного MP3, отказ материализации, отозванная готовность)
+            // остаётся нерешённой.
             Self::Unresolved => {
-                !selected && (deferred || recommendation.class > SelectionClass::AgentSelectable)
+                !ready
+                    && (selected
+                        || deferred
+                        || !batch.automatically_resolvable(
+                            recommendation.class,
+                            recommendation
+                                .reasons
+                                .contains(&ReasonCode::AudioReviewSupports),
+                        ))
             }
             Self::Class(class) => recommendation.class == class,
         }
@@ -1051,7 +1118,10 @@ pub struct GroupView<'a> {
     pub reading: &'a str,
     pub recommendation: &'a GroupRecommendation,
     pub decision: Option<&'a SelectionDecision>,
+    /// Решение действительно (точный кандидат, полномочия, режим пакета).
     pub selection_effective: bool,
+    /// Готовность к выдаче: существует ли проверенный MP3 этой цели.
+    pub readiness: Option<Readiness>,
     pub candidates: Vec<CandidateView<'a>>,
     pub links: Vec<serde_json::Value>,
     pub sources: Vec<SourceView<'a>>,
@@ -1075,6 +1145,8 @@ pub struct StatusView<'a> {
     pub batch_id: &'a str,
     pub revision: u64,
     pub policy: &'static str,
+    /// Действующий режим проверки пакета (`null` — не закреплён).
+    pub review_mode: Option<&'a ReviewModeGrant>,
     /// Пакет содержит текст ASR, метрики и SHA. Получатель, у которого есть
     /// только этот документ, запись не слушал и не вправе это утверждать.
     pub perception_notice: &'static str,
@@ -1119,6 +1191,9 @@ pub(crate) fn group_view<'a>(
         selection_effective: batch
             .current_decision(&recommendation.surface, &recommendation.reading)
             .is_some_and(|d| decision_is_effective(index, batch, d)),
+        readiness: batch
+            .current_decision(&recommendation.surface, &recommendation.reading)
+            .and_then(|d| selection_readiness(index, batch, d)),
         candidates,
         links: batch
             .links_of(&recommendation.surface, &recommendation.reading)
@@ -1187,11 +1262,13 @@ pub fn status_value(
         if let Some(decision) = decision {
             let kind = match decision.action {
                 DecisionAction::Select { .. } => {
-                    if decision_is_effective(&index, &batch, decision) {
-                        *decided.entry(decision.authority.kind()).or_insert(0) += 1;
-                        "selected"
-                    } else {
-                        "selection_expired"
+                    match selection_readiness(&index, &batch, decision) {
+                        Some(readiness) if readiness.is_ready() => {
+                            *decided.entry(decision.authority.kind()).or_insert(0) += 1;
+                            "selected"
+                        }
+                        Some(readiness) => readiness.disposition(),
+                        None => "selection_expired",
                     }
                 }
                 DecisionAction::RejectCandidate { .. } => "candidate_rejected",
@@ -1210,6 +1287,7 @@ pub fn status_value(
         batch_id: &batch.batch_id,
         revision: batch.revision,
         policy: POLICY_VERSION,
+        review_mode: batch.review_mode(),
         perception_notice: PERCEPTION_NOTICE,
         sources: batch.sources.len(),
         links: batch.links.len(),
@@ -1235,6 +1313,11 @@ pub struct AutoSelectReport {
     pub already_decided: usize,
     /// Цели, оставшиеся без решения, по классам.
     pub pending: BTreeMap<&'static str, Vec<(String, String)>>,
+    /// Выбранные, но не готовые к выдаче цели по состоянию готовности
+    /// (например, интервал ждёт `selection materialize`).
+    pub not_ready: BTreeMap<&'static str, Vec<(String, String)>>,
+    /// Действующий режим проверки, по которому принимались решения.
+    pub review_mode: Option<ReviewMode>,
     pub revision: u64,
 }
 
@@ -1254,10 +1337,19 @@ pub(crate) fn plan_auto_select(
     let mut decisions = Vec::new();
     for recommendation in recommendations.values() {
         let (surface, reading) = (&recommendation.surface, &recommendation.reading);
-        if batch.current_decision(surface, reading).is_some_and(|d| {
+        if let Some(current) = batch.current_decision(surface, reading).filter(|d| {
             matches!(d.action, DecisionAction::Defer) || decision_is_effective(&index, batch, d)
         }) {
             report.already_decided += 1;
+            if let Some(readiness) =
+                selection_readiness(&index, batch, current).filter(|r| !r.is_ready())
+            {
+                report
+                    .not_ready
+                    .entry(readiness.disposition())
+                    .or_default()
+                    .push((surface.clone(), reading.clone()));
+            }
             continue;
         }
         let best = recommendation.candidates.first().filter(|c| {
@@ -1299,6 +1391,22 @@ pub(crate) fn plan_auto_select(
             }
             _ => None,
         };
+        // Режим проверки пакета ограничивает полномочия: решение, которого
+        // он не разрешает, остаётся ожидающим, а не принимается молча.
+        let authority = authority.filter(|a| {
+            let permitted = batch.mode_permits(a);
+            if !permitted {
+                match a {
+                    DecisionAuthority::DeterministicAutomation { .. } => {
+                        report.selected_deterministic -= 1
+                    }
+                    DecisionAuthority::AgentEvidence { .. } => report.selected_agent_evidence -= 1,
+                    DecisionAuthority::AgentAudioModel { .. } => report.selected_agent_audio -= 1,
+                    _ => {}
+                }
+            }
+            permitted
+        });
         match (authority, best) {
             (Some(authority), Some(best)) => {
                 let (link, candidate) = index
@@ -1355,7 +1463,35 @@ pub fn auto_select(
     }
     let mut runtime = open(store.root(), batch_id)?;
     let mut batch = load_existing(&mut runtime)?;
+    // Делегированный режим сам называет агента; явный `--agent` обязан с ним
+    // совпадать, а в ручном режиме агентских решений нет вовсе.
+    let delegated;
+    let agent = match (batch.review_mode(), agent) {
+        (Some(grant), Some(policy)) if grant.mode == ReviewMode::ManualUser => {
+            return Err(AssetError::new(
+                ErrorCode::InvalidValidationEvidence,
+                format!(
+                    "пакет в ручном режиме проверки: агент {} не принимает решений; используйте review-export",
+                    policy.agent
+                ),
+            ));
+        }
+        (Some(grant), Some(policy)) if grant.agent.as_deref() != Some(policy.agent.as_str()) => {
+            return Err(AssetError::new(
+                ErrorCode::InvalidValidationEvidence,
+                "полномочия пакета делегированы другому агенту",
+            ));
+        }
+        (Some(grant), None) if grant.mode == ReviewMode::DelegatedAgent => {
+            delegated = AgentPolicy {
+                agent: grant.agent.clone().expect("делегирование называет агента"),
+            };
+            Some(&delegated)
+        }
+        (_, agent) => agent,
+    };
     let (decisions, mut report) = plan_auto_select(&batch, agent);
+    report.review_mode = batch.review_mode().map(|g| g.mode);
     let index = SelectionIndex::new(&batch);
     if !decisions.is_empty() {
         // До записи всех решений проверяем реальные blob для экспертиз,
@@ -1390,6 +1526,125 @@ pub fn auto_select(
     }
     report.revision = batch.revision;
     Ok(report)
+}
+
+/// Выбор режима проверки пакета пользователем.
+pub struct ReviewModeRequest {
+    pub mode: ReviewMode,
+    pub agent: Option<String>,
+    pub agent_trust: Option<ConsumerTrustPolicy>,
+    /// Канал, по которому пользователь выразил выбор (`agent-dialog`).
+    pub channel: String,
+    /// Точная реплика пользователя: хранится только её SHA-256.
+    pub statement: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReviewModeReport {
+    pub grant: ReviewModeGrant,
+    pub changed: bool,
+    pub revision: u64,
+    /// Агентские решения, которые перестали действовать в новом режиме.
+    pub agent_decisions_suspended: usize,
+    /// Краткие следующие шаги для агента.
+    pub next_steps: Vec<String>,
+}
+
+/// Фиксирует выбранный пользователем режим проверки пакета. Режим проверяется
+/// при каждом решении, а также при чтении, экспорте и публикации: смена
+/// режима сразу приостанавливает агентские решения, которых он не разрешает
+/// (журнал решений не переписывается).
+pub fn set_review_mode(
+    store: &AssetStore,
+    batch_id: &str,
+    request: ReviewModeRequest,
+) -> Result<ReviewModeReport, AssetError> {
+    if request.statement.trim().is_empty() || request.statement.len() > 4096 {
+        return Err(AssetError::new(
+            ErrorCode::InvalidIdentity,
+            "нужна точная реплика пользователя (1–4096 байт); хранится только её SHA-256",
+        ));
+    }
+    let mut runtime = open(store.root(), batch_id)?;
+    let mut batch = load_existing(&mut runtime)?;
+    let mut grant = ReviewModeGrant {
+        mode: request.mode,
+        agent: request.agent,
+        agent_trust: request.agent_trust,
+        channel: request.channel,
+        statement_sha256: sha256_hex(request.statement.as_bytes()),
+        state_revision: batch.revision + 1,
+        recorded_at_unix_ms: recorded_at(std::time::SystemTime::now())?,
+    };
+    let same = batch.review_mode().is_some_and(|current| {
+        current.mode == grant.mode
+            && current.agent == grant.agent
+            && current.agent_trust == grant.agent_trust
+            && current.statement_sha256 == grant.statement_sha256
+    });
+    let index = SelectionIndex::new(&batch);
+    let effective_before: Vec<(String, String)> = batch
+        .identities()
+        .into_iter()
+        .filter(|(s, r)| {
+            batch
+                .current_decision(s, r)
+                .is_some_and(|d| !d.authority.is_user() && decision_is_effective(&index, &batch, d))
+        })
+        .collect();
+    let changed = !same;
+    if changed {
+        let mut probe = batch.clone();
+        probe.review_modes.push(grant.clone());
+        probe.revision += 1;
+        probe.validate().map_err(|_| {
+            AssetError::new(
+                ErrorCode::InvalidIdentity,
+                "delegated_agent требует --agent и --agent-trust human-or-audio-model|agent-selected; manual_user — без них",
+            )
+        })?;
+        batch.review_modes.push(grant.clone());
+        save(&mut runtime, &mut batch)?;
+    } else {
+        grant = batch.review_mode().expect("режим совпал").clone();
+    }
+    let index = SelectionIndex::new(&batch);
+    let suspended = effective_before
+        .iter()
+        .filter(|(s, r)| {
+            batch
+                .current_decision(s, r)
+                .is_some_and(|d| !decision_is_effective(&index, &batch, d))
+        })
+        .count();
+    let next_steps = match grant.mode {
+        ReviewMode::DelegatedAgent => vec![
+            format!(
+                "selection auto-select --batch-id {batch_id}: агент {} принимает разрешённые решения без вопроса по каждому кандидату",
+                grant.agent.as_deref().unwrap_or_default()
+            ),
+            format!("selection materialize --batch-id {batch_id}: готовые MP3 выбранных интервалов"),
+            format!(
+                "selection status --batch-id {batch_id} --filter unresolved: остаток с причинами и следующими действиями"
+            ),
+        ],
+        ReviewMode::ManualUser => vec![
+            format!(
+                "selection review-export --batch-id {batch_id}: локальная страница прослушивания и выбора"
+            ),
+            "передайте пользователю путь index.html; после выбора он сохранит файл решений и сообщит его путь".into(),
+            format!(
+                "selection review-apply --batch-id {batch_id} --review-id <id> --decisions-file <путь>: применение только явного выбора"
+            ),
+        ],
+    };
+    Ok(ReviewModeReport {
+        grant,
+        changed,
+        revision: batch.revision,
+        agent_decisions_suspended: suspended,
+        next_steps,
+    })
 }
 
 /// Адресное решение: одна цель, один точный кандидат и SHA.
@@ -1629,11 +1884,180 @@ fn validate_effective_selection<'a>(
             "решение не относится к точной паре, кандидату, SHA и интервалу",
         ));
     }
+    if !batch.mode_permits(&decision.authority) {
+        return Err(AssetError::new(
+            ErrorCode::InvalidValidationEvidence,
+            format!(
+                "действующий режим проверки пакета не признаёт решение вида {}",
+                decision.authority.kind()
+            ),
+        ));
+    }
     let assessment = engine::assess_candidate_with(index, link, candidate);
     if !decision.authority.is_user() {
         validate_agent_authority(batch, link, candidate, &decision.authority, &assessment)?;
     }
     Ok((link, candidate, assessment))
+}
+
+/// Готовность выбранной цели к выдаче. Отдельна от действительности решения:
+/// адресно выбранный интервал без проверенного MP3 — не готовый результат.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Readiness {
+    /// Проверенные байты существуют: `candidate_id` — что именно выдаётся.
+    Ready {
+        candidate_id: String,
+        sha256: String,
+    },
+    /// Выбран интервал; нужен `selection materialize`.
+    PendingMaterialization,
+    /// Последняя материализация не удалась; цель не выдаётся.
+    MaterializationFailed { code: String },
+    /// Байты есть, но решение агента требует поддерживающей аудиоэкспертизы
+    /// именно материализованных байтов (`selection audio-review`).
+    SemanticCheckRequired { candidate_id: String },
+    /// Экспертиза материализованных байтов противоречит цели: готовность отозвана.
+    SemanticContradicted { candidate_id: String },
+}
+
+impl Readiness {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
+    pub(crate) fn disposition(&self) -> &'static str {
+        match self {
+            Self::Ready { .. } => "selected",
+            Self::PendingMaterialization => "selected_pending_materialization",
+            Self::MaterializationFailed { .. } => "selected_materialization_failed",
+            Self::SemanticCheckRequired { .. } => "selected_semantic_check_required",
+            Self::SemanticContradicted { .. } => "selected_semantic_contradicted",
+        }
+    }
+
+    fn refusal(&self, surface: &str, reading: &str) -> AssetError {
+        let (code, text) = match self {
+            Self::Ready { .. } => ("ready", "готово"),
+            Self::PendingMaterialization => (
+                "interval_not_materialized",
+                "выбран интервал без извлечённого MP3: выполните selection materialize",
+            ),
+            Self::MaterializationFailed { .. } => (
+                "materialization_failed",
+                "материализация выбранного интервала не удалась: исходник и журнал сохранены, повторите materialize или выберите другой вариант",
+            ),
+            Self::SemanticCheckRequired { .. } => (
+                "semantic_check_required",
+                "решение агента требует поддерживающей аудиоэкспертизы материализованного MP3",
+            ),
+            Self::SemanticContradicted { .. } => (
+                "semantic_contradicted",
+                "аудиоэкспертиза материализованного MP3 противоречит цели: готовность отозвана",
+            ),
+        };
+        AssetError::with_details(
+            ErrorCode::InvalidTransition,
+            format!("{surface}/{reading}: {text}"),
+            serde_json::json!({"code": code, "readiness": self}),
+        )
+    }
+}
+
+/// Материализованный кандидат выбранного интервала: технически пригодные
+/// байты той же связи и тех же границ.
+pub(crate) fn materialized_of<'a>(
+    link: &'a TargetLink,
+    interval: &PronunciationCandidate,
+) -> Option<&'a PronunciationCandidate> {
+    link.candidates.iter().rev().find(|c| {
+        c.kind == CandidateKind::MaterializedInterval
+            && c.technical.usable
+            && c.audio.is_some()
+            && c.span == interval.span
+            && c.derivation
+                .as_ref()
+                .is_some_and(|d| d.from_candidate_id == interval.candidate_id)
+    })
+}
+
+/// Готовность действующего решения (`None`, если решение не действует или
+/// это не выбор кандидата).
+pub(crate) fn selection_readiness(
+    index: &SelectionIndex,
+    batch: &SelectionBatch,
+    decision: &SelectionDecision,
+) -> Option<Readiness> {
+    let request = Pronunciation::new(&decision.surface, &decision.reading).ok()?;
+    let (link, candidate, _) =
+        validate_effective_selection(index, batch, decision, &request).ok()?;
+    Some(readiness_of(batch, link, candidate, &decision.authority).0)
+}
+
+fn readiness_of<'a>(
+    batch: &SelectionBatch,
+    link: &'a TargetLink,
+    candidate: &'a PronunciationCandidate,
+    authority: &DecisionAuthority,
+) -> (Readiness, Option<&'a PronunciationCandidate>) {
+    if let Some(audio) = &candidate.audio {
+        return (
+            Readiness::Ready {
+                candidate_id: candidate.candidate_id.clone(),
+                sha256: audio.sha256.clone(),
+            },
+            Some(candidate),
+        );
+    }
+    let Some(materialized) = materialized_of(link, candidate) else {
+        let failed = batch
+            .materialization_of(&candidate.candidate_id)
+            .filter(|m| m.link_generation == link.generation && Some(m.span) == candidate.span)
+            .and_then(|m| match &m.outcome {
+                MaterializationOutcome::Failed { code, .. } => Some(code.clone()),
+                MaterializationOutcome::Materialized { .. } => None,
+            });
+        return (
+            match failed {
+                Some(code) => Readiness::MaterializationFailed { code },
+                None => Readiness::PendingMaterialization,
+            },
+            None,
+        );
+    };
+    let audio = materialized.audio.as_ref().expect("материализованный MP3");
+    let latest = batch.audio_reviews.iter().rev().find(|r| {
+        r.candidate_id == materialized.candidate_id
+            && r.audio_sha256 == audio.sha256
+            && r.surface == link.surface
+            && r.reading == link.reading
+            && r.link_generation == link.generation
+            && trustworthy_audio_review(r)
+    });
+    let id = materialized.candidate_id.clone();
+    match latest.map(|r| r.verdict) {
+        Some(AudioVerdict::Contradicts) => {
+            (Readiness::SemanticContradicted { candidate_id: id }, None)
+        }
+        Some(AudioVerdict::Supports) => (
+            Readiness::Ready {
+                candidate_id: id,
+                sha256: audio.sha256.clone(),
+            },
+            Some(materialized),
+        ),
+        // Пользователь сам выбрал интервал: детерминированный срез его же
+        // границ готов после технической проверки. Агентскому решению нужна
+        // поддерживающая экспертиза именно полученных байтов.
+        _ if authority.is_user() => (
+            Readiness::Ready {
+                candidate_id: id,
+                sha256: audio.sha256.clone(),
+            },
+            Some(materialized),
+        ),
+        _ => (Readiness::SemanticCheckRequired { candidate_id: id }, None),
+    }
 }
 
 pub(crate) fn decision_is_effective(
@@ -1677,6 +2101,15 @@ pub fn decide(
     {
         return Err(invalid(
             "свидетельства цели изменились после показа агенту: получите статус заново",
+        ));
+    }
+    if !batch.mode_permits(&request.authority) {
+        return Err(AssetError::new(
+            ErrorCode::InvalidValidationEvidence,
+            format!(
+                "режим проверки пакета не разрешает решение вида {}",
+                request.authority.kind()
+            ),
         ));
     }
     let action = validate_decision(&batch, &recommendation, &request.action, &request.authority)?;
@@ -1913,20 +2346,32 @@ pub(crate) fn audio_review_local(
 // Публикация и чтение по явной политике
 // ---------------------------------------------------------------------------
 
+pub use super::model::ConsumerTrustPolicy;
+
 #[derive(Debug, Serialize)]
 pub struct PromoteReport {
     pub asset: AssetRecord,
     pub decision_id: String,
     pub authority: DecisionAuthority,
+    /// Политика, по которой разрешена публикация решения.
+    pub policy: ConsumerTrustPolicy,
+    /// Что опубликовано: точные исходные байты или производный MP3.
+    pub kind: CandidateKind,
+    pub candidate_id: String,
     /// `HumanAttestation` создаётся только по явному флагу и только для
     /// решения пользователя, который сам заявил прослушивание.
     pub human_attestation_created: bool,
 }
 
-/// Явный перенос выбранных **исходных** байтов в канонический
+/// Явная публикация выбранного готового MP3 в канонический
 /// `pronunciation_audio` через штатный импорт, CAS и техническую проверку.
-/// Производные фрагменты домен пока не принимает: их свидетельство обработки
-/// (извлечение, улучшение речи) не представимо в `audio_derivative`.
+///
+/// Публикуются точные исходные байты (`source_original`) и технически готовые
+/// производные (извлечённый или материализованный фрагмент, обработанная
+/// запись) — последние со свидетельством `selection_derivative`: SHA
+/// исходника, границы, цепочка обработки, отпечатки конфигурации и решение.
+/// Полномочия решения проверяются явной [`ConsumerTrustPolicy`]; публикация
+/// агентского решения не делает запись `Verified` и не означает прослушивания.
 pub fn promote(
     store: &AssetStore,
     batch_id: &str,
@@ -1934,60 +2379,82 @@ pub fn promote(
     reading: &str,
     replace_expected_sha256: Option<String>,
     attest_heard_decision: bool,
+    policy: ConsumerTrustPolicy,
 ) -> Result<PromoteReport, AssetError> {
     let request = Pronunciation::new(surface, reading)?;
     let mut runtime = open(store.root(), batch_id)?;
     let batch = load_existing(&mut runtime)?;
+    let index = SelectionIndex::new(&batch);
+    let item = check_selected(&index, &batch, std::slice::from_ref(&request), policy)?
+        .pop()
+        .expect("один запрос — одна проверенная цель");
     let decision = batch
         .current_decision(&request.surface, &request.reading)
-        .ok_or_else(|| invalid("у цели нет текущего решения"))?
+        .expect("проверенная цель имеет решение")
         .clone();
-    let index = SelectionIndex::new(&batch);
-    let (link, candidate, _) = validate_effective_selection(&index, &batch, &decision, &request)?;
-    if candidate.kind != CandidateKind::SourceOriginal || !candidate.technical.usable {
-        return Err(AssetError::new(
-            ErrorCode::InvalidTransition,
-            "в pronunciation_audio публикуются только выбранные точные исходные байты; производный фрагмент доступен через selection read",
-        ));
-    }
-    if attest_heard_decision && !decision.authority.human_listened() {
+    if attest_heard_decision
+        && (!decision.authority.human_listened() || item.candidate_id != item.decision_candidate_id)
+    {
         return Err(AssetError::new(
             ErrorCode::InvalidValidationEvidence,
-            "HumanAttestation требует решения пользователя, который сам заявил прослушивание; агентский или текстовый выбор его не создаёт",
+            if decision.authority.human_listened() {
+                "пользователь прослушал выбранный интервал исходника, а не полученный из него MP3: HumanAttestation требует прослушивания именно публикуемых байтов"
+            } else {
+                "HumanAttestation требует решения пользователя, который сам заявил прослушивание; агентский или текстовый выбор его не создаёт"
+            },
         ));
     }
+    let (link, consumed) = index
+        .find_candidate(&item.candidate_id)
+        .ok_or_else(|| invalid("выдаваемый кандидат отсутствует"))?;
     let source = batch
         .source(&link.source_sha256)
         .ok_or_else(|| invalid("исходник выбора отсутствует"))?;
-    let bytes = runtime.read_blob_with_limit(&source.blob, MAX_AUDIO_BYTES)?;
-    let forvo = source
-        .forvo_for(&request.surface)
-        .map(|(evidence, _)| evidence);
-    let asset = match forvo {
-        Some(evidence) => crate::pronunciation::import_forvo_bytes(
-            store,
-            &request,
-            &bytes,
-            evidence,
-            replace_expected_sha256,
-        )?,
-        None => {
-            let name = source
-                .origins
-                .iter()
-                .find_map(|origin| match origin {
-                    SourceOrigin::LocalFile { source_name } => Some(source_name.clone()),
-                    SourceOrigin::ForvoBatch { .. } => None,
-                })
-                .unwrap_or_else(|| format!("selection-{}.mp3", &source.sha256[..16]));
-            crate::pronunciation::import_bytes(
+    let bytes = runtime.read_blob_with_limit(&item.blob, MAX_AUDIO_BYTES)?;
+    if sha256_hex(&bytes) != item.sha256 {
+        return Err(AssetError::new(
+            ErrorCode::IntegrityMismatch,
+            "байты выбранного кандидата не совпадают с его SHA",
+        ));
+    }
+    probe_mp3(&bytes)?;
+    // Байты, совпадающие с исходником (Balanced выбрал исходный вариант без
+    // улучшения), — это сам исходник: производной от них не бывает, и
+    // свидетельство производной такую пару отвергло бы.
+    let asset = if consumed.kind == CandidateKind::SourceOriginal
+        || item.sha256 == link.source_sha256
+    {
+        match source
+            .forvo_for(&request.surface)
+            .map(|(evidence, _)| evidence)
+        {
+            Some(evidence) => crate::pronunciation::import_forvo_bytes(
                 store,
                 &request,
                 &bytes,
-                &name,
+                evidence,
                 replace_expected_sha256,
-            )?
+            )?,
+            None => {
+                let name = local_source_name(source);
+                crate::pronunciation::import_bytes(
+                    store,
+                    &request,
+                    &bytes,
+                    &name,
+                    replace_expected_sha256,
+                )?
+            }
         }
+    } else {
+        let derivative = selection_derivative(batch_id, &decision, &item, link, consumed, source)?;
+        crate::pronunciation::import_selection_derived_bytes(
+            store,
+            &request,
+            &bytes,
+            &derivative,
+            replace_expected_sha256,
+        )?
     };
     let mut attested = false;
     let asset = if attest_heard_decision {
@@ -2010,36 +2477,140 @@ pub fn promote(
         asset,
         decision_id: decision.decision_id.clone(),
         authority: decision.authority.clone(),
+        policy,
+        kind: consumed.kind,
+        candidate_id: consumed.candidate_id.clone(),
         human_attestation_created: attested,
     })
 }
 
-/// Явная политика потребителя для чтения выбранных кандидатов. Она не
-/// заменяет `read_verified_with_policy`: строгий потребитель человеческого
-/// `Verified` агентских решений не видит.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConsumerTrustPolicy {
-    /// Только решения пользователя (через агента или в обзоре).
-    HumanDecision,
-    /// Плюс агент с поддерживающей локальной аудиоэкспертизой.
-    HumanOrAudioModel,
-    /// Плюс детерминированная автоматика и агент по свидетельствам. Риск:
-    /// фонетика может быть подтверждена только распознавателем.
-    AgentSelected,
+fn local_source_name(source: &AudioSource) -> String {
+    source
+        .origins
+        .iter()
+        .find_map(|origin| match origin {
+            SourceOrigin::LocalFile { source_name } => Some(source_name.clone()),
+            SourceOrigin::ForvoBatch { .. } => None,
+        })
+        .unwrap_or_else(|| format!("selection-{}.mp3", &source.sha256[..16]))
 }
 
-impl ConsumerTrustPolicy {
-    fn accepts(self, authority: &DecisionAuthority) -> bool {
-        match authority {
-            DecisionAuthority::UserViaAgent { .. } | DecisionAuthority::UserDirectReview { .. } => {
-                true
-            }
-            DecisionAuthority::AgentAudioModel { .. } => self != Self::HumanDecision,
-            DecisionAuthority::DeterministicAutomation { .. }
-            | DecisionAuthority::AgentEvidence { .. } => self == Self::AgentSelected,
+/// Свидетельство производного MP3 для канонического домена: копирует цепочку
+/// обработки кандидата, не создавая второго источника истины.
+fn selection_derivative(
+    batch_id: &str,
+    decision: &SelectionDecision,
+    item: &CheckedSelection,
+    link: &TargetLink,
+    consumed: &PronunciationCandidate,
+    source: &AudioSource,
+) -> Result<crate::pronunciation::derivation::SelectionDerivative, AssetError> {
+    use crate::pronunciation::derivation::{SelectionDerivative, SelectionReference};
+    let (source_provenance, source_metadata) = match source.forvo_for(&link.surface) {
+        Some((evidence, _)) => (
+            crate::Provenance {
+                source_kind: "forvo_web".into(),
+                source_name: format!("forvo-ja-{}.mp3", evidence.selected_record_id),
+            },
+            serde_json::json!({"surface": link.surface, "forvo": evidence}),
+        ),
+        None => {
+            let name = local_source_name(source);
+            (
+                crate::Provenance {
+                    source_kind: "local_import".into(),
+                    source_name: name.clone(),
+                },
+                serde_json::json!({"source_name": name}),
+            )
         }
-    }
+    };
+    let (transform, chain, toolchain, config_sha256, processing) = match &consumed.derivation {
+        Some(d) => (
+            d.transform.clone(),
+            d.chain.clone(),
+            d.toolchain.clone(),
+            d.config_sha256.clone(),
+            None,
+        ),
+        None => {
+            let recognition = link.recognition.as_ref().ok_or_else(|| {
+                invalid("у производного кандидата нет свидетельства распознавателя")
+            })?;
+            let transform = match consumed.kind {
+                CandidateKind::ExtractedFragment => "recognizer_target_fragment",
+                CandidateKind::ProcessedWhole => "recognizer_processed_whole",
+                CandidateKind::ProcessedFullRecord => "balanced_full_record",
+                _ => return Err(invalid("вид кандидата не является производным MP3")),
+            };
+            let details = recognition.quality_details.clone().unwrap_or_default();
+            let config = match consumed.kind {
+                CandidateKind::ProcessedFullRecord => {
+                    details["full_record"]["balanced_config_sha256"]
+                        .as_str()
+                        .filter(|s| valid_sha(s))
+                        .unwrap_or(&recognition.config_sha256)
+                        .to_owned()
+                }
+                _ => recognition.config_sha256.clone(),
+            };
+            (
+                transform.to_owned(),
+                vec![
+                    format!("recognizer_batch:{}", recognition.recognizer_batch_id),
+                    format!("recognizer_outcome:{}", json_word(&recognition.outcome)),
+                    format!("candidate_kind:{}", consumed.kind.as_str()),
+                ],
+                vec![format!(
+                    "recognizer_config_sha256:{}",
+                    recognition.config_sha256
+                )],
+                config,
+                Some(serde_json::json!({
+                    "processing": details["processing"],
+                    "full_record": details["full_record"],
+                    "post_validation_passed": recognition.post_validation_passed,
+                })),
+            )
+        }
+    };
+    let derivative = SelectionDerivative {
+        schema_version: crate::pronunciation::derivation::SELECTION_DERIVATIVE_SCHEMA_VERSION,
+        kind: consumed.kind.as_str().into(),
+        transform,
+        source_sha256: link.source_sha256.clone(),
+        source_provenance,
+        source_metadata,
+        output_sha256: item.sha256.clone(),
+        span: consumed
+            .span
+            .map(|s| crate::pronunciation::derivation::FrameSpan {
+                start_frame: s.start_frame,
+                end_frame: s.end_frame,
+                sample_rate: s.sample_rate,
+            }),
+        chain,
+        toolchain,
+        config_sha256,
+        processing,
+        selection: SelectionReference {
+            batch_id: batch_id.into(),
+            decision_id: decision.decision_id.clone(),
+            decision_candidate_id: item.decision_candidate_id.clone(),
+            candidate_id: consumed.candidate_id.clone(),
+            link_generation: link.generation,
+            authority: decision.authority.kind().into(),
+            proof: json_word(&item.proof),
+        },
+    };
+    Ok(derivative)
+}
+
+fn json_word(value: &impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2047,7 +2618,10 @@ pub struct SelectedAudioInfo {
     pub surface: String,
     pub reading: String,
     pub consumer_filename: String,
+    /// Выдаваемый кандидат (у выбранного интервала — его материализация).
     pub candidate_id: String,
+    /// Кандидат, выбранный решением.
+    pub decision_candidate_id: String,
     pub kind: CandidateKind,
     pub sha256: String,
     pub decision_id: String,
@@ -2071,6 +2645,7 @@ struct CheckedSelection {
     surface: String,
     reading: String,
     candidate_id: String,
+    decision_candidate_id: String,
     kind: CandidateKind,
     sha256: String,
     blob: crate::batch_runtime::RuntimeBlobRef,
@@ -2086,6 +2661,7 @@ impl CheckedSelection {
             reading: self.reading,
             consumer_filename: self.consumer_filename,
             candidate_id: self.candidate_id,
+            decision_candidate_id: self.decision_candidate_id,
             kind: self.kind,
             sha256: self.sha256,
             decision_id: self.decision_id,
@@ -2114,9 +2690,10 @@ fn open_for_consumption(
     Ok((runtime, batch))
 }
 
-/// Проверяет весь набор без чтения blob: отсутствие решения, интервал без
-/// байтов, недостаточные полномочия, понижение класса после новых свидетельств
-/// и конфликт имён потребителя отклоняют весь ответ.
+/// Проверяет весь набор без чтения blob: отсутствие решения, недостаточные
+/// полномочия или режим пакета, понижение класса после новых свидетельств,
+/// неготовность выдачи (интервал без проверенного MP3, отказ материализации,
+/// отозванная экспертиза) и конфликт имён потребителя отклоняют весь ответ.
 fn check_selected(
     index: &SelectionIndex,
     batch: &SelectionBatch,
@@ -2155,17 +2732,23 @@ fn check_selected(
                 ),
             ));
         }
-        let (_link, candidate, assessment) =
+        let (link, candidate, assessment) =
             validate_effective_selection(index, batch, decision, &request)?;
-        let audio = candidate.audio.as_ref().ok_or_else(|| {
-            invalid("выбран интервал без извлечённых байтов: потребление требует извлечения")
-        })?;
+        let (readiness, consumed) = readiness_of(batch, link, candidate, &decision.authority);
+        let Some(consumed) = consumed else {
+            return Err(readiness.refusal(&request.surface, &request.reading));
+        };
+        let audio = consumed
+            .audio
+            .as_ref()
+            .ok_or_else(|| readiness.refusal(&request.surface, &request.reading))?;
         checked.push(CheckedSelection {
             consumer_filename: request.consumer_filename(),
             surface: request.surface,
             reading: request.reading,
-            candidate_id: candidate.candidate_id.clone(),
-            kind: candidate.kind,
+            candidate_id: consumed.candidate_id.clone(),
+            decision_candidate_id: candidate.candidate_id.clone(),
+            kind: consumed.kind,
             sha256: audio.sha256.clone(),
             blob: audio.blob.clone(),
             decision_id: decision.decision_id.clone(),
@@ -2190,14 +2773,29 @@ pub fn read_selected(
     let checked = check_selected(&index, &batch, requests, policy)?;
     let mut out = Vec::with_capacity(checked.len());
     for item in checked {
-        let bytes = runtime.read_blob_with_limit(&item.blob, MAX_AUDIO_BYTES)?;
-        probe_mp3(&bytes)?;
+        let bytes = read_checked(&runtime, &item)?;
         out.push(SelectedAudio {
             info: item.into_info(policy),
             bytes,
         });
     }
     Ok(out)
+}
+
+/// Байты проверенного выбора: SHA и полная техническая проверка MP3.
+fn read_checked(
+    runtime: &SafeBatchRuntime,
+    item: &CheckedSelection,
+) -> Result<Vec<u8>, AssetError> {
+    let bytes = runtime.read_blob_with_limit(&item.blob, MAX_AUDIO_BYTES)?;
+    if sha256_hex(&bytes) != item.sha256 {
+        return Err(AssetError::new(
+            ErrorCode::IntegrityMismatch,
+            "байты выбранного кандидата не совпадают с его SHA",
+        ));
+    }
+    probe_mp3(&bytes)?;
+    Ok(bytes)
 }
 
 /// Те же проверки и сверка байтов, но наружу отдаются только метаданные:
@@ -2214,8 +2812,7 @@ pub fn read_selected_info(
     let checked = check_selected(&index, &batch, requests, policy)?;
     let mut out = Vec::with_capacity(checked.len());
     for item in checked {
-        let bytes = runtime.read_blob_with_limit(&item.blob, MAX_AUDIO_BYTES)?;
-        probe_mp3(&bytes)?;
+        read_checked(&runtime, &item)?;
         out.push(item.into_info(policy));
     }
     Ok(out)
@@ -2239,12 +2836,12 @@ pub struct ExportedAudio {
 /// просмотра метаданных.
 ///
 /// Проверки те же, что у [`read_selected`]: явная [`ConsumerTrustPolicy`],
-/// действующее решение, точная пара и SHA, техническая пригодность, целость
-/// blob. Затем имя потребителя проверяется как одноуровневое безопасное имя,
-/// файл пишется атомарно, а его байты на диске сверяются по SHA-256 и снова
-/// декодируются. Существующий файл с другим содержимым не заменяется, symlink
-/// и не-файл по пути вывода отвергаются. Каталог вывода обязан быть вне
-/// `decks/**`: эту границу проверяет вызывающий до вызова.
+/// действующее решение, точная пара и SHA, готовность выдачи, целость blob.
+/// Затем имя потребителя проверяется как одноуровневое безопасное имя, а файл
+/// публикуется с семантикой «создать, только если отсутствует»: существующий
+/// или конкурентно созданный чужой файл не заменяется и не удаляется ни при
+/// каком исходе. Каталог вывода обязан быть вне `decks/**`: эту границу
+/// проверяет вызывающий до вызова.
 pub fn export_selected(
     store_root: &Path,
     batch_id: &str,
@@ -2261,9 +2858,9 @@ pub fn export_selected(
         validate_safe_consumer_filename(&item.consumer_filename, DetectedFormat::Mp3)?;
         // Байты читаются непосредственно перед записью своего файла: набор не
         // удерживается в памяти целиком.
-        let bytes = runtime.read_blob_with_limit(&item.blob, MAX_AUDIO_BYTES)?;
-        probe_mp3(&bytes)?;
-        let written = persist_selected_file(directory, &item, &bytes)?;
+        let bytes = read_checked(&runtime, &item)?;
+        let written =
+            persist_selected_file(directory, &item.consumer_filename, &item.sha256, &bytes)?;
         exported.push(ExportedAudio {
             consumer_filename: item.consumer_filename,
             sha256: item.sha256,
@@ -2306,60 +2903,128 @@ fn prepare_export_directory(directory: &Path) -> Result<(), AssetError> {
     }
 }
 
-fn persist_selected_file(
-    directory: &Path,
-    item: &CheckedSelection,
-    bytes: &[u8],
-) -> Result<bool, AssetError> {
-    let target = directory.join(&item.consumer_filename);
-    match std::fs::symlink_metadata(&target) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(AssetError::new(
-                ErrorCode::PathTraversal,
-                "symlink вместо файла вывода запрещён",
-            ));
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(AssetError::new(
-                ErrorCode::PathTraversal,
-                "по пути вывода не обычный файл",
-            ));
-        }
+/// Сверяет существующий файл с ожидаемым SHA, не трогая его.
+/// `Ok(true)` — те же байты (идемпотентный повтор), `Ok(false)` — пути нет.
+fn existing_export_matches(target: &Path, sha256: &str) -> Result<bool, AssetError> {
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AssetError::new(
+            ErrorCode::PathTraversal,
+            "symlink вместо файла вывода запрещён",
+        )),
+        Ok(metadata) if !metadata.is_file() => Err(AssetError::new(
+            ErrorCode::PathTraversal,
+            "по пути вывода не обычный файл",
+        )),
         Ok(_) => {
             let existing =
-                std::fs::read(&target).map_err(|error| AssetError::io("файл вывода", error))?;
-            if sha256_hex(&existing) == item.sha256 {
-                return Ok(false);
+                std::fs::read(target).map_err(|error| AssetError::io("файл вывода", error))?;
+            if sha256_hex(&existing) == sha256 {
+                Ok(true)
+            } else {
+                Err(AssetError::new(
+                    ErrorCode::IdentityConflict,
+                    "в каталоге вывода уже есть другой файл с этим именем; он не изменён",
+                ))
             }
-            return Err(AssetError::new(
-                ErrorCode::IdentityConflict,
-                "в каталоге вывода уже есть другой файл с этим именем",
-            ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(AssetError::io("файл вывода", error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AssetError::io("файл вывода", error)),
     }
-    let suffix: String = item.sha256.chars().take(16).collect();
-    let temporary = directory.join(format!(".tmp-export-{}-{suffix}", std::process::id()));
+}
+
+/// Публикует байты под именем потребителя без замены чужого объекта.
+///
+/// Ни один шаг не удаляет и не переименовывает поверх `target`: публикация —
+/// либо жёсткая ссылка на полностью записанный временный файл (атомарна и
+/// отказывает, если имя занято), либо, где жёстких ссылок нет, создание файла
+/// с `create_new` (`O_EXCL` / `CREATE_NEW`) — тоже атомарный отказ при занятом
+/// имени. Обратная сверка байтов при несовпадении сообщает об ошибке, но
+/// файл не удаляет: его принадлежность уже не доказана. Удаляется только
+/// собственный временный файл с уникальным именем.
+fn persist_selected_file(
+    directory: &Path,
+    filename: &str,
+    sha256: &str,
+    bytes: &[u8],
+) -> Result<bool, AssetError> {
+    let target = directory.join(filename);
+    if existing_export_matches(&target, sha256)? {
+        return Ok(false);
+    }
+    let temporary = unique_temporary(directory, sha256);
     if let Err(error) = write_export_temporary(&temporary, bytes) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
-    // `hard_link` не заменяет существующий файл: гонка двух экспортов не
-    // приводит к тихой подмене байтов.
-    let linked = publish_export_file(&temporary, &target);
+    #[cfg(test)]
+    BEFORE_PUBLISH.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(&target);
+        }
+    });
+    let published = publish_no_replace(&temporary, &target, bytes);
     let _ = std::fs::remove_file(&temporary);
-    linked.map_err(|error| AssetError::io("запись файла вывода", error))?;
+    match published {
+        Ok(()) => {}
+        // Имя занято конкурентом между проверкой и публикацией: тот же SHA —
+        // идемпотентный успех, иначе отказ; чужой файл не тронут.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return if existing_export_matches(&target, sha256)? {
+                Ok(false)
+            } else {
+                Err(AssetError::new(
+                    ErrorCode::IdentityConflict,
+                    "в каталоге вывода уже есть другой файл с этим именем; он не изменён",
+                ))
+            };
+        }
+        Err(error) => return Err(AssetError::io("запись файла вывода", error)),
+    }
+    #[cfg(test)]
+    AFTER_PUBLISH.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(&target);
+        }
+    });
     let written = std::fs::read(&target).map_err(|error| AssetError::io("файл вывода", error))?;
-    if sha256_hex(&written) != item.sha256 {
-        let _ = std::fs::remove_file(&target);
-        return Err(AssetError::new(
+    if sha256_hex(&written) != sha256 {
+        return Err(AssetError::with_details(
             ErrorCode::IntegrityMismatch,
-            "записанные байты не совпали с SHA-256 выбранного кандидата",
+            "после публикации по пути вывода другие байты: файл не удалён, его принадлежность не доказана; проверьте каталог вручную",
+            serde_json::json!({"code":"export_readback_mismatch","path": target.display().to_string()}),
         ));
     }
     probe_mp3(&written)?;
     Ok(true)
+}
+
+#[cfg(test)]
+type PublishHook = std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>>;
+
+#[cfg(test)]
+std::thread_local! {
+    /// Детерминированная точка между проверкой цели и публикацией.
+    pub(crate) static BEFORE_PUBLISH: PublishHook =
+        const { std::cell::RefCell::new(None) };
+    /// Детерминированная точка между публикацией и обратной сверкой.
+    pub(crate) static AFTER_PUBLISH: PublishHook =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Уникальное имя временного файла: процесс, поток, время и счётчик, чтобы
+/// параллельные экспорты одного SHA не делили временный объект.
+fn unique_temporary(directory: &Path, sha256: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let suffix: String = sha256.chars().take(16).collect();
+    directory.join(format!(
+        ".tmp-export-{}-{nanos:x}-{}-{suffix}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 fn write_export_temporary(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
@@ -2375,15 +3040,55 @@ fn write_export_temporary(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
         .map_err(|error| AssetError::io("временный файл вывода", error))
 }
 
-/// Публикует подготовленный файл под именем потребителя, не заменяя чужой
-/// файл. Основной путь — жёсткая ссылка (атомарна и не перезаписывает);
-/// на файловых системах без жёстких ссылок Windows используется переименование
-/// с повторной проверкой отсутствия цели.
-fn publish_export_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+/// Публикация «создать, если отсутствует» без проверки-затем-переименования.
+///
+/// Основной путь — `hard_link`: на Unix и NTFS он атомарно создаёт имя и
+/// возвращает `AlreadyExists`, если оно занято. Если ФС жёстких ссылок не
+/// поддерживает (FAT/exFAT, часть сетевых ФС), файл создаётся напрямую с
+/// `create_new` — атомарным эксклюзивным созданием, которое тоже никогда не
+/// заменяет существующий объект. `rename`, способный заменить цель, не
+/// используется ни на одной платформе.
+fn publish_no_replace(temporary: &Path, target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     match std::fs::hard_link(temporary, target) {
         Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(_) if std::fs::symlink_metadata(target).is_err() => std::fs::rename(temporary, target),
-        Err(error) => Err(error),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(error),
+        Err(_) => create_new_with(target, bytes),
     }
+}
+
+/// Эксклюзивно создаёт файл и записывает байты. Если запись не удалась,
+/// созданный этим вызовом файл остаётся: удалять имя, которое к этому моменту
+/// мог подменить другой процесс, небезопасно; следующий экспорт увидит
+/// расхождение SHA и откажет без изменений.
+fn create_new_with(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(target)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+#[cfg(test)]
+pub(crate) fn publish_no_replace_for_test(
+    temporary: &Path,
+    target: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    publish_no_replace(temporary, target, bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn create_new_with_for_test(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    create_new_with(target, bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn persist_selected_file_for_test(
+    directory: &Path,
+    filename: &str,
+    sha256: &str,
+    bytes: &[u8],
+) -> Result<bool, AssetError> {
+    persist_selected_file(directory, filename, sha256, bytes)
 }

@@ -69,7 +69,11 @@ fn is_zero(value: &u64) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Откуда получен исходник. Чтение здесь не хранится как факт: `plan_reading`
-/// Forvo — только подсказка плана, а не доказанное произношение.
+/// Forvo — только подсказка прежнего плана, а не доказанное произношение.
+/// Получение только по написанию чтения не имеет вовсе (`None`).
+// Свидетельство Forvo хранится по значению: это сериализуемая запись
+// состояния, а не горячий путь, и упаковка изменила бы публичный тип.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SourceOrigin {
@@ -85,8 +89,10 @@ pub enum SourceOrigin {
         surface: Option<String>,
         /// Полное проверенное свидетельство Forvo для точного SHA.
         evidence: ForvoEvidence,
-        /// Чтение из плана загрузки: подсказка, не подтверждение.
-        plan_reading: String,
+        /// Чтение из плана загрузки прежнего пакета: подсказка, не
+        /// подтверждение. У сбора только по написанию отсутствует.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_reading: Option<String>,
     },
 }
 
@@ -230,6 +236,9 @@ pub enum CandidateKind {
     SourceOriginal,
     /// Найденный интервал исходника без извлечённых байтов.
     OccurrenceInterval,
+    /// Самостоятельный MP3, вырезанный из исходника по точным границам
+    /// выбранного интервала (`derivation` хранит цепочку обработки).
+    MaterializedInterval,
 }
 
 impl CandidateKind {
@@ -240,6 +249,7 @@ impl CandidateKind {
             Self::ProcessedFullRecord => "processed_full_record",
             Self::SourceOriginal => "source_original",
             Self::OccurrenceInterval => "occurrence_interval",
+            Self::MaterializedInterval => "materialized_interval",
         }
     }
 }
@@ -277,13 +287,37 @@ pub struct CandidateAudio {
     pub probe: AudioProbe,
 }
 
+/// Цепочка обработки производного кандидата пакета выбора: от точного SHA
+/// исходника и границ интервала до SHA полученных байтов. Это единственный
+/// источник истины о том, как получены байты кандидата: канонический домен
+/// копирует его в своё свидетельство при публикации.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateDerivation {
+    /// Вид преобразования (`interval_extraction_v1`).
+    pub transform: String,
+    pub source_sha256: String,
+    /// Кандидат-интервал, из которого получены байты.
+    pub from_candidate_id: String,
+    pub span: CandidateSpan,
+    /// Шаги обработки в порядке применения (декодирование, срез, затухания,
+    /// кодирование) с параметрами.
+    pub chain: Vec<String>,
+    /// Отпечатки инструментов, которые определяют байты (FFmpeg, кодировщик).
+    pub toolchain: Vec<String>,
+    /// SHA-256 канонической конфигурации преобразования и инструментов.
+    pub config_sha256: String,
+    pub output_sha256: String,
+}
+
 /// Техническая пригодность по действующим проверкам владельцев.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TechnicalGate {
     pub usable: bool,
     /// `source_probe_ok`, `post_validation_passed`, `balanced_selected`,
-    /// `post_validation_failed`, `output_bytes_unavailable`, `interval_not_extracted`.
+    /// `post_validation_failed`, `output_bytes_unavailable`, `interval_not_extracted`,
+    /// `fragment_span_missing` (фрагмент без границ: нужен пересчёт распознавания).
     pub code: String,
 }
 
@@ -299,6 +333,9 @@ pub struct PronunciationCandidate {
     /// Вхождение, к которому относится фонетическое свидетельство.
     pub occurrence: Option<usize>,
     pub technical: TechnicalGate,
+    /// Только у материализованного интервала: точная цепочка обработки.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation: Option<CandidateDerivation>,
 }
 
 impl PronunciationCandidate {
@@ -661,6 +698,162 @@ pub struct SelectionDecision {
     pub recorded_at_unix_ms: Option<u64>,
 }
 
+/// Явная политика потребителя для чтения, экспорта и публикации выбранных
+/// кандидатов. Она не заменяет `read_verified_with_policy`: строгий
+/// потребитель человеческого `Verified` агентских решений не видит.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumerTrustPolicy {
+    /// Только решения пользователя (через агента или в обзоре).
+    HumanDecision,
+    /// Плюс агент с поддерживающей локальной аудиоэкспертизой.
+    HumanOrAudioModel,
+    /// Плюс детерминированная автоматика и агент по свидетельствам. Риск:
+    /// фонетика может быть подтверждена только распознавателем.
+    AgentSelected,
+}
+
+impl ConsumerTrustPolicy {
+    pub fn accepts(self, authority: &DecisionAuthority) -> bool {
+        match authority {
+            DecisionAuthority::UserViaAgent { .. } | DecisionAuthority::UserDirectReview { .. } => {
+                true
+            }
+            DecisionAuthority::AgentAudioModel { .. } => self != Self::HumanDecision,
+            DecisionAuthority::DeterministicAutomation { .. }
+            | DecisionAuthority::AgentEvidence { .. } => self == Self::AgentSelected,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HumanDecision => "human_decision",
+            Self::HumanOrAudioModel => "human_or_audio_model",
+            Self::AgentSelected => "agent_selected",
+        }
+    }
+}
+
+/// Режим проверки рабочего пакета, который пользователь выбирает один раз.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    /// Пользователь делегировал допустимые решения названному агенту в
+    /// пределах `agent_trust`. Решение агента остаётся решением агента.
+    DelegatedAgent,
+    /// Пользователь сам слушает и решает; агентские решения не действуют.
+    ManualUser,
+}
+
+impl ReviewMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DelegatedAgent => "delegated_agent",
+            Self::ManualUser => "manual_user",
+        }
+    }
+}
+
+/// Запись выбора режима. Журнал только дополняется; действует последняя
+/// запись. Текст реплики пользователя не хранится — только её SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewModeGrant {
+    pub mode: ReviewMode,
+    /// Агент, которому делегированы решения (только `delegated_agent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Верхняя граница полномочий агента (только `delegated_agent`):
+    /// `human_or_audio_model` — только по поддерживающей аудиоэкспертизе,
+    /// `agent_selected` — также по документированным свидетельствам.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_trust: Option<ConsumerTrustPolicy>,
+    pub channel: String,
+    pub statement_sha256: String,
+    pub state_revision: u64,
+    pub recorded_at_unix_ms: u64,
+}
+
+impl ReviewModeGrant {
+    /// Разрешает ли режим решение с такими полномочиями. Решения
+    /// пользователя разрешены всегда; детерминированная автоматика —
+    /// в ручном режиме (бесспорные цели не требуют прослушивания) и в
+    /// делегированном, если её допускает граница доверия агента.
+    pub fn permits(&self, authority: &DecisionAuthority) -> bool {
+        if authority.is_user() {
+            return true;
+        }
+        match self.mode {
+            ReviewMode::ManualUser => {
+                matches!(authority, DecisionAuthority::DeterministicAutomation { .. })
+            }
+            ReviewMode::DelegatedAgent => {
+                let trust_ok = self.agent_trust.is_some_and(|t| t.accepts(authority));
+                let agent_ok = match authority {
+                    DecisionAuthority::AgentEvidence { agent, .. }
+                    | DecisionAuthority::AgentAudioModel { agent, .. } => {
+                        self.agent.as_deref() == Some(agent.as_str())
+                    }
+                    _ => true,
+                };
+                trust_ok && agent_ok
+            }
+        }
+    }
+
+    fn validate(&self, revision: u64) -> Result<(), AssetError> {
+        let shape = match self.mode {
+            ReviewMode::DelegatedAgent => {
+                self.agent.as_deref().is_some_and(valid_token)
+                    && matches!(
+                        self.agent_trust,
+                        Some(ConsumerTrustPolicy::HumanOrAudioModel)
+                            | Some(ConsumerTrustPolicy::AgentSelected)
+                    )
+            }
+            ReviewMode::ManualUser => self.agent.is_none() && self.agent_trust.is_none(),
+        };
+        if !shape
+            || !valid_token(&self.channel)
+            || !valid_sha(&self.statement_sha256)
+            || self.state_revision > revision
+        {
+            return Err(corrupt("некорректная запись режима проверки"));
+        }
+        Ok(())
+    }
+}
+
+/// Итог попытки материализовать выбранный интервал.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MaterializationOutcome {
+    Materialized {
+        candidate_id: String,
+        sha256: String,
+    },
+    Failed {
+        code: String,
+        message: String,
+    },
+}
+
+/// Журнал материализации интервалов: отказ остаётся явным состоянием цели,
+/// а не исчезает из `unresolved`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaterializationRecord {
+    pub interval_candidate_id: String,
+    pub link_id: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub link_generation: u64,
+    pub source_sha256: String,
+    pub span: CandidateSpan,
+    pub outcome: MaterializationOutcome,
+    pub state_revision: u64,
+    pub recorded_at_unix_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Состояние пакета
 // ---------------------------------------------------------------------------
@@ -676,9 +869,57 @@ pub struct SelectionBatch {
     pub links: Vec<TargetLink>,
     pub audio_reviews: Vec<AudioReview>,
     pub decisions: Vec<SelectionDecision>,
+    /// Журнал выбора режима проверки пакета; действует последняя запись.
+    /// Пустой журнал — прежнее поведение без закреплённого режима.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_modes: Vec<ReviewModeGrant>,
+    /// Журнал материализации выбранных интервалов.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materializations: Vec<MaterializationRecord>,
 }
 
 impl SelectionBatch {
+    /// Действующий режим проверки пакета.
+    pub fn review_mode(&self) -> Option<&ReviewModeGrant> {
+        self.review_modes.last()
+    }
+
+    /// Разрешает ли действующий режим решение с такими полномочиями.
+    pub fn mode_permits(&self, authority: &DecisionAuthority) -> bool {
+        self.review_mode()
+            .is_none_or(|grant| grant.permits(authority))
+    }
+
+    /// Может ли цель такого класса получить решение без человека в
+    /// действующем режиме проверки (`auto-select` и агент делегирования).
+    pub fn automatically_resolvable(&self, class: SelectionClass, audio_supported: bool) -> bool {
+        match self.review_mode() {
+            None => class <= SelectionClass::AgentSelectable,
+            Some(grant) => match (grant.mode, class) {
+                (ReviewMode::ManualUser, SelectionClass::AutoQualified) => true,
+                (ReviewMode::ManualUser, _) => false,
+                (ReviewMode::DelegatedAgent, SelectionClass::AutoQualified) => {
+                    grant.agent_trust == Some(ConsumerTrustPolicy::AgentSelected)
+                }
+                (ReviewMode::DelegatedAgent, SelectionClass::AgentSelectable) => {
+                    grant.agent_trust == Some(ConsumerTrustPolicy::AgentSelected) || audio_supported
+                }
+                (ReviewMode::DelegatedAgent, _) => false,
+            },
+        }
+    }
+
+    /// Последняя попытка материализации интервала.
+    pub fn materialization_of(
+        &self,
+        interval_candidate_id: &str,
+    ) -> Option<&MaterializationRecord> {
+        self.materializations
+            .iter()
+            .rev()
+            .find(|m| m.interval_candidate_id == interval_candidate_id)
+    }
+
     pub fn new(batch_id: &str) -> Self {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
@@ -689,6 +930,8 @@ impl SelectionBatch {
             links: Vec::new(),
             audio_reviews: Vec::new(),
             decisions: Vec::new(),
+            review_modes: Vec::new(),
+            materializations: Vec::new(),
         }
     }
 
@@ -748,6 +991,21 @@ pub(crate) fn normalize_surface(surface: &str) -> Result<String, AssetError> {
         return Err(AssetError::new(
             ErrorCode::InvalidIdentity,
             "написание должно содержать 1–180 байт без краевых пробелов и управляющих символов",
+        ));
+    }
+    Ok(value)
+}
+
+/// Написание для получения Forvo по точной странице: правила [`normalize_surface`]
+/// плюс ограничения безопасного имени потребителя будущей пары.
+pub fn normalize_forvo_surface(surface: &str) -> Result<String, AssetError> {
+    let value = normalize_surface(surface)?;
+    if matches!(value.as_str(), "." | "..")
+        || value.contains(['<', '>', '"', '|', '?', '*', '[', ']', '/', '\\', ':'])
+    {
+        return Err(AssetError::new(
+            ErrorCode::InvalidIdentity,
+            "написание не представимо безопасным именем страницы и файла",
         ));
     }
     Ok(value)
@@ -843,8 +1101,12 @@ impl RuntimeBatchState for SelectionBatch {
                             .as_deref()
                             .or(source.surface_hint.as_deref())
                             .ok_or_else(|| corrupt("исходник Forvo без написания"))?;
-                        let request = Pronunciation::new(surface, plan_reading)?;
-                        evidence.validate(&request, &source.sha256)?;
+                        if normalize_surface(surface)? != surface
+                            || plan_reading.as_deref().is_some_and(|r| !valid_text(r, 180))
+                        {
+                            return Err(corrupt("некорректное происхождение Forvo"));
+                        }
+                        evidence.validate(surface, &source.sha256)?;
                         if !valid_token(batch_id) {
                             return Err(corrupt("некорректный batch_id Forvo"));
                         }
@@ -869,7 +1131,35 @@ impl RuntimeBatchState for SelectionBatch {
                 return Err(corrupt("некорректная связь с целью"));
             }
             for candidate in &link.candidates {
+                let derivation_ok = match (&candidate.derivation, candidate.kind) {
+                    (None, CandidateKind::MaterializedInterval) => false,
+                    (None, _) => true,
+                    (Some(d), CandidateKind::MaterializedInterval) => {
+                        d.source_sha256 == link.source_sha256
+                            && Some(d.span) == candidate.span
+                            && candidate
+                                .audio
+                                .as_ref()
+                                .is_some_and(|a| a.sha256 == d.output_sha256)
+                            && d.output_sha256 != d.source_sha256
+                            && valid_sha(&d.config_sha256)
+                            && valid_token(&d.transform)
+                            && !d.chain.is_empty()
+                            && !d.toolchain.is_empty()
+                            && d.chain
+                                .iter()
+                                .chain(&d.toolchain)
+                                .all(|t| valid_text(t, 1024))
+                            && link.candidates.iter().any(|c| {
+                                c.candidate_id == d.from_candidate_id
+                                    && c.kind == CandidateKind::OccurrenceInterval
+                                    && c.span == candidate.span
+                            })
+                    }
+                    (Some(_), _) => false,
+                };
                 if !candidate_ids.insert(candidate.candidate_id.as_str())
+                    || !derivation_ok
                     || !valid_token(&candidate.candidate_id)
                     || (candidate.kind == CandidateKind::OccurrenceInterval)
                         != candidate.audio.is_none()
@@ -904,6 +1194,30 @@ impl RuntimeBatchState for SelectionBatch {
                 || !valid_token(&review.candidate_id)
             {
                 return Err(corrupt("некорректная аудиоэкспертиза"));
+            }
+        }
+        for grant in &self.review_modes {
+            grant.validate(self.revision)?;
+        }
+        for record in &self.materializations {
+            let outcome_ok = match &record.outcome {
+                MaterializationOutcome::Materialized {
+                    candidate_id,
+                    sha256,
+                } => valid_token(candidate_id) && valid_sha(sha256),
+                MaterializationOutcome::Failed { code, message } => {
+                    valid_token(code) && valid_text(message, 2048)
+                }
+            };
+            if !outcome_ok
+                || !valid_token(&record.interval_candidate_id)
+                || !valid_token(&record.link_id)
+                || !valid_sha(&record.source_sha256)
+                || record.span.sample_rate == 0
+                || record.span.start_frame >= record.span.end_frame
+                || record.state_revision > self.revision
+            {
+                return Err(corrupt("некорректная запись материализации"));
             }
         }
         let mut decision_ids = BTreeSet::new();

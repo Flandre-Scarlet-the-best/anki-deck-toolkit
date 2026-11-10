@@ -78,6 +78,7 @@ fn web_acquisition(bytes: &[u8], request: &Pronunciation) -> asset_store::forvo:
     Acquisition {
         bytes: bytes.to_vec(),
         evidence: ForvoEvidence {
+            acquisition_mode: None,
             schema_version: 1,
             page_url: word_url(&request.surface),
             downloaded_sha256: sha256_hex(bytes),
@@ -196,7 +197,7 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
         schema_version: 1,
         items: vec![web_batch::FetchItem {
             surface: request.surface.clone(),
-            reading: request.reading.clone(),
+            reading: Some(request.reading.clone()),
             replace_expected_sha256: None,
         }],
     };
@@ -324,8 +325,25 @@ fn japanese_identity_nfc_only_and_safe_filename() {
             "{surface:?}"
         );
     }
+    // Слово: имя `<surface>.mp3`, чтение в имя не входит и не ограничивается.
     assert!(Pronunciation::new("a", &"\"".repeat(180)).is_ok());
     assert_eq!(request().consumer_filename(), "こいつ.mp3");
+    // Одиночный кандзи: чтение входит в имя, символы пути и `_` в нём запрещены.
+    for reading in ["\"", "a_b", "a/b", "a\\b", "a:b", "a.", "a?"] {
+        assert!(Pronunciation::new("生", reading).is_err(), "{reading:?}");
+    }
+    assert_eq!(
+        Pronunciation::new("生", "せい")
+            .unwrap()
+            .consumer_filename(),
+        "生_せい.mp3"
+    );
+    assert_eq!(
+        Pronunciation::new("生き", "いき")
+            .unwrap()
+            .consumer_filename(),
+        "生き.mp3"
+    );
     let generic = GenericDomainPolicy;
     assert!(generic.validate_identity(&request().identity()).is_err());
 }
@@ -463,18 +481,30 @@ fn readings_and_equivalent_names_store_independently_but_conflict_on_consumer_se
     let first = import(&store, &a);
     let second = import(&store, &b);
     assert_ne!(first.storage_path, second.storage_path);
-    assert_eq!(first.consumer_filename, second.consumer_filename);
+    assert_eq!(first.consumer_filename, "生_なま.mp3");
+    assert_eq!(second.consumer_filename, "生_せい.mp3");
     attest(&store, &a, &first.sha256, HumanDecision::Approve).unwrap();
     attest(&store, &b, &second.sha256, HumanDecision::Approve).unwrap();
     assert_eq!(store.verify_integrity().unwrap().len(), 2);
     assert!(read_trusted(store.root(), std::slice::from_ref(&a)).is_ok());
     assert!(read_trusted(store.root(), std::slice::from_ref(&b)).is_ok());
+    // Разные чтения одного написания дают разные файлы и выдаются вместе.
+    assert_eq!(read_trusted(store.root(), &[a, b]).unwrap().len(), 2);
+    // Слово (не одиночный кандзи): чтения делят имя `<surface>.mp3`.
+    let a = Pronunciation::new("生物", "せいぶつ").unwrap();
+    let b = Pronunciation::new("生物", "いきもの").unwrap();
+    for r in [&a, &b] {
+        let record = import(&store, r);
+        assert_eq!(record.consumer_filename, "生物.mp3");
+        attest(&store, r, &record.sha256, HumanDecision::Approve).unwrap();
+    }
     assert_eq!(
         read_trusted(store.root(), &[a, b]).unwrap_err().code,
         ErrorCode::IdentityConflict
     );
+    // Имена, равные с точностью до регистра, конфликтуют.
     let a = Pronunciation::new("Voice", "a").unwrap();
-    let b = Pronunciation::new("voice", "b").unwrap();
+    let b = Pronunciation::new("voice", "a").unwrap();
     for r in [&a, &b] {
         let record = import(&store, r);
         attest(&store, r, &record.sha256, HumanDecision::Approve).unwrap();
@@ -522,6 +552,57 @@ fn rejection_reimport_replacement_and_stale_cas_are_safe() {
         other_audio()
     );
 }
+/// Запись одиночного кандзи с историческим именем `<surface>.mp3` открывается
+/// и читается под этим именем, повторный импорт тех же байтов её не
+/// переименовывает, а замена по CAS получает текущее `<surface>_<reading>.mp3`.
+#[test]
+fn historical_single_kanji_name_survives_reopen_and_cas_replacement_renames() {
+    let ws = TempWorkspace::create("audio-historical-name").unwrap();
+    let root = ws.path().join("store");
+    let sei = Pronunciation::new("生", "せい").unwrap();
+    let original = {
+        let store = store(&root);
+        let record = import_bytes(&store, &sei, audio(), "生.mp3", None).unwrap();
+        assert_eq!(record.consumer_filename, "生_せい.mp3");
+        attest(&store, &sei, &record.sha256, HumanDecision::Approve).unwrap();
+        record
+    };
+    // Запись прежнего импорта: имя без чтения.
+    let manifest_path = root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let records = manifest["assets"].as_array_mut().unwrap();
+    assert_eq!(records.len(), 1);
+    records[0]["consumer_filename"] = serde_json::json!("生.mp3");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let store = store(&root);
+    let read = read_trusted(store.root(), std::slice::from_ref(&sei)).unwrap();
+    assert_eq!(read[0].record.consumer_filename, "生.mp3");
+    assert_eq!(read[0].bytes, audio());
+    let again = import_bytes(&store, &sei, audio(), "生.mp3", None).unwrap();
+    assert_eq!(again.sha256, original.sha256);
+    assert_eq!(again.consumer_filename, "生.mp3", "имя не меняется молча");
+
+    let replaced = import_bytes(
+        &store,
+        &sei,
+        other_audio(),
+        "生.mp3",
+        Some(original.sha256.clone()),
+    )
+    .unwrap();
+    assert_eq!(replaced.consumer_filename, "生_せい.mp3");
+    attest(&store, &sei, &replaced.sha256, HumanDecision::Approve).unwrap();
+    let read = read_trusted(store.root(), std::slice::from_ref(&sei)).unwrap();
+    assert_eq!(read[0].record.consumer_filename, "生_せい.mp3");
+    assert_eq!(read[0].bytes, other_audio());
+}
+
 /// После CAS-замены кандидата и подтверждения новой записи прежние байты
 /// остаются в каталоге слота `.runtime` без текущей записи; хранилище
 /// по-прежнему проверяется и открывается.
@@ -1127,7 +1208,7 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
             schema_version: 1,
             items: vec![web::FetchItem {
                 surface: request.surface.clone(),
-                reading: request.reading.clone(),
+                reading: Some(request.reading.clone()),
                 replace_expected_sha256: None,
             }],
         },
@@ -1831,11 +1912,16 @@ fn cli_read_streams_metadata_in_order_and_fails_as_a_whole() {
     );
     fs::write(&manifest_path, original).unwrap();
 
-    let conflict = Pronunciation::new("こいつ", "べつ").unwrap();
-    let candidate = import(&store, &conflict);
-    attest(&store, &conflict, &candidate.sha256, HumanDecision::Approve).unwrap();
+    // Конфликт имён потребителя: `Voice.mp3` и `voice.mp3` совпадают без
+    // учёта регистра (чтение не входит в имя слова).
+    let cased = Pronunciation::new("Voice", "a").unwrap();
+    let conflict = Pronunciation::new("voice", "a").unwrap();
+    for item in [&cased, &conflict] {
+        let candidate = import(&store, item);
+        attest(&store, item, &candidate.sha256, HumanDecision::Approve).unwrap();
+    }
     assert_eq!(
-        fail(read(&[second.clone(), first.clone(), conflict.clone()]))["error"]["code"],
+        fail(read(&[second.clone(), cased.clone(), conflict.clone()]))["error"]["code"],
         "identity_conflict"
     );
     let mut visits = 0;
@@ -1843,7 +1929,7 @@ fn cli_read_streams_metadata_in_order_and_fails_as_a_whole() {
         store.root(),
         &[
             (second.identity(), DetectedFormat::Mp3),
-            (first.identity(), DetectedFormat::Mp3),
+            (cased.identity(), DetectedFormat::Mp3),
             (conflict.identity(), DetectedFormat::Mp3),
         ],
         &technical_validator_identity(),
