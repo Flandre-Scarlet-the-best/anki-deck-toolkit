@@ -131,3 +131,99 @@ fn lookup_verify_and_errors_have_stable_json() {
         "{text}"
     );
 }
+
+fn run_text(root: &Path, args: &[&str]) -> (i32, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_japanese-lexicon"))
+        .arg("--data-dir")
+        .arg(root)
+        .args(args)
+        .env_remove("JAPANESE_LEXICON_DIR")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8(output.stdout).unwrap(),
+    )
+}
+
+#[test]
+fn zero_limits_are_invalid_input() {
+    let tmp = TempDir::new("cli-zero");
+    let root = tmp.path().join("data");
+    for flag in ["--limit", "--max-evidence"] {
+        let (code, json) = run(&root, &["lookup", "--surface", "学校", flag, "0"]);
+        assert_eq!(code, 2, "{flag}: {json}");
+        assert_eq!(json["code"], "invalid_input", "{flag}");
+        assert_eq!(json["schema"], "japanese-lexicon.error/1");
+    }
+    let (code, json) = run(
+        &root,
+        &[
+            "lookup",
+            "--surface",
+            "学校",
+            "--limit",
+            "1",
+            "--max-evidence",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0, "{json}");
+    assert_eq!(json["truncation"]["limit"], 1);
+}
+
+#[test]
+fn text_output_is_russian_while_json_keeps_machine_names() {
+    let tmp = TempDir::new("cli-text");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let sources: Vec<_> = catalog::standard().iter().collect();
+    manager::install(&root, &sources, &up, None, &Options::default()).unwrap();
+
+    let (code, text) = run_text(&root, &["status"]);
+    assert_eq!(code, 0);
+    assert!(text.contains("(задан --data-dir)"), "{text}");
+    assert!(text.contains("[лексический словарь]"), "{text}");
+    assert!(text.contains(": в порядке"), "{text}");
+    assert!(text.contains("записи: статей "), "{text}");
+    for machine in [
+        "Lexicon",
+        "Option",
+        "terms ",
+        "readings ",
+        "term_meta ",
+        ": ok",
+    ] {
+        assert!(!text.contains(machine), "{machine}: {text}");
+    }
+    let (_, json) = run(&root, &["status"]);
+    assert_eq!(json["data_dir_origin"], "option");
+    assert_eq!(json["dictionaries"][0]["state"], "ok");
+    assert_eq!(json["dictionaries"][0]["role"], "lexicon");
+
+    let (code, text) = run_text(&root, &["lookup", "--surface", "学校"]);
+    assert_eq!(code, 0);
+    assert!(text.starts_with("学校 — одно чтение"), "{text}");
+    assert!(text.contains("статья"), "{text}");
+    assert!(!text.contains("single_reading") && !text.contains("lexical_entry"));
+    let (_, text) = run_text(&root, &["lookup", "--surface", "ｶﾒﾗ"]);
+    assert!(text.contains("полуширинная кана"), "{text}");
+    assert!(!text.contains("HalfwidthKana"), "{text}");
+
+    let (code, text) = run_text(&root, &["remove", "jmnedict"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.starts_with("удаление — каталог данных"), "{text}");
+    assert!(
+        text.contains("jmnedict") && text.contains(" удалён: "),
+        "{text}"
+    );
+    let (_, json) = run(&root, &["remove", "jmnedict"]);
+    assert_eq!(json["operation"], "remove");
+    assert_eq!(json["items"][0]["outcome"], "not_installed");
+
+    let (code, text) = run_text(&root, &["--help"]);
+    assert_eq!(code, 0);
+    assert!(text.contains("Использование:") && text.contains("Показать справку"));
+    assert!(!text.contains("Print help"), "{text}");
+}

@@ -11,10 +11,14 @@
 //! └── staging/<случайное имя>/       # незавершённые загрузки и сборки
 //! ```
 //!
+//! Управляемые промежуточные каталоги не могут быть символическими ссылками
+//! (см. [`Store::ensure_layout`]): иначе очистка и удаление ушли бы наружу.
+//!
 //! Новая версия собирается в `staging`, переносится в `dictionaries/<id>/`
 //! и становится видимой только атомарной заменой `registry.json`. Поиск
 //! берёт разделяемую блокировку `active.lock` лишь на время чтения реестра
 //! и открытия индексов; смена версии и удаление ждут её исключительно.
+//! Файлы замков создают только изменяющие операции.
 
 use crate::error::{Code, Error, Result};
 use crate::index::BuildStats;
@@ -173,11 +177,11 @@ pub struct Manifest {
     pub schema: String,
     pub dictionary_id: String,
     pub role: crate::catalog::Role,
-    /// Идентичность поставленного артефакта у upstream.
+    /// Идентичность поставленного артефакта у источника публикации.
     pub artifact: RemoteArtifact,
     /// Хеши фактически полученного архива.
     pub archive: FileDigest,
-    /// Сверена ли опубликованная upstream контрольная сумма.
+    /// Сверена ли опубликованная источником контрольная сумма.
     pub published_checksum_verified: bool,
     /// Совпала ли `revision` из `index.json` с тегом релиза (если источник это обещает).
     pub revision_matches_release: Option<bool>,
@@ -203,14 +207,7 @@ pub struct LockGuard {
     _file: File,
 }
 
-fn lock(path: &Path, operation: FlockOperation) -> Result<LockGuard> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|e| Error::io(path.display(), e))?;
+fn flock(file: File, path: &Path, operation: FlockOperation) -> Result<LockGuard> {
     match rustix::fs::flock(file.as_fd(), operation) {
         Ok(()) => Ok(LockGuard { _file: file }),
         Err(rustix::io::Errno::WOULDBLOCK) => Err(Error::new(
@@ -219,6 +216,29 @@ fn lock(path: &Path, operation: FlockOperation) -> Result<LockGuard> {
         )),
         Err(e) => Err(Error::io(path.display(), e.into())),
     }
+}
+
+/// Блокировка изменяющей стороны: файл замка создаётся при необходимости.
+fn lock(path: &Path, operation: FlockOperation) -> Result<LockGuard> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| Error::io(path.display(), e))?;
+    flock(file, path, operation)
+}
+
+/// Создаёт пустой файл замка, если его нет; содержимое не трогает.
+fn ensure_lock_file(path: &Path) -> Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map(drop)
+        .map_err(|e| Error::io(path.display(), e))
 }
 
 /// Записывает файл атомарно: временный файл, fsync, rename, fsync каталога.
@@ -320,10 +340,17 @@ impl Store {
             fs::create_dir_all(root).map_err(|e| Error::io(root.display(), e))?;
             store.write_owner()?;
         }
+        // Символическая ссылка на месте управляемого каталога не «создаётся
+        // заново» молча: `create_dir_all` принял бы её за готовый каталог.
+        store.ensure_layout()?;
         for dir in [DICTIONARIES_DIR, STAGING_DIR] {
             let path = root.join(dir);
             fs::create_dir_all(&path).map_err(|e| Error::io(path.display(), e))?;
         }
+        store.ensure_layout()?;
+        // Замок реестра создаёт изменяющая сторона: команды чтения его не
+        // создают и до первой изменяющей операции читают без него.
+        ensure_lock_file(&root.join(ACTIVE_LOCK))?;
         Ok(store)
     }
 
@@ -406,9 +433,34 @@ impl Store {
         }
     }
 
-    /// Разделяемая блокировка чтения реестра (ждёт смену версии).
-    pub fn lock_read(&self) -> Result<LockGuard> {
-        lock(&self.root.join(ACTIVE_LOCK), FlockOperation::LockShared)
+    /// Согласованное чтение реестра и активных версий под разделяемой
+    /// блокировкой `active.lock` (ждёт смену версии). Ничего не создаёт и
+    /// не пишет.
+    ///
+    /// `active.lock` создаёт первая изменяющая операция (`open_or_init`).
+    /// Если файла ещё нет, изменяющая операция над каталогом ещё не
+    /// начиналась, и `read` выполняется без блокировки. Если после этого
+    /// замок появился, параллельная операция могла сменить версию во время
+    /// чтения: `read` повторяется под блокировкой.
+    pub fn read_consistent<T>(&self, mut read: impl FnMut() -> Result<T>) -> Result<T> {
+        if let Some(_guard) = self.try_lock_read()? {
+            return read();
+        }
+        let first = read();
+        match self.try_lock_read()? {
+            Some(_guard) => read(),
+            None => first,
+        }
+    }
+
+    /// Разделяемая блокировка `active.lock`, если файл замка существует.
+    fn try_lock_read(&self) -> Result<Option<LockGuard>> {
+        let path = self.root.join(ACTIVE_LOCK);
+        match File::open(&path) {
+            Ok(file) => flock(file, &path, FlockOperation::LockShared).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::io(path.display(), e)),
+        }
     }
 
     /// Исключительная блокировка смены активных версий (ждёт читателей).
@@ -472,7 +524,11 @@ impl Store {
     }
 
     /// Остатки прерванных операций: каталоги staging и версии вне реестра.
+    ///
+    /// Сначала проверяется [`Store::ensure_layout`]: каталоги, в которых
+    /// ищутся остатки, не могут уводить за пределы каталога данных.
     pub fn leftovers(&self, registry: &Registry) -> Result<Vec<PathBuf>> {
+        self.ensure_layout()?;
         let mut found = Vec::new();
         let staging = self.root.join(STAGING_DIR);
         if staging.is_dir() {
@@ -498,6 +554,49 @@ impl Store {
         }
         found.sort();
         Ok(found)
+    }
+
+    /// Проверяет, что управляемые промежуточные каталоги (`staging`,
+    /// `dictionaries`, `dictionaries/<id>`) — настоящие каталоги, а не
+    /// символические ссылки или файлы. Отсутствующий каталог допустим.
+    ///
+    /// Иначе очистка остатков, перенос версии и удаление словаря прошли бы
+    /// через ссылку и затронули чужие файлы: такая раскладка отвергается с
+    /// `not_owned` до любого удаления или записи. Сам корень выбирает
+    /// пользователь (`--data-dir`), и ссылкой он быть может.
+    ///
+    /// Модель угроз — случайная или устаревшая ссылка в каталоге данных, а не
+    /// параллельный злоумышленник с правами того же пользователя: между
+    /// проверкой и действием раскладку можно подменить, а дескрипторных
+    /// операций (`openat`/`unlinkat` от проверенного каталога) здесь нет.
+    /// Внутри удаляемого каталога `fs::remove_dir_all` по ссылкам не ходит.
+    pub fn ensure_layout(&self) -> Result<()> {
+        let dictionaries = self.root.join(DICTIONARIES_DIR);
+        let mut managed = vec![self.root.join(STAGING_DIR), dictionaries.clone()];
+        managed.extend(
+            crate::catalog::standard()
+                .iter()
+                .map(|s| dictionaries.join(s.id)),
+        );
+        for path in managed {
+            let refuse = |what: &str| {
+                Err(Error::new(
+                    Code::NotOwned,
+                    format!(
+                        "небезопасная структура каталога данных: {} — {what}, а не каталог japanese-lexicon; подсистема не обходит и не удаляет её содержимое. Замените её настоящим каталогом или уберите вручную",
+                        path.display()
+                    ),
+                ))
+            };
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => return refuse("символическая ссылка"),
+                Ok(meta) if !meta.is_dir() => return refuse("файл"),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::io(path.display(), e)),
+            }
+        }
+        Ok(())
     }
 
     /// Записи корня, которые не принадлежат раскладке подсистемы. Они не
@@ -538,7 +637,8 @@ impl Store {
 }
 
 /// Удаляет каталог, принадлежащий подсистеме. Символическая ссылка на месте
-/// каталога удаляется как ссылка: обход её цели исключён.
+/// каталога удаляется как ссылка: обход её цели исключён. Родительские
+/// каталоги вызывающий проверяет заранее через [`Store::ensure_layout`].
 pub fn remove_owned_dir(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {

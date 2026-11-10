@@ -107,12 +107,20 @@ pub fn to_hiragana(text: &str) -> String {
         .collect()
 }
 
+/// Ключ точного поиска написания: каноническая нормализация NFC без
+/// других преобразований. Одна и та же функция строит ключи индекса при
+/// импорте и ключ запроса, поэтому канонически эквивалентные записи
+/// (составной и разложенный дакутэн) совпадают, а NFKC-эквивалентные, но
+/// канонически различные (полуширинная и полноширинная кана) — нет.
+pub fn exact_key(text: &str) -> String {
+    text.nfc().collect()
+}
+
 /// Ключ сопоставления чтений разных словарей: NFC + хирагана, без `・`.
 /// Применяется только к строкам, уже признанным чтениями; знак долготы и
 /// малые знаки сохраняются.
 pub fn match_key(reading: &str) -> String {
-    let nfc: String = reading.nfc().collect();
-    to_hiragana(&nfc)
+    to_hiragana(&exact_key(reading))
         .chars()
         .filter(|c| *c != MIDDLE_DOT)
         .collect()
@@ -155,7 +163,7 @@ pub fn classify(surface: &str) -> Script {
 
 /// Нормализованный запрос: NFC, без управляющих символов и пробелов.
 pub fn normalize_query(input: &str) -> Result<String, String> {
-    let surface: String = input.nfc().collect();
+    let surface = exact_key(input);
     if surface.is_empty() {
         return Err("пустое написание".into());
     }
@@ -225,5 +233,15 @@ mod tests {
         assert!(normalize_query("").is_err());
         assert!(normalize_query("学 校").is_err());
         assert!(normalize_query(&"あ".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn exact_key_is_canonical_but_not_compatibility_normalization() {
+        assert_eq!(exact_key("\u{304B}\u{3099}っこう"), "がっこう");
+        assert_eq!(exact_key("\u{30CF}\u{309A}ン"), "パン");
+        // NFKC свёл бы полуширинную кану к полноширинной: NFC — нет.
+        assert_eq!(exact_key("ｶﾒﾗ"), "ｶﾒﾗ");
+        assert_ne!(exact_key("ｶﾒﾗ"), exact_key("カメラ"));
+        assert_eq!(exact_key("Ｔシャツ"), "Ｔシャツ");
     }
 }

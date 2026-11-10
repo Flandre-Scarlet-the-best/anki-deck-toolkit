@@ -1,7 +1,7 @@
-//! Обнаружение доступного артефакта у живого upstream и его скачивание.
+//! Обнаружение доступного артефакта у живого источника публикации и его скачивание.
 //!
 //! Версия, имя файла, ссылка и опубликованная контрольная сумма берутся из
-//! ответа upstream при каждой проверке; в коде нет «последней версии».
+//! ответа источника публикации при каждой проверке; в коде нет «последней версии».
 //! Сетевой доступ идёт через [`Transport`]: настоящий [`HttpTransport`]
 //! допускает только HTTPS и редиректы в пределах известных хостов GitHub,
 //! тесты подставляют собственную реализацию.
@@ -43,7 +43,7 @@ pub struct Checksum {
     pub value: String,
 }
 
-/// Точная идентичность артефакта у upstream.
+/// Точная идентичность артефакта у источника публикации.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteArtifact {
     /// `github_release`, `github_repository_file` или `local_file`.
@@ -56,7 +56,7 @@ pub struct RemoteArtifact {
     pub download_url: Option<String>,
     pub size: Option<u64>,
     pub published_at: Option<String>,
-    /// Опубликованная upstream контрольная сумма, если есть.
+    /// Опубликованная источником контрольная сумма, если есть.
     pub checksum: Option<Checksum>,
 }
 
@@ -173,7 +173,7 @@ impl HttpTransport {
         if !host_allowed(&parsed) {
             return Err(Error::new(
                 Code::UpstreamUnexpected,
-                format!("URL {url} вне разрешённых HTTPS-хостов upstream"),
+                format!("URL {url} вне разрешённых HTTPS-хостов источника публикации"),
             ));
         }
         let response = self
@@ -188,7 +188,7 @@ impl HttpTransport {
             .map_err(|e| {
                 Error::new(
                     Code::UpstreamUnavailable,
-                    format!("{url}: сеть или upstream недоступны: {e}"),
+                    format!("{url}: сеть или источник публикации недоступны: {e}"),
                 )
             })?;
         if !host_allowed(response.url()) {
@@ -207,20 +207,104 @@ impl HttpTransport {
         if status.is_success() {
             return Ok(response);
         }
-        let rate_limited = status.as_u16() == 429
-            || (status.as_u16() == 403
-                && response
-                    .headers()
-                    .get("x-ratelimit-remaining")
-                    .is_some_and(|v| v == "0"));
-        let code = if rate_limited {
-            Code::UpstreamRateLimited
-        } else if status.is_server_error() {
-            Code::UpstreamUnavailable
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        // Тело читается только у 403/429 и с пределом: по нему GitHub
+        // сообщает о вторичном лимите.
+        let body = if matches!(status_code, 403 | 429) {
+            let mut text = String::new();
+            let _ = response
+                .take(MAX_ERROR_BODY_BYTES)
+                .read_to_string(&mut text);
+            text
         } else {
-            Code::UpstreamUnexpected
+            String::new()
         };
-        Err(Error::new(code, format!("{url}: HTTP {status}")))
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+        let failure = classify_failure(
+            status_code,
+            header("x-ratelimit-remaining"),
+            header("retry-after"),
+            &body,
+        );
+        Err(Error::new(
+            failure.code(),
+            format!("{url}: HTTP {status}{}", failure.hint()),
+        ))
+    }
+}
+
+/// Предел тела ответа с ошибкой, читаемого для классификации.
+const MAX_ERROR_BODY_BYTES: u64 = 64 * 1024;
+
+/// Классификация неуспешного HTTP-ответа источника публикации.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// Основной лимит GitHub API: `x-ratelimit-remaining: 0`.
+    PrimaryRateLimit,
+    /// Вторичный лимит GitHub API: `retry-after` или сообщение о нём.
+    SecondaryRateLimit,
+    /// `429` без признаков конкретного лимита.
+    TooManyRequests,
+    ServerError,
+    Unexpected,
+}
+
+impl Failure {
+    fn code(self) -> Code {
+        match self {
+            Failure::PrimaryRateLimit | Failure::SecondaryRateLimit | Failure::TooManyRequests => {
+                Code::UpstreamRateLimited
+            }
+            Failure::ServerError => Code::UpstreamUnavailable,
+            Failure::Unexpected => Code::UpstreamUnexpected,
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Failure::PrimaryRateLimit => {
+                " — исчерпан основной лимит запросов GitHub API; повторите после сброса окна лимита"
+            }
+            Failure::SecondaryRateLimit => {
+                " — сработал вторичный лимит GitHub API; подождите не меньше минуты (или время из retry-after)"
+            }
+            Failure::TooManyRequests => {
+                " — источник публикации временно ограничил частоту запросов"
+            }
+            Failure::ServerError | Failure::Unexpected => "",
+        }
+    }
+}
+
+/// Различает лимиты GitHub API, ошибку сервера и прочие отказы по
+/// документированным признакам GitHub (раздел REST API «Rate limits»):
+/// основной лимит — `403`/`429` с `x-ratelimit-remaining: 0`; вторичный —
+/// `403`/`429` с заголовком `retry-after` или сообщением о secondary rate
+/// limit, при этом основной остаток может быть положительным. Обычный `403`
+/// без этих признаков лимитом не считается.
+fn classify_failure(
+    status: u16,
+    ratelimit_remaining: Option<&str>,
+    retry_after: Option<&str>,
+    body: &str,
+) -> Failure {
+    if matches!(status, 403 | 429) {
+        if ratelimit_remaining.is_some_and(|v| v.trim() == "0") {
+            return Failure::PrimaryRateLimit;
+        }
+        if retry_after.is_some() || body.to_ascii_lowercase().contains("secondary rate limit") {
+            return Failure::SecondaryRateLimit;
+        }
+        if status == 429 {
+            return Failure::TooManyRequests;
+        }
+        return Failure::Unexpected;
+    }
+    if (500..600).contains(&status) {
+        Failure::ServerError
+    } else {
+        Failure::Unexpected
     }
 }
 
@@ -310,7 +394,7 @@ pub fn discover(transport: &dyn Transport, source: &Source) -> Result<RemoteArti
                 || release.get("prerelease").and_then(Value::as_bool) == Some(true)
             {
                 return Err(unexpected(format!(
-                    "{url}: последний релиз — draft или prerelease"
+                    "{url}: последний релиз — черновик (draft) или предварительный (prerelease)"
                 )));
             }
             let tag = release
@@ -454,7 +538,7 @@ pub fn fetch(
         && size > source.max_archive_bytes
     {
         return Err(Error::limit(format!(
-            "{}: upstream заявляет {size} байт, предел {}",
+            "{}: источник публикации заявляет {size} байт, предел {}",
             artifact.asset_name, source.max_archive_bytes
         )));
     }
@@ -470,7 +554,7 @@ pub fn fetch(
         return Err(Error::new(
             Code::ChecksumMismatch,
             format!(
-                "{}: получено {} байт, upstream заявляет {size}",
+                "{}: получено {} байт, источник публикации заявляет {size}",
                 artifact.asset_name, digest.bytes
             ),
         ));
@@ -482,7 +566,7 @@ pub fn fetch(
             if digest.sha1_collision && checksum.algorithm == ChecksumAlgorithm::GitBlobSha1 {
                 "в данных обнаружена атака коллизией SHA-1"
             } else {
-                "не совпала с опубликованной upstream"
+                "не совпала с суммой, опубликованной источником"
             };
         return Err(Error::new(
             Code::ChecksumMismatch,
@@ -538,6 +622,51 @@ mod tests {
             ..digest
         };
         assert!(clean.matches(&sha1));
+    }
+
+    #[test]
+    fn rate_limits_are_told_apart_from_ordinary_failures() {
+        use Failure::*;
+        // Основной лимит: остаток 0, в том числе с 429.
+        assert_eq!(classify_failure(403, Some("0"), None, ""), PrimaryRateLimit);
+        assert_eq!(classify_failure(429, Some("0"), None, ""), PrimaryRateLimit);
+        // Вторичный: остаток положителен, но есть retry-after или сообщение.
+        assert_eq!(
+            classify_failure(403, Some("57"), Some("60"), ""),
+            SecondaryRateLimit
+        );
+        assert_eq!(
+            classify_failure(
+                403,
+                Some("57"),
+                None,
+                r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#
+            ),
+            SecondaryRateLimit
+        );
+        assert_eq!(
+            classify_failure(429, None, Some("30"), ""),
+            SecondaryRateLimit
+        );
+        // Обычный 403 — не лимит.
+        assert_eq!(
+            classify_failure(
+                403,
+                Some("57"),
+                None,
+                r#"{"message":"Resource not accessible"}"#
+            ),
+            Unexpected
+        );
+        assert_eq!(classify_failure(403, None, None, ""), Unexpected);
+        assert_eq!(classify_failure(429, None, None, ""), TooManyRequests);
+        assert_eq!(classify_failure(503, None, None, ""), ServerError);
+        assert_eq!(classify_failure(404, Some("0"), None, ""), Unexpected);
+        assert_eq!(PrimaryRateLimit.code(), Code::UpstreamRateLimited);
+        assert_eq!(SecondaryRateLimit.code(), Code::UpstreamRateLimited);
+        assert_eq!(TooManyRequests.code(), Code::UpstreamRateLimited);
+        assert_eq!(ServerError.code(), Code::UpstreamUnavailable);
+        assert_eq!(Unexpected.code(), Code::UpstreamUnexpected);
     }
 
     #[test]

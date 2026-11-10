@@ -250,11 +250,30 @@ impl LookupResult {
     }
 }
 
+/// Пагинация ответа: пропустить `offset` групп, вернуть не больше `limit`
+/// групп и не больше `max_evidence` свидетельств в группе (оба ≥ 1).
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     pub offset: usize,
     pub limit: usize,
     pub max_evidence: usize,
+}
+
+impl Options {
+    fn validate(&self) -> Result<()> {
+        for (name, flag, value) in [
+            ("limit", "--limit", self.limit),
+            ("max_evidence", "--max-evidence", self.max_evidence),
+        ] {
+            if value == 0 {
+                return Err(Error::new(
+                    Code::InvalidInput,
+                    format!("{name} ({flag}) должен быть не меньше 1"),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for Options {
@@ -283,22 +302,25 @@ pub struct Lexicon {
 
 impl Lexicon {
     pub fn open(root: &Path) -> Result<Self> {
-        let store = Store::open_existing(root)?;
+        match Store::open_existing(root)? {
+            // Реестр читается и индексы открываются согласованно со сменой версий.
+            Some(store) => store.read_consistent(|| Self::open_store(Some(&store))),
+            None => Self::open_store(None),
+        }
+    }
+
+    fn open_store(store: Option<&Store>) -> Result<Self> {
         let mut opened = Vec::new();
         let mut states = Vec::new();
-        let registry = match &store {
-            Some(store) => {
-                let guard = store.lock_read()?;
-                let registry = store.registry()?;
-                Some((store, registry, guard))
-            }
+        let registry = match store {
+            Some(store) => Some((store, store.registry()?)),
             None => None,
         };
         for source in catalog::standard() {
             let entry = registry
                 .as_ref()
-                .and_then(|(_, r, _)| r.dictionaries.get(source.id).map(|e| e.version.clone()));
-            let (Some((store, _, _)), Some(version)) = (&registry, entry) else {
+                .and_then(|(_, r)| r.dictionaries.get(source.id).map(|e| e.version.clone()));
+            let (Some((store, _)), Some(version)) = (&registry, entry) else {
                 states.push(SourceReport {
                     id: source.id,
                     role: source.role,
@@ -342,7 +364,11 @@ impl Lexicon {
         self.by_role(role).next().is_some()
     }
 
+    /// Поиск чтений. `limit` и `max_evidence` должны быть не меньше 1:
+    /// нулевой предел отвергается как `invalid_input`, а не заменяется
+    /// молча (группа без свидетельств потеряла бы происхождение).
     pub fn lookup(&self, input: &str, options: &Options) -> Result<LookupResult> {
+        options.validate()?;
         let surface =
             kana::normalize_query(input).map_err(|m| Error::new(Code::InvalidInput, m))?;
         let script = kana::classify(&surface);
@@ -458,14 +484,14 @@ impl Lexicon {
         };
 
         let total = groups.len();
-        let limit = options.limit.max(1);
+        let limit = options.limit;
         let mut evidence_omitted = 0;
         let shown: Vec<ReadingGroup> = groups
             .into_iter()
             .skip(options.offset)
             .take(limit)
             .map(|mut g| {
-                let keep = options.max_evidence.max(1);
+                let keep = options.max_evidence;
                 if g.evidence.len() > keep {
                     evidence_omitted += g.evidence.len() - keep;
                     g.evidence.truncate(keep);

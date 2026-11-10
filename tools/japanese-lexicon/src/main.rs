@@ -1,9 +1,11 @@
 //! CLI `japanese-lexicon`: управление локальными словарями и поиск чтений.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Arg, ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use japanese_lexicon::catalog::Role;
 use japanese_lexicon::error::{Code, Error, code_name};
-use japanese_lexicon::lookup::{self, Lexicon, LookupResult, SourceState};
-use japanese_lexicon::manager::{self, OperationReport, Options, State, StatusReport};
+use japanese_lexicon::kana::KanaIssue;
+use japanese_lexicon::lookup::{self, EvidenceClass, Lexicon, LookupResult, SourceState, Status};
+use japanese_lexicon::manager::{self, OperationReport, Options, Outcome, State, StatusReport};
 use japanese_lexicon::store;
 use japanese_lexicon::upstream::HttpTransport;
 use serde::Serialize;
@@ -52,10 +54,10 @@ struct Selection {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Весь поддерживаемый набор: что установлено, версии, записи, пути, состояние.
-    #[command(visible_alias = "list")]
+    /// Весь поддерживаемый набор: что установлено, версии, записи, пути, состояние (синоним: list).
+    #[command(alias = "list")]
     Status,
-    /// Установить словари с живого upstream (или один — из локального ZIP).
+    /// Установить словари с живого источника публикации (или один — из локального ZIP).
     Install {
         #[command(flatten)]
         selection: Selection,
@@ -63,7 +65,7 @@ enum Command {
         #[arg(long)]
         from_file: Option<PathBuf>,
     },
-    /// Проверить upstream на новые версии; установленные данные не меняются.
+    /// Проверить источник публикации на новые версии; установленные данные не меняются.
     CheckUpdates {
         #[command(flatten)]
         selection: Selection,
@@ -73,8 +75,8 @@ enum Command {
         #[command(flatten)]
         selection: Selection,
     },
-    /// Удалить словари из каталога данных подсистемы.
-    #[command(visible_alias = "uninstall")]
+    /// Удалить словари из каталога данных подсистемы (синоним: uninstall).
+    #[command(alias = "uninstall")]
     Remove {
         #[command(flatten)]
         selection: Selection,
@@ -82,8 +84,8 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Локальная проверка контрольных сумм, индексов и реестра без сети и исправлений.
-    #[command(visible_alias = "doctor")]
+    /// Локальная проверка контрольных сумм, индексов и реестра без сети и исправлений (синоним: doctor).
+    #[command(alias = "doctor")]
     Verify {
         /// ID словарей; по умолчанию все.
         ids: Vec<String>,
@@ -93,14 +95,14 @@ enum Command {
         /// Японское написание.
         #[arg(long)]
         surface: String,
-        /// Пропустить N групп чтений (пагинация).
-        #[arg(long, default_value_t = 0)]
+        /// Пропустить N групп чтений (пагинация; по умолчанию 0).
+        #[arg(long, default_value_t = 0, hide_default_value = true)]
         offset: usize,
-        /// Не больше N групп чтений.
-        #[arg(long, default_value_t = 50)]
+        /// Не больше N групп чтений, N ≥ 1 (по умолчанию 50).
+        #[arg(long, default_value_t = 50, hide_default_value = true)]
         limit: usize,
-        /// Не больше N свидетельств в группе.
-        #[arg(long, default_value_t = 10)]
+        /// Не больше N свидетельств в группе, N ≥ 1 (по умолчанию 10).
+        #[arg(long, default_value_t = 10, hide_default_value = true)]
         max_evidence: usize,
     },
 }
@@ -129,20 +131,96 @@ fn fail(error: &Error, json: bool) -> ExitCode {
     } as u8)
 }
 
+// Русские подписи машинных значений для текстового вывода. JSON-вывод
+// сохраняет машинные имена без изменений.
+
+fn operation_label(operation: &str) -> &str {
+    match operation {
+        "install" => "установка",
+        "update" => "обновление",
+        "check-updates" => "проверка обновлений",
+        "remove" => "удаление",
+        other => other,
+    }
+}
+
+fn outcome_label(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Installed => "установлен",
+        Outcome::AlreadyInstalled => "уже установлен",
+        Outcome::Updated => "обновлён",
+        Outcome::UpToDate => "актуален",
+        Outcome::UpdateAvailable => "доступно обновление",
+        Outcome::NotInstalled => "не установлен",
+        Outcome::Unknown => "новизна не установлена",
+        Outcome::CheckFailed => "проверка не выполнена",
+        Outcome::Failed => "отказ",
+        Outcome::Removed => "удалён",
+    }
+}
+
+fn role_label(role: Role) -> &'static str {
+    match role {
+        Role::Lexicon => "лексический словарь",
+        Role::ProperNames => "имена собственные",
+        Role::Kanji => "сведения о кандзи",
+        Role::Frequency => "частотность",
+    }
+}
+
+fn origin_label(origin: store::Origin) -> String {
+    match origin {
+        store::Origin::Option => "задан --data-dir".into(),
+        store::Origin::Environment => format!("задан переменной {}", store::DIR_ENV),
+        store::Origin::XdgDataHome => "по XDG_DATA_HOME".into(),
+        store::Origin::Home => "по умолчанию в HOME".into(),
+    }
+}
+
+fn status_label(status: Status) -> &'static str {
+    match status {
+        Status::NotFound => "не найдено",
+        Status::SingleReading => "одно чтение",
+        Status::MultipleReadings => "несколько чтений",
+        Status::KanjiReferenceOnly => "только чтения знака",
+        Status::ProperNameOnly => "только имена собственные",
+        Status::RedirectOnly => "только указатель на другую форму",
+        Status::Ambiguous => "чтение не выводится уверенно",
+        Status::SourceMissing => "нет нужного словаря",
+    }
+}
+
+fn class_label(class: EvidenceClass) -> &'static str {
+    match class {
+        EvidenceClass::LexicalEntry => "статья",
+        EvidenceClass::SurfaceKana => "запись каной",
+        EvidenceClass::ProperName => "имя",
+        EvidenceClass::KanjiReference => "чтение знака",
+    }
+}
+
+fn kana_issue_label(issue: KanaIssue) -> &'static str {
+    match issue {
+        KanaIssue::HalfwidthKana => "полуширинная кана",
+        KanaIssue::IterationMark => "знак повтора",
+        KanaIssue::SeparateVoicingMark => "отдельный знак дакутэна",
+        KanaIssue::UnsupportedKanaLetter => "неподдерживаемый знак каны",
+        KanaIssue::LeadingProlongedMark => "знак долготы в начале",
+        KanaIssue::NonKanaCharacter => "знак не из каны",
+    }
+}
+
 fn print_operation(report: &OperationReport) {
     println!(
         "{} — каталог данных {}",
-        report.operation,
+        operation_label(report.operation),
         report.data_dir.display()
     );
     for path in &report.cleaned {
         println!("  убран остаток прерванной операции: {}", path.display());
     }
     for item in &report.items {
-        let outcome = serde_json::to_value(item.outcome)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
+        let outcome = outcome_label(item.outcome);
         let code = item
             .code
             .map(|c| format!(" [{}]", code_name(c)))
@@ -150,7 +228,7 @@ fn print_operation(report: &OperationReport) {
         println!("  {:<22} {outcome}{code}: {}", item.id, item.message);
         if let Some(i) = &item.installed {
             println!(
-                "      установлено: {} (revision {}, release {}), sha256 {}…",
+                "      установлено: {} (ревизия {}, релиз {}), sha256 {}…",
                 i.title,
                 i.revision,
                 i.release.as_deref().unwrap_or("неизвестен"),
@@ -158,13 +236,13 @@ fn print_operation(report: &OperationReport) {
             );
         }
         if let Some(p) = &item.previous {
-            println!("      прежняя версия: revision {}", p.revision);
+            println!("      прежняя версия: ревизия {}", p.revision);
         }
         if let Some(r) = &item.remote {
             println!(
-                "      upstream: {} {} {}",
+                "      источник публикации: {}, релиз {}, файл {}",
                 r.locator,
-                r.release.as_deref().unwrap_or("?"),
+                r.release.as_deref().unwrap_or("неизвестен"),
                 r.asset_name
             );
         }
@@ -184,9 +262,9 @@ fn print_operation(report: &OperationReport) {
 
 fn print_status(report: &StatusReport) {
     println!(
-        "каталог данных: {} ({:?}){}",
+        "каталог данных: {} ({}){}",
         report.data_dir.display(),
-        report.data_dir_origin,
+        origin_label(report.data_dir_origin),
         if report.exists {
             ""
         } else {
@@ -195,24 +273,24 @@ fn print_status(report: &StatusReport) {
     );
     for d in &report.dictionaries {
         let state = match d.state {
-            State::Ok => "ok",
+            State::Ok => "в порядке",
             State::Corrupt => "ПОВРЕЖДЁН",
             State::NotInstalled => "не установлен",
         };
-        println!("\n{} [{:?}] — {}: {state}", d.id, d.role, d.title);
+        println!("\n{} [{}] — {}: {state}", d.id, role_label(d.role), d.title);
         if let Some(i) = &d.installed {
             println!(
-                "  версия: {} (release {}), установлен {}",
+                "  версия: ревизия {}, релиз {}, установлен {}",
                 i.revision,
                 i.release.as_deref().unwrap_or("неизвестен"),
                 i.installed_at
             );
             println!(
-                "  источник: {} {} ({})",
+                "  источник: {} {} (файл {})",
                 i.provider, i.locator, i.asset_name
             );
             println!(
-                "  записи: terms {}, readings {}, redirects {}, kanji {}, term_meta {}",
+                "  записи: статей {}, чтений {}, указателей {}, кандзи {}, частотных и прочих метаданных {}",
                 i.stats.terms,
                 i.stats.readings,
                 i.stats.redirects,
@@ -245,19 +323,12 @@ fn print_status(report: &StatusReport) {
 }
 
 fn print_lookup(r: &LookupResult) {
-    let status = serde_json::to_value(r.status)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default();
-    println!("{} — {status}", r.query.surface);
+    println!("{} — {}", r.query.surface, status_label(r.status));
     if !r.distinct_readings.is_empty() {
         println!("различные чтения: {}", r.distinct_readings.join(", "));
     }
     for g in &r.readings {
-        let class = serde_json::to_value(g.class)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .unwrap_or_default();
+        let class = class_label(g.class);
         let sources: Vec<String> = g
             .evidence
             .iter()
@@ -325,11 +396,12 @@ fn print_lookup(r: &LookupResult) {
     if let Some(k) = &r.kana
         && !k.issues.is_empty()
     {
-        println!("  кана не выводится уверенно: {:?}", k.issues);
+        let issues: Vec<&str> = k.issues.iter().map(|i| kana_issue_label(*i)).collect();
+        println!("  кана не выводится уверенно: {}", issues.join(", "));
     }
     if r.truncation.truncated {
         println!(
-            "  показано {} из {} групп (offset {}); --offset/--limit для продолжения",
+            "  показано {} из {} групп (смещение {}); --offset/--limit для продолжения",
             r.truncation.groups_returned, r.truncation.groups_total, r.truncation.offset
         );
     }
@@ -418,7 +490,7 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
                 println!(
                     "\nитог проверки: {}",
                     if report.ok {
-                        "ok"
+                        "в порядке"
                     } else {
                         "найдены проблемы"
                     }
@@ -489,8 +561,51 @@ fn run(cli: Cli) -> Result<ExitCode, Error> {
     }
 }
 
+/// Русские заголовки справки и собственные флаги `-h`/`-V` вместо
+/// встроенных английских подписей clap.
+fn localize(command: clap::Command) -> clap::Command {
+    command
+        .help_template(
+            "{before-help}{about-with-newline}\nИспользование: {usage}\n\n{all-args}{after-help}",
+        )
+        .subcommand_help_heading("Команды")
+        .subcommand_value_name("КОМАНДА")
+        .disable_help_flag(true)
+        .disable_help_subcommand(true)
+        .mut_args(|arg| {
+            if arg.get_help_heading().is_some() {
+                arg
+            } else if arg.is_positional() {
+                arg.help_heading("Аргументы")
+            } else {
+                arg.help_heading("Параметры")
+            }
+        })
+        .arg(
+            Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(ArgAction::Help)
+                .help("Показать справку")
+                .help_heading("Параметры"),
+        )
+        .mut_subcommands(localize)
+}
+
+fn parse() -> Cli {
+    let command = localize(Cli::command()).disable_version_flag(true).arg(
+        Arg::new("version")
+            .short('V')
+            .long("version")
+            .action(ArgAction::Version)
+            .help("Показать версию")
+            .help_heading("Параметры"),
+    );
+    Cli::from_arg_matches(&command.get_matches()).unwrap_or_else(|e| e.exit())
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse();
     let json = cli.json;
     match run(cli) {
         Ok(code) => code,

@@ -1,4 +1,4 @@
-//! Жизненный цикл словарей на синтетических архивах и поддельном upstream.
+//! Жизненный цикл словарей на синтетических архивах и поддельном источнике публикации.
 
 mod common;
 
@@ -913,4 +913,352 @@ fn empty_data_dir_is_honest() {
             .all(|i| i.outcome == Outcome::NotInstalled && i.remote.is_some())
     );
     assert!(!root.exists(), "check-updates не создаёт каталог");
+}
+
+/// Полный перечень записей дерева, включая файлы замков и ссылки.
+fn listing(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                stack.push(path.clone());
+            }
+            out.push(path.strip_prefix(root).unwrap().to_path_buf());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Внешний каталог с «чужими» файлами, которые не должны пострадать.
+fn victim(tmp: &TempDir, name: &str) -> std::path::PathBuf {
+    let dir = tmp.path().join(name);
+    std::fs::create_dir_all(dir.join("nested")).unwrap();
+    std::fs::write(dir.join("precious.txt"), b"keep me").unwrap();
+    std::fs::write(dir.join("nested/also.txt"), b"keep me too").unwrap();
+    dir
+}
+
+#[test]
+fn symlinked_managed_directories_are_refused_without_touching_targets() {
+    use std::os::unix::fs::symlink;
+    let up = FakeUpstream::standard();
+    up.publish("jitendex", "T2", jitendex("T2", &[]));
+    for link in ["staging", "dictionaries", "dictionaries/jitendex"] {
+        let tmp = TempDir::new("symlink");
+        let root = tmp.path().join("data");
+        let (loc, _) = installed(&root);
+        let outside = victim(&tmp, "outside");
+        let before = snapshot(&outside);
+        let managed = root.join(link);
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&managed, &moved).unwrap();
+        symlink(&outside, &managed).unwrap();
+
+        let install = manager::install(&root, &all(), &up, None, &Options::default());
+        assert_eq!(install.unwrap_err().code, Code::NotOwned, "{link}: install");
+        let update = manager::update(&root, &all(), &up, &Options::default());
+        assert_eq!(update.unwrap_err().code, Code::NotOwned, "{link}: update");
+        let remove = manager::remove(&root, &all());
+        assert_eq!(remove.unwrap_err().code, Code::NotOwned, "{link}: remove");
+        assert_eq!(
+            manager::status(&loc).unwrap_err().code,
+            Code::NotOwned,
+            "{link}: status"
+        );
+        assert_eq!(
+            manager::verify(&loc, &all()).unwrap_err().code,
+            Code::NotOwned,
+            "{link}: verify"
+        );
+        assert_eq!(snapshot(&outside), before, "{link}: внешние файлы изменены");
+        assert!(
+            std::fs::symlink_metadata(&managed)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{link}: ссылка не должна заменяться"
+        );
+        // Реестр не тронут отказавшим remove.
+        assert_eq!(
+            Store::open_existing(&root)
+                .unwrap()
+                .unwrap()
+                .registry()
+                .unwrap()
+                .dictionaries
+                .len(),
+            4
+        );
+        // После восстановления настоящего каталога всё снова работает.
+        std::fs::remove_file(&managed).unwrap();
+        std::fs::rename(&moved, &managed).unwrap();
+        assert!(manager::verify(&loc, &all()).unwrap().ok, "{link}");
+    }
+
+    // Файл на месте управляемого каталога — тоже отказ, без удаления.
+    let tmp = TempDir::new("symlink-file");
+    let root = tmp.path().join("data");
+    installed(&root);
+    std::fs::remove_dir_all(root.join("staging")).unwrap();
+    std::fs::write(root.join("staging"), b"not a dir").unwrap();
+    let err = manager::update(&root, &all(), &up, &Options::default()).unwrap_err();
+    assert_eq!(err.code, Code::NotOwned);
+    assert_eq!(std::fs::read(root.join("staging")).unwrap(), b"not a dir");
+
+    // Ссылка на месте остатка (листовой каталог версии) убирается как
+    // ссылка: цель не обходится, обычное восстановление работает.
+    let tmp = TempDir::new("symlink-leaf");
+    let root = tmp.path().join("data");
+    installed(&root);
+    let outside = victim(&tmp, "outside");
+    let before = snapshot(&outside);
+    symlink(&outside, root.join("staging/0123456789abcdef")).unwrap();
+    symlink(
+        &outside,
+        root.join("dictionaries/jitendex/0000000000000000-00000000"),
+    )
+    .unwrap();
+    let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+    assert!(update.ok, "{update:#?}");
+    assert_eq!(update.cleaned.len(), 2);
+    assert!(!root.join("staging/0123456789abcdef").exists());
+    assert_eq!(snapshot(&outside), before);
+}
+
+#[test]
+fn read_only_commands_create_no_files() {
+    let tmp = TempDir::new("read-only");
+    let root = tmp.path().join("data");
+    let (loc, up) = installed(&root);
+    // Каталог, принадлежащий подсистеме, но без файлов замков (например,
+    // после ручной уборки): команды чтения не должны их создавать.
+    std::fs::remove_file(root.join(store::ACTIVE_LOCK)).unwrap();
+    std::fs::remove_file(root.join(store::OPERATIONS_LOCK)).unwrap();
+    let before = listing(&root);
+    let contents = snapshot(&root);
+
+    assert!(manager::status(&loc).unwrap().ok);
+    assert_eq!(listing(&root), before, "status");
+    assert!(manager::verify(&loc, &all()).unwrap().ok);
+    assert_eq!(listing(&root), before, "verify");
+    assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
+    assert_eq!(listing(&root), before, "lookup");
+    let check = manager::check_updates(&root, &all(), &up).unwrap();
+    assert!(check.ok, "{check:#?}");
+    assert_eq!(listing(&root), before, "check-updates");
+    assert_eq!(snapshot(&root), contents);
+    assert!(!root.join(store::ACTIVE_LOCK).exists());
+
+    // Изменяющая операция создаёт замок до того, как начнёт менять версии.
+    up.publish("jitendex", "T2", jitendex("T2", &[]));
+    manager::update(&root, &one("jitendex"), &up, &Options::default()).unwrap();
+    assert!(root.join(store::ACTIVE_LOCK).exists());
+
+    // Свежая инициализация тоже создаёт замок, а чтение после неё — нет.
+    let fresh = tmp.path().join("fresh");
+    let report = manager::remove(&fresh, &all()).unwrap();
+    assert!(
+        report
+            .items
+            .iter()
+            .all(|i| i.outcome == Outcome::NotInstalled)
+    );
+    assert!(!fresh.exists(), "remove без каталога ничего не создаёт");
+}
+
+#[test]
+fn concurrent_reads_stay_consistent_during_activation_and_removal() {
+    let tmp = TempDir::new("read-race");
+    let root = tmp.path().join("data");
+    let (loc, up) = installed(&root);
+    // Начинаем без файла замка: путь чтения без блокировки с повтором.
+    std::fs::remove_file(root.join(store::ACTIVE_LOCK)).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut rounds = 0;
+                    while !stop.load(Ordering::SeqCst) {
+                        let lexicon = Lexicon::open(&root).unwrap();
+                        let r = lexicon.lookup("学校", &lookup::Options::default()).unwrap();
+                        for s in &r.sources {
+                            assert_ne!(
+                                s.state,
+                                lookup::SourceState::Unavailable,
+                                "версия исчезла между чтением реестра и открытием: {s:?}"
+                            );
+                        }
+                        let status = manager::status(&loc).unwrap();
+                        assert!(
+                            status
+                                .dictionaries
+                                .iter()
+                                .all(|d| d.state != State::Corrupt),
+                            "{status:#?}"
+                        );
+                        rounds += 1;
+                    }
+                    rounds
+                })
+            })
+            .collect();
+        for n in 2..6 {
+            let release = format!("T{n}");
+            up.publish("jitendex", &release, jitendex(&release, &[]));
+            let r = manager::update(&root, &one("jitendex"), &up, &Options::default()).unwrap();
+            assert_eq!(outcome(&r, "jitendex"), Outcome::Updated);
+        }
+        manager::remove(&root, &one("jitendex")).unwrap();
+        let r = manager::install(&root, &one("jitendex"), &up, None, &Options::default()).unwrap();
+        assert!(r.ok);
+        stop.store(true, Ordering::SeqCst);
+        for reader in readers {
+            assert!(reader.join().unwrap() > 0);
+        }
+    });
+}
+
+#[test]
+fn exact_lookup_keys_are_nfc_on_import_and_query() {
+    let tmp = TempDir::new("nfc");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    // ドア с разложенным дакутэном (ト + U+3099) и пустым чтением;
+    // パン — составной формой.
+    let decomposed = "\u{30C8}\u{3099}\u{30A2}";
+    up.publish(
+        "jitendex",
+        "T1",
+        jitendex(
+            "T1",
+            &[
+                json!([decomposed, "", "", "", 10, [{"type": "structured-content", "content": "door"}], 100, ""]),
+                json!(["パン", "", "", "", 10, [{"type": "structured-content", "content": "bread"}], 101, ""]),
+            ],
+        ),
+    );
+    // KANJIDIC: совместимый иероглиф U+FA10 канонически равен 塚 (U+585A).
+    up.publish(
+        "kanjidic-english",
+        "2026-01-01",
+        zip_bytes(vec![
+            file(
+                "index.json",
+                &json!({"title": "KANJIDIC [T1]", "format": 3, "revision": "T1"}),
+            ),
+            file(
+                "kanji_bank_1.json",
+                &json!([["\u{FA10}", "チョウ", "つか", "", ["mound"], {}]]),
+            ),
+        ]),
+    );
+    // JPDB: частотность записи ドア тоже в разложенной форме.
+    up.publish(
+        "jpdb-v2.2-freq-kana",
+        "2024-10-13",
+        zip_bytes(vec![
+            file(
+                "index.json",
+                &json!({"title": "JPDBv2㋕", "format": 3, "revision": "T1", "frequencyMode": "rank-based"}),
+            ),
+            file(
+                "term_meta_bank_1.json",
+                &json!([[decomposed, "freq", {"value": 900, "displayValue": "900㋕"}]]),
+            ),
+        ]),
+    );
+    let report = manager::install(&root, &all(), &up, None, &Options::default()).unwrap();
+    assert!(report.ok, "{report:#?}");
+
+    let composed = lookup(&root, "ドア");
+    let raw = lookup(&root, decomposed);
+    assert_eq!(
+        serde_json::to_value(&composed.readings).unwrap(),
+        serde_json::to_value(&raw.readings).unwrap(),
+        "составная и разложенная форма запроса дают одно извлечение"
+    );
+    assert!(raw.query.nfc_changed);
+    let lexical = composed
+        .readings
+        .iter()
+        .find(|g| g.class == EvidenceClass::LexicalEntry)
+        .expect("статья с разложенным написанием находится по NFC-запросу");
+    assert_eq!(lexical.normalized, "どあ");
+    // Происхождение — исходная строка словаря и её адрес в архиве.
+    let evidence = &lexical.evidence[0];
+    assert_eq!(evidence.surface, decomposed);
+    assert_eq!(evidence.origin, "kana_term");
+    let entry = evidence.entry.as_ref().unwrap();
+    assert_eq!(entry.bank, "term_bank_1.json");
+    assert_eq!(entry.sequence, Some(100));
+    // Частотность с разложенным ключом аннотирует ту же группу.
+    assert_eq!(lexical.frequency.len(), 1);
+    assert_eq!(lexical.frequency[0].display.as_deref(), Some("900㋕"));
+    assert!(composed.frequency_unmatched.is_empty());
+
+    // Составная форма в источнике находится разложенным запросом.
+    let pan = lookup(&root, "\u{30CF}\u{309A}\u{30F3}");
+    assert!(
+        pan.readings
+            .iter()
+            .any(|g| g.class == EvidenceClass::LexicalEntry && g.normalized == "ぱん")
+    );
+
+    // Банк кандзи: совместимый иероглиф канонически равен основному.
+    let tsuka = lookup(&root, "\u{585A}");
+    let kanji = tsuka
+        .readings
+        .iter()
+        .find(|g| g.class == EvidenceClass::KanjiReference)
+        .expect("KANJIDIC находит канонически эквивалентный знак");
+    assert_eq!(kanji.evidence[0].surface, "\u{FA10}");
+
+    // NFKC-эквивалентная, но канонически иная запись не сливается.
+    let halfwidth = lookup(&root, "ﾄﾞｱ");
+    assert!(
+        halfwidth
+            .readings
+            .iter()
+            .all(|g| g.class != EvidenceClass::LexicalEntry)
+    );
+    assert_eq!(halfwidth.status, Status::Ambiguous);
+}
+
+#[test]
+fn zero_page_limits_are_rejected_explicitly() {
+    let tmp = TempDir::new("zero-limits");
+    let root = tmp.path().join("data");
+    installed(&root);
+    let lexicon = Lexicon::open(&root).unwrap();
+    for options in [
+        lookup::Options {
+            limit: 0,
+            ..lookup::Options::default()
+        },
+        lookup::Options {
+            max_evidence: 0,
+            ..lookup::Options::default()
+        },
+    ] {
+        let err = lexicon.lookup("生", &options).unwrap_err();
+        assert_eq!(err.code, Code::InvalidInput, "{options:?}");
+    }
+    let one_each = lexicon
+        .lookup(
+            "生",
+            &lookup::Options {
+                offset: 0,
+                limit: 1,
+                max_evidence: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(one_each.truncation.limit, 1);
+    assert_eq!(one_each.readings.len(), 1);
+    assert_eq!(one_each.readings[0].evidence.len(), 1);
 }

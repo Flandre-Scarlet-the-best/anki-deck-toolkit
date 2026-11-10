@@ -32,9 +32,9 @@ pub enum Outcome {
     UpToDate,
     UpdateAvailable,
     NotInstalled,
-    /// Новизну нельзя уверенно установить: upstream не публикует сумму.
+    /// Новизну нельзя уверенно установить: источник публикации не публикует сумму.
     Unknown,
-    /// Проверка не выполнена: сеть, upstream или ответ не позволили.
+    /// Проверка не выполнена: сеть, источник публикации или его ответ не позволили.
     CheckFailed,
     Failed,
     Removed,
@@ -299,7 +299,11 @@ fn activate(store: &Store, source: &Source, staging: &Path, manifest: &Manifest)
     let id8 = store::random_id()?;
     let version = format!("{}-{}", &manifest.archive.sha256[..16], &id8[..8]);
     let parent = store.dictionary_dir(source.id);
+    // Каталог словаря мог смениться ссылкой после начала операции:
+    // перепроверка до создания и до переноса версии.
+    store.ensure_layout()?;
     fs::create_dir_all(&parent).map_err(|e| Error::io(parent.display(), e))?;
+    store.ensure_layout()?;
     let dest = parent.join(&version);
     fs::rename(staging, &dest).map_err(|e| Error::io(dest.display(), e))?;
     store::sync_dir(&parent)?;
@@ -416,7 +420,7 @@ fn begin(
     Ok((store, guard, report))
 }
 
-/// `install`: недостающие словари с живого upstream или из локального ZIP.
+/// `install`: недостающие словари с живого источника публикации или из локального ZIP.
 pub fn install(
     root: &Path,
     sources: &[&Source],
@@ -532,7 +536,7 @@ fn compare(installed: &Manifest, remote: &RemoteArtifact) -> (Outcome, String) {
                 (
                     Outcome::UpToDate,
                     format!(
-                        "содержимое совпадает с опубликованным по контрольной сумме; маркер релиза upstream — {}, у установленного — {}",
+                        "содержимое совпадает с опубликованным по контрольной сумме; маркер релиза у источника публикации — {}, у установленного — {}",
                         release_label(&remote.release),
                         installed_label(installed)
                     ),
@@ -551,7 +555,7 @@ fn compare(installed: &Manifest, remote: &RemoteArtifact) -> (Outcome, String) {
         ),
         None => (
             Outcome::Unknown,
-            "upstream не публикует контрольную сумму: новизну можно установить только скачиванием (update)".into(),
+            "источник публикации не публикует контрольную сумму: новизну можно установить только скачиванием (update)".into(),
         ),
     }
 }
@@ -568,10 +572,7 @@ pub fn check_updates(
         // Реестр и манифест читаются под `active.lock`, чтобы параллельный
         // update не удалил прочитанную версию; блокировка не держится на сеть.
         let current = match &store {
-            Some(store) => {
-                let _read = store.lock_read()?;
-                active(store, source.id)?
-            }
+            Some(store) => store.read_consistent(|| active(store, source.id))?,
             None => None,
         };
         let remote = upstream::discover(transport, source);
@@ -924,32 +925,44 @@ fn survey(
         untouched: Vec::new(),
         unknown_registry_entries: Vec::new(),
     };
-    // Реестр читается под `active.lock`: иначе параллельная активация может
-    // удалить версию, на которую ссылается уже прочитанный реестр.
-    let _read = match &store {
-        Some(store) => Some(store.lock_read()?),
-        None => None,
+    let Some(store) = store else {
+        report.dictionaries = sources.iter().map(|s| not_installed_status(s)).collect();
+        return Ok(report);
     };
-    let registry = match &store {
-        Some(store) => Some(store.registry()?),
-        None => None,
-    };
+    // Реестр и версии читаются согласованно: иначе параллельная активация
+    // может удалить версию, на которую ссылается уже прочитанный реестр.
+    store.read_consistent(|| {
+        let mut report = report.clone();
+        survey_store(&store, &mut report, sources, deep)?;
+        Ok(report)
+    })
+}
+
+fn not_installed_status(source: &Source) -> DictionaryStatus {
+    DictionaryStatus {
+        id: source.id,
+        role: source.role,
+        title: source.title,
+        homepage: source.homepage,
+        license: source.license,
+        attribution: source.attribution,
+        redistribution_note: source.redistribution_note,
+        state: State::NotInstalled,
+        installed: None,
+        problems: Vec::new(),
+    }
+}
+
+fn survey_store(
+    store: &Store,
+    report: &mut StatusReport,
+    sources: &[&Source],
+    deep: bool,
+) -> Result<()> {
+    let registry = store.registry()?;
     for source in sources {
-        let mut status = DictionaryStatus {
-            id: source.id,
-            role: source.role,
-            title: source.title,
-            homepage: source.homepage,
-            license: source.license,
-            attribution: source.attribution,
-            redistribution_note: source.redistribution_note,
-            state: State::NotInstalled,
-            installed: None,
-            problems: Vec::new(),
-        };
-        if let (Some(store), Some(registry)) = (&store, &registry)
-            && let Some(entry) = registry.dictionaries.get(source.id)
-        {
+        let mut status = not_installed_status(source);
+        if let Some(entry) = registry.dictionaries.get(source.id) {
             match store.read_manifest(source.id, &entry.version) {
                 Ok(manifest) => {
                     status.problems =
@@ -971,21 +984,19 @@ fn survey(
         }
         report.dictionaries.push(status);
     }
-    if let (Some(store), Some(registry)) = (&store, &registry) {
-        report.operation_in_progress = store.operation_in_progress()?;
-        report.leftovers = store.leftovers(registry)?;
-        report.untouched = store.foreign_entries()?;
-        report.unknown_registry_entries = registry
-            .dictionaries
-            .keys()
-            .filter(|id| catalog::find(id).is_none())
-            .cloned()
-            .collect();
-        if !report.unknown_registry_entries.is_empty() {
-            report.ok = false;
-        }
+    report.operation_in_progress = store.operation_in_progress()?;
+    report.leftovers = store.leftovers(&registry)?;
+    report.untouched = store.foreign_entries()?;
+    report.unknown_registry_entries = registry
+        .dictionaries
+        .keys()
+        .filter(|id| catalog::find(id).is_none())
+        .cloned()
+        .collect();
+    if !report.unknown_registry_entries.is_empty() {
+        report.ok = false;
     }
-    Ok(report)
+    Ok(())
 }
 
 /// `status`: быстрый обзор без хеширования.

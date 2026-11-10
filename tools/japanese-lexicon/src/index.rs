@@ -16,6 +16,12 @@
 //!   по профилю источника, с происхождением (`origin`).
 //! - `redirects` — статьи-указатели на другую форму: не чтения написания.
 //! - `kanji`, `term_meta`, `tags` — соответствующие банки.
+//!
+//! Точный поиск идёт по отдельным столбцам-ключам (`surface_key`,
+//! `character_key`, `term_key`) — NFC исходной строки ([`kana::exact_key`]),
+//! той же функцией, что нормализует запрос. Исходные строки словаря
+//! хранятся без изменений рядом с ключом и вместе с `bank`/`row` остаются
+//! происхождением свидетельства.
 
 use crate::catalog::{BankKind, Source, TermProfile};
 use crate::error::{Error, Result};
@@ -29,7 +35,9 @@ use std::path::Path;
 
 /// Версия схемы корпуса. Изменение несовместимо с уже построенными индексами:
 /// `verify` сообщит о несовпадении, `update` перестроит индекс.
-pub const CORPUS_SCHEMA: u32 = 1;
+///
+/// `2`: ключи точного поиска в NFC отдельно от исходных строк.
+pub const CORPUS_SCHEMA: u32 = 2;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -39,22 +47,22 @@ CREATE TABLE terms(id INTEGER PRIMARY KEY, bank TEXT NOT NULL, row INTEGER NOT N
   term TEXT NOT NULL, reading TEXT NOT NULL, definition_tags TEXT NOT NULL, rules TEXT NOT NULL,
   score INTEGER NOT NULL, sequence INTEGER, term_tags TEXT NOT NULL, kind TEXT NOT NULL);
 CREATE TABLE readings(term_id INTEGER NOT NULL REFERENCES terms(id), surface TEXT NOT NULL,
-  reading TEXT NOT NULL, match_key TEXT NOT NULL, origin TEXT NOT NULL);
+  surface_key TEXT NOT NULL, reading TEXT NOT NULL, match_key TEXT NOT NULL, origin TEXT NOT NULL);
 CREATE TABLE redirects(term_id INTEGER NOT NULL REFERENCES terms(id), surface TEXT NOT NULL,
-  target TEXT NOT NULL, target_reading TEXT);
+  surface_key TEXT NOT NULL, target TEXT NOT NULL, target_reading TEXT);
 CREATE TABLE kanji(id INTEGER PRIMARY KEY, bank TEXT NOT NULL, row INTEGER NOT NULL,
-  character TEXT NOT NULL, onyomi TEXT NOT NULL, kunyomi TEXT NOT NULL, tags TEXT NOT NULL,
-  meanings TEXT NOT NULL, stats TEXT NOT NULL);
+  character TEXT NOT NULL, character_key TEXT NOT NULL, onyomi TEXT NOT NULL,
+  kunyomi TEXT NOT NULL, tags TEXT NOT NULL, meanings TEXT NOT NULL, stats TEXT NOT NULL);
 CREATE TABLE term_meta(id INTEGER PRIMARY KEY, bank TEXT NOT NULL, row INTEGER NOT NULL,
-  term TEXT NOT NULL, mode TEXT NOT NULL, reading TEXT, value INTEGER, display TEXT,
-  data TEXT NOT NULL);
+  term TEXT NOT NULL, term_key TEXT NOT NULL, mode TEXT NOT NULL, reading TEXT, value INTEGER,
+  display TEXT, data TEXT NOT NULL);
 ";
 
 const INDEX_SQL: &str = "
-CREATE INDEX readings_surface ON readings(surface);
-CREATE INDEX redirects_surface ON redirects(surface);
-CREATE INDEX kanji_character ON kanji(character);
-CREATE INDEX term_meta_term ON term_meta(term);
+CREATE INDEX readings_surface_key ON readings(surface_key);
+CREATE INDEX redirects_surface_key ON redirects(surface_key);
+CREATE INDEX kanji_character_key ON kanji(character_key);
+CREATE INDEX term_meta_term_key ON term_meta(term_key);
 ";
 
 /// Класс строки банка терминов.
@@ -223,10 +231,10 @@ pub fn build(
     {
         let mut w = Writer {
             term: tx.prepare("INSERT INTO terms(bank,row,term,reading,definition_tags,rules,score,sequence,term_tags,kind) VALUES(?,?,?,?,?,?,?,?,?,?)")?,
-            reading: tx.prepare("INSERT INTO readings(term_id,surface,reading,match_key,origin) VALUES(?,?,?,?,?)")?,
-            redirect: tx.prepare("INSERT INTO redirects(term_id,surface,target,target_reading) VALUES(?,?,?,?)")?,
-            kanji: tx.prepare("INSERT INTO kanji(bank,row,character,onyomi,kunyomi,tags,meanings,stats) VALUES(?,?,?,?,?,?,?,?)")?,
-            meta: tx.prepare("INSERT INTO term_meta(bank,row,term,mode,reading,value,display,data) VALUES(?,?,?,?,?,?,?,?)")?,
+            reading: tx.prepare("INSERT INTO readings(term_id,surface,surface_key,reading,match_key,origin) VALUES(?,?,?,?,?,?)")?,
+            redirect: tx.prepare("INSERT INTO redirects(term_id,surface,surface_key,target,target_reading) VALUES(?,?,?,?,?)")?,
+            kanji: tx.prepare("INSERT INTO kanji(bank,row,character,character_key,onyomi,kunyomi,tags,meanings,stats) VALUES(?,?,?,?,?,?,?,?,?)")?,
+            meta: tx.prepare("INSERT INTO term_meta(bank,row,term,term_key,mode,reading,value,display,data) VALUES(?,?,?,?,?,?,?,?,?)")?,
             tag: tx.prepare("INSERT OR REPLACE INTO tags(name,category,sort_order,notes,score) VALUES(?,?,?,?,?)")?,
         };
         for bank in &inspection.banks {
@@ -298,6 +306,9 @@ fn insert_term(
     if term.is_empty() {
         return Err(Error::format(format!("{bank}[{n}]: пустое написание")));
     }
+    // Решения «запись каной или нет» и ключ поиска — по канонической форме:
+    // разложенный дакутэн не должен превращать кану в «сомнительную».
+    let surface_key = kana::exact_key(term);
 
     let mut pairs: Vec<(String, &'static str)> = Vec::new();
     let mut redirect = None;
@@ -306,10 +317,13 @@ fn insert_term(
             redirect = redirect_target(glossary);
             kind::REDIRECT
         }
-        TermProfile::JmnedictNames if reading.is_empty() && !kana::is_plain_kana(term) => {
+        TermProfile::JmnedictNames if reading.is_empty() && !kana::is_plain_kana(&surface_key) => {
             let listed: Option<Vec<&str>> = glossary
                 .iter()
-                .map(|g| g.as_str().filter(|s| kana::is_plain_kana(s)))
+                .map(|g| {
+                    g.as_str()
+                        .filter(|s| kana::is_plain_kana(&kana::exact_key(s)))
+                })
                 .collect();
             match listed {
                 Some(list) if !list.is_empty() => {
@@ -328,7 +342,7 @@ fn insert_term(
         }
         // Пустое чтение по Yomitan означает «совпадает с написанием» —
         // осмысленно только для записи каной.
-        _ if kana::is_plain_kana(term) => {
+        _ if kana::is_plain_kana(&surface_key) => {
             pairs.push((term.to_owned(), origin::KANA_TERM));
             kind::ENTRY
         }
@@ -353,13 +367,13 @@ fn insert_term(
     }
     for (r, o) in pairs {
         w.reading
-            .execute(params![id, term, r, kana::match_key(&r), o])?;
+            .execute(params![id, term, surface_key, r, kana::match_key(&r), o])?;
         stats.readings += 1;
     }
     if record_kind == kind::REDIRECT {
         if let Some((target, target_reading)) = redirect {
             w.redirect
-                .execute(params![id, term, target, target_reading])?;
+                .execute(params![id, term, surface_key, target, target_reading])?;
             stats.redirects += 1;
         } else {
             stats.terms_without_reading += 1;
@@ -381,7 +395,8 @@ fn insert_kanji(
         )));
     }
     let character = cell_str(row, 0, bank, n)?;
-    if character.chars().count() != 1 {
+    let character_key = kana::exact_key(character);
+    if character_key.chars().count() != 1 {
         return Err(Error::format(format!("{bank}[{n}]: ожидается один символ")));
     }
     let meanings = row[4]
@@ -394,6 +409,7 @@ fn insert_kanji(
         bank,
         n as i64,
         character,
+        character_key,
         cell_str(row, 1, bank, n)?,
         cell_str(row, 2, bank, n)?,
         cell_str(row, 3, bank, n)?,
@@ -468,6 +484,7 @@ fn insert_term_meta(
         bank,
         n as i64,
         term,
+        kana::exact_key(term),
         mode,
         reading,
         value,
@@ -556,7 +573,8 @@ pub struct TagRow {
     pub notes: String,
 }
 
-/// Открытый только для чтения индекс.
+/// Открытый только для чтения индекс. Методы поиска сами приводят
+/// аргумент к ключу [`kana::exact_key`].
 pub struct Index {
     conn: Connection,
 }
@@ -639,13 +657,14 @@ impl Index {
     }
 
     pub fn readings(&self, surface: &str) -> Result<Vec<ReadingRow>> {
+        let key = kana::exact_key(surface);
         let mut st = self.conn.prepare(
             "SELECT r.surface, r.reading, r.match_key, r.origin, t.id, t.bank, t.row, t.sequence, t.score,
                     t.definition_tags, t.term_tags, t.rules
              FROM readings r JOIN terms t ON t.id = r.term_id
-             WHERE r.surface = ? ORDER BY t.id, r.rowid",
+             WHERE r.surface_key = ? ORDER BY t.id, r.rowid",
         )?;
-        let rows = st.query_map([surface], |r| {
+        let rows = st.query_map([&key], |r| {
             Ok(ReadingRow {
                 surface: r.get(0)?,
                 reading: r.get(1)?,
@@ -665,11 +684,12 @@ impl Index {
     }
 
     pub fn redirects(&self, surface: &str) -> Result<Vec<RedirectRow>> {
+        let key = kana::exact_key(surface);
         let mut st = self.conn.prepare(
             "SELECT d.surface, d.target, d.target_reading, t.definition_tags, t.bank, t.row, t.sequence
-             FROM redirects d JOIN terms t ON t.id = d.term_id WHERE d.surface = ? ORDER BY t.id",
+             FROM redirects d JOIN terms t ON t.id = d.term_id WHERE d.surface_key = ? ORDER BY t.id",
         )?;
-        let rows = st.query_map([surface], |r| {
+        let rows = st.query_map([&key], |r| {
             Ok(RedirectRow {
                 surface: r.get(0)?,
                 target: r.get(1)?,
@@ -684,10 +704,11 @@ impl Index {
     }
 
     pub fn kanji(&self, character: &str) -> Result<Vec<KanjiRow>> {
+        let key = kana::exact_key(character);
         let mut st = self.conn.prepare(
-            "SELECT character, onyomi, kunyomi, tags, meanings, bank, row FROM kanji WHERE character = ? ORDER BY id",
+            "SELECT character, onyomi, kunyomi, tags, meanings, bank, row FROM kanji WHERE character_key = ? ORDER BY id",
         )?;
-        let rows = st.query_map([character], |r| {
+        let rows = st.query_map([&key], |r| {
             let meanings: String = r.get(4)?;
             Ok(KanjiRow {
                 character: r.get(0)?,
@@ -703,10 +724,11 @@ impl Index {
     }
 
     pub fn term_meta(&self, term: &str) -> Result<Vec<TermMetaRow>> {
+        let key = kana::exact_key(term);
         let mut st = self.conn.prepare(
-            "SELECT term, mode, reading, value, display FROM term_meta WHERE term = ? ORDER BY id",
+            "SELECT term, mode, reading, value, display FROM term_meta WHERE term_key = ? ORDER BY id",
         )?;
-        let rows = st.query_map([term], |r| {
+        let rows = st.query_map([&key], |r| {
             Ok(TermMetaRow {
                 term: r.get(0)?,
                 mode: r.get(1)?,
