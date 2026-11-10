@@ -320,9 +320,11 @@ pub struct CollectedRecord {
     pub evidence: ForvoEvidence,
 }
 
-/// Итог полного сбора японского блока точного слова. Частичный результат
-/// сохраняется даже при остановке: скачанные записи не теряются, а
-/// возобновление пропускает их по ID.
+/// Итог полного сбора японского блока точного слова. Сбор пишет его по месту
+/// во внешний `Collection`, принадлежащий вызывающему: записи, уже прошедшие
+/// загрузку и техническую проверку MP3, переживают сброс future сбора
+/// (Ctrl+C, `batch-cancel`, истечение ожидания адаптера), а возобновление
+/// пропускает их по ID.
 #[derive(Debug, Default)]
 pub struct Collection {
     /// Ранжированные записи блока; `None`, если страница не прочитана.
@@ -333,6 +335,15 @@ pub struct Collection {
     /// Ошибка, остановившая сбор (страница, авторизация, сайт, прерывание).
     pub stop: Option<AssetError>,
 }
+impl Collection {
+    /// ID записей, уже скачанных или отклонённых в этом сборе.
+    fn processed_ids(&self) -> impl Iterator<Item = String> + '_ {
+        self.records
+            .iter()
+            .map(|r| r.evidence.selected_record_id.clone())
+            .chain(self.rejected.iter().map(|a| a.record_id.clone()))
+    }
+}
 
 /// Полный сбор через собственный Chromium: интерактивное восстановление
 /// входа — как у одиночного получения, уже скачанные записи не повторяются.
@@ -340,60 +351,50 @@ pub async fn collect(
     session: &mut ForvoSession,
     surface: &str,
     skip: &BTreeSet<String>,
-) -> Collection {
-    let mut collection = collect_from(session, surface, skip).await;
-    if collection
-        .stop
-        .as_ref()
-        .is_some_and(super::requires_interaction)
-    {
+    out: &mut Collection,
+) {
+    collect_from(session, surface, skip, out).await;
+    if out.stop.as_ref().is_some_and(super::requires_interaction) {
         match session.recover_interactively(Some(surface)).await {
             Ok(true) => {
                 let mut done: BTreeSet<String> = skip.clone();
-                done.extend(
-                    collection
-                        .records
-                        .iter()
-                        .map(|r| r.evidence.selected_record_id.clone()),
-                );
-                done.extend(collection.rejected.iter().map(|a| a.record_id.clone()));
-                let more = collect_from(session, surface, &done).await;
-                collection.candidates = more.candidates.or(collection.candidates);
-                collection.records.extend(more.records);
-                collection.rejected.extend(more.rejected);
-                collection.stop = more.stop;
+                done.extend(out.processed_ids());
+                out.stop = None;
+                collect_from(session, surface, &done, out).await;
             }
             Ok(false) => {}
-            Err(error) => collection.stop = Some(error),
+            Err(error) => out.stop = Some(error),
         }
     }
-    collection
 }
 
 /// Общий порядок полного сбора для CDP и расширения: те же кандидаты, проверка
 /// MP3 и коды отказов, что у одиночного получения, но без выбора «лучшей»
 /// записи — скачивается каждая доступная запись, кроме уже собранных.
+///
+/// Запись добавляется в `out` только после полной загрузки, проверки MP3 и
+/// свидетельства; прерванная на середине загрузка в `out` не попадает.
 pub(crate) async fn collect_from(
     session: &mut impl CandidateSource,
     surface: &str,
     skip: &BTreeSet<String>,
-) -> Collection {
+    out: &mut Collection,
+) {
     use crate::browser_diagnostics::{BrowserItemContext, BrowserItemTimer};
     let timer = BrowserItemTimer::new(BrowserItemContext::without_generation(
         "forvo_web",
         surface,
         1,
     ));
-    let mut collection = Collection::default();
     let candidates = match ranked_candidates(session, surface, &timer).await {
         Ok(candidates) => candidates,
         Err(error) => {
             timer.finish_failure(provider_code(&error), pauses_batch(&error), None);
-            collection.stop = Some(error);
-            return collection;
+            out.stop = Some(error);
+            return;
         }
     };
-    collection.candidates = Some(candidates.clone());
+    out.candidates = Some(candidates.clone());
     for candidate in candidates
         .iter()
         .filter(|c| c.download_available && !skip.contains(&c.record_id))
@@ -415,26 +416,25 @@ pub(crate) async fn collect_from(
                     acquisition_mode: Some(COLLECT_ALL_MODE.into()),
                 };
                 if let Err(error) = evidence.validate(surface, &sha) {
-                    collection.stop = Some(error);
+                    out.stop = Some(error);
                     break;
                 }
-                collection.records.push(CollectedRecord { bytes, evidence });
+                out.records.push(CollectedRecord { bytes, evidence });
             }
             Err(error) if super::rejects_candidate(&error) => {
-                collection.rejected.push(Attempt {
+                out.rejected.push(Attempt {
                     record_id: candidate.record_id.clone(),
                     code: provider_code(&error).into(),
                 });
             }
             Err(error) => {
-                collection.stop = Some(error);
+                out.stop = Some(error);
                 break;
             }
         }
     }
-    match &collection.stop {
+    match &out.stop {
         None => timer.finish_success(),
         Some(error) => timer.finish_failure(provider_code(error), pauses_batch(error), None),
     }
-    collection
 }

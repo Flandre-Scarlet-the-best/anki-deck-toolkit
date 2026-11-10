@@ -233,10 +233,12 @@ impl RuntimeBatchState for ForvoBatch {
     fn maximum_blob_bytes(&self) -> u64 {
         MAX_AUDIO_BYTES
     }
+    /// Каждый MP3 состояния: одиночное получение и все записи полного сбора.
     fn referenced_blobs(&self) -> Vec<RuntimeBlobRef> {
         self.items
             .iter()
-            .filter_map(|i| i.acquisition.as_ref().map(|a| a.blob.clone()))
+            .flat_map(|i| i.acquisition.iter().chain(&i.collected))
+            .map(|a| a.blob.clone())
             .collect()
     }
     fn validate(&self) -> Result<(), AssetError> {
@@ -690,7 +692,8 @@ async fn finish_interrupted(
 }
 
 /// Полный сбор одного написания с наблюдением Ctrl+C и `batch-cancel`.
-/// Частичный результат не теряется: скачанные записи фиксируются, а
+/// Частичный результат не теряется: сбор пишет записи во внешний
+/// `Collection`, поэтому завершённые записи переживают сброс future, а
 /// остановка становится причиной паузы.
 async fn collect_item(
     session: &mut Session,
@@ -699,43 +702,82 @@ async fn collect_item(
     surface: &str,
     skip: &std::collections::BTreeSet<String>,
 ) -> Collection {
-    let stopped = |error: AssetError| Collection {
-        stop: Some(error),
-        ..Collection::default()
-    };
-    match session {
-        Session::Cdp(session) => tokio::select! {
-            c = super::collect(session, surface, skip) => c,
-            _ = tokio::signal::ctrl_c() => stopped(AssetError::new(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume")),
-            r = cancellation(store, id) => stopped(r.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён"))),
-        },
+    let mut collection = Collection::default();
+    let stop = match session {
+        Session::Cdp(session) => {
+            let signal = async {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => AssetError::new(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume"),
+                    r = cancellation(store, id) => r.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён")),
+                }
+            };
+            run_collection(
+                super::collect(session, surface, skip, &mut collection),
+                signal,
+                None,
+            )
+            .await
+        }
         Session::Brave(session) => {
             let (tx, rx) = tokio::sync::watch::channel(false);
             session.set_interrupt(Some(rx));
-            let work = brave_fetch::acquire_collection(session, surface, skip);
-            tokio::pin!(work);
-            let stop = tokio::select! {
-                c = &mut work => return c,
-                _ = tokio::signal::ctrl_c() => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume цели",
-                    serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
-                r = cancellation(store, id) => match r {
-                    Err(e) => e,
-                    Ok(()) => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет отменён",
+            let signal = async {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume цели",
                         serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
-                },
+                    r = cancellation(store, id) => match r {
+                        Err(e) => e,
+                        Ok(()) => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет отменён",
+                            serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
+                    },
+                }
             };
-            let _ = tx.send(true);
-            match tokio::time::timeout(BRAVE_INTERRUPT_GRACE, work).await {
-                Ok(mut collection) => {
-                    collection.stop = Some(stop);
-                    collection
-                }
-                Err(_) => {
-                    let mut stop = stop;
-                    stop.details["recovery_required"] = serde_json::json!(true);
-                    stopped(stop)
-                }
-            }
+            run_collection(
+                brave_fetch::acquire_collection(session, surface, skip, &mut collection),
+                signal,
+                Some((tx, BRAVE_INTERRUPT_GRACE)),
+            )
+            .await
+        }
+    };
+    if let Some(stop) = stop {
+        collection.stop = Some(stop);
+    }
+    collection
+}
+
+/// Выполняет сбор до завершения или сигнала остановки и возвращает остановку,
+/// если она пришла. Без `cooperative` (CDP) future сбора сразу сбрасывается.
+/// С ним (расширение) сессии передаётся прерывание и даётся `grace` на
+/// освобождение собственной загрузки; по истечении — остановка с
+/// `recovery_required`. Записи, уже переданные сбором во внешний
+/// `Collection`, в обоих случаях сохраняются.
+pub(super) async fn run_collection(
+    work: impl std::future::Future<Output = ()>,
+    signal: impl std::future::Future<Output = AssetError>,
+    cooperative: Option<(tokio::sync::watch::Sender<bool>, Duration)>,
+) -> Option<AssetError> {
+    tokio::pin!(work);
+    let stop = tokio::select! {
+        () = &mut work => return None,
+        stop = signal => stop,
+    };
+    let Some((interrupt, grace)) = cooperative else {
+        return Some(stop);
+    };
+    tracing::warn!(
+        event = "brave_batch_stop_requested",
+        stage = "collect",
+        code = provider_code(&stop),
+        "Получена остановка; собственная операция загрузки освобождается"
+    );
+    let _ = interrupt.send(true);
+    match tokio::time::timeout(grace, work).await {
+        Ok(()) => Some(stop),
+        Err(_) => {
+            let mut stop = stop;
+            stop.details["recovery_required"] = serde_json::json!(true);
+            Some(stop)
         }
     }
 }
@@ -778,6 +820,18 @@ pub(super) fn checkpoint_collection(
         }
     }
     item.collection = Some(report);
+    if batch.cancelled {
+        // Отмена запрещает продолжение, но не стирает завершённые записи: они
+        // фиксируются, а `paused` и `outcome` остаются как у отменённого пакета.
+        tracing::warn!(
+            event = "forvo_batch_cancelled",
+            stage = "collect",
+            "Пакет Forvo отменён; завершённые записи сохранены"
+        );
+        batch.revision += 1;
+        runtime.save(batch)?;
+        return Ok(AcquisitionProgress::Paused);
+    }
     let progress = match collection.stop {
         Some(e) if pauses_batch(&e) || e.code == ErrorCode::Interrupted => {
             tracing::warn!(
@@ -1025,11 +1079,14 @@ pub async fn resume_prepared(
                         e.details.clone(),
                     ));
                 }
-                if batch.cancelled {
+                // Завершённые записи фиксируются и при отмене пакета.
+                let cancelled = batch.cancelled;
+                let code = collection.stop.as_ref().map(|e| provider_code(e).to_owned());
+                let progress = checkpoint_collection(&mut runtime, &mut batch, index, collection)?;
+                if cancelled {
                     break;
                 }
-                let code = collection.stop.as_ref().map(|e| provider_code(e).to_owned());
-                match checkpoint_collection(&mut runtime, &mut batch, index, collection)? {
+                match progress {
                     AcquisitionProgress::Ready => {
                         stage.finish_success();
                         timer.finish_success();

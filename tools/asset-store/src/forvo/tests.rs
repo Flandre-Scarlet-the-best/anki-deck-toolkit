@@ -36,6 +36,10 @@ fn source(responses: Vec<Result<Vec<u8>, AssetError>>) -> FakeSource {
     }
 }
 pub(crate) fn synthetic_mp3() -> Vec<u8> {
+    synthetic_mp3_tone(440)
+}
+/// Технически пригодный MP3 с заданным тоном: разные тоны — разные байты.
+fn synthetic_mp3_tone(frequency: u32) -> Vec<u8> {
     let workspace = crate::temp_workspace::TempWorkspace::create("forvo-synthetic-mp3").unwrap();
     let path = workspace.path().join("fixture.mp3");
     let status = std::process::Command::new("ffmpeg")
@@ -46,7 +50,7 @@ pub(crate) fn synthetic_mp3() -> Vec<u8> {
             "-f",
             "lavfi",
             "-i",
-            "sine=frequency=440:duration=0.6:sample_rate=44100",
+            format!("sine=frequency={frequency}:duration=0.6:sample_rate=44100").as_str(),
             "-c:a",
             "libmp3lame",
             "-q:a",
@@ -916,6 +920,17 @@ async fn candidate_failures_exhaust_records_but_unknown_errors_keep_their_code()
 // Полный сбор японского блока точного слова без чтения
 // ---------------------------------------------------------------------------
 
+/// Полный сбор в собственный `Collection`, как его владеет вызывающий.
+async fn collected(
+    source: &mut impl evidence::CandidateSource,
+    surface: &str,
+    skip: &std::collections::BTreeSet<String>,
+) -> Collection {
+    let mut collection = Collection::default();
+    evidence::collect_from(source, surface, skip, &mut collection).await;
+    collection
+}
+
 fn collection_source(responses: Vec<Result<Vec<u8>, AssetError>>) -> FakeSource {
     let mut source = source(responses);
     source.candidates.push(Candidate {
@@ -934,7 +949,7 @@ async fn collection_downloads_every_available_record_and_keeps_each_provenance()
         Err(error("download_aborted", "Загрузка отменена")),
         Ok(first.clone()),
     ]);
-    let collection = evidence::collect_from(&mut source, "生", &Default::default()).await;
+    let collection = collected(&mut source, "生", &Default::default()).await;
     assert!(collection.stop.is_none());
     // Недоступная для загрузки запись не скачивается, но остаётся в наблюдениях.
     assert_eq!(source.calls, ["1", "2", "3"]);
@@ -968,7 +983,7 @@ async fn collection_stop_keeps_partial_records_and_resume_skips_them() {
         Ok(bytes.clone()),
         Err(error("session_expired", "Повторите вход")),
     ]);
-    let collection = evidence::collect_from(&mut source, "生", &Default::default()).await;
+    let collection = collected(&mut source, "生", &Default::default()).await;
     assert_eq!(collection.records.len(), 1);
     assert_eq!(
         provider_code(collection.stop.as_ref().unwrap()),
@@ -976,7 +991,7 @@ async fn collection_stop_keeps_partial_records_and_resume_skips_them() {
     );
     let skip = ["1".to_owned()].into_iter().collect();
     let mut source = collection_source(vec![Ok(bytes.clone()), Ok(bytes)]);
-    let resumed = evidence::collect_from(&mut source, "生", &skip).await;
+    let resumed = collected(&mut source, "生", &skip).await;
     assert_eq!(
         source.calls,
         ["2", "3"],
@@ -986,7 +1001,7 @@ async fn collection_stop_keeps_partial_records_and_resume_skips_them() {
     // Страница без японского блока — остановка без записей.
     let mut missing = collection_source(Vec::new());
     missing.candidate_error = Some("japanese_pronunciation_not_found");
-    let collection = evidence::collect_from(&mut missing, "生", &Default::default()).await;
+    let collection = collected(&mut missing, "生", &Default::default()).await;
     assert!(collection.records.is_empty() && collection.candidates.is_none());
     assert_eq!(
         provider_code(collection.stop.as_ref().unwrap()),
@@ -1071,11 +1086,7 @@ fn surface_only_batch_item_collects_without_reading_and_without_import() {
 
     let bytes = synthetic_mp3();
     let mut source = collection_source(vec![Ok(bytes.clone()), Ok(bytes.clone()), Ok(bytes)]);
-    let collection = futures::executor::block_on(evidence::collect_from(
-        &mut source,
-        "生",
-        &Default::default(),
-    ));
+    let collection = futures::executor::block_on(collected(&mut source, "生", &Default::default()));
     let mut runtime = SafeBatchRuntime::open(store.root(), "collect").unwrap();
     let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
     batch::checkpoint_collection(&mut runtime, &mut state, 0, collection).unwrap();
@@ -1150,11 +1161,7 @@ fn collection_checkpoint_pauses_rejects_and_merges_without_duplicates() {
     .unwrap();
     let collect = |responses: Vec<Result<Vec<u8>, AssetError>>, surface: &str| {
         let mut source = collection_source(responses);
-        futures::executor::block_on(evidence::collect_from(
-            &mut source,
-            surface,
-            &Default::default(),
-        ))
+        futures::executor::block_on(collected(&mut source, surface, &Default::default()))
     };
     let bytes = synthetic_mp3();
     let mut runtime = SafeBatchRuntime::open(store.root(), "cp").unwrap();
@@ -1199,11 +1206,7 @@ fn collection_checkpoint_pauses_rejects_and_merges_without_duplicates() {
     // Ошибка страницы, не требующая паузы, — отказ элемента.
     let mut missing = collection_source(Vec::new());
     missing.candidate_error = Some("japanese_pronunciation_not_found");
-    let missing = futures::executor::block_on(evidence::collect_from(
-        &mut missing,
-        "水",
-        &Default::default(),
-    ));
+    let missing = futures::executor::block_on(collected(&mut missing, "水", &Default::default()));
     assert!(matches!(
         batch::checkpoint_collection(&mut runtime, &mut state, 1, missing).unwrap(),
         AcquisitionProgress::Rejected
@@ -1246,4 +1249,377 @@ fn legacy_batch_item_state_is_still_readable() {
     let item: batch::Item = serde_json::from_value(legacy).unwrap();
     assert!(!item.collects());
     assert_eq!(item.surface(), "水");
+}
+
+// ---------------------------------------------------------------------------
+// Сохранность полного сбора при асинхронной остановке и целостность MP3
+// ---------------------------------------------------------------------------
+
+/// Источник, у которого загрузка записи `stall_id` начинается и не завершается
+/// сама: сообщает о начале и либо висит, либо (с `interrupt`) кооперативно
+/// завершается ошибкой прерывания, как загрузка расширения.
+struct StalledSource {
+    inner: FakeSource,
+    stall_id: &'static str,
+    started: Option<tokio::sync::oneshot::Sender<()>>,
+    interrupt: Option<tokio::sync::watch::Receiver<bool>>,
+}
+impl evidence::CandidateSource for StalledSource {
+    async fn candidates(&mut self, surface: &str) -> Result<Vec<Candidate>, AssetError> {
+        self.inner.candidates(surface).await
+    }
+    async fn download(
+        &mut self,
+        surface: &str,
+        candidate: &Candidate,
+    ) -> Result<Vec<u8>, AssetError> {
+        if candidate.record_id != self.stall_id {
+            return self.inner.download(surface, candidate).await;
+        }
+        self.inner.calls.push(candidate.record_id.clone());
+        if let Some(started) = self.started.take() {
+            let _ = started.send(());
+        }
+        match &mut self.interrupt {
+            Some(rx) => {
+                rx.wait_for(|stop| *stop).await.unwrap();
+                Err(AssetError::with_details(
+                    ErrorCode::Interrupted,
+                    "Операция прервана пользователем",
+                    serde_json::json!({"provider":"forvo_brave","code":"interrupted"}),
+                ))
+            }
+            None => std::future::pending().await,
+        }
+    }
+}
+fn stalled(
+    responses: Vec<Result<Vec<u8>, AssetError>>,
+    interrupt: Option<tokio::sync::watch::Receiver<bool>>,
+) -> (StalledSource, tokio::sync::oneshot::Receiver<()>) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (
+        StalledSource {
+            inner: collection_source(responses),
+            stall_id: "2",
+            started: Some(tx),
+            interrupt,
+        },
+        rx,
+    )
+}
+fn interrupted_stop() -> AssetError {
+    AssetError::new(
+        ErrorCode::Interrupted,
+        "Forvo-пакет прерван; продолжите через batch-resume",
+    )
+}
+fn surface_store(
+    name: &str,
+    id: &str,
+) -> (crate::temp_workspace::TempWorkspace, crate::AssetStore) {
+    let workspace = crate::temp_workspace::TempWorkspace::create(name).unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    batch::start(
+        &store,
+        id,
+        batch::FetchPlan {
+            schema_version: 1,
+            items: vec![batch::FetchItem {
+                surface: "生".into(),
+                reading: None,
+                replace_expected_sha256: None,
+            }],
+        },
+        batch::Transport::CdpChromium,
+    )
+    .unwrap();
+    (workspace, store)
+}
+fn checkpoint(
+    store: &crate::AssetStore,
+    id: &str,
+    collection: Collection,
+) -> batch::AcquisitionProgress {
+    let mut runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    batch::checkpoint_collection(&mut runtime, &mut state, 0, collection).unwrap()
+}
+
+#[tokio::test]
+async fn cdp_stop_during_next_download_keeps_completed_records_and_resume_skips_them() {
+    let (_workspace, store) = surface_store("forvo-collect-stop", "stop");
+    let bytes = synthetic_mp3();
+    let (mut source, started) = stalled(vec![Ok(bytes.clone())], None);
+    let mut collection = Collection::default();
+    // Остановка приходит, когда запись 1 проверена, а загрузка записи 2 идёт:
+    // future сбора сбрасывается так же, как в ветке CDP пакета.
+    let stop = batch::run_collection(
+        evidence::collect_from(&mut source, "生", &Default::default(), &mut collection),
+        async {
+            started.await.unwrap();
+            interrupted_stop()
+        },
+        None,
+    )
+    .await;
+    collection.stop = stop;
+    assert_eq!(source.inner.calls, ["1", "2"]);
+    assert_eq!(
+        collection.records.len(),
+        1,
+        "проверенная запись не теряется"
+    );
+    assert_eq!(collection.records[0].evidence.selected_record_id, "1");
+    assert!(matches!(
+        checkpoint(&store, "stop", collection),
+        batch::AcquisitionProgress::Paused
+    ));
+
+    // Новый runtime: запись 1 сохранена, пауза — по причине остановки.
+    let state = batch::status(&store, "stop").unwrap();
+    let paused = state.paused.as_ref().unwrap();
+    assert_eq!(paused.code, "interrupted");
+    assert!(!paused.recovery_required);
+    let item = &state.items[0];
+    assert!(item.outcome.is_none());
+    assert_eq!(item.collected_ids(), ["1".to_owned()].into_iter().collect());
+
+    // Возобновление не скачивает запись 1; записи 2 и 3 с теми же байтами —
+    // отдельные записи без дублей.
+    let mut source = collection_source(vec![Ok(bytes.clone()), Ok(bytes)]);
+    let resumed = collected(&mut source, "生", &item.collected_ids()).await;
+    assert_eq!(source.calls, ["2", "3"]);
+    assert!(matches!(
+        checkpoint(&store, "stop", resumed),
+        batch::AcquisitionProgress::Ready
+    ));
+    let state = batch::status(&store, "stop").unwrap();
+    let item = &state.items[0];
+    assert!(state.paused.is_none());
+    assert_eq!(item.outcome.as_ref().unwrap().code, "collected");
+    assert_eq!(
+        item.collected_ids(),
+        ["1", "2", "3"].map(str::to_owned).into_iter().collect()
+    );
+    assert_eq!(item.collected.len(), 3);
+    assert!(
+        item.collected
+            .iter()
+            .all(|c| c.blob == item.collected[0].blob)
+    );
+}
+
+#[tokio::test]
+async fn brave_cooperative_stop_keeps_completed_records_without_recovery() {
+    let (_workspace, store) = surface_store("forvo-collect-coop", "coop");
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let (mut source, started) = stalled(vec![Ok(synthetic_mp3())], Some(rx));
+    let mut collection = Collection::default();
+    let stop = batch::run_collection(
+        evidence::collect_from(&mut source, "生", &Default::default(), &mut collection),
+        async {
+            started.await.unwrap();
+            interrupted_stop()
+        },
+        Some((tx, std::time::Duration::from_secs(30))),
+    )
+    .await
+    .unwrap();
+    assert!(stop.details["recovery_required"].is_null());
+    collection.stop = Some(stop);
+    // Прерванная загрузка записи 2 не стала ни записью, ни отказом.
+    assert_eq!(collection.records.len(), 1);
+    assert!(collection.rejected.is_empty());
+    checkpoint(&store, "coop", collection);
+    let state = batch::status(&store, "coop").unwrap();
+    assert!(!state.paused.as_ref().unwrap().recovery_required);
+    assert_eq!(
+        state.items[0].collected_ids(),
+        ["1".to_owned()].into_iter().collect()
+    );
+}
+
+#[tokio::test]
+async fn brave_grace_timeout_keeps_completed_records_and_requires_recovery() {
+    let (_workspace, store) = surface_store("forvo-collect-grace", "grace");
+    let (tx, _rx) = tokio::sync::watch::channel(false);
+    // Загрузка не освобождается вовремя: сбор не завершается сам.
+    let (mut source, started) = stalled(vec![Ok(synthetic_mp3())], None);
+    let mut collection = Collection::default();
+    let stop = batch::run_collection(
+        evidence::collect_from(&mut source, "生", &Default::default(), &mut collection),
+        async {
+            started.await.unwrap();
+            interrupted_stop()
+        },
+        Some((tx, std::time::Duration::from_millis(1))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stop.details["recovery_required"], true);
+    collection.stop = Some(stop);
+    assert_eq!(collection.records.len(), 1);
+    checkpoint(&store, "grace", collection);
+    let state = batch::status(&store, "grace").unwrap();
+    assert!(state.paused.as_ref().unwrap().recovery_required);
+    assert_eq!(
+        state.items[0].collected_ids(),
+        ["1".to_owned()].into_iter().collect()
+    );
+}
+
+#[tokio::test]
+async fn batch_cancel_during_collection_keeps_records_but_forbids_resume() {
+    let (workspace, store) = surface_store("forvo-collect-cancel", "cancel");
+    let (mut source, started) = stalled(vec![Ok(synthetic_mp3())], None);
+    let mut collection = Collection::default();
+    // Сигнал — штатный `batch-cancel` и наблюдение отмены пакетом.
+    let stop = batch::run_collection(
+        evidence::collect_from(&mut source, "生", &Default::default(), &mut collection),
+        async {
+            started.await.unwrap();
+            batch::cancel(&store, "cancel").unwrap();
+            batch::cancellation(&store, "cancel").await.unwrap();
+            AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён")
+        },
+        None,
+    )
+    .await;
+    collection.stop = stop;
+    assert_eq!(collection.records.len(), 1);
+    checkpoint(&store, "cancel", collection);
+    let state = batch::status(&store, "cancel").unwrap();
+    assert!(state.cancelled);
+    assert!(state.paused.is_none(), "отмена не становится паузой");
+    assert!(state.items[0].outcome.is_none());
+    assert_eq!(
+        state.items[0].collected_ids(),
+        ["1".to_owned()].into_iter().collect()
+    );
+    let error = batch::resume(
+        &store,
+        "cancel",
+        batch::Backend::Cdp {
+            profile: &workspace.path().join("profile"),
+        },
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidTransition);
+    assert!(batch::status(&store, "cancel").unwrap().cancelled);
+}
+
+#[test]
+fn runtime_verifies_every_collected_mp3_and_legacy_acquisition() {
+    use crate::batch_runtime::SafeBatchRuntime;
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-collect-blobs").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    batch::start(
+        &store,
+        "blobs",
+        batch::FetchPlan {
+            schema_version: 1,
+            items: vec![
+                batch::FetchItem {
+                    surface: "生".into(),
+                    reading: None,
+                    replace_expected_sha256: None,
+                },
+                batch::FetchItem {
+                    surface: "水".into(),
+                    reading: Some("みず".into()),
+                    replace_expected_sha256: None,
+                },
+            ],
+        },
+        batch::Transport::CdpChromium,
+    )
+    .unwrap();
+    let same = synthetic_mp3();
+    let other = synthetic_mp3_tone(660);
+    let mut source = collection_source(vec![Ok(same.clone()), Ok(other), Ok(same)]);
+    let collection = futures::executor::block_on(collected(&mut source, "生", &Default::default()));
+    let mut runtime = SafeBatchRuntime::open(store.root(), "blobs").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    batch::checkpoint_collection(&mut runtime, &mut state, 0, collection).unwrap();
+    // Прежний путь: одиночное получение пары хранит MP3 в `acquisition`.
+    // Отдельные байты, чтобы проверка `collected` не опиралась на этот blob.
+    let legacy = synthetic_mp3_tone(880);
+    batch::checkpoint_acquisition(
+        &mut runtime,
+        &mut state,
+        1,
+        Ok(Acquisition {
+            evidence: evidence(&legacy, "水"),
+            bytes: legacy,
+        }),
+    )
+    .unwrap();
+    drop(runtime);
+
+    let state = batch::status(&store, "blobs").unwrap();
+    let item = &state.items[0];
+    assert_eq!(item.collected.len(), 3);
+    // Одинаковые байты у разных записей — один blob, раздельное происхождение.
+    assert_eq!(item.collected[0].blob, item.collected[2].blob);
+    assert_ne!(item.collected[0].blob, item.collected[1].blob);
+    let ids: Vec<_> = item
+        .collected
+        .iter()
+        .map(|c| c.evidence.selected_record_id.as_str())
+        .collect();
+    assert_eq!(ids, ["1", "2", "3"]);
+    let encoded = serde_json::to_value(&state).unwrap();
+    assert!(encoded["items"][1].get("collected").is_none());
+    assert!(encoded["items"][0]["acquisition"].is_null());
+
+    let batch_dir = store.root().join(".runtime/batches/blobs");
+    let load = || {
+        SafeBatchRuntime::open(store.root(), "blobs")
+            .unwrap()
+            .load::<batch::ForvoBatch>()
+            .map(|_| ())
+    };
+    load().unwrap();
+    // Порча любого MP3 полного сбора (здесь — единственного по байтам
+    // второго) обнаруживается штатной загрузкой состояния.
+    let collected_path = batch_dir.join(&item.collected[1].blob.storage_path);
+    let original = std::fs::read(&collected_path).unwrap();
+    std::fs::remove_file(&collected_path).unwrap();
+    assert_eq!(load().unwrap_err().code, ErrorCode::MissingAssetFile);
+    let mut changed = original.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    std::fs::write(&collected_path, &changed).unwrap();
+    assert_eq!(load().unwrap_err().code, ErrorCode::IntegrityMismatch);
+    let oversized = std::fs::File::create(&collected_path).unwrap();
+    oversized
+        .set_len(crate::pronunciation::MAX_AUDIO_BYTES + 1)
+        .unwrap();
+    drop(oversized);
+    assert_eq!(load().unwrap_err().code, ErrorCode::BoundaryViolation);
+    std::fs::write(&collected_path, &original).unwrap();
+    load().unwrap();
+
+    // Исторический `acquisition` по-прежнему проверяется.
+    let legacy_path = batch_dir.join(
+        &state.items[1]
+            .acquisition
+            .as_ref()
+            .unwrap()
+            .blob
+            .storage_path,
+    );
+    assert_ne!(legacy_path, collected_path);
+    std::fs::remove_file(&legacy_path).unwrap();
+    assert_eq!(load().unwrap_err().code, ErrorCode::MissingAssetFile);
 }

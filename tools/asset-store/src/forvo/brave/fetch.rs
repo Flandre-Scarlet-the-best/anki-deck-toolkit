@@ -451,12 +451,14 @@ pub async fn acquire(session: &mut BraveSession, surface: &str) -> Result<Acquis
 }
 
 /// Полный сбор записей японского блока точного слова тем же транспортом.
+/// Результат пишется в `out` по мере проверки записей и переживает сброс future.
 pub async fn acquire_collection(
     session: &mut BraveSession,
     surface: &str,
     skip: &std::collections::BTreeSet<String>,
-) -> super::super::Collection {
-    super::super::collect_from(session, surface, skip).await
+    out: &mut super::super::Collection,
+) {
+    super::super::collect_from(session, surface, skip, out).await
 }
 
 /// Одиночный fetch: одно сопряжение, кандидаты, загрузка выбранного
