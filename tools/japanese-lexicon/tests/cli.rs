@@ -113,4 +113,21 @@ fn lookup_verify_and_errors_have_stable_json() {
         .unwrap();
     assert_eq!(jmnedict["state"], "unavailable");
     assert_eq!(jmnedict["code"], "index_corrupt");
+
+    // Текстовый вывод отличает повреждённый источник от неустановленного.
+    let output = Command::new(env!("CARGO_BIN_EXE_japanese-lexicon"))
+        .arg("--data-dir")
+        .arg(&root)
+        .args(["lookup", "--surface", "学校"])
+        .env_remove("JAPANESE_LEXICON_DIR")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("нет источников: jmnedict"), "{text}");
+    assert!(
+        text.contains("jmnedict недоступен (index_corrupt)") && text.contains("verify jmnedict"),
+        "{text}"
+    );
 }

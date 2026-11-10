@@ -313,7 +313,14 @@ fn activate(store: &Store, source: &Source, staging: &Path, manifest: &Manifest)
         },
     );
     if let Err(e) = store.write_registry(&registry) {
-        let _ = store::remove_owned_dir(&dest);
+        // Ошибка могла случиться уже после замены реестра (fsync каталога):
+        // активную версию не удалять; при сомнении каталог остаётся остатком.
+        let activated = store
+            .registry()
+            .map(|r| r.dictionaries.get(source.id).map(|v| v.version.as_str()) == Some(&version));
+        if let Ok(false) = activated {
+            let _ = store::remove_owned_dir(&dest);
+        }
         return Err(e);
     }
     if let Some(old) = previous
@@ -558,8 +565,13 @@ pub fn check_updates(
     let mut report = OperationReport::new("check-updates", root);
     let store = Store::open_existing(root)?;
     for source in sources {
+        // Реестр и манифест читаются под `active.lock`, чтобы параллельный
+        // update не удалил прочитанную версию; блокировка не держится на сеть.
         let current = match &store {
-            Some(store) => active(store, source.id)?,
+            Some(store) => {
+                let _read = store.lock_read()?;
+                active(store, source.id)?
+            }
             None => None,
         };
         let remote = upstream::discover(transport, source);

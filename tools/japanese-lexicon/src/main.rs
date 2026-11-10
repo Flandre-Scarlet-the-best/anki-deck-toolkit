@@ -2,7 +2,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use japanese_lexicon::error::{Code, Error, code_name};
-use japanese_lexicon::lookup::{self, Lexicon, LookupResult};
+use japanese_lexicon::lookup::{self, Lexicon, LookupResult, SourceState};
 use japanese_lexicon::manager::{self, OperationReport, Options, State, StatusReport};
 use japanese_lexicon::store;
 use japanese_lexicon::upstream::HttpTransport;
@@ -332,6 +332,20 @@ fn print_lookup(r: &LookupResult) {
     }
     if !r.missing_sources.is_empty() {
         println!("  нет источников: {}", r.missing_sources.join(", "));
+        // Повреждённый индекс не должен выглядеть как неустановленный словарь.
+        for s in r
+            .sources
+            .iter()
+            .filter(|s| s.state == SourceState::Unavailable && r.missing_sources.contains(&s.id))
+        {
+            let code = s.code.map(code_name).unwrap_or_default();
+            println!(
+                "  {} недоступен ({code}): {}; проверьте командой verify {}",
+                s.id,
+                s.message.as_deref().unwrap_or(""),
+                s.id
+            );
+        }
     }
     println!("  {}", r.notice);
 }

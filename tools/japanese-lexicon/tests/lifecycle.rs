@@ -126,6 +126,17 @@ fn install_status_verify_and_lookup_distinguish_every_class() {
     let iki = kanji.iter().find(|g| g.normalized == "いきる").unwrap();
     assert_eq!(iki.evidence[0].character_reading.as_deref(), Some("い"));
     assert_eq!(iki.evidence[0].okurigana.as_deref(), Some("きる"));
+    let affix = |form: &str| {
+        kanji
+            .iter()
+            .find(|g| g.normalized == form)
+            .unwrap()
+            .evidence[0]
+            .affix
+    };
+    assert_eq!(affix("なま"), Some("prefix"));
+    assert_eq!(affix("う"), Some("suffix"));
+    assert_eq!(affix("いきる"), None);
     assert!(
         r.candidate_targets()
             .iter()
@@ -801,6 +812,17 @@ fn lookup_output_is_deterministic_and_paginated() {
         )
         .unwrap();
     assert!(nama.readings.iter().all(|g| g.evidence.len() <= 1));
+    let hidden: usize = full
+        .readings
+        .iter()
+        .map(|g| g.evidence.len().saturating_sub(1))
+        .sum();
+    assert!(
+        hidden > 0,
+        "фикстура должна давать группу с несколькими свидетельствами"
+    );
+    assert_eq!(nama.truncation.evidence_omitted, hidden);
+    assert!(nama.truncation.truncated);
     assert!(lexicon.lookup("", &lookup::Options::default()).is_err());
 }
 
