@@ -1212,6 +1212,54 @@ fn explicit_export_writes_only_authorized_bytes_and_never_replaces_files() {
     );
 }
 
+/// Balanced выбрал исходный вариант без улучшения: итоговый кандидат
+/// распознавателя совпадает с исходником по SHA. Он продвигается как сам
+/// исходник, а не как производная, которую проверка отвергла бы.
+#[test]
+fn processed_whole_equal_to_source_is_promoted_as_source() {
+    let (_workspace, store) = store();
+    let source_bytes = mp3(440);
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "本.mp3".into(),
+            bytes: source_bytes.clone(),
+        }],
+        None,
+    )
+    .unwrap();
+    add_recognized_link(
+        &store,
+        "sel",
+        &intake.added[0],
+        "本",
+        "ほん",
+        "ほん",
+        &source_bytes,
+    );
+    assert_eq!(
+        auto_select(&store, "sel", None)
+            .unwrap()
+            .selected_deterministic,
+        1
+    );
+    let promoted = promote(
+        &store,
+        "sel",
+        "本",
+        "ほん",
+        None,
+        false,
+        ConsumerTrustPolicy::AgentSelected,
+    )
+    .unwrap();
+    assert_eq!(promoted.kind, CandidateKind::ProcessedWhole);
+    assert_eq!(promoted.asset.sha256, intake.added[0]);
+    assert_eq!(promoted.asset.provenance.source_kind, "local_import");
+    assert_eq!(promoted.asset.consumer_filename, "本_ほん.mp3");
+}
+
 #[test]
 fn agent_selected_audio_needs_explicit_consumer_policy_and_stays_out_of_verified() {
     let (_workspace, store) = store();

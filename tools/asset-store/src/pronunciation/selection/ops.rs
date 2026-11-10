@@ -2418,7 +2418,12 @@ pub fn promote(
         ));
     }
     probe_mp3(&bytes)?;
-    let asset = if consumed.kind == CandidateKind::SourceOriginal {
+    // Байты, совпадающие с исходником (Balanced выбрал исходный вариант без
+    // улучшения), — это сам исходник: производной от них не бывает, и
+    // свидетельство производной такую пару отвергло бы.
+    let asset = if consumed.kind == CandidateKind::SourceOriginal
+        || item.sha256 == link.source_sha256
+    {
         match source
             .forvo_for(&request.surface)
             .map(|(evidence, _)| evidence)

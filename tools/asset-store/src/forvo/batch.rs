@@ -912,6 +912,23 @@ pub(super) fn checkpoint_collection(
             batch.paused = Some(e.into());
             AcquisitionProgress::Paused
         }
+        // Уже собранные записи (например, до паузы) определяют итог элемента:
+        // последующая ошибка страницы не превращает его в отказ, а остаётся
+        // в сообщении итога.
+        Some(e) if !item.collected.is_empty() => {
+            item.outcome = Some(Failure {
+                code: "collected".into(),
+                message: format!(
+                    "Собрано записей: {}; дальнейший сбор остановлен ({}); чтения не установлены — их определяет анализ selection",
+                    item.collected.len(),
+                    provider_code(&e)
+                ),
+                recovery_required: false,
+                report: None,
+            });
+            batch.paused = None;
+            AcquisitionProgress::Ready
+        }
         Some(e) => {
             item.outcome = Some(e.into());
             batch.paused = None;

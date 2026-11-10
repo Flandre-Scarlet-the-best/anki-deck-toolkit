@@ -552,6 +552,57 @@ fn rejection_reimport_replacement_and_stale_cas_are_safe() {
         other_audio()
     );
 }
+/// Запись одиночного кандзи с историческим именем `<surface>.mp3` открывается
+/// и читается под этим именем, повторный импорт тех же байтов её не
+/// переименовывает, а замена по CAS получает текущее `<surface>_<reading>.mp3`.
+#[test]
+fn historical_single_kanji_name_survives_reopen_and_cas_replacement_renames() {
+    let ws = TempWorkspace::create("audio-historical-name").unwrap();
+    let root = ws.path().join("store");
+    let sei = Pronunciation::new("生", "せい").unwrap();
+    let original = {
+        let store = store(&root);
+        let record = import_bytes(&store, &sei, audio(), "生.mp3", None).unwrap();
+        assert_eq!(record.consumer_filename, "生_せい.mp3");
+        attest(&store, &sei, &record.sha256, HumanDecision::Approve).unwrap();
+        record
+    };
+    // Запись прежнего импорта: имя без чтения.
+    let manifest_path = root.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let records = manifest["assets"].as_array_mut().unwrap();
+    assert_eq!(records.len(), 1);
+    records[0]["consumer_filename"] = serde_json::json!("生.mp3");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let store = store(&root);
+    let read = read_trusted(store.root(), std::slice::from_ref(&sei)).unwrap();
+    assert_eq!(read[0].record.consumer_filename, "生.mp3");
+    assert_eq!(read[0].bytes, audio());
+    let again = import_bytes(&store, &sei, audio(), "生.mp3", None).unwrap();
+    assert_eq!(again.sha256, original.sha256);
+    assert_eq!(again.consumer_filename, "生.mp3", "имя не меняется молча");
+
+    let replaced = import_bytes(
+        &store,
+        &sei,
+        other_audio(),
+        "生.mp3",
+        Some(original.sha256.clone()),
+    )
+    .unwrap();
+    assert_eq!(replaced.consumer_filename, "生_せい.mp3");
+    attest(&store, &sei, &replaced.sha256, HumanDecision::Approve).unwrap();
+    let read = read_trusted(store.root(), std::slice::from_ref(&sei)).unwrap();
+    assert_eq!(read[0].record.consumer_filename, "生_せい.mp3");
+    assert_eq!(read[0].bytes, other_audio());
+}
+
 /// После CAS-замены кандидата и подтверждения новой записи прежние байты
 /// остаются в каталоге слота `.runtime` без текущей записи; хранилище
 /// по-прежнему проверяется и открывается.

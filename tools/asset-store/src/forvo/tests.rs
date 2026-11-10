@@ -1771,3 +1771,56 @@ fn collection_with_browser_cleanup_failure_is_checkpointed_before_error() {
     let plain = super::Collection::default();
     assert!(batch::checkpoint_before_cleanup_failure(&mut runtime, &mut state, 0, plain).is_ok());
 }
+
+/// Ошибка страницы без паузы после частичного сбора не превращает элемент с
+/// собранными записями в отказ: итог `collected`, код остановки — в сообщении.
+#[test]
+fn page_error_after_partial_collection_keeps_collected_outcome() {
+    use super::batch::{AcquisitionProgress, FetchItem, FetchPlan};
+    use crate::batch_runtime::SafeBatchRuntime;
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-collect-tail").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    batch::start(
+        &store,
+        "tail",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![FetchItem {
+                surface: "生".into(),
+                reading: None,
+                replace_expected_sha256: None,
+            }],
+        },
+        batch::Transport::CdpChromium,
+    )
+    .unwrap();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "tail").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    let mut source = collection_source(vec![
+        Ok(synthetic_mp3()),
+        Err(error("session_expired", "Повторите вход")),
+    ]);
+    let first = futures::executor::block_on(collected(&mut source, "生", &Default::default()));
+    assert!(matches!(
+        batch::checkpoint_collection(&mut runtime, &mut state, 0, first).unwrap(),
+        AcquisitionProgress::Paused
+    ));
+    assert_eq!(state.items[0].collected.len(), 1);
+
+    let mut missing = collection_source(Vec::new());
+    missing.candidate_error = Some("japanese_pronunciation_not_found");
+    let resumed = futures::executor::block_on(collected(&mut missing, "生", &Default::default()));
+    assert!(matches!(
+        batch::checkpoint_collection(&mut runtime, &mut state, 0, resumed).unwrap(),
+        AcquisitionProgress::Ready
+    ));
+    let outcome = state.items[0].outcome.as_ref().unwrap();
+    assert_eq!(outcome.code, "collected");
+    assert!(outcome.message.contains("japanese_pronunciation_not_found"));
+    assert!(state.paused.is_none());
+    assert_eq!(state.items[0].collected.len(), 1);
+}
