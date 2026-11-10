@@ -38,6 +38,7 @@ tools/
 ├── benchmark-contract/      # загрузка и проверка каталога бенчмарков и результатов измерений
 ├── benchmark-runner/        # исполнитель серий бенчмарков: Hyperfine 2.0 и системные метрики Linux
 ├── benchmark-history/       # локальная история бенчмарков: архив, индекс SQLite, сравнение и отчёты
+├── japanese-lexicon/        # локальные словари Yomitan и офлайн-поиск чтений по написанию
 └── asset-store/             # библиотека и CLI kanji-assets, pitch-assets,
                              # forvo-extension-release
 ```
@@ -72,6 +73,10 @@ tools/
 - `tools/benchmark-history/` — локальная история результатов бенчмарков: архив
   исходных JSON и индекс SQLite в каталоге данных пользователя, база, сравнение,
   отчёт для PR и снимки документации. Контракт — `docs/ru/benchmark-history/README.md`.
+- `tools/japanese-lexicon/` — японская лексическая подсистема: управляемые локальные
+  словари Yomitan в каталоге данных пользователя вне Git и офлайн-поиск чтений по
+  написанию с происхождением. Не зависит от Forvo, ASR, `anki-repo` и колод.
+  Контракт — `docs/ru/japanese-lexicon/README.md`.
 - `docs/ru/performance/` — методика замеров производительности и потребления ресурсов
   (`README.md`) и каталог сценариев (`benchmarks.md`). Последний подтверждённый
   снимок модуля хранится на русской странице `docs/ru/<модуль>/performance.md`;

@@ -120,6 +120,7 @@ echo "$DEMO/report/index.html"   # откройте этот файл в бра�
 | `anki-repo anki` | Anki Desktop: диагностика, AnkiConnect, CrowdAnki | [desktop.md](docs/ru/anki-repo/desktop.md) |
 | `anki_repo::exchange` | библиотека ревизий и сравнения A/C/B | [exchange.md](docs/ru/anki-repo/exchange.md) |
 | `asset-store` | кандзи, ударение JPDB, произношение Forvo | [README](docs/ru/asset-store/README.md) · [Forvo](docs/ru/asset-store/forvo.md) |
+| `japanese-lexicon` | локальные словари Yomitan и офлайн-поиск чтений по написанию | [README](docs/ru/japanese-lexicon/README.md) |
 | `repository-maintenance` | учёт места на диске и безопасная очистка сборки | [README](docs/ru/repository-maintenance/README.md) |
 | `anki-e2e` | изолированный стенд Anki Desktop в Docker | [README](docs/ru/anki-e2e/README.md) |
 | `benchmark-contract` · `-runner` · `-history` | сценарии, запуск и история измерений | [методика](docs/ru/performance/README.md) · [каталог](docs/ru/performance/benchmarks.md) · [runner](docs/ru/benchmark-runner/README.md) · [history](docs/ru/benchmark-history/README.md) |

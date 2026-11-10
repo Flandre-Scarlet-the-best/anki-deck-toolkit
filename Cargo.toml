@@ -13,6 +13,7 @@ members = [
     "tools/benchmark-contract",
     "tools/benchmark-history",
     "tools/benchmark-runner",
+    "tools/japanese-lexicon",
     "tools/repository-maintenance",
     "tools/speech-enhance",
     "tools/speech-recognize",

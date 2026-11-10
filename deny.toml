@@ -58,6 +58,10 @@ name = "benchmark-runner"
 allow = ["AGPL-3.0-only"]
 
 [[licenses.exceptions]]
+name = "japanese-lexicon"
+allow = ["AGPL-3.0-only"]
+
+[[licenses.exceptions]]
 name = "speech-enhance"
 allow = ["AGPL-3.0-only"]
 
