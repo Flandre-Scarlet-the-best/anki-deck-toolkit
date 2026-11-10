@@ -6,7 +6,7 @@
 use japanese_lexicon::error::{Code, Error, Result};
 use japanese_lexicon::upstream::Transport;
 use serde_json::{Value, json};
-use sha1::Sha1;
+use sha1_checked::Sha1;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
@@ -249,9 +249,11 @@ pub fn sha256(bytes: &[u8]) -> String {
 
 pub fn git_blob_sha1(bytes: &[u8]) -> String {
     let mut h = Sha1::new();
-    h.update(format!("blob {}\0", bytes.len()).as_bytes());
-    h.update(bytes);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    sha1_checked::Digest::update(&mut h, format!("blob {}\0", bytes.len()).as_bytes());
+    sha1_checked::Digest::update(&mut h, bytes);
+    let result = h.try_finalize();
+    assert!(!result.has_collision());
+    result.hash().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[derive(Clone)]

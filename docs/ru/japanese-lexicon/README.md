@@ -41,7 +41,7 @@ $B remove --all                  # удалить всё (спросит под�
 | `jitendex` | `lexicon` — основные написания и чтения (на основе JMdict), английские определения | последний опубликованный релиз GitHub `stephenmk/stephenmk.github.io`, ассет `jitendex-yomitan.zip` (на него ведёт официальная страница [jitendex.org](https://jitendex.org/pages/downloads.html)) | SHA-256 ассета, опубликованная GitHub (`digest`); `revision` в `index.json` обязана совпасть с тегом релиза |
 | `jmnedict` | `proper_names` — имена людей, мест, организаций | последний релиз `yomidevs/jmdict-yomitan`, ассет `JMnedict.zip` | SHA-256 ассета (`digest`) |
 | `kanjidic-english` | `kanji` — он/кун-чтения и сведения об отдельных знаках | последний релиз `yomidevs/jmdict-yomitan`, ассет `KANJIDIC_english.zip` | SHA-256 ассета (`digest`) |
-| `jpdb-v2.2-freq-kana` | `frequency` — частотность, только аннотация | файл `dictionaries/JPDB_v2.2_Frequency_Kana_YYYY-MM-DD.zip` ветки `main` репозитория `Kuuuube/yomitan-dictionaries` с самой поздней датой (его рекомендует README репозитория) | git blob SHA-1, опубликованная GitHub для файла |
+| `jpdb-v2.2-freq-kana` | `frequency` — частотность, только аннотация | файл `dictionaries/JPDB_v2.2_Frequency_Kana_YYYY-MM-DD.zip` ветки `main` репозитория `Kuuuube/yomitan-dictionaries` с самой поздней датой (его рекомендует README репозитория) | git blob SHA-1, опубликованная GitHub для файла; считается с обнаружением коллизий (SHA-1DC, как в Git), архив с признаками атаки коллизией отклоняется с `checksum_mismatch` |
 
 Версия, имя файла, ссылка и опубликованная сумма каждый раз берутся из
 живого ответа GitHub API, а не из кода. Старые релизы

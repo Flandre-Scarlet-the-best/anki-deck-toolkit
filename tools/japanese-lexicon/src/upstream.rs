@@ -10,7 +10,7 @@ use crate::catalog::{Discovery, Source};
 use crate::error::{Code, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha1::Sha1;
+use sha1_checked::Sha1;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -66,13 +66,19 @@ pub struct FileDigest {
     pub bytes: u64,
     pub sha256: String,
     pub git_blob_sha1: String,
+    /// SHA-1 обнаружила в данных признаки атаки коллизией (SHAttered и
+    /// подобные): такой git blob SHA-1 не доказывает целостность.
+    #[serde(skip)]
+    pub sha1_collision: bool,
 }
 
 impl FileDigest {
     pub fn matches(&self, checksum: &Checksum) -> bool {
         match checksum.algorithm {
             ChecksumAlgorithm::Sha256 => self.sha256 == checksum.value,
-            ChecksumAlgorithm::GitBlobSha1 => self.git_blob_sha1 == checksum.value,
+            ChecksumAlgorithm::GitBlobSha1 => {
+                !self.sha1_collision && self.git_blob_sha1 == checksum.value
+            }
         }
     }
 }
@@ -81,14 +87,17 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// SHA-256 и git blob SHA-1 файла за два прохода чтения.
+/// SHA-256 и git blob SHA-1 файла за один проход чтения.
+///
+/// SHA-1 нужна только для сверки с суммой, которую публикует GitHub, и
+/// считается с обнаружением коллизий, как в самом Git.
 pub fn digest_file(path: &Path) -> Result<FileDigest> {
     let size = std::fs::metadata(path)
         .map_err(|e| Error::io(path.display(), e))?
         .len();
     let mut sha256 = Sha256::new();
-    let mut sha1 = Sha1::new();
-    sha1.update(format!("blob {size}\0").as_bytes());
+    let mut sha1 = Sha1::builder().safe_hash(false).build();
+    sha1_checked::Digest::update(&mut sha1, format!("blob {size}\0").as_bytes());
     let mut file = File::open(path).map_err(|e| Error::io(path.display(), e))?;
     let mut buffer = vec![0u8; 1 << 20];
     let mut total = 0u64;
@@ -100,7 +109,7 @@ pub fn digest_file(path: &Path) -> Result<FileDigest> {
             break;
         }
         sha256.update(&buffer[..n]);
-        sha1.update(&buffer[..n]);
+        sha1_checked::Digest::update(&mut sha1, &buffer[..n]);
         total += n as u64;
     }
     if total != size {
@@ -109,10 +118,12 @@ pub fn digest_file(path: &Path) -> Result<FileDigest> {
             format!("{} изменился во время чтения", path.display()),
         ));
     }
+    let sha1 = sha1.try_finalize();
     Ok(FileDigest {
         bytes: total,
         sha256: hex(&sha256.finalize()),
-        git_blob_sha1: hex(&sha1.finalize()),
+        git_blob_sha1: hex(sha1.hash().as_slice()),
+        sha1_collision: sha1.has_collision(),
     })
 }
 
@@ -467,10 +478,16 @@ pub fn fetch(
     if let Some(checksum) = &artifact.checksum
         && !digest.matches(checksum)
     {
+        let reason =
+            if digest.sha1_collision && checksum.algorithm == ChecksumAlgorithm::GitBlobSha1 {
+                "в данных обнаружена атака коллизией SHA-1"
+            } else {
+                "не совпала с опубликованной upstream"
+            };
         return Err(Error::new(
             Code::ChecksumMismatch,
             format!(
-                "{}: контрольная сумма {:?} не совпала с опубликованной upstream",
+                "{}: контрольная сумма {:?} {reason}",
                 artifact.asset_name, checksum.algorithm
             ),
         ));
@@ -496,6 +513,31 @@ mod tests {
             "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sha1_collision_rejects_git_blob_checksum() {
+        let digest = FileDigest {
+            bytes: 6,
+            sha256: "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03".into(),
+            git_blob_sha1: "ce013625030ba8dba906f756967f9e9ca394464a".into(),
+            sha1_collision: true,
+        };
+        let sha1 = Checksum {
+            algorithm: ChecksumAlgorithm::GitBlobSha1,
+            value: digest.git_blob_sha1.clone(),
+        };
+        let sha256 = Checksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: digest.sha256.clone(),
+        };
+        assert!(!digest.matches(&sha1));
+        assert!(digest.matches(&sha256));
+        let clean = FileDigest {
+            sha1_collision: false,
+            ..digest
+        };
+        assert!(clean.matches(&sha1));
     }
 
     #[test]
