@@ -909,12 +909,14 @@ fn survey(
         operation_in_progress: false,
         untouched: Vec::new(),
     };
-    let registry = match &store {
-        Some(store) => Some(store.registry()?),
-        None => None,
-    };
+    // Реестр читается под `active.lock`: иначе параллельная активация может
+    // удалить версию, на которую ссылается уже прочитанный реестр.
     let _read = match &store {
         Some(store) => Some(store.lock_read()?),
+        None => None,
+    };
+    let registry = match &store {
+        Some(store) => Some(store.registry()?),
         None => None,
     };
     for source in sources {
