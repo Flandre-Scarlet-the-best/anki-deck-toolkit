@@ -51,7 +51,23 @@ pub struct Pronunciation {
 }
 
 impl Pronunciation {
+    /// Новая пара. У одиночного кандзи чтение входит в имя
+    /// `<surface>_<reading>.mp3`; без `_` и символов пути в чтении граница
+    /// однозначна, поэтому разные пары не дают одного имени.
     pub fn new(surface: &str, reading: &str) -> Result<Self, AssetError> {
+        let value = Self::parse(surface, reading)?;
+        if value.surface_is_single_kanji() && !value.reading_fits_consumer_filename() {
+            return Err(invalid(
+                "reading одиночного кандзи не представимо однозначной частью имени файла (запрещены _ и символы пути)",
+            ));
+        }
+        Ok(value)
+    }
+
+    /// Общая проверка пары без ограничения символов чтения одиночного кандзи:
+    /// прежний импорт его не вводил, и историческая запись не должна блокировать
+    /// хранилище. Такая запись сохраняет имя `<surface>.mp3`.
+    fn parse(surface: &str, reading: &str) -> Result<Self, AssetError> {
         let value = Self {
             surface: surface.nfc().collect(),
             reading: reading.nfc().collect(),
@@ -74,19 +90,6 @@ impl Pronunciation {
         {
             return Err(invalid("surface не представима безопасным именем Anki"));
         }
-        // У одиночного кандзи чтение входит в имя `<surface>_<reading>.mp3`.
-        // Без `_` в чтении граница однозначна, поэтому разные пары не дают
-        // одного имени.
-        if value.reading_in_consumer_filename()
-            && (value
-                .reading
-                .contains(['<', '>', '"', '|', '?', '*', '[', ']', '_', '/', '\\', ':'])
-                || value.reading.ends_with(['.', ' ']))
-        {
-            return Err(invalid(
-                "reading одиночного кандзи не представимо однозначной частью имени файла (запрещены _ и символы пути)",
-            ));
-        }
         validate_safe_consumer_filename(&value.consumer_filename(), DetectedFormat::Mp3)?;
         value.identity().validate().map_err(invalid)?;
         Ok(value)
@@ -101,8 +104,22 @@ impl Pronunciation {
 
     /// Написание — одиночный кандзи: только у него разные чтения одного
     /// написания реально встречаются как отдельные карточки.
-    fn reading_in_consumer_filename(&self) -> bool {
+    fn surface_is_single_kanji(&self) -> bool {
         crate::kanji_domain::parse_kanji_character(&self.surface).is_ok()
+    }
+
+    fn reading_fits_consumer_filename(&self) -> bool {
+        !(self
+            .reading
+            .contains(['<', '>', '"', '|', '?', '*', '[', ']', '_', '/', '\\', ':'])
+            || self.reading.ends_with(['.', ' ']))
+    }
+
+    /// Чтение входит в имя только у одиночного кандзи и только тогда, когда
+    /// оно однозначно представимо; историческое непредставимое чтение остаётся
+    /// в прежнем имени `<surface>.mp3`.
+    fn reading_in_consumer_filename(&self) -> bool {
+        self.surface_is_single_kanji() && self.reading_fits_consumer_filename()
     }
 
     /// Имя готового MP3 этой пары у потребителя. Одиночный кандзи —
@@ -131,7 +148,7 @@ impl Pronunciation {
         }
         let [surface, reading]: [String; 2] = serde_json::from_str(&identity.key)
             .map_err(|_| invalid("ключ должен быть канонической парой surface/reading"))?;
-        let value = Self::new(&surface, &reading)?;
+        let value = Self::parse(&surface, &reading)?;
         if value.identity() != *identity {
             return Err(invalid("идентичность должна быть канонической NFC-парой"));
         }

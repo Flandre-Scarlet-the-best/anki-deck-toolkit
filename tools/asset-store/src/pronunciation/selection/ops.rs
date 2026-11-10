@@ -780,6 +780,29 @@ pub(crate) fn build_link_for_test(
 pub type SourceReader<'a> = dyn FnMut(&Path) -> Result<Vec<u8>, AssetError> + 'a;
 
 /// Попытка выйти за защищённую область — ошибка операции, а не исход файла.
+/// Материализованные кандидаты прежней связи, интервал которых остался тем же
+/// кандидатом (те же связь, исходник и границы): их байты не теряются при
+/// повторном связывании. Идентификатор интервала не зависит от номера
+/// вхождения, а новый пакет распознавания может пронумеровать вхождения иначе,
+/// поэтому номер берётся из нового интервала.
+pub(crate) fn carried_materialized(
+    previous: &[PronunciationCandidate],
+    fresh: &[PronunciationCandidate],
+) -> Vec<PronunciationCandidate> {
+    previous
+        .iter()
+        .filter_map(|candidate| {
+            let derivation = candidate.derivation.as_ref()?;
+            let interval = fresh
+                .iter()
+                .find(|n| n.candidate_id == derivation.from_candidate_id)?;
+            let mut kept = candidate.clone();
+            kept.occurrence = interval.occurrence;
+            Some(kept)
+        })
+        .collect()
+}
+
 pub(crate) fn is_boundary_refusal(code: ErrorCode) -> bool {
     matches!(
         code,
@@ -968,20 +991,7 @@ pub fn link_recognizer(
                         .checked_add(1)
                         .ok_or_else(|| invalid("исчерпаны поколения связи"))?;
                 }
-                // Материализованные байты интервала, который остался тем же
-                // кандидатом (те же связь, исходник и границы), не теряются.
-                let kept: Vec<PronunciationCandidate> = existing
-                    .candidates
-                    .iter()
-                    .filter(|c| {
-                        c.derivation.as_ref().is_some_and(|d| {
-                            link.candidates
-                                .iter()
-                                .any(|n| n.candidate_id == d.from_candidate_id)
-                        })
-                    })
-                    .cloned()
-                    .collect();
+                let kept = carried_materialized(&existing.candidates, &link.candidates);
                 link.candidates.extend(kept);
                 if *existing != link {
                     rechanged = true;

@@ -147,6 +147,14 @@ fn consumer_names_include_reading_and_never_collide() {
     // `_` и символы пути в чтении сделали бы имя неоднозначным.
     for reading in ["な_ま", "なま/", "なま:", "なま."] {
         assert!(Pronunciation::new("生", reading).is_err(), "{reading}");
+        // Историческая идентичность с таким чтением допустима и не блокирует
+        // хранилище, но её чтение в имя не входит.
+        let identity = crate::AssetIdentity {
+            namespace: "pronunciation_audio".into(),
+            key: serde_json::to_string(&["生", reading]).unwrap(),
+        };
+        let historical = Pronunciation::from_identity(&identity).unwrap();
+        assert_eq!(historical.consumer_filename(), "生.mp3", "{reading}");
     }
     // Историческое имя допустимо только у своей идентичности.
     use crate::AssetDomainPolicy;
@@ -168,6 +176,47 @@ fn consumer_names_include_reading_and_never_collide() {
         policy.consumer_name_key(&upper.consumer_filename()),
         policy.consumer_name_key(&lower.consumer_filename())
     );
+}
+
+/// Повторное связывание сохраняет материализованного кандидата, даже если
+/// новый пакет распознавания пронумеровал вхождения иначе: номер вхождения
+/// берётся из нового интервала, и пакет остаётся валидным.
+#[test]
+fn relinking_carries_materialized_candidate_with_renumbered_occurrence() {
+    let f = two_readings();
+    let second = interval(&f.nama, 1).clone();
+    select_by_user(&f.store, "なま", &second, &f.source_sha);
+    let report = materialize::materialize(&f.store, "sel", None).unwrap();
+    let produced = report.materialized[0].candidate_id.clone();
+
+    // Новое распознавание нашло лишнее вхождение раньше: те же границы
+    // получают номера на единицу больше, идентификаторы интервалов не меняются.
+    let mut fresh = f.nama.clone();
+    for occurrence in &mut fresh.occurrences {
+        occurrence.index += 1;
+    }
+    for candidate in &mut fresh.candidates {
+        candidate.occurrence = candidate.occurrence.map(|i| i + 1);
+    }
+    let previous = load(&f.store, "sel")
+        .links
+        .into_iter()
+        .find(|l| l.link_id == f.nama.link_id)
+        .unwrap();
+    let kept = ops::carried_materialized(&previous.candidates, &fresh.candidates);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].candidate_id, produced);
+    assert_eq!(kept[0].occurrence, interval(&fresh, 1).occurrence);
+    assert_ne!(kept[0].occurrence, second.occurrence);
+    fresh.candidates.extend(kept);
+    mutate(&f.store, "sel", |batch, _| {
+        let link = batch
+            .links
+            .iter_mut()
+            .find(|l| l.link_id == fresh.link_id)
+            .unwrap();
+        *link = fresh;
+    });
 }
 
 /// Выбранный интервал — не готовый результат: до материализации цель не

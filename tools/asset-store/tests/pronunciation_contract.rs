@@ -1861,8 +1861,8 @@ fn cli_read_streams_metadata_in_order_and_fails_as_a_whole() {
     );
     fs::write(&manifest_path, original).unwrap();
 
-    // Конфликт имён потребителя: `Voice_a.mp3` и `voice_a.mp3` совпадают без
-    // учёта регистра.
+    // Конфликт имён потребителя: `Voice.mp3` и `voice.mp3` совпадают без
+    // учёта регистра (чтение не входит в имя слова).
     let cased = Pronunciation::new("Voice", "a").unwrap();
     let conflict = Pronunciation::new("voice", "a").unwrap();
     for item in [&cased, &conflict] {
