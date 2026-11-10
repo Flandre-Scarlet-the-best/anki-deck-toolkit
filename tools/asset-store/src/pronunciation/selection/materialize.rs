@@ -244,7 +244,13 @@ pub fn materialize(
             "у цели нет действующего выбора интервала, ожидающего материализации",
         ));
     }
-    let mut tools: Option<Vec<String>> = None;
+    // Отсутствие ffmpeg или кодировщика — проблема среды, а не интервалов:
+    // операция отказывает целиком, не записывая отказов и не меняя ревизию.
+    let tools = if work.is_empty() {
+        Vec::new()
+    } else {
+        toolchain()?
+    };
     let mut agent_pending = false;
     let timestamp = ops::recorded_at(std::time::SystemTime::now())?;
     let revision = batch.revision + 1;
@@ -260,14 +266,7 @@ pub fn materialize(
                 "исходные байты интервала не совпадают с SHA",
             ));
         }
-        let extraction = match &tools {
-            Some(tools) => extract_interval(&source_bytes, &span, tools),
-            None => toolchain().and_then(|t| {
-                let result = extract_interval(&source_bytes, &span, &t);
-                tools = Some(t);
-                result
-            }),
-        };
+        let extraction = extract_interval(&source_bytes, &span, &tools);
         let outcome = match extraction {
             Ok(extraction) => {
                 let sha = sha256_hex(&extraction.bytes);

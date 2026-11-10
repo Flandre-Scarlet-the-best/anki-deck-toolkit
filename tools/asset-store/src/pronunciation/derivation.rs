@@ -912,8 +912,12 @@ pub struct SelectionDerivative {
     pub selection: SelectionReference,
 }
 
+/// Имя источника производного MP3 выбора. Некорректный SHA не вызывает панику:
+/// имя строится из того, что есть, а `SelectionDerivative::validate` отклоняет
+/// такое значение штатной ошибкой.
 pub fn selection_source_name(transform: &str, source_sha256: &str) -> String {
-    format!("selection-{transform}-{}.mp3", &source_sha256[..16])
+    let prefix = source_sha256.get(..16).unwrap_or(source_sha256);
+    format!("selection-{transform}-{prefix}.mp3")
 }
 
 fn valid_token(text: &str) -> bool {
@@ -1055,6 +1059,27 @@ mod selection_derivative_tests {
             provenance,
             output,
         )
+    }
+
+    /// Короткий или многобайтный SHA исходника не роняет построение имени:
+    /// значение отклоняет штатная проверка.
+    #[test]
+    fn selection_source_name_tolerates_malformed_sha() {
+        let (valid, request, _, output) = sample();
+        for sha in ["abc", "生生生生生生"] {
+            let name = selection_source_name("interval_extraction_v1", sha);
+            assert!(name.contains(sha), "{name}");
+            let mut d = valid.clone();
+            d.source_sha256 = sha.into();
+            let provenance = Provenance {
+                source_kind: SELECTION_SOURCE_KIND.into(),
+                source_name: name,
+            };
+            assert_eq!(
+                d.validate(&request, &output, &provenance).unwrap_err().code,
+                ErrorCode::InvalidIdentity
+            );
+        }
     }
 
     #[test]

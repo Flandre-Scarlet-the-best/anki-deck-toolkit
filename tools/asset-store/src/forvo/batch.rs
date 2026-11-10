@@ -379,12 +379,24 @@ fn start_inner(
                             "полный сбор по написанию ничего не импортирует: replace_expected_sha256 без reading недопустим",
                         ));
                     }
-                    (
-                        None,
-                        Some(crate::pronunciation::selection::normalize_forvo_surface(
-                            &i.surface,
-                        )?),
+                    let surface =
+                        crate::pronunciation::selection::normalize_forvo_surface(&i.surface)?;
+                    // Собранные записи потом связываются с парами этого написания:
+                    // имя `<surface>.mp3`, которое `Pronunciation` не примет
+                    // (имя устройства, длина), отвергается до скачивания. Только
+                    // здесь, а не в проверке состояния: сохранённые пакеты
+                    // продолжают загружаться.
+                    crate::domain::validate_safe_consumer_filename(
+                        &format!("{surface}.mp3"),
+                        crate::DetectedFormat::Mp3,
                     )
+                    .map_err(|_| {
+                        AssetError::new(
+                            ErrorCode::InvalidIdentity,
+                            "написание не представимо безопасным именем страницы и файла",
+                        )
+                    })?;
+                    (None, Some(surface))
                 }
             };
             Ok(Item {

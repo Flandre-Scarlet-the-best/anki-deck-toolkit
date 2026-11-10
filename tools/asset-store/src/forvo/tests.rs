@@ -1058,6 +1058,28 @@ fn surface_only_batch_item_collects_without_reading_and_without_import() {
         batch::Transport::CdpChromium,
     );
     assert!(replace.is_err());
+    // Написание, имя которого `Pronunciation` не примет (имя устройства),
+    // отвергается до скачивания, а не после сбора.
+    for surface in ["CON", "nul", "LPT1"] {
+        let reserved = batch::start(
+            &store,
+            "reserved",
+            FetchPlan {
+                schema_version: 1,
+                items: vec![FetchItem {
+                    surface: surface.into(),
+                    reading: None,
+                    replace_expected_sha256: None,
+                }],
+            },
+            batch::Transport::CdpChromium,
+        );
+        assert_eq!(
+            reserved.unwrap_err().code,
+            crate::ErrorCode::InvalidIdentity,
+            "{surface}"
+        );
+    }
     let state = batch::start(
         &store,
         "collect",
