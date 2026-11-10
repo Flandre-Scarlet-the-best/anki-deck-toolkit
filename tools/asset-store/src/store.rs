@@ -3749,7 +3749,14 @@ fn validate_manifest(
             }
         }
         policy.validate_record_evidence(record)?;
-        if !consumer_names.insert(policy.consumer_name_key(&record.consumer_filename))
+        // В схемах прежней раскладки `consumer_filename` может отсутствовать:
+        // имя записи там задаёт расположение домена.
+        let consumer_filename = if manifest.schema_version < NESTED_LAYOUT_SCHEMA_VERSION {
+            &expected_location.consumer_filename
+        } else {
+            &record.consumer_filename
+        };
+        if !consumer_names.insert(policy.consumer_name_key(consumer_filename))
             && !policy.allows_consumer_name_overlap()
         {
             return Err(AssetError::new(

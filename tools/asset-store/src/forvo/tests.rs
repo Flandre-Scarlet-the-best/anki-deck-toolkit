@@ -1623,3 +1623,71 @@ fn runtime_verifies_every_collected_mp3_and_legacy_acquisition() {
     std::fs::remove_file(&legacy_path).unwrap();
     assert_eq!(load().unwrap_err().code, ErrorCode::MissingAssetFile);
 }
+
+/// Привязка пакета к браузеру одинакова для получения и полного сбора: первая
+/// сессия закрепляется, привязка расширения до 0.3 дополняется экземпляром того
+/// же расширения, а чужой экземпляр или другое расширение её не меняют.
+#[test]
+fn browser_binding_is_completed_with_instance_only_for_same_extension() {
+    use super::batch::{FetchItem, FetchPlan};
+    use super::brave::BrowserKind;
+    use super::brave::fetch::BrowserBinding;
+    use crate::batch_runtime::SafeBatchRuntime;
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-bind").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    batch::start(
+        &store,
+        "bind",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![FetchItem {
+                surface: "あ".into(),
+                reading: Some("あ".into()),
+                replace_expected_sha256: None,
+            }],
+        },
+        batch::Transport::CdpChromium,
+    )
+    .unwrap();
+    let mut runtime = SafeBatchRuntime::open(store.root(), "bind").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    let binding = |extension: &str, instance: Option<&str>| BrowserBinding {
+        target: "brave".into(),
+        browser: BrowserKind::Brave,
+        extension_id: extension.into(),
+        instance_id: instance.map(Into::into),
+    };
+
+    // Первая сессия закрепляется всегда.
+    assert!(batch::bind_browser(
+        &mut state,
+        binding("ext", None),
+        "collect"
+    ));
+    assert_eq!(state.browser, Some(binding("ext", None)));
+    // Другое расширение не дополняет привязку.
+    assert!(!batch::bind_browser(
+        &mut state,
+        binding("other", Some("i1")),
+        "collect"
+    ));
+    assert_eq!(state.browser, Some(binding("ext", None)));
+    // То же расширение версии 0.3+ дополняет экземпляр.
+    assert!(batch::bind_browser(
+        &mut state,
+        binding("ext", Some("i1")),
+        "collect"
+    ));
+    assert_eq!(state.browser, Some(binding("ext", Some("i1"))));
+    // Закреплённый экземпляр не заменяется другим.
+    assert!(!batch::bind_browser(
+        &mut state,
+        binding("ext", Some("i2")),
+        "acquire"
+    ));
+    assert_eq!(state.browser, Some(binding("ext", Some("i1"))));
+}

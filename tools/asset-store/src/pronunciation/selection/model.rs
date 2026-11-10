@@ -316,7 +316,8 @@ pub struct CandidateDerivation {
 pub struct TechnicalGate {
     pub usable: bool,
     /// `source_probe_ok`, `post_validation_passed`, `balanced_selected`,
-    /// `post_validation_failed`, `output_bytes_unavailable`, `interval_not_extracted`.
+    /// `post_validation_failed`, `output_bytes_unavailable`, `interval_not_extracted`,
+    /// `fragment_span_missing` (фрагмент без границ: нужен пересчёт распознавания).
     pub code: String,
 }
 

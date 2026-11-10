@@ -686,6 +686,7 @@ fn build_link(
             .and_then(|p| p.output_span)
             .filter(|s| s.start < s.end)
             .map(|s| span_of(s.start, s.end));
+        let technical = output_gate(kind, span.as_ref(), passed);
         candidates.push(PronunciationCandidate {
             candidate_id: candidate_id(&id, kind, &audio.sha256, span.as_ref()),
             kind,
@@ -695,15 +696,7 @@ fn build_link(
                 .selected_occurrence
                 .filter(|i| occurrences.iter().any(|o| o.index == *i)),
             derivation: None,
-            technical: TechnicalGate {
-                usable: passed,
-                code: if passed {
-                    "post_validation_passed"
-                } else {
-                    "post_validation_failed"
-                }
-                .into(),
-            },
+            technical,
         });
     }
     if matches!(
@@ -780,6 +773,28 @@ pub(crate) fn build_link_for_test(
 pub type SourceReader<'a> = dyn FnMut(&Path) -> Result<Vec<u8>, AssetError> + 'a;
 
 /// Попытка выйти за защищённую область — ошибка операции, а не исход файла.
+/// Технический гейт итогового кандидата распознавателя. Фрагмент без границ
+/// не доказывает свою производную и не может быть продвинут, поэтому он
+/// отклоняется до выбора, а не после него; исправляет это только пересчёт
+/// распознавания.
+pub(crate) fn output_gate(
+    kind: CandidateKind,
+    span: Option<&CandidateSpan>,
+    post_validation_passed: bool,
+) -> TechnicalGate {
+    let code = if kind == CandidateKind::ExtractedFragment && span.is_none() {
+        "fragment_span_missing"
+    } else if post_validation_passed {
+        "post_validation_passed"
+    } else {
+        "post_validation_failed"
+    };
+    TechnicalGate {
+        usable: code == "post_validation_passed",
+        code: code.into(),
+    }
+}
+
 /// Материализованные кандидаты прежней связи, интервал которых остался тем же
 /// кандидатом (те же связь, исходник и границы): их байты не теряются при
 /// повторном связывании. Идентификатор интервала не зависит от номера

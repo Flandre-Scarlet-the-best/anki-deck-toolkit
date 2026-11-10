@@ -2092,6 +2092,77 @@ fn recognizer_occurrences_become_interval_candidates_without_inventing_bytes() {
     assert!(!link.candidates[0].technical.usable);
 }
 
+/// Фрагмент без границ (повреждённый кэш распознавания) отклоняется до выбора
+/// с причиной неразрешённых границ, а не проходит в `read` и падает в `promote`.
+#[test]
+fn extracted_fragment_without_span_is_rejected_before_selection() {
+    let span = CandidateSpan {
+        start_frame: 0,
+        end_frame: 4410,
+        sample_rate: 44_100,
+    };
+    let gate = ops::output_gate(CandidateKind::ExtractedFragment, None, true);
+    assert!(!gate.usable);
+    assert_eq!(gate.code, "fragment_span_missing");
+    assert!(ops::output_gate(CandidateKind::ExtractedFragment, Some(&span), true).usable);
+    // Целая обработанная запись границ не имеет и не требует.
+    assert!(ops::output_gate(CandidateKind::ProcessedWhole, None, true).usable);
+    assert_eq!(
+        ops::output_gate(CandidateKind::ProcessedWhole, None, false).code,
+        "post_validation_failed"
+    );
+
+    let (_workspace, store) = store();
+    let intake = intake_files(
+        &store,
+        "sel",
+        vec![IntakeFile {
+            source_name: "生.mp3".into(),
+            bytes: mp3(440),
+        }],
+        Some("生"),
+    )
+    .unwrap();
+    let audio = mp3(330);
+    mutate(&store, "sel", |batch, runtime| {
+        let source = batch.source(&intake.added[0]).unwrap().clone();
+        let mut link = multi_reading_link(
+            &source,
+            "なま",
+            RecognitionOutcome::TargetWhole,
+            &[(50.0, 250.0)],
+        );
+        let mut fragment = candidate(
+            &link.link_id,
+            CandidateKind::ExtractedFragment,
+            None,
+            true,
+            Some(0),
+            None,
+        );
+        fragment.audio = Some(real_audio(runtime, &audio));
+        fragment.technical = ops::output_gate(CandidateKind::ExtractedFragment, None, true);
+        link.candidates.push(fragment);
+        batch.links.push(link);
+    });
+    let batch = load(&store, "sel");
+    let index = engine::SelectionIndex::new(&batch);
+    let link = &batch.links[0];
+    let fragment = link
+        .candidates
+        .iter()
+        .find(|c| c.kind == CandidateKind::ExtractedFragment)
+        .unwrap();
+    let assessment = engine::assess_candidate_with(&index, link, fragment);
+    assert_eq!(assessment.class, SelectionClass::Rejected);
+    assert!(!assessment.consumable);
+    assert!(
+        assessment
+            .reasons
+            .contains(&ReasonCode::BoundariesUnresolved)
+    );
+}
+
 #[test]
 fn expert_verdict_follows_targeted_reanalysis() {
     let supports = recognition_result(

@@ -1435,6 +1435,94 @@ fn flat_kanji_schema_v3_v4_migrate_without_reacquisition_or_trust_loss() {
     }
 }
 
+/// В схемах прежней раскладки `consumer_filename` нет ни у одной записи: имена
+/// для проверки уникальности берутся из расположения домена, и несколько
+/// записей не считаются дубликатами.
+#[test]
+fn flat_kanji_schema_without_consumer_names_accepts_several_records() {
+    const VALID_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b";
+
+    for legacy_schema in [3_u64, 4] {
+        let temp = TempDir::new(&format!("kanji-schema-names-{legacy_schema}"));
+        let root = temp.path().join("store");
+        let validator = FixedValidator::new(SemanticStatus::Verified);
+        let identities: Vec<_> = ["元", "本"]
+            .into_iter()
+            .map(|c| AssetIdentity::new("kanji", c).unwrap())
+            .collect();
+        let store = open_kanji_store(&root);
+        for identity in &identities {
+            store
+                .ingest_verified(
+                    VerifiedIngestRequest {
+                        identity: identity.clone(),
+                        bytes: VALID_GIF.to_vec(),
+                        provenance: Provenance {
+                            source_kind: "fixture".into(),
+                            source_name: "trusted.gif".into(),
+                        },
+                        domain_metadata: Some(serde_json::json!({ "character": identity.key })),
+                        replace_expected_sha256: None,
+                    },
+                    &validator,
+                )
+                .unwrap();
+        }
+        drop(store);
+
+        let manifest_path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["schema_version"] = serde_json::json!(legacy_schema);
+        manifest.as_object_mut().unwrap().remove("domain_id");
+        for record in manifest["assets"].as_array_mut().unwrap() {
+            let name = record["consumer_filename"].as_str().unwrap().to_owned();
+            fs::rename(
+                root.join("assets/gif").join(&name),
+                root.join("assets").join(&name),
+            )
+            .unwrap();
+            record["storage_path"] = serde_json::json!(format!("assets/{name}"));
+            let object = record.as_object_mut().unwrap();
+            object.remove("consumer_filename");
+            if legacy_schema == 3 {
+                object.remove("human_attestation");
+            }
+        }
+        fs::remove_dir(root.join("assets/gif")).unwrap();
+        fs::remove_dir(root.join("assets/png")).ok();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(root.join(".lock")).unwrap();
+        fs::remove_dir_all(root.join(".runtime")).unwrap();
+
+        let read_only = AssetStore::read_verified_with_policy(
+            &root,
+            &identities,
+            &validator.identity(),
+            &asset_store::KanjiDomainPolicy,
+        )
+        .unwrap();
+        let names: Vec<_> = read_only
+            .iter()
+            .map(|r| r.record.consumer_filename.as_str())
+            .collect();
+        assert_eq!(names, ["元.gif", "本.gif"]);
+
+        let migrated = AssetStore::open_kanji_existing(StoreOptions::new(&root)).unwrap();
+        assert!(migrated.layout_migrated_on_open());
+        let records = migrated.verify_integrity().unwrap();
+        let names: Vec<_> = records
+            .iter()
+            .map(|r| r.consumer_filename.as_str())
+            .collect();
+        assert_eq!(names, ["元.gif", "本.gif"]);
+    }
+}
+
 #[test]
 fn empty_legacy_schema_v4_is_kanji_only_and_migrates_once() {
     let temp = TempDir::new("empty-legacy-v4");

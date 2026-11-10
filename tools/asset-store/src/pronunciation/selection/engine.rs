@@ -300,6 +300,7 @@ pub(crate) fn assess_candidate_with(
         reasons.push(match candidate.technical.code.as_str() {
             "post_validation_failed" => ReasonCode::PostValidationFailed,
             "output_bytes_unavailable" => ReasonCode::OutputBytesUnavailable,
+            "fragment_span_missing" => ReasonCode::BoundariesUnresolved,
             _ => ReasonCode::SourceRejected,
         });
         SelectionClass::Rejected

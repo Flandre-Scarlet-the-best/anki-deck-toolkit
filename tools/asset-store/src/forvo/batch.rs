@@ -537,6 +537,36 @@ fn bound_options(
     Ok(options)
 }
 
+/// Закрепляет за пакетом подключённую сессию Brave: первую — всегда, а
+/// привязку без `instance_id` (расширение до 0.3) дополняет экземпляром, если
+/// прежняя привязка принимает текущую сессию. Общая для получения и полного
+/// сбора, чтобы ни одна ветка не продолжала пакет с другим экземпляром после
+/// `setup --repin`. Возвращает `true`, если привязка изменилась.
+fn bind_session(batch: &mut ForvoBatch, session: Option<&Session>, stage: &str) -> bool {
+    let Some(Session::Brave(brave)) = session else {
+        return false;
+    };
+    bind_browser(batch, brave.binding(), stage)
+}
+
+pub(super) fn bind_browser(batch: &mut ForvoBatch, actual: BrowserBinding, stage: &str) -> bool {
+    let record = match &batch.browser {
+        None => true,
+        Some(bound) => {
+            bound.instance_id.is_none() && actual.instance_id.is_some() && bound.accepts(&actual)
+        }
+    };
+    if record {
+        tracing::info!(event = "forvo_batch_browser_bound", stage, target = %actual.target,
+            browser = actual.browser.id(), "Пакет закреплён за браузерной сессией");
+        batch.browser = Some(actual);
+        if batch.schema_version == 2 {
+            batch.schema_version = 3;
+        }
+    }
+    record
+}
+
 /// Сессия выбранного транспорта; открывается лениво, только если элементу нужны байты.
 enum Session {
     Cdp(Box<ForvoSession>),
@@ -1062,14 +1092,8 @@ pub async fn resume_prepared(
                 }
                 runtime.reacquire_lock()?;
                 batch = reload_after_acquisition(&mut runtime)?;
-                if let Some(Session::Brave(brave)) = &session
-                    && batch.browser.is_none()
-                {
-                    batch.browser = Some(brave.binding());
-                    if batch.schema_version == 2 {
-                        batch.schema_version = 3;
-                    }
-                }
+                // Сохраняется вместе с фиксацией сбора ниже.
+                bind_session(&mut batch, session.as_ref(), "collect");
                 if let Some(e) = &collection.stop
                     && !e.details["browser_cleanup"].is_null()
                 {
@@ -1150,22 +1174,9 @@ pub async fn resume_prepared(
                 runtime.reacquire_lock()?;
                 batch = reload_after_acquisition(&mut runtime)?;
                 // Первая подключённая сессия закрепляется за пакетом.
-                if let Some(Session::Brave(brave)) = &session {
-                    let actual = brave.binding();
-                    let record = match &batch.browser {
-                        None => true,
-                        Some(bound) => bound.instance_id.is_none() && actual.instance_id.is_some() && bound.accepts(&actual),
-                    };
-                    if record {
-                        tracing::info!(event = "forvo_batch_browser_bound", stage = "acquire", target = %actual.target,
-                            browser = actual.browser.id(), "Пакет закреплён за браузерной сессией");
-                        batch.browser = Some(actual);
-                        if batch.schema_version == 2 {
-                            batch.schema_version = 3;
-                        }
-                        batch.revision += 1;
-                        runtime.save(&batch)?;
-                    }
+                if bind_session(&mut batch, session.as_ref(), "acquire") {
+                    batch.revision += 1;
+                    runtime.save(&batch)?;
                 }
                 if let Err(e) = &acquisition
                     && !e.details["browser_cleanup"].is_null()
