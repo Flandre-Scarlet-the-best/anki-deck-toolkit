@@ -972,8 +972,7 @@ fn survey(
         report.dictionaries.push(status);
     }
     if let (Some(store), Some(registry)) = (&store, &registry) {
-        report.operation_in_progress =
-            matches!(store.lock_operations(), Err(e) if e.code == Code::Busy);
+        report.operation_in_progress = store.operation_in_progress()?;
         report.leftovers = store.leftovers(registry)?;
         report.untouched = store.foreign_entries()?;
         report.unknown_registry_entries = registry

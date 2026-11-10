@@ -87,7 +87,12 @@ fn install_status_verify_and_lookup_distinguish_every_class() {
     // Частотность чтения, которого нет в словарях, не стала чтением.
     assert!(r.readings.iter().all(|g| g.normalized != "まなびや"));
     assert_eq!(r.frequency_unmatched.len(), 1);
-    assert_eq!(r.candidate_targets().len(), 1);
+    let targets = r.candidate_targets();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].surface, "学校");
+    assert_eq!(targets[0].reading, "がっこう");
+    assert_eq!(targets[0].classes, vec![EvidenceClass::LexicalEntry]);
+    assert_eq!(targets[0].dictionaries, vec!["jitendex"]);
 
     // Неоднозначное слово: все чтения с происхождением; имя собственное отдельно.
     let r = lookup(&root, "今日");
@@ -579,6 +584,11 @@ fn concurrent_mutation_is_refused_and_open_lookup_survives_replacement() {
     let store = Store::open_existing(&root).unwrap().unwrap();
     {
         let _held = store.lock_operations().unwrap();
+        assert!(
+            manager::status(&location(&root))
+                .unwrap()
+                .operation_in_progress
+        );
         let err = manager::update(&root, &all(), &up, &Options::default()).unwrap_err();
         assert_eq!(err.code, Code::Busy);
         let err = manager::remove(&root, &all()).unwrap_err();
@@ -586,6 +596,12 @@ fn concurrent_mutation_is_refused_and_open_lookup_survives_replacement() {
         // Поиск не ждёт изменяющую операцию.
         assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
     }
+    // Проба status/verify не создаёт файл блокировки и не мешает операциям.
+    std::fs::remove_file(root.join(store::OPERATIONS_LOCK)).unwrap();
+    let status = manager::status(&location(&root)).unwrap();
+    assert!(!status.operation_in_progress);
+    assert!(!root.join(store::OPERATIONS_LOCK).exists());
+
     // Открытый поиск продолжает работать после замены и удаления версии.
     let lexicon = Lexicon::open(&root).unwrap();
     up.publish("jitendex", "T2", jitendex("T2", &[]));
@@ -812,6 +828,33 @@ fn lookup_output_is_deterministic_and_paginated() {
         )
         .unwrap();
     assert!(nama.readings.iter().all(|g| g.evidence.len() <= 1));
+    // Кандидаты строятся только по показанной странице.
+    let full_targets: Vec<_> = full
+        .candidate_targets()
+        .into_iter()
+        .map(|t| (t.surface, t.reading))
+        .collect();
+    assert_eq!(
+        full_targets,
+        vec![("生".into(), "せい".into()), ("生".into(), "なま".into())]
+    );
+    let first = lexicon
+        .lookup(
+            "生",
+            &lookup::Options {
+                offset: 0,
+                limit: 1,
+                max_evidence: 10,
+            },
+        )
+        .unwrap();
+    let paged: Vec<_> = first
+        .candidate_targets()
+        .into_iter()
+        .map(|t| (t.surface, t.reading))
+        .collect();
+    assert_eq!(paged.len(), 1);
+    assert!(full_targets.contains(&paged[0]));
     let hidden: usize = full
         .readings
         .iter()

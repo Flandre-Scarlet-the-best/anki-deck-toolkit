@@ -372,12 +372,38 @@ impl Store {
         Ok(self.dictionary_dir(id).join(version))
     }
 
-    /// Исключительная блокировка изменяющих операций (без ожидания).
+    /// Исключительная блокировка изменяющих операций (без длительного ожидания).
+    ///
+    /// Кратко повторяет попытку: `operation_in_progress` у `status`/`verify`
+    /// держит разделяемую блокировку лишь на мгновение и не должна давать
+    /// ложный `busy`. Настоящая операция длится дольше окна повтора.
     pub fn lock_operations(&self) -> Result<LockGuard> {
-        lock(
-            &self.root.join(OPERATIONS_LOCK),
-            FlockOperation::NonBlockingLockExclusive,
-        )
+        let path = self.root.join(OPERATIONS_LOCK);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            match lock(&path, FlockOperation::NonBlockingLockExclusive) {
+                Err(e) if e.code == Code::Busy && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// Выполняется ли сейчас изменяющая операция. Ничего не создаёт и не
+    /// пишет: отсутствующий `operations.lock` значит, что операций не было.
+    pub fn operation_in_progress(&self) -> Result<bool> {
+        let path = self.root.join(OPERATIONS_LOCK);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(Error::io(path.display(), e)),
+        };
+        match rustix::fs::flock(file.as_fd(), FlockOperation::NonBlockingLockShared) {
+            Ok(()) => Ok(false),
+            Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
+            Err(e) => Err(Error::io(path.display(), e.into())),
+        }
     }
 
     /// Разделяемая блокировка чтения реестра (ждёт смену версии).

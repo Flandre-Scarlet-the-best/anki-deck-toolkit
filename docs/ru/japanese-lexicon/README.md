@@ -81,8 +81,10 @@ Kana; файлы `…_Display_Only_…`, `JPDB_v2.2_Frequency_…` без `Kana`
 | `XDG_DATA_HOME` | `$XDG_DATA_HOME/anki-deck-toolkit/japanese-lexicon` |
 | иначе | `~/.local/share/anki-deck-toolkit/japanese-lexicon` |
 
-Путь должен быть абсолютным и без `..`. Каталог внутри рабочей копии Git
-отвергается до создания файлов. Непустой каталог без маркера `owner.json`
+Путь должен быть абсолютным и без `..`. Изменяющие операции отвергают
+каталог внутри рабочей копии Git до создания файлов; команды чтения
+(`status`, `verify`, `lookup`, `check-updates`) расположение относительно Git
+не проверяют и сами каталог не создают. Непустой каталог без маркера `owner.json`
 подсистема себе не присваивает (`not_owned`).
 
 ```text
@@ -197,7 +199,13 @@ KANJIDIC ≈ 4 МБ (архив + индекс).
 
 ```rust
 let lexicon = japanese_lexicon::lookup::Lexicon::open(&root)?;
-let result = lexicon.lookup("今日", &Default::default())?;
+// По умолчанию ответ ограничен 50 группами и 10 свидетельствами на группу.
+let all = japanese_lexicon::lookup::Options {
+    offset: 0,
+    limit: usize::MAX,
+    max_evidence: usize::MAX,
+};
+let result = lexicon.lookup("今日", &all)?;
 for target in result.candidate_targets() {
     // target.surface, target.reading (нормализованная хирагана),
     // target.classes (lexical_entry / surface_kana), target.dictionaries
@@ -281,7 +289,10 @@ ZIP Yomitan — формат импорта, а не доказательств�
 ### Конкурентный доступ
 
 Изменяющие операции (`install`, `update`, `remove`) исключают друг друга
-через `operations.lock`; вторая сразу получает `busy` (код возврата 4).
+через `operations.lock`; вторая получает `busy` (код возврата 4) после
+короткого повтора, чтобы мгновенная проба `status`/`verify` не давала ложный
+отказ. Сами `status`/`verify` определяют выполняющуюся операцию без записи
+и создания файлов.
 Поиск берёт разделяемую блокировку только на время чтения реестра и
 открытия индексов, а индексы открывает как неизменяемые файлы: удаление или
 замена версии во время запроса не ломает уже открытый поиск, а следующий
