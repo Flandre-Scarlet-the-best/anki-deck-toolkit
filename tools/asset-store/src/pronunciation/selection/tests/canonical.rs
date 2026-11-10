@@ -616,15 +616,20 @@ fn concurrent_exports_never_replace_each_other() {
     let directory = std::sync::Arc::new(workspace.path().to_owned());
     let same = std::sync::Arc::new(mp3(440));
     let sha = sha256_hex(same.as_slice());
-    let results: Vec<_> = (0..8)
+    // Все потоки запускаются до первого `join` и стартуют вместе: ленивая
+    // цепочка `spawn`→`join` выполнила бы их по очереди.
+    let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
         .map(|_| {
             let (directory, same, sha) = (directory.clone(), same.clone(), sha.clone());
+            let start = start.clone();
             std::thread::spawn(move || {
+                start.wait();
                 persist_selected_file_for_test(&directory, "same.mp3", &sha, &same)
             })
         })
-        .map(|t| t.join().unwrap())
         .collect();
+    let results: Vec<_> = handles.into_iter().map(|t| t.join().unwrap()).collect();
     assert!(results.iter().all(Result::is_ok));
     assert_eq!(results.iter().filter(|r| *r.as_ref().unwrap()).count(), 1);
     assert_eq!(
@@ -633,21 +638,24 @@ fn concurrent_exports_never_replace_each_other() {
     );
 
     let variants: Vec<Vec<u8>> = (0..6).map(|i| mp3(300 + 50 * i)).collect();
-    let results: Vec<_> = variants
+    let start = std::sync::Arc::new(std::sync::Barrier::new(variants.len()));
+    let handles: Vec<_> = variants
         .iter()
         .cloned()
         .map(|bytes| {
             let directory = directory.clone();
+            let start = start.clone();
             std::thread::spawn(move || {
                 let sha = sha256_hex(&bytes);
+                start.wait();
                 (
                     sha.clone(),
                     persist_selected_file_for_test(&directory, "diff.mp3", &sha, &bytes),
                 )
             })
         })
-        .map(|t| t.join().unwrap())
         .collect();
+    let results: Vec<_> = handles.into_iter().map(|t| t.join().unwrap()).collect();
     let winners: Vec<_> = results.iter().filter(|(_, r)| r.is_ok()).collect();
     assert_eq!(winners.len(), 1);
     for (_, result) in results.iter().filter(|(_, r)| r.is_err()) {

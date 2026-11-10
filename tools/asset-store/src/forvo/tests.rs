@@ -1713,3 +1713,61 @@ fn browser_binding_is_completed_with_instance_only_for_same_extension() {
     ));
     assert_eq!(state.browser, Some(binding("ext", Some("i1"))));
 }
+
+/// Сбор, остановленный неудачным закрытием браузера после неуспешного
+/// восстановления входа, сохраняет уже проверенные записи до возврата ошибки.
+#[test]
+fn collection_with_browser_cleanup_failure_is_checkpointed_before_error() {
+    use super::batch::{FetchItem, FetchPlan};
+    use crate::batch_runtime::SafeBatchRuntime;
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-collect-cleanup").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    batch::start(
+        &store,
+        "cleanup",
+        FetchPlan {
+            schema_version: 1,
+            items: vec![FetchItem {
+                surface: "生".into(),
+                reading: None,
+                replace_expected_sha256: None,
+            }],
+        },
+        batch::Transport::CdpChromium,
+    )
+    .unwrap();
+    let mut source = collection_source(vec![
+        Ok(synthetic_mp3()),
+        Err(error("session_expired", "Повторите вход")),
+    ]);
+    let mut collection =
+        futures::executor::block_on(collected(&mut source, "生", &Default::default()));
+    assert_eq!(collection.records.len(), 1);
+    collection.stop.as_mut().unwrap().details["browser_cleanup"] =
+        serde_json::json!({"code": "browser_cleanup_failed", "message": "ошибка закрытия"});
+
+    let mut runtime = SafeBatchRuntime::open(store.root(), "cleanup").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    let error = batch::checkpoint_before_cleanup_failure(&mut runtime, &mut state, 0, collection)
+        .unwrap_err();
+    assert_eq!(provider_code(&error), "session_expired");
+    assert_eq!(
+        error.details["browser_cleanup"]["code"],
+        "browser_cleanup_failed"
+    );
+    assert!(error.details["browser_cleanup"]["checkpoint_error"].is_null());
+    drop(runtime);
+    let saved = batch::status(&store, "cleanup").unwrap();
+    assert_eq!(saved.items[0].collected.len(), 1, "запись не потеряна");
+    assert_eq!(saved.paused.as_ref().unwrap().code, "session_expired");
+
+    // Без ошибки закрытия сбор возвращается для обычной фиксации.
+    let mut runtime = SafeBatchRuntime::open(store.root(), "cleanup").unwrap();
+    let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+    let plain = super::Collection::default();
+    assert!(batch::checkpoint_before_cleanup_failure(&mut runtime, &mut state, 0, plain).is_ok());
+}

@@ -74,9 +74,10 @@ Forvo: поиск идёт только по написанию. Чтобы гр
 принимает у записи либо текущее имя, либо историческое имя её же пары
 (`AssetDomainPolicy::accepts_historical_consumer_filename`), и записи не
 переименовываются молча. Новая запись и замена записи по CAS получают
-`<surface>_<reading>.mp3`. Ссылки колод на прежнее имя переводятся только явным
-`anki-repo migrate-media`: домен доказывает принадлежность `<surface>.mp3`
-своей паре (`proves_legacy_consumer_filename`).
+`<surface>_<reading>.mp3`. Домен доказывает принадлежность `<surface>.mp3`
+своей паре (`proves_legacy_consumer_filename`), но `anki-repo migrate-media`
+пока не обрабатывает `pronunciation_audio` (отказ `media_domain_unknown`) и
+ссылки колод на прежнее имя не переводит.
 
 Внутренний путь — `assets/<sha256(identity.key)>/<content-sha256>.mp3`.
 Разночтения одного написания имеют независимые объекты, решения и CAS-слоты,

@@ -824,6 +824,33 @@ pub(super) async fn run_collection(
     }
 }
 
+/// Сбор, остановленный неудачным закрытием браузера (например, после
+/// неуспешного интерактивного восстановления входа), может уже содержать
+/// проверенные записи: они фиксируются до возврата исходной ошибки, чтобы
+/// `batch-resume` не скачивал их повторно. Ошибка фиксации добавляется к
+/// сведениям об очистке. Без такой остановки сбор возвращается как есть.
+pub(super) fn checkpoint_before_cleanup_failure(
+    runtime: &mut SafeBatchRuntime,
+    batch: &mut ForvoBatch,
+    index: usize,
+    collection: Collection,
+) -> Result<Collection, AssetError> {
+    let Some(mut error) = collection
+        .stop
+        .as_ref()
+        .filter(|e| !e.details["browser_cleanup"].is_null())
+        .map(|e| AssetError::with_details(e.code, e.message.clone(), e.details.clone()))
+    else {
+        return Ok(collection);
+    };
+    if let Err(save) = checkpoint_collection(runtime, batch, index, collection) {
+        error.details["browser_cleanup"]["checkpoint_error"] = serde_json::json!({
+            "code": save.code.as_str(), "message": save.message, "details": save.details
+        });
+    }
+    Err(error)
+}
+
 /// Фиксирует результат полного сбора: байты каждой записи — отдельным blob
 /// (одинаковые байты хранятся один раз, свидетельства — у каждой записи),
 /// отказы записей — в отчёте сбора, остановка — паузой пакета.
@@ -1106,15 +1133,8 @@ pub async fn resume_prepared(
                 batch = reload_after_acquisition(&mut runtime)?;
                 // Сохраняется вместе с фиксацией сбора ниже.
                 bind_session(&mut batch, session.as_ref(), "collect");
-                if let Some(e) = &collection.stop
-                    && !e.details["browser_cleanup"].is_null()
-                {
-                    return Err(AssetError::with_details(
-                        e.code,
-                        e.message.clone(),
-                        e.details.clone(),
-                    ));
-                }
+                let collection =
+                    checkpoint_before_cleanup_failure(&mut runtime, &mut batch, index, collection)?;
                 // Завершённые записи фиксируются и при отмене пакета.
                 let cancelled = batch.cancelled;
                 let code = collection.stop.as_ref().map(|e| provider_code(e).to_owned());

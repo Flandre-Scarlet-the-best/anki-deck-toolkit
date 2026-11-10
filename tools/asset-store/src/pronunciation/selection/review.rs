@@ -548,7 +548,7 @@ pub fn apply_with(
 /// Скрипт повторов, замедления и сборки файла решений; CSP разрешает только
 /// его точный SHA-256. Скрипт заполняет первую колонку встроенного шаблона
 /// `decisions.tsv` и отдаёт файл браузеру; сам он ничего не применяет.
-const PLAYER_SCRIPT: &str = "document.addEventListener('click',function(e){var b=e.target.closest('button[data-for]');if(!b)return;var a=document.getElementById(b.getAttribute('data-for'));if(!a)return;var r=b.getAttribute('data-rate');if(r){a.playbackRate=parseFloat(r);return;}if(b.hasAttribute('data-loop')){a.loop=!a.loop;b.setAttribute('aria-pressed',a.loop?'true':'false');return;}a.currentTime=parseFloat(a.getAttribute('data-start')||'0');a.play();});(function(){var t=document.getElementById('decisions-template'),s=document.getElementById('save-decisions');if(!t||!s)return;var tpl=JSON.parse(t.textContent);function build(){var lines=tpl.split('\n'),row=-1,out=[];for(var i=0;i<lines.length;i++){var l=lines[i];if(l.trim()===''||l.charAt(0)==='#'){out.push(l);continue;}if(row<0){row=0;out.push(l);continue;}var c=document.querySelector('input[name=d-'+row+']:checked'),v=c?c.value:'',h=document.getElementById('heard-'+row);if(/^[0-9]+$/.test(v)&&h&&h.checked)v='heard:'+v;var k=l.indexOf('\t');out.push(v+l.slice(k));row++;}return out.join('\n');}s.addEventListener('click',function(){var text=build(),o=document.getElementById('decisions-output');o.value=text;o.hidden=false;var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/tab-separated-values'}));a.download=s.getAttribute('data-file');document.body.appendChild(a);a.click();a.remove();});})();";
+const PLAYER_SCRIPT: &str = "document.addEventListener('click',function(e){var b=e.target.closest('button[data-for]');if(!b)return;var a=document.getElementById(b.getAttribute('data-for'));if(!a)return;var r=b.getAttribute('data-rate');if(r){a.playbackRate=parseFloat(r);return;}if(b.hasAttribute('data-loop')){a.loop=!a.loop;b.setAttribute('aria-pressed',a.loop?'true':'false');return;}a.currentTime=parseFloat(a.getAttribute('data-start')||'0');a.play();});(function(){var t=document.getElementById('decisions-template'),s=document.getElementById('save-decisions');if(!t||!s)return;var tpl=JSON.parse(t.textContent);function build(){var lines=tpl.split('\\n'),row=-1,out=[];for(var i=0;i<lines.length;i++){var l=lines[i];if(l.trim()===''||l.charAt(0)==='#'){out.push(l);continue;}if(row<0){row=0;out.push(l);continue;}var c=document.querySelector('input[name=d-'+row+']:checked'),v=c?c.value:'',h=document.getElementById('heard-'+row);if(/^[0-9]+$/.test(v)&&h&&h.checked)v='heard:'+v;var k=l.indexOf('\\t');out.push(v+l.slice(k));row++;}return out.join('\\n');}s.addEventListener('click',function(){var text=build(),o=document.getElementById('decisions-output');o.value=text;o.hidden=false;var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/tab-separated-values'}));a.download=s.getAttribute('data-file');document.body.appendChild(a);a.click();a.remove();});})();";
 
 fn script_hash() -> String {
     STANDARD.encode(Sha256::digest(PLAYER_SCRIPT.as_bytes()))
@@ -678,6 +678,16 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Перевод строки Rust внутри JS-строки в одинарных кавычках — синтаксическая
+    /// ошибка, из-за которой не работают ни проигрывание, ни сохранение решений:
+    /// управляющие символы в скрипте допустимы только как JS-экранирования.
+    #[test]
+    fn player_script_has_no_raw_control_characters() {
+        assert!(!PLAYER_SCRIPT.chars().any(char::is_control));
+        assert!(PLAYER_SCRIPT.contains("split('\\n')"));
+        assert!(PLAYER_SCRIPT.contains("join('\\n')"));
+    }
 
     #[test]
     fn csp_hash_matches_the_only_script() {
