@@ -832,9 +832,10 @@ fn context(error: &clap::Error, kind: clap::error::ContextKind) -> Option<String
 }
 
 /// Значение контекста без отбрасывания пустой строки: пустое значение
-/// аргумента clap передаёт отдельно от его отсутствия.
+/// аргумента clap передаёт отдельно от его отсутствия. Значение приходит из
+/// аргументов командной строки, поэтому печатается без управляющих символов.
 fn context_raw(error: &clap::Error, kind: clap::error::ContextKind) -> Option<String> {
-    error.get(kind).map(ToString::to_string)
+    error.get(kind).map(|value| printable(&value.to_string()))
 }
 
 fn with_hint(mut text: String, hint: Option<String>, label: &str) -> String {

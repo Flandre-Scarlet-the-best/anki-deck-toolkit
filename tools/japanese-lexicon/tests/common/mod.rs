@@ -233,23 +233,59 @@ pub fn kanjidic(revision: &str) -> Vec<u8> {
 }
 
 pub fn jpdb(revision: &str) -> Vec<u8> {
+    jpdb_rows(
+        revision,
+        &[
+            json!(["学校", "freq", {"reading": "がっこう", "frequency": {"value": 616, "displayValue": "616"}}]),
+            json!(["今日", "freq", {"reading": "きょう", "frequency": {"value": 122, "displayValue": "122"}}]),
+            json!(["がっこう", "freq", {"value": 5, "displayValue": "5㋕"}]),
+            // Частотность для чтения, которого нет ни в одном словаре:
+            // не должна превратиться в чтение.
+            json!(["学校", "freq", {"reading": "まなびや", "frequency": {"value": 9, "displayValue": "9"}}]),
+        ],
+    )
+}
+
+/// JPDB-подобный архив ровно с заданными строками банка метаданных.
+pub fn jpdb_rows(revision: &str, rows: &[Value]) -> Vec<u8> {
     zip_bytes(vec![
         file(
             "index.json",
             &json!({"title": "JPDBv2㋕", "format": 3, "revision": revision, "frequencyMode": "rank-based"}),
         ),
-        file(
-            "term_meta_bank_1.json",
-            &json!([
-                ["学校", "freq", {"reading": "がっこう", "frequency": {"value": 616, "displayValue": "616"}}],
-                ["今日", "freq", {"reading": "きょう", "frequency": {"value": 122, "displayValue": "122"}}],
-                ["がっこう", "freq", {"value": 5, "displayValue": "5㋕"}],
-                // Частотность для чтения, которого нет ни в одном словаре:
-                // не должна превратиться в чтение.
-                ["学校", "freq", {"reading": "まなびや", "frequency": {"value": 9, "displayValue": "9"}}]
-            ]),
-        ),
+        file("term_meta_bank_1.json", &Value::Array(rows.to_vec())),
     ])
+}
+
+/// Дублирует запись центрального каталога ZIP: писатель `zip` повторяющихся имён
+/// не создаёт, а читатель объединяет их во внутренней карте, поэтому архив
+/// собирается правкой байтов — дубликат ссылается на тот же local header.
+pub fn duplicate_central_record(zip: &[u8], name: &str) -> Vec<u8> {
+    let eocd = zip.len() - 22;
+    let entries = u16::from_le_bytes(zip[eocd + 10..eocd + 12].try_into().unwrap());
+    let cd_size = u32::from_le_bytes(zip[eocd + 12..eocd + 16].try_into().unwrap());
+    let cd_offset = u32::from_le_bytes(zip[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+    let name_len =
+        u16::from_le_bytes(zip[cd_offset + 28..cd_offset + 30].try_into().unwrap()) as usize;
+    let extra_len =
+        u16::from_le_bytes(zip[cd_offset + 30..cd_offset + 32].try_into().unwrap()) as usize;
+    let comment_len =
+        u16::from_le_bytes(zip[cd_offset + 32..cd_offset + 34].try_into().unwrap()) as usize;
+    assert_eq!(
+        &zip[cd_offset + 46..cd_offset + 46 + name_len],
+        name.as_bytes(),
+        "первая запись каталога — не {name}"
+    );
+    let record_len = 46 + name_len + extra_len + comment_len;
+    let mut out = zip[..eocd].to_vec();
+    out.extend_from_slice(&zip[cd_offset..cd_offset + record_len]);
+    let mut tail = zip[eocd..].to_vec();
+    // Записей на этом диске и всего: оба поля, иначе архив выглядит многодисковым.
+    tail[8..10].copy_from_slice(&(entries + 1).to_le_bytes());
+    tail[10..12].copy_from_slice(&(entries + 1).to_le_bytes());
+    tail[12..16].copy_from_slice(&(cd_size + record_len as u32).to_le_bytes());
+    out.extend_from_slice(&tail);
+    out
 }
 
 pub fn sha256(bytes: &[u8]) -> String {

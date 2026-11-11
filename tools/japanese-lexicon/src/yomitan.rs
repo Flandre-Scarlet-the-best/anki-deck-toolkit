@@ -168,6 +168,14 @@ impl Archive {
         let file = File::open(path).map_err(|e| Error::io(path.display(), e))?;
         let zip = zip::ZipArchive::new(file)
             .map_err(|e| Error::format(format!("архив не читается как ZIP: {e}")))?;
+        // Читатель объединяет записи с одинаковыми именами во внутренней карте,
+        // поэтому повтор проверяется по числу записей центрального каталога, а
+        // не по обходу `by_index_raw`.
+        if zip.has_duplicate_names() {
+            return Err(Error::unsafe_archive(
+                "архив содержит записи с повторяющимися именами",
+            ));
+        }
         if zip.len() > limits.max_entries {
             return Err(Error::limit(format!(
                 "в архиве {} записей, предел {}",

@@ -501,3 +501,26 @@ fn truncation_hint_matches_what_is_hidden() {
     assert_eq!(code, 0, "{text}");
     assert!(!text.contains("продолжение:"), "{text}");
 }
+
+/// Значение аргумента в сообщении об ошибке разбора печатается без управляющих
+/// символов: иначе подготовленный аргумент менял бы состояние терминала.
+#[test]
+fn invalid_argument_value_is_escaped_in_the_parse_error() {
+    let tmp = TempDir::new("cli-arg-escape");
+    let root = tmp.path().join("data");
+    let (code, _, stderr) = run_raw(&[
+        "--data-dir",
+        root.to_str().unwrap(),
+        "lookup",
+        "--surface",
+        "学校",
+        "--limit",
+        "\u{1b}[31mPWN",
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "управляющая последовательность осталась в stderr: {stderr:?}"
+    );
+    assert!(stderr.contains("\\u{001B}[31mPWN"), "{stderr}");
+}

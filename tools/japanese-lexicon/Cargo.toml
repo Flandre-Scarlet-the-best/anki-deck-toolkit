@@ -25,11 +25,6 @@ sha2 = "0.11"
 unicode-normalization = "0.1"
 zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 
-[dev-dependencies]
-# Тесты портят установленный индекс адресно (удаляют таблицу), чтобы проверить
-# отказ источника во время поиска: это тот же rusqlite, что и в зависимостях.
-rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
-
 [lib]
 
 [[bin]]

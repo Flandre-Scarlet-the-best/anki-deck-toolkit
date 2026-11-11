@@ -126,20 +126,20 @@ fn cell_i64(row: &[Value], i: usize, bank: &str, n: usize) -> Result<i64> {
 fn cell_i64_or_null(row: &[Value], i: usize, bank: &str, n: usize) -> Result<Option<i64>> {
     match row.get(i) {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) => integer_value(number)
+        Some(value) => integer_value(value)
             .map(Some)
             .ok_or_else(|| Error::format(format!("{bank}[{n}][{i}]: ожидается целое число"))),
-        Some(_) => Err(Error::format(format!(
-            "{bank}[{n}][{i}]: ожидается целое число"
-        ))),
     }
 }
 
 /// Целое значение JSON-числа: целая запись как есть, дробная запись с нулевой
-/// дробной частью (`1.0`, `1e16`) — тем же целым, если оно помещается в `i64`.
-/// Дробное значение или значение вне диапазона не усекается и не насыщается,
-/// а отвергается вызывающим.
-fn integer_value(number: &serde_json::Number) -> Option<i64> {
+/// дробной частью (`1.0`, `616.0`, `1e16`) — тем же целым, если оно помещается
+/// в `i64`. Дробное значение или значение вне диапазона не усекается и не
+/// насыщается: вызывающий решает, ошибка это или отсутствие значения.
+fn integer_value(value: &Value) -> Option<i64> {
+    let Value::Number(number) = value else {
+        return None;
+    };
     if let Some(value) = number.as_i64() {
         return Some(value);
     }
@@ -491,12 +491,13 @@ fn insert_kanji(
 }
 
 /// Значение частотности Yomitan: число, строка или `{value, displayValue}`.
+/// Целое, записанное как `616.0`, сохраняется целым.
 fn frequency_value(value: &Value) -> (Option<i64>, Option<String>) {
     match value {
-        Value::Number(n) => (n.as_i64(), Some(n.to_string())),
+        Value::Number(n) => (integer_value(value), Some(n.to_string())),
         Value::String(s) => (s.trim().parse().ok(), Some(s.clone())),
         Value::Object(map) => {
-            let v = map.get("value").and_then(Value::as_i64);
+            let v = map.get("value").and_then(integer_value);
             let display = map
                 .get("displayValue")
                 .and_then(Value::as_str)

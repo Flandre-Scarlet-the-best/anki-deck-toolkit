@@ -1173,14 +1173,103 @@ fn read_only_commands_create_no_files() {
 
     // Свежая инициализация тоже создаёт замок, а чтение после неё — нет.
     let fresh = tmp.path().join("fresh");
-    let report = manager::remove(&fresh, &all()).unwrap();
+    let report = manager::install(&fresh, &all(), &up, None, &Options::default()).unwrap();
+    assert!(report.ok, "{report:#?}");
+    assert!(
+        fresh.join(store::ACTIVE_LOCK).exists(),
+        "замок свежей инициализации"
+    );
+    std::fs::remove_file(fresh.join(store::ACTIVE_LOCK)).unwrap();
+    let fresh_before = listing(&fresh);
+    assert!(manager::status(&location(&fresh)).unwrap().ok);
+    assert_eq!(lookup(&fresh, "学校").status, Status::SingleReading);
+    assert_eq!(listing(&fresh), fresh_before, "чтение не создаёт файлов");
+    assert!(!fresh.join(store::ACTIVE_LOCK).exists());
+
+    // `remove` без каталога ничего не создаёт.
+    let absent = tmp.path().join("absent");
+    let report = manager::remove(&absent, &all()).unwrap();
     assert!(
         report
             .items
             .iter()
             .all(|i| i.outcome == Outcome::NotInstalled)
     );
-    assert!(!fresh.exists(), "remove без каталога ничего не создаёт");
+    assert!(!absent.exists(), "remove без каталога ничего не создаёт");
+}
+
+/// Целая частотность, записанная как `616.0`, сохраняется числом — и в объекте
+/// `{value, displayValue}`, и прямой записью.
+#[test]
+fn integral_frequency_written_as_float_keeps_the_rank() {
+    let tmp = TempDir::new("float-frequency");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let report = manager::install(&root, &all(), &up, None, &Options::default()).unwrap();
+    assert!(report.ok, "{report:#?}");
+
+    up.publish(
+        "jpdb-v2.2-freq-kana",
+        "2026-02-02",
+        jpdb_rows(
+            "JPDB v2.2 Frequency Kana 2026-02-02",
+            &[
+                // Объект частотности с целым, записанным как `616.0`.
+                json!(["学校", "freq", {"reading": "がっこう", "frequency": {"value": 616.0, "displayValue": "616"}}]),
+                // Прямая числовая запись: относится к написанию запроса.
+                json!(["がっこう", "freq", 5.0]),
+            ],
+        ),
+    );
+    let update =
+        manager::update(&root, &one("jpdb-v2.2-freq-kana"), &up, &Options::default()).unwrap();
+    assert!(update.ok, "{update:#?}");
+
+    let ranks = |surface: &str| {
+        let r = lookup(&root, surface);
+        let mut ranks: Vec<Option<i64>> = r
+            .readings
+            .iter()
+            .flat_map(|g| g.frequency.iter())
+            .map(|f| f.rank)
+            .collect();
+        ranks.sort();
+        ranks
+    };
+    // Объект частотности: ранг сохранён, а не потерян как `null`.
+    assert_eq!(ranks("学校"), vec![Some(616)]);
+    // Прямая запись: `5.0` даёт ранг 5, а не `null`.
+    assert_eq!(ranks("がっこう"), vec![Some(5)]);
+}
+
+/// Повторяющиеся имена записей отвергаются, даже когда читатель ZIP объединяет
+/// их во внутренней карте: проверка идёт по числу записей центрального каталога.
+#[test]
+fn duplicate_entry_names_are_rejected() {
+    let tmp = TempDir::new("duplicate-names");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let zip = tmp.path().join("Jitendex.zip");
+    std::fs::write(
+        &zip,
+        duplicate_central_record(&jitendex("dup", &[]), "index.json"),
+    )
+    .unwrap();
+
+    let report = manager::install(
+        &root,
+        &one("jitendex"),
+        &up,
+        Some(&zip),
+        &Options::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome(&report, "jitendex"), Outcome::Failed);
+    assert_eq!(
+        code(&report, "jitendex"),
+        Some(Code::UnsafeArchive),
+        "{report:#?}"
+    );
 }
 
 #[test]
