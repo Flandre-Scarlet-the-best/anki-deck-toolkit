@@ -114,15 +114,10 @@ fn cell_str_or_null<'a>(row: &'a [Value], i: usize, bank: &str, n: usize) -> Res
     }
 }
 
-/// Целочисленное поле без `null` (`order` и `score` банка тегов).
-fn cell_i64(row: &[Value], i: usize, bank: &str, n: usize) -> Result<i64> {
-    cell_i64_or_null(row, i, bank, n)?
-        .ok_or_else(|| Error::format(format!("{bank}[{n}][{i}]: ожидается целое число")))
-}
-
 /// Целочисленное поле, которое допускает `null` (`sequence` статьи): отсутствие
 /// значения — это `null`, а строка, логическое значение, дробное число и
 /// значение вне `i64` — ошибка формата, а не молчаливое искажение поля.
+/// Схема `dictionary-term-bank-v3` объявляет `sequence` как `integer`.
 fn cell_i64_or_null(row: &[Value], i: usize, bank: &str, n: usize) -> Result<Option<i64>> {
     match row.get(i) {
         None | Some(Value::Null) => Ok(None),
@@ -578,12 +573,16 @@ fn insert_tag(
             "{bank}[{n}]: строка банка тегов должна содержать 5 полей"
         )));
     }
+    // `sort_order` и `score` схема `dictionary-tag-bank-v3` объявляет как
+    // `number`, как и оценку статьи: дробная помета допустима и сохраняется
+    // числом. Колонки с целочисленной близостью не теряют её — SQLite хранит
+    // дробное значение как REAL, а целое как INTEGER.
     w.tag.execute(params![
         cell_str(row, 0, bank, n)?,
         cell_str(row, 1, bank, n)?,
-        cell_i64(row, 2, bank, n)?,
+        cell_number(row, 2, bank, n)?,
         cell_str(row, 3, bank, n)?,
-        cell_i64(row, 4, bank, n)?
+        cell_number(row, 4, bank, n)?
     ])?;
     stats.tags += 1;
     Ok(())

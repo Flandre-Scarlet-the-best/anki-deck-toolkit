@@ -1704,21 +1704,21 @@ fn index_failure_during_lookup_marks_source_unavailable() {
     assert_eq!(r.missing_sources, vec!["jitendex"]);
 }
 
-/// Дробный `sort_order` тега — не «единица» и не насыщение: обновление
-/// отклоняется целиком, прежняя версия остаётся активной.
+/// `sort_order` и `score` банка тегов схема Yomitan объявляет как `number`:
+/// дробная помета сохраняется числом без усечения и насыщения, а нечисловое
+/// значение отклоняет обновление целиком, не трогая активную версию.
 #[test]
-fn invalid_tag_order_is_rejected_without_touching_active_version() {
-    let tmp = TempDir::new("bad-tag-order");
+fn fractional_tag_numbers_are_kept_and_non_numeric_ones_rejected() {
+    let tmp = TempDir::new("tag-numbers");
     let root = tmp.path().join("data");
     let up = FakeUpstream::standard();
     let report = manager::install(&root, &all(), &up, None, &Options::default()).unwrap();
     assert!(report.ok, "{report:#?}");
 
     let gloss = json!([{"type": "structured-content", "content": "synthetic"}]);
-    // Банк тегов целиком: иначе отказ пришёл бы от ссылки на помету, которой нет.
-    let bank = |order: Value| {
+    let bank = |order: Value, score: Value| {
         json!([
-            ["★", "popular", order, "high priority entry", 2],
+            ["★", "popular", order, "high priority entry", score],
             [
                 "priority\u{a0}form",
                 "frequent",
@@ -1735,16 +1735,34 @@ fn invalid_tag_order_is_rejected_without_touching_active_version() {
             ]
         ])
     };
-    for (release, bad) in [("T2", json!(1.5)), ("T3", json!(1e30)), ("T4", json!("2"))] {
+    let publish = |release: &str, order: Value, score: Value| {
         up.publish(
             "jitendex",
             release,
             jitendex_with_tags(
                 release,
                 &[json!(["試標", "さか", "", "", 200, gloss, 600, ""])],
-                bank(bad),
+                bank(order, score),
             ),
         );
+    };
+
+    // Дробная помета допустима схемой и сохраняется числом.
+    publish("T2", json!(1.5), json!(-0.5));
+    let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+    assert!(update.ok, "{update:#?}");
+    assert_eq!(tag_numbers(&root, "★"), (1.5, -0.5));
+
+    // Большое конечное число не насыщается границей `i64`.
+    publish("T3", json!(1e30), json!(2.0));
+    let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+    assert!(update.ok, "{update:#?}");
+    assert!(manager::verify(&location(&root), &all()).unwrap().ok);
+    assert_eq!(tag_numbers(&root, "★"), (1e30, 2.0));
+
+    // Нечисловое значение: обновление отклоняется целиком, прежняя версия цела.
+    for (release, bad) in [("T4", json!("2")), ("T5", json!(true))] {
+        publish(release, bad, json!(2));
         let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
         assert!(!update.ok, "{release}: {update:#?}");
         assert_eq!(outcome(&update, "jitendex"), Outcome::Failed, "{release}");
@@ -1758,24 +1776,20 @@ fn invalid_tag_order_is_rejected_without_touching_active_version() {
             Status::SingleReading,
             "{release}"
         );
+        assert_eq!(tag_numbers(&root, "★"), (1e30, 2.0), "{release}");
     }
+}
 
-    // Целое значение, записанное как `2.0`, остаётся допустимым.
-    up.publish(
-        "jitendex",
-        "T5",
-        jitendex_with_tags("T5", &[], bank(json!(2.0))),
-    );
-    let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
-    assert!(update.ok, "{update:#?}");
-    let r = lookup(&root, "学校");
-    assert_eq!(r.status, Status::SingleReading);
-    let tags: Vec<&str> = r.readings[0].evidence[0]
-        .tags
-        .iter()
-        .map(|t| t.name.as_str())
-        .collect();
-    assert_eq!(tags, vec!["★"]);
+/// Числовые поля пометы в установленном индексе: `sort_order` и `score`.
+fn tag_numbers(root: &Path, name: &str) -> (f64, f64) {
+    let index = version_dir(root, "jitendex").join(store::INDEX_FILE);
+    let conn = rusqlite::Connection::open(index).unwrap();
+    conn.query_row(
+        "SELECT sort_order, score FROM tags WHERE name = ?1",
+        [name],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
 }
 
 #[test]
