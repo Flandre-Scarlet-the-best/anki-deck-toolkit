@@ -800,6 +800,84 @@ fn local_zip_import_works_without_network() {
     assert_eq!(code(&report, "jitendex"), Some(Code::UnsupportedSchema));
 }
 
+/// `install` не заменяет установленный словарь с читаемым манифестом, даже
+/// когда индекс повреждён; запись с нечитаемым манифестом установленной не
+/// считается и ставится заново — из локального ZIP без сети и `update`
+/// с источника публикации.
+#[test]
+fn install_replaces_only_unreadable_manifest_and_keeps_damaged_index() {
+    let tmp = TempDir::new("install-repair");
+    let root = tmp.path().join("data");
+    let (loc, up) = installed(&root);
+    let zip = tmp.path().join("Jitendex.zip");
+    std::fs::write(&zip, jitendex("Jitendex.test", &[])).unwrap();
+
+    let version_dir = || {
+        let version = Store::open_existing(&root)
+            .unwrap()
+            .unwrap()
+            .registry()
+            .unwrap()
+            .dictionaries["jitendex"]
+            .version
+            .clone();
+        root.join("dictionaries/jitendex").join(version)
+    };
+
+    // Повреждённый индекс: манифест читается, установка версию не заменяет.
+    let index = version_dir().join(store::INDEX_FILE);
+    let mut bytes = std::fs::read(&index).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xFF;
+    std::fs::write(&index, &bytes).unwrap();
+    assert!(!manager::verify(&loc, &all()).unwrap().ok);
+    let damaged = version_dir();
+    let report = manager::install(
+        &root,
+        &one("jitendex"),
+        &up,
+        Some(&zip),
+        &Options::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome(&report, "jitendex"), Outcome::AlreadyInstalled);
+    assert!(report.items[0].installed.is_some());
+    assert_eq!(version_dir(), damaged, "активная версия не заменена");
+    assert!(
+        !manager::verify(&loc, &all()).unwrap().ok,
+        "повреждение осталось: восстановление — update или remove"
+    );
+
+    // Нечитаемый манифест: запись не считается установленной, локальный ZIP её ставит.
+    std::fs::write(damaged.join(store::MANIFEST_FILE), b"{").unwrap();
+    let report = manager::install(
+        &root,
+        &one("jitendex"),
+        &up,
+        Some(&zip),
+        &Options::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome(&report, "jitendex"), Outcome::Installed);
+    assert_eq!(
+        report.items[0].installed.as_ref().unwrap().provider,
+        "local_file"
+    );
+    assert!(manager::verify(&loc, &all()).unwrap().ok);
+    assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
+
+    // То же состояние `update` переустанавливает с источника публикации.
+    std::fs::write(version_dir().join(store::MANIFEST_FILE), b"{").unwrap();
+    let update = manager::update(&root, &one("jitendex"), &up, &Options::default()).unwrap();
+    assert_eq!(
+        outcome(&update, "jitendex"),
+        Outcome::Updated,
+        "{update:#?}"
+    );
+    assert!(manager::verify(&loc, &all()).unwrap().ok);
+    assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
+}
+
 #[test]
 fn lookup_output_is_deterministic_and_paginated() {
     let tmp = TempDir::new("pages");
