@@ -391,3 +391,87 @@ fn text_output_is_russian_while_json_keeps_machine_names() {
     assert!(text.contains("Использование:") && text.contains("Показать справку"));
     assert!(!text.contains("Print help"), "{text}");
 }
+
+/// Текст словаря приходит из недоверенного ZIP: управляющая последовательность в
+/// заголовке и ревизии не должна управлять терминалом в текстовом выводе.
+#[test]
+fn dictionary_text_is_escaped_in_text_output() {
+    let tmp = TempDir::new("cli-escape");
+    let root = tmp.path().join("data");
+    let zip = tmp.path().join("Jitendex.zip");
+    std::fs::write(&zip, jitendex("\u{1b}[31mPWN", &[])).unwrap();
+
+    let (code, text) = run_text(
+        &root,
+        &["install", "jitendex", "--from-file", zip.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        !text.contains('\u{1b}'),
+        "управляющая последовательность осталась в выводе: {text:?}"
+    );
+    assert!(text.contains("\\u{001B}[31mPWN"), "{text}");
+
+    // Машинный JSON хранит исходное значение: экранирование — свойство текста.
+    let (_, json) = run(&root, &["status"]);
+    assert!(
+        json["dictionaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["installed"]["revision"] == "\u{1b}[31mPWN"),
+        "{json}"
+    );
+}
+
+/// Документация обещает лицензию и атрибуцию каждого источника: текстовый
+/// `status` показывает и то, и другое, включая ограничения распространения.
+#[test]
+fn text_status_shows_license_attribution_and_redistribution_note() {
+    let tmp = TempDir::new("cli-attribution");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let sources: Vec<_> = catalog::standard().iter().collect();
+    assert!(
+        manager::install(&root, &sources, &up, None, &Options::default())
+            .unwrap()
+            .ok
+    );
+
+    let (code, text) = run_text(&root, &["status"]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(text.matches("  лицензия: ").count(), 4, "{text}");
+    assert_eq!(text.matches("  атрибуция: ").count(), 4, "{text}");
+    assert_eq!(
+        text.matches("  ограничения распространения: ").count(),
+        4,
+        "{text}"
+    );
+}
+
+/// Подсказка о продолжении нужна только тогда, когда за выборкой остались ещё
+/// группы: скрытые свидетельства открываются `--max-evidence`.
+#[test]
+fn truncation_hint_matches_what_is_hidden() {
+    let tmp = TempDir::new("cli-truncation");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let sources: Vec<_> = catalog::standard().iter().collect();
+    assert!(
+        manager::install(&root, &sources, &up, None, &Options::default())
+            .unwrap()
+            .ok
+    );
+
+    // Скрыты только свидетельства: у 生 две статьи одного чтения.
+    let (code, text) = run_text(&root, &["lookup", "--surface", "生", "--max-evidence", "1"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("показаны все"), "{text}");
+    assert!(!text.contains("--offset/--limit"), "{text}");
+    assert!(text.contains("--max-evidence"), "{text}");
+
+    // Скрыты группы: пагинация уместна.
+    let (code, text) = run_text(&root, &["lookup", "--surface", "生", "--limit", "1"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("--offset/--limit"), "{text}");
+}

@@ -46,6 +46,8 @@ pub enum Status {
     MultipleReadings,
     /// Только чтения символа из KANJIDIC: ограниченный статус.
     KanjiReferenceOnly,
+    /// Только чтения символа из KANJIDIC и варианты имени собственного.
+    KanjiReferenceAndProperNameOnly,
     /// Только варианты имени собственного.
     ProperNameOnly,
     /// Только указатель на другую форму.
@@ -362,10 +364,6 @@ impl Lexicon {
         self.opened.iter().filter(move |o| o.source.role == role)
     }
 
-    fn available(&self, role: Role) -> bool {
-        self.by_role(role).next().is_some()
-    }
-
     /// Поиск чтений. `limit` и `max_evidence` должны быть не меньше 1:
     /// нулевой предел отвергается как `invalid_input`, а не заменяется
     /// молча (группа без свидетельств потеряла бы происхождение).
@@ -378,6 +376,10 @@ impl Lexicon {
         let mut redirects = Vec::new();
         let kana_analysis = (script == Script::Kana).then(|| kana::analyze_kana(&surface));
 
+        // Отказ одного индекса не отменяет поиск по исправным словарям: чтения
+        // источника собираются целиком до записи в ответ, поэтому частичный
+        // набор отказавшего словаря в ответ не попадает.
+        let mut failed: Vec<(&'static str, Error)> = Vec::new();
         for o in self
             .by_role(Role::Lexicon)
             .chain(self.by_role(Role::ProperNames))
@@ -387,14 +389,15 @@ impl Lexicon {
             } else {
                 EvidenceClass::ProperName
             };
-            for row in o.index.readings(&surface)? {
-                let evidence = reading_evidence(o, class, &row)?;
-                add(&mut groups, class, &row.reading, &row.match_key, evidence);
-            }
-            if o.source.role == Role::Lexicon {
-                for row in o.index.redirects(&surface)? {
-                    redirects.push(redirect_hint(o, row)?);
+            match lexicon_entries(o, class, &surface) {
+                Ok((rows, hints)) => {
+                    for entry in rows {
+                        let SourceEntry { row, evidence } = entry;
+                        add(&mut groups, class, &row.reading, &row.match_key, evidence);
+                    }
+                    redirects.extend(hints);
                 }
+                Err(e) => failed.push((o.source.id, e)),
             }
         }
         if let Some(KanaReading {
@@ -423,28 +426,36 @@ impl Lexicon {
         }
         if script == Script::SingleKanji {
             for o in self.by_role(Role::Kanji) {
-                for row in o.index.kanji(&surface)? {
-                    for (reading, evidence) in kanji_evidence(o, &row)? {
-                        let key = kana::match_key(&reading);
-                        add(
-                            &mut groups,
-                            EvidenceClass::KanjiReference,
-                            &reading,
-                            &key,
-                            evidence,
-                        );
+                match kanji_evidence_rows(o, &surface) {
+                    Ok(rows) => {
+                        for (reading, evidence) in rows {
+                            let key = kana::match_key(&reading);
+                            add(
+                                &mut groups,
+                                EvidenceClass::KanjiReference,
+                                &reading,
+                                &key,
+                                evidence,
+                            );
+                        }
                     }
+                    Err(e) => failed.push((o.source.id, e)),
                 }
             }
         }
 
         let mut unmatched = Vec::new();
         for o in self.by_role(Role::Frequency) {
-            for row in o.index.term_meta(&surface)? {
-                if row.mode != "freq" {
-                    continue;
+            match o.index.term_meta(&surface) {
+                Ok(rows) => {
+                    for row in rows {
+                        if row.mode != "freq" {
+                            continue;
+                        }
+                        attach_frequency(&mut groups, &mut unmatched, &surface, o, &row);
+                    }
                 }
-                attach_frequency(&mut groups, &mut unmatched, &surface, o, &row);
+                Err(e) => failed.push((o.source.id, e)),
             }
         }
 
@@ -466,8 +477,23 @@ impl Lexicon {
         if script == Script::SingleKanji {
             relevant.push(Role::Kanji);
         }
-        let missing_sources: Vec<&'static str> = self
-            .states
+        // Отказ во время поиска виден в отчёте об источниках так же, как отказ
+        // при открытии: состояние `unavailable` с кодом причины.
+        let mut sources = self.states.clone();
+        for (id, e) in &failed {
+            if let Some(report) = sources.iter_mut().find(|s| s.id == *id) {
+                report.state = SourceState::Unavailable;
+                report.dictionary = None;
+                report.code = Some(e.code);
+                report.message = Some(e.message.clone());
+            }
+        }
+        let failed_ids: Vec<&str> = failed.iter().map(|(id, _)| *id).collect();
+        let lexicon_available = self
+            .opened
+            .iter()
+            .any(|o| o.source.role == Role::Lexicon && !failed_ids.contains(&o.source.id));
+        let missing_sources: Vec<&'static str> = sources
             .iter()
             .filter(|s| relevant.contains(&s.role) && s.state != SourceState::Used)
             .map(|s| s.id)
@@ -478,7 +504,12 @@ impl Lexicon {
             n if n > 1 => Status::MultipleReadings,
             // Кана без вывода чтения сомнительна сама по себе: словари этого не исправят.
             _ if kana_analysis.is_some() => Status::Ambiguous,
-            _ if !self.available(Role::Lexicon) => Status::SourceMissing,
+            _ if !lexicon_available => Status::SourceMissing,
+            // Сочетание чтений символа и имён собственных нельзя называть «только»
+            // ни тем, ни другим: ответ содержит оба класса свидетельств.
+            _ if has(EvidenceClass::KanjiReference) && has(EvidenceClass::ProperName) => {
+                Status::KanjiReferenceAndProperNameOnly
+            }
             _ if has(EvidenceClass::KanjiReference) => Status::KanjiReferenceOnly,
             _ if has(EvidenceClass::ProperName) => Status::ProperNameOnly,
             _ if !redirects.is_empty() => Status::RedirectOnly,
@@ -525,7 +556,7 @@ impl Lexicon {
             readings: shown,
             redirects,
             frequency_unmatched: unmatched,
-            sources: self.states.clone(),
+            sources,
             truncation,
             notice: NOTICE,
         })
@@ -570,6 +601,44 @@ fn tags(o: &Opened, raw: &str) -> Result<Vec<TagInfo>> {
             })
         })
         .collect()
+}
+
+/// Свидетельство лексического чтения или имени вместе с исходной строкой
+/// индекса: собирается до записи в общий ответ.
+struct SourceEntry {
+    row: ReadingRow,
+    evidence: Evidence,
+}
+
+/// Чтения и указатели одного источника: собираются целиком до записи в общий
+/// ответ, чтобы отказ индекса посреди чтения не оставил частичный набор
+/// свидетельств отказавшего словаря.
+fn lexicon_entries(
+    o: &Opened,
+    class: EvidenceClass,
+    surface: &str,
+) -> Result<(Vec<SourceEntry>, Vec<RedirectHint>)> {
+    let mut rows = Vec::new();
+    for row in o.index.readings(surface)? {
+        let evidence = reading_evidence(o, class, &row)?;
+        rows.push(SourceEntry { row, evidence });
+    }
+    let mut hints = Vec::new();
+    if o.source.role == Role::Lexicon {
+        for row in o.index.redirects(surface)? {
+            hints.push(redirect_hint(o, row)?);
+        }
+    }
+    Ok((rows, hints))
+}
+
+/// Чтения символа одного источника KANJIDIC — тоже до записи в ответ.
+fn kanji_evidence_rows(o: &Opened, character: &str) -> Result<Vec<(String, Evidence)>> {
+    let mut rows = Vec::new();
+    for row in o.index.kanji(character)? {
+        rows.extend(kanji_evidence(o, &row)?);
+    }
+    Ok(rows)
 }
 
 fn reading_evidence(o: &Opened, class: EvidenceClass, row: &ReadingRow) -> Result<Evidence> {

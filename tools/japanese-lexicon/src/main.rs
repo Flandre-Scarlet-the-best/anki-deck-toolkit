@@ -122,7 +122,11 @@ fn fail(error: &Error, json: bool) -> ExitCode {
             "message": error.message,
         }));
     } else {
-        eprintln!("ошибка [{}]: {}", code_name(error.code), error.message);
+        eprintln!(
+            "ошибка [{}]: {}",
+            code_name(error.code),
+            printable(&error.message)
+        );
     }
     ExitCode::from(match error.code {
         Code::Busy => Exit::Busy,
@@ -183,6 +187,7 @@ fn status_label(status: Status) -> &'static str {
         Status::SingleReading => "одно чтение",
         Status::MultipleReadings => "несколько чтений",
         Status::KanjiReferenceOnly => "только чтения знака",
+        Status::KanjiReferenceAndProperNameOnly => "только чтения знака и имена собственные",
         Status::ProperNameOnly => "только имена собственные",
         Status::RedirectOnly => "только указатель на другую форму",
         Status::Ambiguous => "чтение не выводится уверенно",
@@ -210,6 +215,23 @@ fn kana_issue_label(issue: KanaIssue) -> &'static str {
     }
 }
 
+/// Текст из словаря и с источника публикации — недоверенные данные: управляющие
+/// символы и перестановки направления показываются escape-последовательностью, а
+/// не управляют терминалом. Машинный JSON выводится без изменений.
+fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            c if c.is_control() => out.push_str(&format!("\\u{{{:04X}}}", c as u32)),
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => {
+                out.push_str(&format!("\\u{{{:04X}}}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn print_operation(report: &OperationReport) {
     println!(
         "{} — каталог данных {}",
@@ -225,25 +247,29 @@ fn print_operation(report: &OperationReport) {
             .code
             .map(|c| format!(" [{}]", code_name(c)))
             .unwrap_or_default();
-        println!("  {:<22} {outcome}{code}: {}", item.id, item.message);
+        println!(
+            "  {:<22} {outcome}{code}: {}",
+            item.id,
+            printable(&item.message)
+        );
         if let Some(i) = &item.installed {
             println!(
                 "      установлено: {} (ревизия {}, релиз {}), sha256 {}…",
-                i.title,
-                i.revision,
-                i.release.as_deref().unwrap_or("неизвестен"),
+                printable(&i.title),
+                printable(&i.revision),
+                printable(i.release.as_deref().unwrap_or("неизвестен")),
                 &i.archive_sha256[..12.min(i.archive_sha256.len())]
             );
         }
         if let Some(p) = &item.previous {
-            println!("      прежняя версия: ревизия {}", p.revision);
+            println!("      прежняя версия: ревизия {}", printable(&p.revision));
         }
         if let Some(r) = &item.remote {
             println!(
                 "      источник публикации: {}, релиз {}, файл {}",
-                r.locator,
-                r.release.as_deref().unwrap_or("неизвестен"),
-                r.asset_name
+                printable(&r.locator),
+                printable(r.release.as_deref().unwrap_or("неизвестен")),
+                printable(&r.asset_name)
             );
         }
     }
@@ -281,13 +307,15 @@ fn print_status(report: &StatusReport) {
         if let Some(i) = &d.installed {
             println!(
                 "  версия: ревизия {}, релиз {}, установлен {}",
-                i.revision,
-                i.release.as_deref().unwrap_or("неизвестен"),
+                printable(&i.revision),
+                printable(i.release.as_deref().unwrap_or("неизвестен")),
                 i.installed_at
             );
             println!(
                 "  источник: {} {} (файл {})",
-                i.provider, i.locator, i.asset_name
+                i.provider,
+                printable(&i.locator),
+                printable(&i.asset_name)
             );
             println!(
                 "  записи: статей {}, чтений {}, указателей {}, кандзи {}, частотных и прочих метаданных {}",
@@ -301,9 +329,17 @@ fn print_status(report: &StatusReport) {
             println!("  путь: {}", i.path.display());
         }
         for p in &d.problems {
-            println!("  проблема [{}]: {}", code_name(p.code), p.message);
+            println!(
+                "  проблема [{}]: {}",
+                code_name(p.code),
+                printable(&p.message)
+            );
         }
         println!("  лицензия: {}", d.license);
+        println!("  атрибуция: {}", d.attribution);
+        if !d.redistribution_note.is_empty() {
+            println!("  ограничения распространения: {}", d.redistribution_note);
+        }
     }
     if report.operation_in_progress {
         println!("\nсейчас выполняется изменяющая операция");
@@ -323,9 +359,14 @@ fn print_status(report: &StatusReport) {
 }
 
 fn print_lookup(r: &LookupResult) {
-    println!("{} — {}", r.query.surface, status_label(r.status));
+    println!(
+        "{} — {}",
+        printable(&r.query.surface),
+        status_label(r.status)
+    );
     if !r.distinct_readings.is_empty() {
-        println!("различные чтения: {}", r.distinct_readings.join(", "));
+        let readings: Vec<String> = r.distinct_readings.iter().map(|s| printable(s)).collect();
+        println!("различные чтения: {}", readings.join(", "));
     }
     for g in &r.readings {
         let class = class_label(g.class);
@@ -342,7 +383,11 @@ fn print_lookup(r: &LookupResult) {
         let tags: Vec<String> = g
             .evidence
             .iter()
-            .flat_map(|e| e.tags.iter().map(|t| t.name.replace('\u{a0}', " ")))
+            .flat_map(|e| {
+                e.tags
+                    .iter()
+                    .map(|t| printable(&t.name.replace('\u{a0}', " ")))
+            })
             .fold(Vec::new(), |mut acc, t| {
                 if !acc.contains(&t) {
                     acc.push(t);
@@ -352,13 +397,13 @@ fn print_lookup(r: &LookupResult) {
         let freq: Vec<String> = g
             .frequency
             .iter()
-            .filter_map(|f| f.display.clone())
+            .filter_map(|f| f.display.as_deref().map(printable))
             .collect();
         println!(
             "  {:<14} {} [{}]{}{}{}",
             class,
-            g.reading,
-            g.normalized,
+            printable(&g.reading),
+            printable(&g.normalized),
             if sources.is_empty() {
                 String::new()
             } else {
@@ -385,10 +430,10 @@ fn print_lookup(r: &LookupResult) {
     for d in &r.redirects {
         println!(
             "  указатель на форму {}{} ({}) — не чтение запрошенного написания",
-            d.target,
+            printable(&d.target),
             d.target_reading
                 .as_deref()
-                .map(|r| format!(" 【{r}】"))
+                .map(|r| format!(" 【{}】", printable(r)))
                 .unwrap_or_default(),
             d.dictionary.id
         );
@@ -399,10 +444,17 @@ fn print_lookup(r: &LookupResult) {
         let issues: Vec<&str> = k.issues.iter().map(|i| kana_issue_label(*i)).collect();
         println!("  кана не выводится уверенно: {}", issues.join(", "));
     }
-    if r.truncation.truncated {
+    // Скрытые свидетельства не открываются смещением: продолжение имеет смысл
+    // только тогда, когда за выборкой остались ещё группы.
+    if r.truncation.groups_returned < r.truncation.groups_total {
         println!(
             "  показано {} из {} групп (смещение {}); --offset/--limit для продолжения",
             r.truncation.groups_returned, r.truncation.groups_total, r.truncation.offset
+        );
+    } else if r.truncation.truncated {
+        println!(
+            "  показаны все {} групп (смещение {}); свидетельств скрыто {} — --max-evidence",
+            r.truncation.groups_total, r.truncation.offset, r.truncation.evidence_omitted
         );
     }
     if !r.missing_sources.is_empty() {
@@ -417,7 +469,7 @@ fn print_lookup(r: &LookupResult) {
             println!(
                 "  {} недоступен ({code}): {}; проверьте командой verify {}",
                 s.id,
-                s.message.as_deref().unwrap_or(""),
+                printable(s.message.as_deref().unwrap_or("")),
                 s.id
             );
         }

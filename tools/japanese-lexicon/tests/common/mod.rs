@@ -83,6 +83,32 @@ fn redirect(target: &str, target_href: &str) -> Value {
 
 /// Jitendex-подобный словарь. `extra` добавляет статьи (для новых версий).
 pub fn jitendex(revision: &str, extra: &[Value]) -> Vec<u8> {
+    jitendex_with_tags(
+        revision,
+        extra,
+        json!([
+            ["★", "popular", 2, "high priority entry", 2],
+            [
+                "priority\u{a0}form",
+                "frequent",
+                1,
+                "high priority spelling",
+                1
+            ],
+            [
+                "old\u{a0}kanji\u{a0}form",
+                "archaism",
+                0,
+                "old character form",
+                1
+            ]
+        ]),
+    )
+}
+
+/// Как [`jitendex`], но с собственным банком тегов: нужен там, где проверяется
+/// разбор целочисленных полей тегов.
+pub fn jitendex_with_tags(revision: &str, extra: &[Value], tags: Value) -> Vec<u8> {
     let mut terms = vec![
         json!(["学校", "がっこう", "★", "", 200, gloss("school"), 1, ""]),
         json!([
@@ -134,26 +160,7 @@ pub fn jitendex(revision: &str, extra: &[Value]) -> Vec<u8> {
             &json!({"title": format!("Jitendex.org [{revision}]"), "format": 3, "revision": revision,
                     "sequenced": true, "attribution": "test"}),
         ),
-        file(
-            "tag_bank_1.json",
-            &json!([
-                ["★", "popular", 2, "high priority entry", 2],
-                [
-                    "priority\u{a0}form",
-                    "frequent",
-                    1,
-                    "high priority spelling",
-                    1
-                ],
-                [
-                    "old\u{a0}kanji\u{a0}form",
-                    "archaism",
-                    0,
-                    "old character form",
-                    1
-                ]
-            ]),
-        ),
+        file("tag_bank_1.json", &tags),
         file("term_bank_1.json", &Value::Array(terms)),
         Entry::Dir("jitendex/".into()),
         Entry::File("jitendex/LICENSE".into(), b"font licence".to_vec()),
@@ -188,7 +195,10 @@ pub fn jmnedict(revision: &str) -> Vec<u8> {
                     ""
                 ],
                 ["今日", "", "fem", "", 0, ["きょう"], 11, ""],
-                ["東京", "トンキン", "place", "", 0, ["Tonkin"], 12, ""]
+                ["東京", "トンキン", "place", "", 0, ["Tonkin"], 12, ""],
+                // Одиночный кандзи, у которого есть и чтения символа в KANJIDIC,
+                // и вариант имени собственного.
+                ["間", "", "surname", "", 0, ["あいだ"], 13, ""]
             ]),
         ),
     ])

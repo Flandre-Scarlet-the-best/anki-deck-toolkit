@@ -5,11 +5,11 @@ mod common;
 use common::*;
 use japanese_lexicon::catalog;
 use japanese_lexicon::error::Code;
-use japanese_lexicon::lookup::{self, EvidenceClass, Lexicon, Status};
+use japanese_lexicon::lookup::{self, EvidenceClass, Lexicon, SourceState, Status};
 use japanese_lexicon::manager::{self, Options, Outcome, State};
 use japanese_lexicon::store::{self, Location, Origin, Store};
 use japanese_lexicon::yomitan::Limits;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -41,6 +41,26 @@ fn lookup(root: &Path, surface: &str) -> lookup::LookupResult {
         .unwrap()
         .lookup(surface, &lookup::Options::default())
         .unwrap()
+}
+
+/// Каталог активной версии установленного словаря.
+fn version_dir(root: &Path, id: &str) -> std::path::PathBuf {
+    let version = Store::open_existing(root)
+        .unwrap()
+        .unwrap()
+        .registry()
+        .unwrap()
+        .dictionaries[id]
+        .version
+        .clone();
+    root.join("dictionaries").join(id).join(version)
+}
+
+/// Адресная порча установленного индекса: таблица удаляется, сам файл остаётся
+/// корректной базой, поэтому словарь открывается и отказывает уже в поиске.
+fn drop_table(index: &Path, table: &str) {
+    let conn = rusqlite::Connection::open(index).unwrap();
+    conn.execute(&format!("DROP TABLE {table}"), []).unwrap();
 }
 
 fn installed(root: &Path) -> (Location, FakeUpstream) {
@@ -148,9 +168,10 @@ fn install_status_verify_and_lookup_distinguish_every_class() {
             .all(|c| !c.classes.contains(&EvidenceClass::KanjiReference))
     );
 
-    // Помета с дефисами с обеих сторон — значение `infix` машинного контракта.
+    // Помета с дефисами с обеих сторон — значение `infix` машинного контракта;
+    // у 間 есть и чтения знака, и вариант имени собственного.
     let r = lookup(&root, "間");
-    assert_eq!(r.status, Status::KanjiReferenceOnly);
+    assert_eq!(r.status, Status::KanjiReferenceAndProperNameOnly);
     assert!(r.distinct_readings.is_empty());
     let ma = r
         .readings
@@ -159,6 +180,12 @@ fn install_status_verify_and_lookup_distinguish_every_class() {
         .expect("нет чтения символа ま");
     assert_eq!(ma.class, EvidenceClass::KanjiReference);
     assert_eq!(ma.evidence[0].affix, Some("infix"));
+    let name = r
+        .readings
+        .iter()
+        .find(|g| g.class == EvidenceClass::ProperName)
+        .expect("нет варианта имени собственного");
+    assert_eq!(name.normalized, "あいだ");
 
     // Кандзи без лексической статьи — только ограниченный статус.
     let r = lookup(&root, "学");
@@ -812,26 +839,14 @@ fn install_replaces_only_unreadable_manifest_and_keeps_damaged_index() {
     let zip = tmp.path().join("Jitendex.zip");
     std::fs::write(&zip, jitendex("Jitendex.test", &[])).unwrap();
 
-    let version_dir = || {
-        let version = Store::open_existing(&root)
-            .unwrap()
-            .unwrap()
-            .registry()
-            .unwrap()
-            .dictionaries["jitendex"]
-            .version
-            .clone();
-        root.join("dictionaries/jitendex").join(version)
-    };
-
     // Повреждённый индекс: манифест читается, установка версию не заменяет.
-    let index = version_dir().join(store::INDEX_FILE);
+    let index = version_dir(&root, "jitendex").join(store::INDEX_FILE);
     let mut bytes = std::fs::read(&index).unwrap();
     let middle = bytes.len() / 2;
     bytes[middle] ^= 0xFF;
     std::fs::write(&index, &bytes).unwrap();
     assert!(!manager::verify(&loc, &all()).unwrap().ok);
-    let damaged = version_dir();
+    let damaged = version_dir(&root, "jitendex");
     let report = manager::install(
         &root,
         &one("jitendex"),
@@ -842,7 +857,11 @@ fn install_replaces_only_unreadable_manifest_and_keeps_damaged_index() {
     .unwrap();
     assert_eq!(outcome(&report, "jitendex"), Outcome::AlreadyInstalled);
     assert!(report.items[0].installed.is_some());
-    assert_eq!(version_dir(), damaged, "активная версия не заменена");
+    assert_eq!(
+        version_dir(&root, "jitendex"),
+        damaged,
+        "активная версия не заменена"
+    );
     assert!(
         !manager::verify(&loc, &all()).unwrap().ok,
         "повреждение осталось: восстановление — update или remove"
@@ -867,7 +886,11 @@ fn install_replaces_only_unreadable_manifest_and_keeps_damaged_index() {
     assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
 
     // То же состояние `update` переустанавливает с источника публикации.
-    std::fs::write(version_dir().join(store::MANIFEST_FILE), b"{").unwrap();
+    std::fs::write(
+        version_dir(&root, "jitendex").join(store::MANIFEST_FILE),
+        b"{",
+    )
+    .unwrap();
     let update = manager::update(&root, &one("jitendex"), &up, &Options::default()).unwrap();
     assert_eq!(
         outcome(&update, "jitendex"),
@@ -1548,6 +1571,122 @@ fn invalid_term_sequence_is_rejected_without_touching_active_version() {
     };
     assert_eq!(sequence("さか"), Some(1));
     assert_eq!(sequence("たな"), None);
+}
+
+/// Отказ одного индекса во время поиска не отменяет поиск по исправным словарям:
+/// источник помечается недоступным, его частичные свидетельства в ответ не
+/// попадают, а `complete` становится false.
+#[test]
+fn index_failure_during_lookup_marks_source_unavailable() {
+    let tmp = TempDir::new("index-failure");
+    let root = tmp.path().join("data");
+    installed(&root);
+
+    // У jitendex удалена таблица указателей: индекс открывается, а чтение
+    // указателей падает уже во время поиска.
+    let index = version_dir(&root, "jitendex").join(store::INDEX_FILE);
+    drop_table(&index, "redirects");
+
+    let r = lookup(&root, "学校");
+    assert!(
+        r.readings.is_empty(),
+        "частичные свидетельства отказавшего словаря не попадают в ответ: {r:#?}"
+    );
+    assert!(!r.complete);
+    assert_eq!(r.missing_sources, vec!["jitendex"]);
+    assert_eq!(r.status, Status::SourceMissing);
+    let jitendex = r
+        .sources
+        .iter()
+        .find(|s| s.id == "jitendex")
+        .expect("нет отчёта об источнике");
+    assert_eq!(jitendex.state, SourceState::Unavailable);
+    assert_eq!(jitendex.code, Some(Code::IndexCorrupt));
+
+    // Исправные словари продолжают отвечать, отказ виден и в их ответе.
+    let r = lookup(&root, "田中");
+    assert!(
+        r.readings
+            .iter()
+            .any(|g| g.class == EvidenceClass::ProperName),
+        "{r:#?}"
+    );
+    assert!(!r.complete);
+    assert_eq!(r.missing_sources, vec!["jitendex"]);
+}
+
+/// Дробный `sort_order` тега — не «единица» и не насыщение: обновление
+/// отклоняется целиком, прежняя версия остаётся активной.
+#[test]
+fn invalid_tag_order_is_rejected_without_touching_active_version() {
+    let tmp = TempDir::new("bad-tag-order");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let report = manager::install(&root, &all(), &up, None, &Options::default()).unwrap();
+    assert!(report.ok, "{report:#?}");
+
+    let gloss = json!([{"type": "structured-content", "content": "synthetic"}]);
+    // Банк тегов целиком: иначе отказ пришёл бы от ссылки на помету, которой нет.
+    let bank = |order: Value| {
+        json!([
+            ["★", "popular", order, "high priority entry", 2],
+            [
+                "priority\u{a0}form",
+                "frequent",
+                1,
+                "high priority spelling",
+                1
+            ],
+            [
+                "old\u{a0}kanji\u{a0}form",
+                "archaism",
+                0,
+                "old character form",
+                1
+            ]
+        ])
+    };
+    for (release, bad) in [("T2", json!(1.5)), ("T3", json!(1e30)), ("T4", json!("2"))] {
+        up.publish(
+            "jitendex",
+            release,
+            jitendex_with_tags(
+                release,
+                &[json!(["試標", "さか", "", "", 200, gloss, 600, ""])],
+                bank(bad),
+            ),
+        );
+        let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+        assert!(!update.ok, "{release}: {update:#?}");
+        assert_eq!(outcome(&update, "jitendex"), Outcome::Failed, "{release}");
+        assert_eq!(
+            code(&update, "jitendex"),
+            Some(Code::InvalidFormat),
+            "{release}"
+        );
+        assert_eq!(
+            lookup(&root, "学校").status,
+            Status::SingleReading,
+            "{release}"
+        );
+    }
+
+    // Целое значение, записанное как `2.0`, остаётся допустимым.
+    up.publish(
+        "jitendex",
+        "T5",
+        jitendex_with_tags("T5", &[], bank(json!(2.0))),
+    );
+    let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+    assert!(update.ok, "{update:#?}");
+    let r = lookup(&root, "学校");
+    assert_eq!(r.status, Status::SingleReading);
+    let tags: Vec<&str> = r.readings[0].evidence[0]
+        .tags
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    assert_eq!(tags, vec!["★"]);
 }
 
 #[test]
