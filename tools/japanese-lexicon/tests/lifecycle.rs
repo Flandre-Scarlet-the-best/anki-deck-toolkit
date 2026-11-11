@@ -1229,6 +1229,166 @@ fn exact_lookup_keys_are_nfc_on_import_and_query() {
     assert_eq!(halfwidth.status, Status::Ambiguous);
 }
 
+/// Оценка статьи Yomitan (`score`, пятый элемент строки банка) объявлена
+/// схемой как `number`: дробные значения сохраняются без усечения до целого.
+/// Иначе `0.9`, `0.899999999` и `0.1` стали бы одним нулём, и порядок чтений
+/// определяла бы нормализованная форма, а не оценка словаря.
+#[test]
+fn fractional_term_scores_keep_precision_and_reading_order() {
+    let tmp = TempDir::new("fractional-score");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let gloss = |text: &str| json!([{"type": "structured-content", "content": text}]);
+    up.publish(
+        "jitendex",
+        "T1",
+        jitendex(
+            "T1",
+            &[
+                // Порядок чтений по нормализованной форме — かさ, さか, たな,
+                // なさ: он и был бы выбран, потеряй оценки дробную часть.
+                json!(["試標", "さか", "", "", 0.9, gloss("synthetic"), 500, ""]),
+                json!([
+                    "試標",
+                    "まな",
+                    "",
+                    "",
+                    0.899999999,
+                    gloss("synthetic"),
+                    501,
+                    ""
+                ]),
+                json!(["試標", "かさ", "", "", 0.1, gloss("synthetic"), 502, ""]),
+                json!(["試標", "たな", "", "", -0.5, gloss("synthetic"), 503, ""]),
+                json!(["試標", "なさ", "", "", -2, gloss("synthetic"), 504, ""]),
+                // Целое значение, записанное как `3.0`: машинный ответ
+                // остаётся целым числом.
+                json!(["試標", "はな", "", "", 3.0, gloss("synthetic"), 505, ""]),
+            ],
+        ),
+    );
+    let report = manager::install(&root, &all(), &up, None, &Options::default()).unwrap();
+    assert!(report.ok, "{report:#?}");
+
+    let r = lookup(&root, "試標");
+    assert_eq!(r.status, Status::MultipleReadings);
+    // Порядок показа групп: оценка статьи по убыванию, а не нормализованная
+    // форма чтения (она дала бы かさ, さか, たな, なさ, はな, まな).
+    let order: Vec<&str> = r
+        .readings
+        .iter()
+        .filter(|g| g.class == EvidenceClass::LexicalEntry)
+        .map(|g| g.normalized.as_str())
+        .collect();
+    assert_eq!(order, vec!["はな", "さか", "まな", "かさ", "たな", "なさ"]);
+    // `distinct_readings` — множество различных чтений без порядка показа.
+    assert_eq!(
+        r.distinct_readings,
+        vec!["かさ", "さか", "たな", "なさ", "はな", "まな"]
+    );
+
+    let group = |reading: &str| {
+        r.readings
+            .iter()
+            .find(|g| g.normalized == reading)
+            .unwrap_or_else(|| panic!("нет группы {reading}"))
+    };
+    let score = |reading: &str| group(reading).evidence[0].entry.as_ref().unwrap().score;
+    assert_eq!(score("はな"), Some(3.0));
+    assert_eq!(score("さか"), Some(0.9));
+    assert_eq!(score("まな"), Some(0.899_999_999));
+    assert_eq!(score("かさ"), Some(0.1));
+    assert_eq!(score("たな"), Some(-0.5));
+    assert_eq!(score("なさ"), Some(-2.0));
+
+    // Машинный ответ: дробные оценки остаются дробными, целые — целыми.
+    let json = serde_json::to_value(&r).unwrap();
+    let json_score = |reading: &str| {
+        json["readings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["normalized"] == reading)
+            .unwrap()["evidence"][0]["entry"]["score"]
+            .clone()
+    };
+    assert_eq!(json_score("はな"), json!(3));
+    assert_eq!(json_score("さか"), json!(0.9));
+    assert_eq!(json_score("まな"), json!(0.899_999_999));
+    assert_eq!(json_score("かさ"), json!(0.1));
+    assert_eq!(json_score("たな"), json!(-0.5));
+    assert_eq!(json_score("なさ"), json!(-2));
+    assert_eq!(
+        json_score("はな").as_f64().unwrap(),
+        3.0,
+        "целое значение не потеряло величину"
+    );
+    assert!(
+        json_score("はな").is_i64(),
+        "целая оценка не стала 3.0: {}",
+        json_score("はな")
+    );
+
+    // Контроль: обычные целые оценки не изменились ни значением, ни формой.
+    for (surface, reading, expected) in [("学校", "がっこう", 200), ("生", "なま", 200)] {
+        let control = lookup(&root, surface);
+        let value = serde_json::to_value(&control).unwrap();
+        let found = value["readings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["normalized"] == reading)
+            .unwrap()["evidence"][0]["entry"]["score"]
+            .clone();
+        assert_eq!(found, json!(expected), "{surface}: {found}");
+        assert!(found.is_i64(), "{surface}: целая оценка стала {found}");
+    }
+
+    assert!(manager::verify(&location(&root), &all()).unwrap().ok);
+}
+
+/// Нечисловая оценка статьи — не «ноль» и не молчаливое усечение:
+/// обновление отклоняется целиком, прежняя версия остаётся активной.
+#[test]
+fn non_numeric_term_score_is_rejected_without_touching_active_version() {
+    let tmp = TempDir::new("bad-score");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let report = manager::install(&root, &all(), &up, None, &Options::default()).unwrap();
+    assert!(report.ok, "{report:#?}");
+
+    let gloss = json!([{"type": "structured-content", "content": "synthetic"}]);
+    for (release, bad) in [
+        ("T2", json!("0.9")),
+        ("T3", json!(null)),
+        ("T4", json!(true)),
+        ("T5", json!([])),
+    ] {
+        up.publish(
+            "jitendex",
+            release,
+            jitendex(
+                release,
+                &[json!(["試標", "さか", "", "", bad, gloss, 600, ""])],
+            ),
+        );
+        let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+        assert!(!update.ok, "{release}: {update:#?}");
+        assert_eq!(outcome(&update, "jitendex"), Outcome::Failed, "{release}");
+        assert_eq!(
+            code(&update, "jitendex"),
+            Some(Code::InvalidFormat),
+            "{release}"
+        );
+        // Активной остаётся прежняя версия, поиск работает.
+        assert_eq!(
+            lookup(&root, "学校").status,
+            Status::SingleReading,
+            "{release}"
+        );
+    }
+}
+
 #[test]
 fn zero_page_limits_are_rejected_explicitly() {
     let tmp = TempDir::new("zero-limits");

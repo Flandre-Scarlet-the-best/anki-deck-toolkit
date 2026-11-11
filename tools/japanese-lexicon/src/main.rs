@@ -593,15 +593,206 @@ fn localize(command: clap::Command) -> clap::Command {
 }
 
 fn parse() -> Cli {
-    let command = localize(Cli::command()).disable_version_flag(true).arg(
+    let command = command();
+    // Разбор потребляет `Command`; копия остаётся для диагностики ошибок.
+    let matches = match command.clone().try_get_matches() {
+        Ok(matches) => matches,
+        Err(error) => exit_on_parse_error(&error, &command),
+    };
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| exit_on_parse_error(&e, &command))
+}
+
+/// Собранная команда CLI: русские заголовки справки и собственные флаги
+/// `-h`/`-V` вместо встроенных английских подписей clap.
+fn command() -> clap::Command {
+    localize(Cli::command()).disable_version_flag(true).arg(
         Arg::new("version")
             .short('V')
             .long("version")
             .action(ArgAction::Version)
             .help("Показать версию")
             .help_heading("Параметры"),
-    );
-    Cli::from_arg_matches(&command.get_matches()).unwrap_or_else(|e| e.exit())
+    )
+}
+
+/// Завершает процесс после ошибки разбора аргументов.
+///
+/// Справка и версия ошибками не являются: они печатаются как прежде, а
+/// поток и код возврата берутся у `clap` (справка и версия — stdout и 0,
+/// справка вместо пропущенного аргумента — stderr и 2). Остальные ошибки
+/// разбора не проходят через доменный [`fail`]: у них нет кода из
+/// публичного списка JSON-отказов, поэтому они дают русский текст в stderr
+/// и код возврата 2 — и при `--json` тоже, чтобы не расширять машинный
+/// контракт новым кодом ошибки.
+fn exit_on_parse_error(error: &clap::Error, command: &clap::Command) -> ! {
+    match error.kind() {
+        clap::error::ErrorKind::DisplayHelp
+        | clap::error::ErrorKind::DisplayVersion
+        | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            let _ = error.print();
+            std::process::exit(error.exit_code());
+        }
+        _ => {
+            eprintln!("{}", parse_error_text(error, command));
+            std::process::exit(Exit::Usage as i32);
+        }
+    }
+}
+
+/// Русский текст ошибки аргументов. Переводятся структурные признаки
+/// `clap` (вид ошибки и её контекст), а не готовые английские фразы;
+/// машинные имена флагов, команд и типов остаются без изменений.
+fn parse_error_text(error: &clap::Error, command: &clap::Command) -> String {
+    let mut text = format!("ошибка аргументов: {}", parse_error_reason(error, command));
+    // Строка использования берётся ровно из тех ошибок, где её формирует сам
+    // clap; для ошибок значения он её не печатает, и подсказка о справке
+    // здесь точнее, чем общая строка использования.
+    if let Some(usage) = error.get(clap::error::ContextKind::Usage) {
+        let usage = usage.to_string();
+        if !usage.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(&usage_line(&usage));
+        }
+    }
+    text.push_str("\nСправка: --help или <КОМАНДА> --help.");
+    text
+}
+
+/// Строку использования clap формирует с собственным заголовком `Usage:`;
+/// переводится только заголовок, сама строка остаётся построенной clap.
+fn usage_line(usage: &str) -> String {
+    let body = usage
+        .strip_prefix("Usage:")
+        .map(str::trim_start)
+        .unwrap_or(usage);
+    format!("Использование: {body}")
+}
+
+fn parse_error_reason(error: &clap::Error, command: &clap::Command) -> String {
+    use clap::error::{ContextKind, ErrorKind};
+    let arg = context(error, ContextKind::InvalidArg);
+    let value = context(error, ContextKind::InvalidValue);
+    match error.kind() {
+        ErrorKind::UnknownArgument => match arg {
+            Some(arg) => with_hint(
+                format!("неизвестный аргумент «{arg}»"),
+                context(error, ContextKind::SuggestedArg),
+                "возможно, имелся в виду аргумент",
+            ),
+            None => "неизвестный аргумент".to_owned(),
+        },
+        ErrorKind::InvalidSubcommand => with_hint(
+            match context(error, ContextKind::InvalidSubcommand) {
+                Some(name) => format!("неизвестная команда «{name}»"),
+                None => "неизвестная команда".to_owned(),
+            },
+            context(error, ContextKind::SuggestedSubcommand),
+            "возможно, имелась в виду команда",
+        ),
+        ErrorKind::MissingSubcommand => {
+            let known: Vec<&str> = command.get_subcommands().map(|c| c.get_name()).collect();
+            if known.is_empty() {
+                "не указана команда".to_owned()
+            } else {
+                format!("не указана команда; доступные: {}", known.join(", "))
+            }
+        }
+        ErrorKind::MissingRequiredArgument => match error.get(ContextKind::InvalidArg) {
+            Some(clap::error::ContextValue::Strings(args)) if args.len() == 1 => {
+                format!("не указан обязательный аргумент: {}", args[0])
+            }
+            Some(clap::error::ContextValue::Strings(args)) => {
+                format!("не указаны обязательные аргументы: {}", args.join(", "))
+            }
+            Some(other) => format!("не указаны обязательные аргументы: {other}"),
+            None => "не указаны обязательные аргументы".to_owned(),
+        },
+        ErrorKind::InvalidValue => match (arg, context_raw(error, ContextKind::InvalidValue)) {
+            (Some(arg), Some(value)) if value.is_empty() => {
+                format!("для «{arg}» нужно значение")
+            }
+            (Some(arg), Some(value)) => with_hint(
+                format!("недопустимое значение «{value}» для «{arg}»"),
+                context(error, ContextKind::ValidValue),
+                "допустимо",
+            ),
+            (Some(arg), None) => format!("недопустимое значение для «{arg}»"),
+            (None, _) => "недопустимое значение аргумента".to_owned(),
+        },
+        ErrorKind::ValueValidation => {
+            let reason = number_reason(error).unwrap_or("недопустимое значение");
+            match (arg, value) {
+                (Some(arg), Some(value)) => format!("значение «{value}» для «{arg}»: {reason}"),
+                (Some(arg), None) => format!("значение для «{arg}»: {reason}"),
+                (None, _) => reason.to_owned(),
+            }
+        }
+        ErrorKind::NoEquals => match arg {
+            Some(arg) => format!("для «{arg}» значение указывается через «=»"),
+            None => "значение аргумента указывается через «=»".to_owned(),
+        },
+        ErrorKind::TooManyValues => match (arg, value) {
+            (Some(arg), Some(value)) => format!("лишнее значение «{value}» для «{arg}»"),
+            (Some(arg), None) => format!("лишнее значение для «{arg}»"),
+            (None, _) => "лишнее значение аргумента".to_owned(),
+        },
+        ErrorKind::TooFewValues => match arg {
+            Some(arg) => format!("для «{arg}» нужно больше значений"),
+            None => "аргументу нужно больше значений".to_owned(),
+        },
+        ErrorKind::WrongNumberOfValues => match arg {
+            Some(arg) => format!("для «{arg}» неверное число значений"),
+            None => "неверное число значений аргумента".to_owned(),
+        },
+        ErrorKind::ArgumentConflict => match arg {
+            Some(arg) => format!("аргумент «{arg}» несовместим с уже указанными"),
+            None => "аргументы несовместимы".to_owned(),
+        },
+        ErrorKind::InvalidUtf8 => "значение аргумента не является корректным UTF-8".to_owned(),
+        ErrorKind::Io => "ошибка ввода-вывода при разборе аргументов".to_owned(),
+        ErrorKind::Format => "ошибка форматирования при разборе аргументов".to_owned(),
+        // Справка и версия обрабатываются до вызова этой функции.
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        | ErrorKind::DisplayVersion => "запрошены справка или версия".to_owned(),
+        // `ErrorKind` не исчерпывающий: для новой разновидности остаётся
+        // короткое описание clap, но текст уже помечен как ошибка аргументов.
+        other => other
+            .as_str()
+            .unwrap_or("неизвестная ошибка аргументов")
+            .to_owned(),
+    }
+}
+
+fn context(error: &clap::Error, kind: clap::error::ContextKind) -> Option<String> {
+    context_raw(error, kind).filter(|text| !text.is_empty())
+}
+
+/// Значение контекста без отбрасывания пустой строки: пустое значение
+/// аргумента clap передаёт отдельно от его отсутствия.
+fn context_raw(error: &clap::Error, kind: clap::error::ContextKind) -> Option<String> {
+    error.get(kind).map(ToString::to_string)
+}
+
+fn with_hint(mut text: String, hint: Option<String>, label: &str) -> String {
+    if let Some(hint) = hint {
+        text.push_str(&format!(" ({label}: «{hint}»)"));
+    }
+    text
+}
+
+/// Причина отказа числового значения: clap сохраняет исходную ошибку
+/// разбора, поэтому переводится её вид, а не её английский текст.
+fn number_reason(error: &clap::Error) -> Option<&'static str> {
+    let source = std::error::Error::source(error)?;
+    let parse = source.downcast_ref::<std::num::ParseIntError>()?;
+    Some(match parse.kind() {
+        std::num::IntErrorKind::InvalidDigit => "ожидается целое число",
+        std::num::IntErrorKind::Empty => "значение пусто",
+        std::num::IntErrorKind::PosOverflow => "число слишком велико",
+        std::num::IntErrorKind::NegOverflow => "число слишком мало",
+        _ => "недопустимое число",
+    })
 }
 
 fn main() -> ExitCode {

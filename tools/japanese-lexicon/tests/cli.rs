@@ -147,6 +147,170 @@ fn run_text(root: &Path, args: &[&str]) -> (i32, String) {
     )
 }
 
+/// Вызов без добавления `--json` и чтение обоих потоков: нужен для ошибок
+/// разбора аргументов, которые clap формирует до обработки приложения.
+fn run_raw(args: &[&str]) -> (i32, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_japanese-lexicon"))
+        .args(args)
+        .env_remove("JAPANESE_LEXICON_DIR")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+/// Ни одной английской фразы clap: негативные сценарии CLI русифицированы.
+fn assert_no_english_clap_text(text: &str) {
+    for english in [
+        "error:",
+        "Usage:",
+        "For more information",
+        "unexpected argument",
+        "unrecognized subcommand",
+        "required arguments",
+        "invalid value",
+        "possible values",
+        "Print help",
+        "Print version",
+    ] {
+        assert!(!text.contains(english), "{english}: {text}");
+    }
+}
+
+#[test]
+fn argument_errors_are_russian_with_stable_exit_codes() {
+    let tmp = TempDir::new("cli-args");
+    let dir = tmp.path().join("data");
+    let dir = dir.to_str().unwrap();
+
+    // Неизвестный аргумент: код 2, пустой stdout, русский текст в stderr.
+    let (code, out, err) = run_raw(&["--data-dir", dir, "--bogus"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("ошибка аргументов"), "{err}");
+    assert!(
+        err.contains("неизвестный аргумент") && err.contains("--bogus"),
+        "{err}"
+    );
+    assert!(
+        err.contains("Использование:") && err.contains("--help"),
+        "{err}"
+    );
+    assert_no_english_clap_text(&err);
+
+    // Неизвестная команда.
+    let (code, out, err) = run_raw(&["--data-dir", dir, "frobnicate"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("неизвестная команда") && err.contains("frobnicate"),
+        "{err}"
+    );
+    assert!(err.contains("Использование:"), "{err}");
+    assert_no_english_clap_text(&err);
+
+    // Пропущенная команда: перечисляются доступные, машинные имена без перевода.
+    let (code, out, err) = run_raw(&["--data-dir", dir]);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("не указана команда") && err.contains("lookup"),
+        "{err}"
+    );
+    assert_no_english_clap_text(&err);
+
+    // Пропущенный обязательный аргумент.
+    let (code, out, err) = run_raw(&["--data-dir", dir, "lookup"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("не указан обязательный аргумент") && err.contains("--surface"),
+        "{err}"
+    );
+    assert!(err.contains("Использование:"), "{err}");
+    assert_no_english_clap_text(&err);
+
+    // Флаг без значения: имя флага остаётся машинным.
+    let (code, _out, err) = run_raw(&["--data-dir", dir, "lookup", "--surface", "学校", "--limit"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("нужно значение") && err.contains("--limit"),
+        "{err}"
+    );
+    assert_no_english_clap_text(&err);
+
+    // Нечисловое значение числового аргумента.
+    let (code, out, err) = run_raw(&[
+        "--data-dir",
+        dir,
+        "lookup",
+        "--surface",
+        "学校",
+        "--limit",
+        "x",
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("значение «x»") && err.contains("--limit") && err.contains("целое число"),
+        "{err}"
+    );
+    assert_no_english_clap_text(&err);
+
+    // Контракт при `--json`: ошибка разбора аргументов не получает нового
+    // машинного кода, остаётся русский текст в stderr и код 2 без JSON.
+    let (code, out, err) = run_raw(&[
+        "--data-dir",
+        dir,
+        "--json",
+        "lookup",
+        "--surface",
+        "学校",
+        "--limit",
+        "x",
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("ошибка аргументов"), "{err}");
+    assert_no_english_clap_text(&err);
+
+    // Доменные ошибки по-прежнему дают машинный JSON и тот же код 2.
+    let (code, json) = run(Path::new(dir), &["lookup", "--surface", "学 校"]);
+    assert_eq!(code, 2, "{json}");
+    assert_eq!(json["schema"], "japanese-lexicon.error/1");
+    assert_eq!(json["code"], "invalid_input");
+
+    // Справка и версия — не ошибки: stdout, код 0.
+    for args in [vec!["--help"], vec!["-h"]] {
+        let (code, out, err) = run_raw(&args);
+        assert_eq!(code, 0, "{args:?}: {err}");
+        assert!(
+            out.contains("Использование:") && out.contains("Показать справку"),
+            "{out}"
+        );
+        assert!(err.is_empty(), "{err}");
+        assert_no_english_clap_text(&out);
+    }
+    let (code, out, err) = run_raw(&["lookup", "--help"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("Использование: japanese-lexicon lookup"),
+        "{out}"
+    );
+    assert!(err.is_empty(), "{err}");
+    assert_no_english_clap_text(&out);
+    for args in [vec!["--version"], vec!["-V"]] {
+        let (code, out, err) = run_raw(&args);
+        assert_eq!(code, 0, "{args:?}: {err}");
+        assert!(out.starts_with("japanese-lexicon "), "{out}");
+        assert!(err.is_empty(), "{err}");
+    }
+}
+
 #[test]
 fn zero_limits_are_invalid_input() {
     let tmp = TempDir::new("cli-zero");

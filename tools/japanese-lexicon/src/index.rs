@@ -8,7 +8,9 @@
 //! - `terms` — каждая строка банка терминов с исходными полями Yomitan
 //!   (`term`, `reading`, `definition_tags`, `rules`, `score`, `sequence`,
 //!   `term_tags`), классом записи (`kind`) и ссылкой на исходную строку
-//!   (`bank`, `row`). Глоссарий (английские значения, части речи, формы,
+//!   (`bank`, `row`). `score` схема банка объявляет как `number`, поэтому
+//!   он хранится числом с плавающей точкой без усечения; `sequence` —
+//!   целое. Глоссарий (английские значения, части речи, формы,
 //!   ссылки) остаётся в сохранённом рядом проверенном `archive.zip` и
 //!   адресуется парой `bank`/`row`: импорт ничего не выбрасывает, а индекс
 //!   не дублирует сотни мегабайт structured-content.
@@ -37,7 +39,8 @@ use std::path::Path;
 /// `verify` сообщит о несовпадении, `update` перестроит индекс.
 ///
 /// `2`: ключи точного поиска в NFC отдельно от исходных строк.
-pub const CORPUS_SCHEMA: u32 = 2;
+/// `3`: `score` статьи хранится числом без усечения до целого.
+pub const CORPUS_SCHEMA: u32 = 3;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -45,7 +48,7 @@ CREATE TABLE tags(name TEXT PRIMARY KEY, category TEXT NOT NULL, sort_order INTE
   notes TEXT NOT NULL, score INTEGER NOT NULL);
 CREATE TABLE terms(id INTEGER PRIMARY KEY, bank TEXT NOT NULL, row INTEGER NOT NULL,
   term TEXT NOT NULL, reading TEXT NOT NULL, definition_tags TEXT NOT NULL, rules TEXT NOT NULL,
-  score INTEGER NOT NULL, sequence INTEGER, term_tags TEXT NOT NULL, kind TEXT NOT NULL);
+  score REAL NOT NULL, sequence INTEGER, term_tags TEXT NOT NULL, kind TEXT NOT NULL);
 CREATE TABLE readings(term_id INTEGER NOT NULL REFERENCES terms(id), surface TEXT NOT NULL,
   surface_key TEXT NOT NULL, reading TEXT NOT NULL, match_key TEXT NOT NULL, origin TEXT NOT NULL);
 CREATE TABLE redirects(term_id INTEGER NOT NULL REFERENCES terms(id), surface TEXT NOT NULL,
@@ -115,6 +118,45 @@ fn cell_i64(row: &[Value], i: usize, bank: &str, n: usize) -> Result<i64> {
     row.get(i)
         .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
         .ok_or_else(|| Error::format(format!("{bank}[{n}][{i}]: ожидается число")))
+}
+
+/// Поле, которое схема Yomitan объявляет как `number` (`score` статьи):
+/// сохраняется без приведения к целому, иначе допустимые дробные оценки
+/// (`0.9` и `0.1`) стали бы одинаковыми и порядок чтений изменился бы.
+fn cell_number(row: &[Value], i: usize, bank: &str, n: usize) -> Result<f64> {
+    let value = row
+        .get(i)
+        .ok_or_else(|| Error::format(format!("{bank}[{n}][{i}]: ожидается число")))?;
+    let Some(number) = value.as_f64() else {
+        return Err(Error::format(format!("{bank}[{n}][{i}]: ожидается число")));
+    };
+    // JSON не допускает NaN и бесконечности, но неявное значение такого
+    // числа сломало бы и сравнение, и сериализацию ответа.
+    if !number.is_finite() {
+        return Err(Error::format(format!(
+            "{bank}[{n}][{i}]: ожидается конечное число"
+        )));
+    }
+    Ok(number)
+}
+
+/// Сериализация оценки статьи: в JSON целое значение остаётся целым
+/// (`200`, а не `200.0`), дробное печатается дробным. Так машинный ответ не
+/// меняется там, где словарь задал целую оценку, и сохраняет точность там,
+/// где она дробная.
+pub fn serialize_score<S: serde::Serializer>(
+    value: &Option<f64>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    /// Граница, до которой `f64` точно представляет целое.
+    const EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
+    if let Some(number) = value.filter(|v| v.fract() == 0.0 && v.abs() <= EXACT_INTEGER) {
+        return serde_json::Number::from(number as i64).serialize(serializer);
+    }
+    let number = value
+        .and_then(serde_json::Number::from_f64)
+        .ok_or_else(|| serde::ser::Error::custom("оценка статьи — не конечное число"))?;
+    number.serialize(serializer)
 }
 
 fn percent_decode(text: &str) -> Option<String> {
@@ -295,7 +337,7 @@ fn insert_term(
     let reading = cell_str(row, 1, bank, n)?;
     let definition_tags = cell_str_or_null(row, 2, bank, n)?;
     let rules = cell_str(row, 3, bank, n)?;
-    let score = cell_i64(row, 4, bank, n)?;
+    let score = cell_number(row, 4, bank, n)?;
     let Some(glossary) = row[5].as_array() else {
         return Err(Error::format(format!(
             "{bank}[{n}][5]: глоссарий — не массив"
@@ -529,7 +571,8 @@ pub struct ReadingRow {
     pub bank: String,
     pub row: i64,
     pub sequence: Option<i64>,
-    pub score: i64,
+    /// Оценка статьи Yomitan (`number`), без усечения до целого.
+    pub score: f64,
     pub definition_tags: String,
     pub term_tags: String,
     pub rules: String,

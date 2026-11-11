@@ -80,8 +80,10 @@ pub struct EntryRef {
     pub row: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<i64>,
+    /// Оценка статьи Yomitan (`number`): дробные значения сохраняются.
+    #[serde(serialize_with = "crate::index::serialize_score")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub score: Option<i64>,
+    pub score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -725,8 +727,8 @@ fn sort_groups(groups: &mut [ReadingGroup], opened: &[Opened]) {
         g.evidence
             .iter()
             .filter_map(|e| e.entry.as_ref().and_then(|x| x.score))
-            .max()
-            .unwrap_or(0)
+            .max_by(f64::total_cmp)
+            .unwrap_or(0.0)
     };
     // Сортировка устойчива: чтения кандзи сохраняют порядок словаря
     // (он, затем кун), который уже детерминирован порядком строк индекса.
@@ -737,7 +739,9 @@ fn sort_groups(groups: &mut [ReadingGroup], opened: &[Opened]) {
         }
         head.then_with(|| {
             if a.class == EvidenceClass::LexicalEntry {
-                score(b).cmp(&score(a))
+                // Полный порядок `f64`: дробные и отрицательные оценки
+                // сравниваются без усечения и без паники на NaN.
+                score(b).total_cmp(&score(a))
             } else {
                 std::cmp::Ordering::Equal
             }
