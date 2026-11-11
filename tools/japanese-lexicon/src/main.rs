@@ -446,16 +446,27 @@ fn print_lookup(r: &LookupResult) {
     }
     // Скрытые свидетельства не открываются смещением: продолжение имеет смысл
     // только тогда, когда за выборкой остались ещё группы.
-    if r.truncation.groups_returned < r.truncation.groups_total {
+    if r.truncation.truncated {
+        let next = r
+            .truncation
+            .offset
+            .saturating_add(r.truncation.groups_returned);
         println!(
-            "  показано {} из {} групп (смещение {}); --offset/--limit для продолжения",
+            "  показано {} из {} групп (смещение {})",
             r.truncation.groups_returned, r.truncation.groups_total, r.truncation.offset
         );
-    } else if r.truncation.truncated {
-        println!(
-            "  показаны все {} групп (смещение {}); свидетельств скрыто {} — --max-evidence",
-            r.truncation.groups_total, r.truncation.offset, r.truncation.evidence_omitted
-        );
+        if next < r.truncation.groups_total {
+            println!(
+                "  продолжение: --offset {next} --limit {}",
+                r.truncation.limit
+            );
+        }
+        if r.truncation.evidence_omitted > 0 {
+            println!(
+                "  скрыто свидетельств: {}; --max-evidence",
+                r.truncation.evidence_omitted
+            );
+        }
     }
     if !r.missing_sources.is_empty() {
         println!("  нет источников: {}", r.missing_sources.join(", "));

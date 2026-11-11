@@ -466,12 +466,38 @@ fn truncation_hint_matches_what_is_hidden() {
     // Скрыты только свидетельства: у 生 две статьи одного чтения.
     let (code, text) = run_text(&root, &["lookup", "--surface", "生", "--max-evidence", "1"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("показаны все"), "{text}");
-    assert!(!text.contains("--offset/--limit"), "{text}");
-    assert!(text.contains("--max-evidence"), "{text}");
+    assert!(text.contains("показано 7 из 7 групп"), "{text}");
+    assert!(text.contains("скрыто свидетельств: 1"), "{text}");
+    assert!(!text.contains("продолжение:"), "{text}");
 
-    // Скрыты группы: пагинация уместна.
+    // Скрыты группы: пагинация уместна и называет следующий шаг.
     let (code, text) = run_text(&root, &["lookup", "--surface", "生", "--limit", "1"]);
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("--offset/--limit"), "{text}");
+    assert!(text.contains("показано 1 из 7 групп"), "{text}");
+    assert!(text.contains("продолжение: --offset 1 --limit 1"), "{text}");
+
+    // Смещение к концу выборки: групп дальше нет, продолжение не предлагается.
+    let (code, text) = run_text(&root, &["lookup", "--surface", "生", "--offset", "5"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("показано 2 из 7 групп (смещение 5)"),
+        "{text}"
+    );
+    assert!(!text.contains("продолжение:"), "{text}");
+
+    // Смещение за концом выборки: подсказок нет, свидетельства видны.
+    let (code, text) = run_text(
+        &root,
+        &[
+            "lookup",
+            "--surface",
+            "生",
+            "--offset",
+            "99",
+            "--max-evidence",
+            "1",
+        ],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert!(!text.contains("продолжение:"), "{text}");
 }
