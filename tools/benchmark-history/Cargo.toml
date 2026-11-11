@@ -13,7 +13,7 @@ autotests = false
 benchmark-contract = { path = "../benchmark-contract" }
 clap = { version = "4.5", features = ["derive"] }
 # Встроенная сборка SQLite: индекс не зависит от системной библиотеки и её версии.
-rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
