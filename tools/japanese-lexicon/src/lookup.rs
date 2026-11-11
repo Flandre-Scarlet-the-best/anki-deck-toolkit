@@ -106,7 +106,7 @@ pub struct Evidence {
     pub character_reading: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub okurigana: Option<String>,
-    /// `prefix`/`suffix` для помет `-` в KANJIDIC.
+    /// `prefix`/`suffix`/`infix` для помет `-` в KANJIDIC.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub affix: Option<&'static str>,
 }
@@ -611,7 +611,8 @@ fn redirect_hint(o: &Opened, row: RedirectRow) -> Result<RedirectHint> {
 }
 
 /// Он/кун-чтения символа. Кун-чтение `い.きる`: знак читается `い`,
-/// `きる` — окуригана; `なま-`/`-う` — употребление как префикс/суффикс.
+/// `きる` — окуригана; `なま-`/`-う` — употребление как префикс/суффикс,
+/// дефисы с обеих сторон (`-ま-`) — `infix`.
 fn kanji_evidence(o: &Opened, row: &KanjiRow) -> Result<Vec<(String, Evidence)>> {
     let row_tags = tags(o, &row.tags)?;
     let mut out = Vec::new();

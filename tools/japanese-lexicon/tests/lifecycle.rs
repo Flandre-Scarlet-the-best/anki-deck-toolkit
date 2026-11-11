@@ -148,6 +148,18 @@ fn install_status_verify_and_lookup_distinguish_every_class() {
             .all(|c| !c.classes.contains(&EvidenceClass::KanjiReference))
     );
 
+    // Помета с дефисами с обеих сторон — значение `infix` машинного контракта.
+    let r = lookup(&root, "間");
+    assert_eq!(r.status, Status::KanjiReferenceOnly);
+    assert!(r.distinct_readings.is_empty());
+    let ma = r
+        .readings
+        .iter()
+        .find(|g| g.normalized == "ま")
+        .expect("нет чтения символа ま");
+    assert_eq!(ma.class, EvidenceClass::KanjiReference);
+    assert_eq!(ma.evidence[0].affix, Some("infix"));
+
     // Кандзи без лексической статьи — только ограниченный статус.
     let r = lookup(&root, "学");
     assert_eq!(r.status, Status::KanjiReferenceOnly);
@@ -1387,6 +1399,77 @@ fn non_numeric_term_score_is_rejected_without_touching_active_version() {
             "{release}"
         );
     }
+}
+
+/// `sequence` статьи — целое или `null`: строка, логическое значение и дробное
+/// число отклоняются целиком, а целое, записанное как `1.0`, остаётся целым.
+#[test]
+fn invalid_term_sequence_is_rejected_without_touching_active_version() {
+    let tmp = TempDir::new("bad-sequence");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    let report = manager::install(&root, &all(), &up, None, &Options::default()).unwrap();
+    assert!(report.ok, "{report:#?}");
+
+    let gloss = json!([{"type": "structured-content", "content": "synthetic"}]);
+    for (release, bad) in [
+        ("T2", json!("1206730")),
+        ("T3", json!(true)),
+        ("T4", json!(1.5)),
+    ] {
+        up.publish(
+            "jitendex",
+            release,
+            jitendex(
+                release,
+                &[json!(["試標", "さか", "", "", 200, gloss, bad, ""])],
+            ),
+        );
+        let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+        assert!(!update.ok, "{release}: {update:#?}");
+        assert_eq!(outcome(&update, "jitendex"), Outcome::Failed, "{release}");
+        assert_eq!(
+            code(&update, "jitendex"),
+            Some(Code::InvalidFormat),
+            "{release}"
+        );
+        // Активной остаётся прежняя версия, поиск работает.
+        assert_eq!(
+            lookup(&root, "学校").status,
+            Status::SingleReading,
+            "{release}"
+        );
+    }
+
+    // `null` и целое, записанное как `1.0`, остаются допустимыми.
+    up.publish(
+        "jitendex",
+        "T5",
+        jitendex(
+            "T5",
+            &[
+                json!(["試標", "さか", "", "", 200, gloss, 1.0, ""]),
+                json!(["試標", "たな", "", "", 200, gloss, null, ""]),
+            ],
+        ),
+    );
+    let update = manager::update(&root, &all(), &up, &Options::default()).unwrap();
+    assert!(update.ok, "{update:#?}");
+
+    let r = lookup(&root, "試標");
+    let sequence = |reading: &str| {
+        r.readings
+            .iter()
+            .find(|g| g.normalized == reading)
+            .unwrap_or_else(|| panic!("нет группы {reading}"))
+            .evidence[0]
+            .entry
+            .as_ref()
+            .unwrap()
+            .sequence
+    };
+    assert_eq!(sequence("さか"), Some(1));
+    assert_eq!(sequence("たな"), None);
 }
 
 #[test]

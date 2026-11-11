@@ -120,6 +120,34 @@ fn cell_i64(row: &[Value], i: usize, bank: &str, n: usize) -> Result<i64> {
         .ok_or_else(|| Error::format(format!("{bank}[{n}][{i}]: ожидается число")))
 }
 
+/// Целочисленное поле, которое допускает `null` (`sequence` статьи):
+/// отсутствие значения — это `null`, а строка, логическое значение и дробное
+/// число — ошибка формата, а не молчаливая потеря поля.
+fn cell_i64_or_null(row: &[Value], i: usize, bank: &str, n: usize) -> Result<Option<i64>> {
+    match row.get(i) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => integer_value(number)
+            .map(Some)
+            .ok_or_else(|| Error::format(format!("{bank}[{n}][{i}]: ожидается целое число"))),
+        Some(_) => Err(Error::format(format!(
+            "{bank}[{n}][{i}]: ожидается целое число"
+        ))),
+    }
+}
+
+/// Целое значение JSON-числа: целая запись как есть, дробная запись с нулевой
+/// дробной частью (`1.0`) — тем же целым, если `f64` представляет его точно.
+fn integer_value(number: &serde_json::Number) -> Option<i64> {
+    if let Some(value) = number.as_i64() {
+        return Some(value);
+    }
+    let value = number.as_f64()?;
+    (value.fract() == 0.0 && value.abs() <= EXACT_INTEGER).then_some(value as i64)
+}
+
+/// Граница, до которой `f64` точно представляет целое.
+const EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
+
 /// Поле, которое схема Yomitan объявляет как `number` (`score` статьи):
 /// сохраняется без приведения к целому, иначе допустимые дробные оценки
 /// (`0.9` и `0.1`) стали бы одинаковыми и порядок чтений изменился бы.
@@ -148,8 +176,6 @@ pub fn serialize_score<S: serde::Serializer>(
     value: &Option<f64>,
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
-    /// Граница, до которой `f64` точно представляет целое.
-    const EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
     if let Some(number) = value.filter(|v| v.fract() == 0.0 && v.abs() <= EXACT_INTEGER) {
         return serde_json::Number::from(number as i64).serialize(serializer);
     }
@@ -343,7 +369,7 @@ fn insert_term(
             "{bank}[{n}][5]: глоссарий — не массив"
         )));
     };
-    let sequence = row[6].as_i64();
+    let sequence = cell_i64_or_null(row, 6, bank, n)?;
     let term_tags = cell_str(row, 7, bank, n)?;
     if term.is_empty() {
         return Err(Error::format(format!("{bank}[{n}]: пустое написание")));

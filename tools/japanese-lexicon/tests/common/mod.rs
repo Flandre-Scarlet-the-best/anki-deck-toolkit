@@ -214,7 +214,9 @@ pub fn kanjidic(revision: &str) -> Vec<u8> {
             "kanji_bank_1.json",
             &json!([
                 ["生", "セイ ショウ", "い.きる なま- -う", "jouyou", ["life", "birth"], {"grade": "1"}],
-                ["学", "ガク", "まな.ぶ", "jouyou", ["study"], {"grade": "1"}]
+                ["学", "ガク", "まな.ぶ", "jouyou", ["study"], {"grade": "1"}],
+                // Помета с дефисами с обеих сторон: кун-чтение с `affix: infix`.
+                ["間", "", "-ま-", "jouyou", ["interval"], {"grade": "2"}]
             ]),
         ),
     ])
