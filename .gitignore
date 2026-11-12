@@ -51,3 +51,5 @@ __pycache__/
 # projector и бинарнику конкретной машины. Образец —
 # `tools/asset-store/config/inference.local.example.toml`.
 /tools/asset-store/config/inference.local.toml
+
+/.idea/
