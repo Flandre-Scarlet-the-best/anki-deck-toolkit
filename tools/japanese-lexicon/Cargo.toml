@@ -1,0 +1,33 @@
+[package]
+name = "japanese-lexicon"
+version = "0.1.0"
+# `edition` и MSRV наследуются из корневого `[workspace.package]`.
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Japanese Lexicon: управляемые локальные словари Yomitan-формата, точный офлайн-поиск чтений по написанию с происхождением и жизненный цикл словарей"
+publish = false
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+getrandom = { version = "0.4", features = ["std"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"] }
+# Встроенная сборка SQLite: индекс не зависит от системной библиотеки и её версии.
+rusqlite = { version = "0.42", default-features = false, features = ["bundled"] }
+rustix = { version = "1.1", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Git blob SHA-1 — контрольная сумма, которую GitHub публикует для файлов
+# репозитория; проверяется вместе с собственной SHA-256 архива. Считается с
+# обнаружением коллизий (SHA-1DC, как в Git), а не обычной SHA-1.
+sha1-checked = { version = "0.10", default-features = false }
+sha2 = "0.11"
+unicode-normalization = "0.1"
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
+
+[lib]
+
+[[bin]]
+name = "japanese-lexicon"
+path = "src/main.rs"
+test = false

@@ -333,6 +333,15 @@ CrowdAnki проверяет стенд `tools/anki-e2e` — только явн
 `BLOCKED` из-за недоступного Docker или неподдержанной версии Anki не равен
 `PASS`. Контракт, параметры и отчёт — `docs/ru/anki-e2e/README.md`.
 
+## Японские словари
+
+Тесты `japanese-lexicon` входят в `cargo test --workspace --locked` и строят
+синтетические Yomitan-архивы и поддельный источник публикации во временном каталоге:
+реальные словари и сеть не нужны. Живую установку с настоящего источника публикации и
+целостность своих словарей пользователь проверяет вручную в выделенном
+каталоге: `cargo run -p japanese-lexicon -- --data-dir <каталог> install --all`
+и `… verify`. Контракт — `docs/ru/japanese-lexicon/README.md`.
+
 ## Каталог бенчмарков
 
 Декларации `benchmarks/` проверяет `cargo run -p benchmark-contract -- validate`,
