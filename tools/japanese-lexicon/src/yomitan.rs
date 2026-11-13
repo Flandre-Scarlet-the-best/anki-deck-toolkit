@@ -266,10 +266,9 @@ impl Archive {
                 if !source.allowed_banks.contains(&kind) {
                     return Err(Error::new(
                         Code::UnsupportedSchema,
-                        format!(
-                            "банк «{name}» ({kind:?}) не ожидается в словаре {}",
-                            source.id
-                        ),
+                        // Тип банка уже назван его файлом; внутреннее имя
+                        // варианта `BankKind` пользователю ничего не даёт.
+                        format!("банк «{name}» не ожидается в словаре {}", source.id),
                     ));
                 }
                 banks.push(Bank { kind, number, name });
@@ -293,7 +292,8 @@ impl Archive {
         for required in source.required_banks {
             if !banks.iter().any(|b| b.kind == *required) {
                 return Err(Error::format(format!(
-                    "нет обязательного банка {required:?} для словаря {}",
+                    "нет обязательного банка {} для словаря {}",
+                    required.label(),
                     source.id
                 )));
             }

@@ -44,6 +44,29 @@ impl BankKind {
         }
     }
 
+    /// Точный шаблон имени файла банка: `term_bank_*.json`. Техническая
+    /// идентичность банка остаётся за [`BankKind::prefix`].
+    pub fn file_template(self) -> String {
+        format!("{}*.json", self.prefix())
+    }
+
+    /// Русское обозначение банка для диагностики: техническое имя банка
+    /// пользователю ничего не говорит, а роль содержимого — говорит.
+    fn noun(self) -> &'static str {
+        match self {
+            BankKind::Term => "статей",
+            BankKind::TermMeta => "метаданных терминов",
+            BankKind::Kanji => "кандзи",
+            BankKind::KanjiMeta => "метаданных кандзи",
+            BankKind::Tag => "помет",
+        }
+    }
+
+    /// Банк для человека и для точной сверки: `статей (term_bank_*.json)`.
+    pub fn label(self) -> String {
+        format!("{} ({})", self.noun(), self.file_template())
+    }
+
     pub const ALL: [BankKind; 5] = [
         BankKind::TermMeta,
         BankKind::KanjiMeta,

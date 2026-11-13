@@ -38,6 +38,12 @@ use std::path::Path;
 /// Версия схемы корпуса. Изменение несовместимо с уже построенными индексами:
 /// `verify` сообщит о несовпадении, `update` перестроит индекс.
 ///
+/// Смысл счётчиков [`BuildStats`] — часть этого же контракта: проверка
+/// полноты и сравнение версий при обновлении опираются на то, что счётчики
+/// одной схемы означают одно и то же. Изменение того, как считаются записи
+/// или чтения, требует подъёма версии, иначе уже установленные манифесты
+/// станут несопоставимыми, оставаясь формально совместимыми.
+///
 /// `2`: ключи точного поиска в NFC отдельно от исходных строк.
 /// `3`: `score` статьи хранится числом без усечения до целого.
 pub const CORPUS_SCHEMA: u32 = 3;
@@ -127,6 +133,85 @@ pub fn empty_required_bank(source: &Source, stats: &BuildStats) -> Option<BankKi
         .iter()
         .copied()
         .find(|kind| stats.entries(*kind) == 0)
+}
+
+/// Извлекает ли профиль банка терминов пригодные чтения.
+///
+/// Профиль — уже существующий владелец семантики банка терминов: `Jitendex`
+/// и `JmnedictNames` выводят чтения, `None` не выводит. Отдельного списка
+/// ролей нет намеренно: JPDB — тоже банк метаданных терминов, но чтений не
+/// даёт, а KANJIDIC говорит о чтениях отдельного знака, а не слова.
+pub fn requires_readings(source: &Source) -> bool {
+    !matches!(source.term_profile, TermProfile::None)
+}
+
+/// Содержательная неполнота корпуса, из-за которой версию нельзя активировать.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentDefect {
+    /// Обязательный банк присутствует, но не содержит ни одной записи.
+    EmptyRequiredBank(BankKind),
+    /// Словарь, извлекающий чтения, не дал ни одной пары написание/чтение.
+    NoReadings,
+}
+
+impl ContentDefect {
+    /// Русское описание порока: вид банка и точный шаблон Yomitan.
+    pub fn describe(self) -> String {
+        match self {
+            ContentDefect::EmptyRequiredBank(kind) => {
+                format!("нет ни одной записи обязательного банка {}", kind.label())
+            }
+            ContentDefect::NoReadings => format!(
+                "нет ни одного пригодного чтения: банк {} не дал ни одной пары написание/чтение",
+                BankKind::Term.label()
+            ),
+        }
+    }
+}
+
+/// Содержательный порок корпуса, если он есть.
+///
+/// Единая точка решения и для активации, и для оценки уже установленной
+/// версии: разойдись они — `verify` считал бы исправным то, что установка
+/// отвергает. Записи без чтений внутри корпуса легальны (например, статья
+/// кандзи без чтения): проверяется пригодность корпуса в целом, а не
+/// каждая строка. Источники, не извлекающие чтения, этой проверки не
+/// получают — иначе KANJIDIC и JPDB требовали бы чужих для них данных.
+pub fn content_defect(source: &Source, stats: &BuildStats) -> Option<ContentDefect> {
+    if let Some(kind) = empty_required_bank(source, stats) {
+        return Some(ContentDefect::EmptyRequiredBank(kind));
+    }
+    if requires_readings(source) && stats.readings == 0 {
+        return Some(ContentDefect::NoReadings);
+    }
+    None
+}
+
+/// Сопоставимые величины содержимого корпуса: по ним сравниваются версии.
+///
+/// Сравнение обязано опираться на показатели, осмысленные для роли
+/// источника, поэтому берутся записи его обязательных банков
+/// ([`Source::required_banks`]: статьи у Jitendex и JMnedict, кандзи у
+/// KANJIDIC, частотные метаданные у JPDB) и, отдельным показателем,
+/// пригодные чтения — там, где профиль их выводит. Сумма по всем
+/// обязательным банкам, потому что содержание задаёт каждый из них.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentAmount {
+    pub records: u64,
+    /// `None` — источник чтений не выводит, и требовать их нельзя.
+    pub readings: Option<u64>,
+}
+
+/// Содержимое корпуса в сопоставимом виде.
+pub fn content_amount(source: &Source, stats: &BuildStats) -> ContentAmount {
+    ContentAmount {
+        records: source
+            .required_banks
+            .iter()
+            .map(|kind| stats.entries(*kind))
+            .sum(),
+        readings: requires_readings(source).then_some(stats.readings),
+    }
 }
 
 fn cell_str<'a>(row: &'a [Value], i: usize, bank: &str, n: usize) -> Result<&'a str> {
