@@ -446,6 +446,30 @@ fn failed_updates_keep_the_last_good_version() {
             ]),
             Code::InvalidFormat,
         ),
+        (
+            // Обязательного банка нет вовсе: отклоняется ещё при осмотре архива.
+            "no_bank",
+            zip_bytes(vec![
+                file(
+                    "index.json",
+                    &json!({"title": "Jitendex.org [T9]", "format": 3, "revision": "T9"}),
+                ),
+                file("tag_bank_1.json", &json!([])),
+            ]),
+            Code::InvalidFormat,
+        ),
+        (
+            // Обязательный банк есть, но пуст: структура верна, словаря нет.
+            "empty_bank",
+            zip_bytes(vec![
+                file(
+                    "index.json",
+                    &json!({"title": "Jitendex.org [T9]", "format": 3, "revision": "T9"}),
+                ),
+                file("term_bank_1.json", &json!([])),
+            ]),
+            Code::InvalidFormat,
+        ),
     ];
     for (name, bytes, expected) in cases {
         up.publish("jitendex", "T9", bytes);
@@ -500,6 +524,252 @@ fn failed_updates_keep_the_last_good_version() {
     let check = manager::check_updates(&root, &one("jitendex"), &up).unwrap();
     assert_eq!(code(&check, "jitendex"), Some(Code::UpstreamRateLimited));
     assert!(manager::verify(&loc, &all()).unwrap().ok);
+}
+
+/// Пустой обязательный банк не даёт установить словарь ни одного типа:
+/// статьи для Jitendex и JMnedict, кандзи для KANJIDIC, частотные
+/// метаданные для JPDB. Проверка идёт до манифеста и до активации.
+#[test]
+fn empty_required_bank_is_refused_for_every_source() {
+    let cases = [
+        (
+            "jitendex",
+            "T1",
+            empty_dictionary("Jitendex.org [T1]", "T1", "term_bank_1.json"),
+        ),
+        (
+            "jmnedict",
+            "2026-01-01",
+            empty_dictionary(
+                "JMnedict [2026-01-01]",
+                "JMnedict.2026-01-01",
+                "term_bank_1.json",
+            ),
+        ),
+        (
+            "kanjidic-english",
+            "2026-01-01",
+            empty_dictionary(
+                "KANJIDIC [kanjidic2.test]",
+                "kanjidic2.test",
+                "kanji_bank_1.json",
+            ),
+        ),
+        (
+            "jpdb-v2.2-freq-kana",
+            "2024-10-13",
+            jpdb_rows("JPDB v2.2 Frequency Kana 2024-10-13", &[]),
+        ),
+        (
+            // Разрешённый, но не обязательный банк непуст, а обязательных
+            // записей кандзи нет: решает содержимое корпуса, не имя банка.
+            "kanjidic-english",
+            "2026-01-01",
+            zip_bytes(vec![
+                file(
+                    "index.json",
+                    &json!({"title": "KANJIDIC [kanjidic2.test]", "format": 3, "revision": "kanjidic2.test"}),
+                ),
+                file(
+                    "kanji_meta_bank_1.json",
+                    &json!([["生", "freq", {"value": 1, "displayValue": "1"}]]),
+                ),
+            ]),
+        ),
+    ];
+    for (id, release, bytes) in cases {
+        let tmp = TempDir::new("empty-bank");
+        let root = tmp.path().join("data");
+        let up = FakeUpstream::standard();
+        up.publish(id, release, bytes);
+        let report = manager::install(&root, &one(id), &up, None, &Options::default()).unwrap();
+        assert_eq!(outcome(&report, id), Outcome::Failed, "{id}: {report:#?}");
+        assert_eq!(code(&report, id), Some(Code::InvalidFormat), "{id}");
+        assert!(report.items[0].installed.is_none(), "{id}");
+        // Ни версии, ни записи реестра, ни остатков сборки.
+        assert!(!root.join("dictionaries").join(id).exists(), "{id}");
+        let store = Store::open_existing(&root).unwrap().unwrap();
+        assert!(
+            !store.registry().unwrap().dictionaries.contains_key(id),
+            "{id}"
+        );
+        assert!(
+            std::fs::read_dir(root.join("staging"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "{id}: staging"
+        );
+        let status = manager::status(&location(&root)).unwrap();
+        let item = status.dictionaries.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(item.state, State::NotInstalled, "{id}");
+        assert!(item.installed.is_none(), "{id}");
+    }
+}
+
+/// Пустой необязательный банк рядом с непустым обязательным — допустим:
+/// словарь содержит записи, а проверка не превращается в запрет пустых
+/// банков вообще.
+#[test]
+fn empty_optional_bank_does_not_block_install() {
+    let tmp = TempDir::new("empty-optional");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    up.publish(
+        "jitendex",
+        "T1",
+        zip_bytes(vec![
+            file(
+                "index.json",
+                &json!({"title": "Jitendex.org [T1]", "format": 3, "revision": "T1"}),
+            ),
+            file(
+                "term_bank_1.json",
+                &json!([["学校", "がっこう", "", "", 1, ["school"], 1, ""]]),
+            ),
+            file("term_bank_2.json", &json!([])),
+            file("tag_bank_1.json", &json!([])),
+        ]),
+    );
+    let report = manager::install(&root, &one("jitendex"), &up, None, &Options::default()).unwrap();
+    assert_eq!(
+        outcome(&report, "jitendex"),
+        Outcome::Installed,
+        "{report:#?}"
+    );
+    assert!(manager::verify(&location(&root), &all()).unwrap().ok);
+    assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
+}
+
+/// Полнота банка считается по его записям, а не по производным чтениям.
+/// Словарь с записями, из которых чтений не выводится, устанавливается:
+/// иначе проверка запрещала бы законные данные, а не пустой словарь.
+#[test]
+fn bank_with_records_but_without_derived_readings_is_not_empty() {
+    let tmp = TempDir::new("no-readings");
+    let root = tmp.path().join("data");
+    let up = FakeUpstream::standard();
+    up.publish(
+        "jitendex",
+        "T1",
+        zip_bytes(vec![
+            file(
+                "index.json",
+                &json!({"title": "Jitendex.org [T1]", "format": 3, "revision": "T1"}),
+            ),
+            // Кандзи без чтения: строка банка есть, чтений она не даёт.
+            file(
+                "term_bank_1.json",
+                &json!([["謎字", "", "", "", 0, ["mystery"], 1, ""]]),
+            ),
+        ]),
+    );
+    let report = manager::install(&root, &one("jitendex"), &up, None, &Options::default()).unwrap();
+    assert_eq!(
+        outcome(&report, "jitendex"),
+        Outcome::Installed,
+        "{report:#?}"
+    );
+    let installed = report.items[0].installed.as_ref().unwrap();
+    assert_eq!(installed.stats.terms, 1);
+    assert_eq!(installed.stats.readings, 0);
+    assert!(manager::verify(&location(&root), &all()).unwrap().ok);
+}
+
+/// Версия с пустым корпусом, установленная до появления проверки, остаётся
+/// активной, но `status` и `verify` обязаны её обнаружить: иначе словарь
+/// без единой записи навсегда останется «исправным».
+#[test]
+fn installed_empty_corpus_is_reported_by_status_and_verify() {
+    let tmp = TempDir::new("empty-installed");
+    let root = tmp.path().join("data");
+    let (loc, _up) = installed(&root);
+    let source = catalog::find("jmnedict").unwrap();
+    let dir = version_dir(&root, "jmnedict");
+
+    // Состояние, которое прежнее поведение считало нормальным: архив с
+    // пустым обязательным банком и построенный из него пустой корпус.
+    let archive = dir.join(store::ARCHIVE_FILE);
+    std::fs::write(
+        &archive,
+        empty_dictionary(
+            "JMnedict [2026-01-01]",
+            "JMnedict.2026-01-01",
+            "term_bank_1.json",
+        ),
+    )
+    .unwrap();
+    let archive_digest = japanese_lexicon::upstream::digest_file(&archive).unwrap();
+    let (mut opened, inspection) =
+        japanese_lexicon::yomitan::Archive::open(&archive, source, Limits::default()).unwrap();
+    let index_path = dir.join(store::INDEX_FILE);
+    std::fs::remove_file(&index_path).unwrap();
+    let meta = std::collections::BTreeMap::from([(
+        "archive_sha256".to_owned(),
+        archive_digest.sha256.clone(),
+    )]);
+    let stats =
+        japanese_lexicon::index::build(&mut opened, &inspection, source, &index_path, &meta)
+            .unwrap();
+    assert_eq!(stats.terms, 0);
+
+    let store = Store::open_existing(&root).unwrap().unwrap();
+    let version = store.registry().unwrap().dictionaries["jmnedict"]
+        .version
+        .clone();
+    let mut manifest = store.read_manifest("jmnedict", &version).unwrap();
+    let index_digest = japanese_lexicon::upstream::digest_file(&index_path).unwrap();
+    manifest.index_json = inspection.index;
+    manifest.archive = archive_digest;
+    manifest.corpus.bytes = index_digest.bytes;
+    manifest.corpus.sha256 = index_digest.sha256;
+    manifest.corpus.stats = stats;
+    store::write_atomic(
+        &dir.join(store::MANIFEST_FILE),
+        &serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    for report in [
+        manager::status(&loc).unwrap(),
+        manager::verify(&loc, &all()).unwrap(),
+    ] {
+        assert!(!report.ok, "пустой словарь не должен считаться исправным");
+        let item = report
+            .dictionaries
+            .iter()
+            .find(|d| d.id == "jmnedict")
+            .unwrap();
+        assert_eq!(item.state, State::Corrupt);
+        assert!(
+            item.problems.iter().any(|p| p
+                .message
+                .contains("нет ни одной записи обязательного банка")),
+            "{:#?}",
+            item.problems
+        );
+        // Остальные словари набора не затронуты.
+        assert!(
+            report
+                .dictionaries
+                .iter()
+                .filter(|d| d.id != "jmnedict")
+                .all(|d| d.state == State::Ok)
+        );
+    }
+
+    // Пустой корпус не проходит и глубокую проверку `update`: он не считается
+    // актуальным, поэтому рабочая версия с источника публикации возвращается.
+    let up = FakeUpstream::standard();
+    let update = manager::update(&root, &one("jmnedict"), &up, &Options::default()).unwrap();
+    assert_eq!(
+        outcome(&update, "jmnedict"),
+        Outcome::Updated,
+        "{update:#?}"
+    );
+    assert!(manager::verify(&loc, &all()).unwrap().ok);
+    // 田中の чтения даёт только JMnedict: поиск снова отвечает по данным словаря.
+    assert_eq!(lookup(&root, "田中").status, Status::ProperNameOnly);
 }
 
 #[test]

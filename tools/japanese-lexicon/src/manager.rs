@@ -258,6 +258,15 @@ fn prepare(
     meta.insert("revision".to_owned(), inspection.index.revision.clone());
     meta.insert("title".to_owned(), inspection.index.title.clone());
     let stats = index::build(&mut archive, &inspection, source, &index_path, &meta)?;
+    // Содержательная полнота: обязательный банк, в котором нет ни одной
+    // записи, — это не словарь. Проверка до манифеста и до активации, чтобы
+    // синтаксически верный пустой архив не заменил рабочий.
+    if let Some(kind) = index::empty_required_bank(source, &stats) {
+        return Err(Error::format(format!(
+            "в архиве нет ни одной записи обязательного банка {kind:?} для словаря {}: пустой словарь не активируется",
+            source.id
+        )));
+    }
     let index_digest = upstream::digest_file(&index_path)?;
     let manifest = Manifest {
         schema: store::MANIFEST_SCHEMA.into(),
@@ -789,6 +798,18 @@ fn verify_version(
             format!(
                 "схема корпуса {} устарела (текущая {CORPUS_SCHEMA}); update перестроит индекс",
                 manifest.corpus.schema
+            ),
+        ));
+    }
+    if let Some(kind) = index::empty_required_bank(source, &manifest.corpus.stats) {
+        // Проверка нужна и здесь: версия, установленная до её появления,
+        // `verify` не исправляет, а только показывает. `update` такую версию
+        // не считает актуальной и либо переустановит рабочий артефакт, либо
+        // откажет на пустом, сохранив прежнюю.
+        problems.push(problem(
+            Code::InvalidFormat,
+            format!(
+                "в установленном корпусе нет ни одной записи обязательного банка {kind:?}: словарь пуст, удалите его и установите заново"
             ),
         ));
     }

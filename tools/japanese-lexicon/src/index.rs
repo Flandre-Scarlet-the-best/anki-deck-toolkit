@@ -99,6 +99,36 @@ pub struct BuildStats {
     pub tags: u64,
 }
 
+impl BuildStats {
+    /// Число записей указанного вида банка в построенном корпусе.
+    ///
+    /// `KanjiMeta` в индекс не переносится — такие банки остаются в
+    /// сохранённом архиве, — поэтому записей этого вида здесь нет.
+    pub fn entries(&self, kind: BankKind) -> u64 {
+        match kind {
+            BankKind::Term => self.terms,
+            BankKind::TermMeta => self.term_meta,
+            BankKind::Kanji => self.kanji,
+            BankKind::Tag => self.tags,
+            BankKind::KanjiMeta => 0,
+        }
+    }
+}
+
+/// Первый обязательный банк источника, в котором нет ни одной записи.
+///
+/// Отсутствие банка в архиве ловит [`Archive::open`]; здесь проверяется
+/// содержательная полнота: присутствующий, но пустой банк не делает архив
+/// словарём, который можно активировать. Обязательные банки источника
+/// различаются по роли — статьи, кандзи или частотные метаданные.
+pub fn empty_required_bank(source: &Source, stats: &BuildStats) -> Option<BankKind> {
+    source
+        .required_banks
+        .iter()
+        .copied()
+        .find(|kind| stats.entries(*kind) == 0)
+}
+
 fn cell_str<'a>(row: &'a [Value], i: usize, bank: &str, n: usize) -> Result<&'a str> {
     match row.get(i) {
         Some(Value::String(s)) => Ok(s),

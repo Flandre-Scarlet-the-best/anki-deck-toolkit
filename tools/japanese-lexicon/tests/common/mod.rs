@@ -257,6 +257,18 @@ pub fn jpdb_rows(revision: &str, rows: &[Value]) -> Vec<u8> {
     ])
 }
 
+/// Архив нужного источника с корректным `index.json` и единственным банком,
+/// в котором нет ни одной записи: структурно верный, содержательно пустой.
+pub fn empty_dictionary(title: &str, revision: &str, bank: &str) -> Vec<u8> {
+    zip_bytes(vec![
+        file(
+            "index.json",
+            &json!({"title": title, "format": 3, "revision": revision}),
+        ),
+        file(bank, &json!([])),
+    ])
+}
+
 /// Дублирует запись центрального каталога ZIP: писатель `zip` повторяющихся имён
 /// не создаёт, а читатель объединяет их во внутренней карте, поэтому архив
 /// собирается правкой байтов — дубликат ссылается на тот же local header.
