@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+RENOVATE = os.environ.get("RENOVATE_BINARY", str(ROOT / "node_modules/.bin/renovate"))
 PIN = re.compile(r"\d+\.\d+\.\d+\Z")
 RUST_MANAGERS = ["rust-toolchain", "custom.regex"]
 
@@ -38,7 +39,7 @@ def run_renovate(scenario: Scenario) -> tuple[Scenario, dict, float]:
     })
     started = time.monotonic()
     result = subprocess.run(
-        [str(ROOT / "node_modules/.bin/renovate"), "--platform=local", f"--dry-run={scenario.mode}"],
+        [RENOVATE, "--platform=local", f"--dry-run={scenario.mode}"],
         cwd=scenario.root, env=env, capture_output=True, text=True, timeout=240,
     )
     elapsed = time.monotonic() - started

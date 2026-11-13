@@ -1,6 +1,6 @@
-"""Проверки воркера Resemble Enhance без PyTorch и весов: граница доверия
-к файлам модели, ограниченный unpickler и отказы протокола до загрузки
-модели. Запускаются из `cargo test` (`tools/speech-enhance/tests/resemble.rs`).
+"""Проверки границы файлов модели, безопасной десериализации и протокола.
+Запускаются из `cargo test` (`tools/speech-enhance/tests/resemble.rs`);
+проверки десериализации требуют PyTorch, но не требуют весов.
 """
 
 import collections
@@ -30,8 +30,11 @@ def run(*args):
 
 
 class Evil:
+    def __init__(self, path):
+        self.path = path
+
     def __reduce__(self):
-        return (os.system, ("true",))
+        return (os.system, (f"touch {self.path}",))
 
 
 class InterpreterTest(unittest.TestCase):
@@ -65,23 +68,6 @@ class ManifestTest(unittest.TestCase):
         for name, length, digest in worker.FILES:
             self.assertGreater(length, 0, name)
             self.assertEqual(len(digest), 64, name)
-
-
-class UnpicklerTest(unittest.TestCase):
-    def load(self, obj):
-        return worker.RestrictedPickle.load(io.BytesIO(pickle.dumps(obj, protocol=2)))
-
-    def test_allowed_containers_load(self):
-        value = collections.OrderedDict(a={1, 2})
-        self.assertEqual(self.load(value), value)
-
-    def test_code_execution_payload_is_refused(self):
-        with self.assertRaises(pickle.UnpicklingError):
-            self.load(Evil())
-
-    def test_arbitrary_global_is_refused(self):
-        with self.assertRaises(pickle.UnpicklingError):
-            self.load(Path("x"))
 
 
 class ModelFilesTest(unittest.TestCase):
@@ -212,7 +198,7 @@ def torch_available() -> bool:
 
 @unittest.skipUnless(torch_available(), "нет torch: проверка настоящего torch.load пропущена")
 class TorchLoadTest(unittest.TestCase):
-    """Настоящий `torch.load` идёт через ограниченный unpickler воркера."""
+    """Настоящий `torch.load` использует production-путь воркера."""
 
     def save(self, obj) -> bytes:
         import torch
@@ -222,14 +208,7 @@ class TorchLoadTest(unittest.TestCase):
         return buf.getvalue()
 
     def load(self, data: bytes):
-        import torch
-
-        return torch.load(
-            io.BytesIO(data),
-            map_location="cpu",
-            pickle_module=worker.RestrictedPickle,
-            weights_only=False,
-        )
+        return worker.load_checkpoint(data)
 
     def test_half_tensors_and_sets_load(self):
         import torch
@@ -239,8 +218,15 @@ class TorchLoadTest(unittest.TestCase):
         self.assertTrue(torch.equal(loaded["module"]["w"], value["module"]["w"]))
 
     def test_code_execution_payload_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "executed"
+            with self.assertRaises(pickle.UnpicklingError):
+                self.load(self.save({"x": Evil(marker)}))
+            self.assertFalse(marker.exists())
+
+    def test_arbitrary_global_is_refused(self):
         with self.assertRaises(pickle.UnpicklingError):
-            self.load(self.save({"x": Evil()}))
+            self.load(self.save({"x": Path("x")}))
 
 
 class ProtocolTest(unittest.TestCase):

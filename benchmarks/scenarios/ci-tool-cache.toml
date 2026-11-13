@@ -1,0 +1,67 @@
+schema_version = 1
+module = "ci-tool-cache"
+
+[[scenario]]
+id = "ci-tool-cache.verified-hit"
+title = "Повторное использование проверенного архива CI"
+revision = 1
+kind = "short-cli"
+status = "executable"
+description = "Запуск загрузчика CI с заранее подготовленным синтетическим архивом; сеть не используется, файл заново проверяется по SHA-256."
+measured = "Процесс Python от запуска до выхода, включая открытие кэша, блокировку и проверку SHA-256 архива размером 16 МиБ."
+platforms = ["linux"]
+
+[scenario.target]
+program = { kind = "executable", name = "python3" }
+args = [".github/scripts/fetch_verified_tool.py", "--url", "https://github.com/example/tool", "--name", "synthetic.tar", "--sha256", "080acf35a507ac9849cfcba47dc2ad83e01b75663a516279c8b9d243b719643e", "--size", "16777216"]
+expect_exit_codes = [0]
+
+[scenario.target.env]
+inherit = ["PATH"]
+set = { CI_TOOL_CACHE = "{input.cache}" }
+
+[[scenario.parameter]]
+name = "cache_dir"
+description = "Каталог синтетического кэша с 16 МиБ нулевых байтов в synthetic.tar и пустым файлом .fetch.lock."
+required = true
+record = false
+affects_comparability = false
+
+[[scenario.input]]
+id = "cache"
+kind = "external-path"
+role = "workload"
+identity = "content-tree-sha256"
+parameter = "cache_dir"
+description = "Синтетический проверенный архив и файл блокировки; путь не публикуется."
+size = [{ name = "archive_bytes", unit = "byte", description = "Размер архива.", measure = { kind = "file-bytes", path = "synthetic.tar" } }]
+
+[scenario.runs]
+warmup = 3
+min_runs = 10
+max_runs = 100
+single_run_allowed = false
+run_timeout_seconds = 60
+total_budget_seconds = 900
+
+[[scenario.profile]]
+id = "warm"
+cache_definition = "Архив уже присутствует, page cache прогрет; команда проверяет его в каждом прогоне."
+cleared = []
+retained = ["архив и блокировка", "page cache ОС"]
+
+[[scenario.metric]]
+metric = "time_wall_clock"
+scope = "command"
+source = "hyperfine"
+required = true
+
+[[scenario.metric]]
+metric = "time_cpu"
+scope = "process-tree-waited"
+source = "hyperfine"
+required = false
+
+[scenario.environment]
+record = ["os", "arch", "cpu_model", "module_version", "hyperfine_version"]
+comparable = ["os", "arch", "cpu_model"]
