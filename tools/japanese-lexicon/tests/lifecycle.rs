@@ -962,6 +962,52 @@ fn update_to_an_anomalously_shrunken_lexicon_keeps_the_working_version() {
     assert_eq!(outcome(&check, "jitendex"), Outcome::UpdateAvailable);
 }
 
+/// Сокращение одних чтений при прежнем числе статей — отдельное условие отказа:
+/// статьи целы, поэтому сравнение записей не срабатывает и решение принимает
+/// только показатель чтений. Без такого кандидата это условие проверялось бы
+/// лишь косвенно — усечение статей уже даёт отказ само по себе.
+#[test]
+fn update_that_only_shrinks_readings_is_refused_by_its_own_measure() {
+    let tmp = TempDir::new("shrunk-readings");
+    let root = tmp.path().join("data");
+    let (loc, up) = installed(&root);
+    let good = snapshot(&root.join("dictionaries"));
+    // Статей столько же, сколько у активной версии; чтения есть у двух из них,
+    // у остальных строк чтение пустое — банк статей цел, чтений меньше половины.
+    let rows: Vec<Value> = LEXICON_PAIRS
+        .iter()
+        .enumerate()
+        .map(|(i, (surface, reading))| {
+            let reading = if i < 2 { *reading } else { "" };
+            json!([surface, reading, "", "", 200, ["meaning"], 1, ""])
+        })
+        .collect();
+    up.publish("jitendex", "T2", jitendex_rows("T2", &rows));
+    let update = manager::update(&root, &one("jitendex"), &up, &Options::default()).unwrap();
+    assert_eq!(outcome(&update, "jitendex"), Outcome::Failed, "{update:#?}");
+    assert_eq!(code(&update, "jitendex"), Some(Code::UpstreamUnexpected));
+    let previous = update.items[0].installed.as_ref().unwrap();
+    let message = &update.items[0].message;
+    assert!(message.contains("аномально меньше"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "пригодных чтений 2 против {}",
+            previous.stats.readings
+        )),
+        "{message}"
+    );
+    // Отказ вызван именно чтениями: записей не меньше, чем было.
+    assert!(
+        !message.contains("записей обязательных банков"),
+        "{message}"
+    );
+    // Прежняя версия цела и остаётся активной для поиска.
+    assert_eq!(snapshot(&root.join("dictionaries")), good);
+    assert!(manager::verify(&loc, &all()).unwrap().ok);
+    assert!(manager::status(&loc).unwrap().ok);
+    assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
+}
+
 /// Показатели сравнения берутся по роли словаря: у KANJIDIC корпус задают
 /// знаки, и чтений в сравнении нет вовсе — иначе источник с нулём чтений
 /// сравнивался бы по чужим для него данным.
