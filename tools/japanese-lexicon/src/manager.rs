@@ -861,6 +861,13 @@ fn problem(code: Code, message: impl Into<String>) -> Problem {
 }
 
 /// Проверка одной версии. `deep` — с хешированием и quick_check SQLite.
+///
+/// Собираются все виды проблем, какие удалось установить: неполнота корпуса
+/// не отменяет проверку целостности файлов, иначе вызывающая сторона увидела
+/// бы только дефект содержимого и не узнала о повреждённом архиве или индексе.
+/// Пропускаются только проверки, для которых физическое состояние файлов
+/// делает их заведомо бессмысленными: отсутствующий или неточного размера
+/// файл нечего хешировать и открывать.
 fn verify_version(
     store: &Store,
     source: &Source,
@@ -876,6 +883,9 @@ fn verify_version(
         )];
     };
     if manifest.corpus.schema != CORPUS_SCHEMA {
+        // Схема корпуса не наша: счётчики строк в ней значат другое, поэтому
+        // проверка SQLite пропускается — но целостность файлов проверяется:
+        // испорченный файл остаётся испорченным при любой схеме.
         problems.push(problem(
             Code::IndexCorrupt,
             format!(
@@ -884,11 +894,11 @@ fn verify_version(
             ),
         ));
     }
+    // Содержательная неполнота: версия, установленная до появления проверки,
+    // остаётся активной, `verify` её не исправляет, а только показывает.
+    // `update` такую версию не считает актуальной и либо переустановит рабочий
+    // артефакт, либо откажет на неполном, сохранив прежнюю.
     if let Some(defect) = index::content_defect(source, &manifest.corpus.stats) {
-        // Проверка нужна и здесь: версия, установленная до её появления,
-        // `verify` не исправляет, а только показывает. `update` такую версию
-        // не считает актуальной и либо переустановит рабочий артефакт, либо
-        // откажет на неполном, сохранив прежнюю.
         problems.push(problem(
             Code::InvalidFormat,
             format!(
@@ -900,27 +910,34 @@ fn verify_version(
     }
     let archive = dir.join(store::ARCHIVE_FILE);
     let index_path = dir.join(store::INDEX_FILE);
+    let mut file_is_useless = false;
     for (path, bytes) in [
         (&archive, manifest.archive.bytes),
         (&index_path, manifest.corpus.bytes),
     ] {
         match fs::metadata(path) {
             Ok(meta) if meta.len() == bytes => {}
-            Ok(meta) => problems.push(problem(
-                Code::IndexCorrupt,
-                format!(
-                    "{}: {} байт, в манифесте {bytes}",
-                    path.display(),
-                    meta.len()
-                ),
-            )),
-            Err(e) => problems.push(problem(
-                Code::IndexCorrupt,
-                format!("{}: {e}", path.display()),
-            )),
+            Ok(meta) => {
+                file_is_useless = true;
+                problems.push(problem(
+                    Code::IndexCorrupt,
+                    format!(
+                        "{}: {} байт, в манифесте {bytes}",
+                        path.display(),
+                        meta.len()
+                    ),
+                ));
+            }
+            Err(e) => {
+                file_is_useless = true;
+                problems.push(problem(
+                    Code::IndexCorrupt,
+                    format!("{}: {e}", path.display()),
+                ));
+            }
         }
     }
-    if !problems.is_empty() || !deep {
+    if file_is_useless || !deep {
         return problems;
     }
     match upstream::digest_file(&archive) {
@@ -939,9 +956,9 @@ fn verify_version(
         )),
         Err(e) => problems.push(problem(e.code, e.message)),
     }
-    if !problems.is_empty() {
-        return problems;
-    }
+    // Дальше индекс проверяется, даже если расхождение уже найдено: две
+    // независимые проверки одного файла говорят о разном, и вызывающая
+    // сторона должна видеть обе — и потерю файла, и его порчу.
     let checked = Index::open(&index_path).and_then(|index| {
         index.quick_check()?;
         if index.meta_value("archive_sha256")?.as_deref() != Some(manifest.archive.sha256.as_str())

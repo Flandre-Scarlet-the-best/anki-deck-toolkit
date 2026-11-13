@@ -887,6 +887,79 @@ fn installed_corpus_without_readings_is_reported_and_repaired_by_update() {
     assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
 }
 
+/// Неполнота корпуса не скрывает порчу файлов: `verify` обязан сообщить и о
+/// дефекте содержимого, и о повреждённом архиве, и о потере части индекса.
+/// Иначе вызывающая сторона видела бы только дефект содержимого, а порча
+/// индекса при той же неполноте оставалась бы незамеченной.
+#[test]
+fn content_defect_does_not_mask_damaged_files() {
+    let tmp = TempDir::new("masked-damage");
+    let root = tmp.path().join("data");
+    let (loc, up) = installed(&root);
+    let stats = replace_active_version(
+        &root,
+        "jitendex",
+        jitendex_rows("T1", &[json!(["謎字", "", "", "", 0, ["mystery"], 1, ""])]),
+    );
+    assert_eq!((stats.terms, stats.readings), (1, 0));
+
+    let dir = version_dir(&root, "jitendex");
+    // Архив повреждён при том же размере: проверка размеров его не ловит.
+    let archive = dir.join(store::ARCHIVE_FILE);
+    let mut damaged = std::fs::read(&archive).unwrap();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 0x01;
+    std::fs::write(&archive, damaged).unwrap();
+    // Индекс повреждён так, что его размер и сумма совпадают с манифестом:
+    // обнаружить потерю обязана проверка SQLite, а не размер файла.
+    let index_path = dir.join(store::INDEX_FILE);
+    {
+        let index = rusqlite::Connection::open(&index_path).unwrap();
+        index.execute("DROP TABLE readings", []).unwrap();
+    }
+    let index_digest = japanese_lexicon::upstream::digest_file(&index_path).unwrap();
+    let store = Store::open_existing(&root).unwrap().unwrap();
+    let version = version_name(&root, "jitendex");
+    let mut manifest = store.read_manifest("jitendex", &version).unwrap();
+    manifest.corpus.bytes = index_digest.bytes;
+    manifest.corpus.sha256 = index_digest.sha256;
+    store::write_atomic(
+        &dir.join(store::MANIFEST_FILE),
+        &serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let report = manager::verify(&loc, &all()).unwrap();
+    assert!(!report.ok, "{report:#?}");
+    let item = report
+        .dictionaries
+        .iter()
+        .find(|d| d.id == "jitendex")
+        .unwrap();
+    assert_eq!(item.state, State::Corrupt);
+    for expected in [
+        "нет ни одного пригодного чтения",
+        "SHA-256 архива не совпадает с манифестом",
+        "readings",
+    ] {
+        assert!(
+            item.problems.iter().any(|p| p.message.contains(expected)),
+            "нет сообщения «{expected}»: {:#?}",
+            item.problems
+        );
+    }
+
+    // Диагностика не отменяет починки: рабочая версия источника возвращается.
+    let update = manager::update(&root, &one("jitendex"), &up, &Options::default()).unwrap();
+    assert_eq!(
+        outcome(&update, "jitendex"),
+        Outcome::Updated,
+        "{update:#?}"
+    );
+    assert!(manager::verify(&loc, &all()).unwrap().ok);
+    assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
+}
+
 /// Аномально сокращённый корпус не активируется: отказ происходит до
 /// манифеста и активации, поэтому прежняя исправная версия остаётся активной,
 /// ищется, проверяется и не теряет ни одного файла, а её реестр не меняется.
