@@ -1210,6 +1210,61 @@ fn legitimate_decrease_growth_and_replacement_update_normally() {
     assert_eq!(lookup(&root, "学校").status, Status::SingleReading);
 }
 
+/// Устаревшая схема корпуса сообщается один раз. Проверка SQLite пропускается
+/// намеренно: её отказ пересказывал бы то же самое вторым сообщением, а
+/// счётчики чужой схемы значат другое и дали бы ложное расхождение. Проверка
+/// целостности файлов при этом остаётся.
+#[test]
+fn outdated_schema_is_reported_once() {
+    let tmp = TempDir::new("outdated-schema");
+    let root = tmp.path().join("data");
+    let (loc, _up) = installed(&root);
+    let store = Store::open_existing(&root).unwrap().unwrap();
+    let version = version_name(&root, "jitendex");
+    let mut manifest = store.read_manifest("jitendex", &version).unwrap();
+    let dir = version_dir(&root, "jitendex");
+    manifest.corpus.schema -= 1;
+    // Версия, честно собранная под прежней схемой: и манифест, и сам индекс
+    // называют её одну и ту же.
+    {
+        let index = rusqlite::Connection::open(dir.join(store::INDEX_FILE)).unwrap();
+        index
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'corpus_schema'",
+                [manifest.corpus.schema.to_string()],
+            )
+            .unwrap();
+    }
+    let index_digest =
+        japanese_lexicon::upstream::digest_file(&dir.join(store::INDEX_FILE)).unwrap();
+    manifest.corpus.bytes = index_digest.bytes;
+    manifest.corpus.sha256 = index_digest.sha256;
+    store::write_atomic(
+        &dir.join(store::MANIFEST_FILE),
+        &serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    for report in [
+        manager::status(&loc).unwrap(),
+        manager::verify(&loc, &all()).unwrap(),
+    ] {
+        assert!(!report.ok, "{report:#?}");
+        let item = report
+            .dictionaries
+            .iter()
+            .find(|d| d.id == "jitendex")
+            .unwrap();
+        assert_eq!(item.state, State::Corrupt);
+        assert_eq!(item.problems.len(), 1, "{:#?}", item.problems);
+        assert!(
+            item.problems[0].message.contains("схема корпуса"),
+            "{:#?}",
+            item.problems
+        );
+    }
+}
+
 /// Как испорчена прежняя версия: устаревшая схема корпуса или повреждённый
 /// индекс. Обе делают её непригодной как эталон сравнения.
 #[derive(Clone, Copy)]
@@ -1217,7 +1272,6 @@ enum BaselineDamage {
     OutdatedSchema,
     CorruptIndex,
 }
-
 /// Неподходящая прежняя версия не становится эталоном: `update` перестраивает
 /// её из опубликованного артефакта и не сравнивает содержание с недостоверными
 /// счётчиками. Иначе сравнение с ними маскировало бы настоящую причину —
