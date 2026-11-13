@@ -226,7 +226,66 @@ fn installed_summary(store: &Store, id: &str) -> Option<Installed> {
     Some(Installed::from(&manifest, &version, path))
 }
 
+/// Во сколько раз допустимо уменьшение содержимого словаря при обновлении:
+/// кандидат обязан сохранить не менее `1 / RETAINED_CONTENT_FACTOR` прежнего.
+///
+/// Критерий причинный, а не подобранный под тест. Содержимое управляемых
+/// словарей — курируемые корпуса: JMdict, JMnedict и KANJIDIC собирает EDRDG,
+/// частотные метаданные — jpdb.io. Их выпуски правят статьи точечно и в целом
+/// растут, поэтому потеря половины и более записей означает не редактуру, а
+/// усечённый артефакт: оборванную выгрузку, чужой или частично собранный
+/// набор данных. Границы применимости: сравнение относительное и включается
+/// только при исправной прежней версии той же схемы корпуса с ненулевым
+/// содержанием; при первом `install` сравнивать не с чем. Абсолютного порога
+/// «не меньше N записей» нет намеренно: у словарей разный масштаб данных, и
+/// единое число запретило бы законный маленький словарь, ничего не сказав о
+/// потере относительно прежней версии.
+const RETAINED_CONTENT_FACTOR: u64 = 2;
+
+/// Аномальное сокращение содержимого кандидата против прежней исправной
+/// версии: сообщение для диагностики либо `None`, если потеря допустима.
+///
+/// Показатели берутся у [`index::content_amount`] — по роли источника, а не
+/// одной константой на все словари. Полная потеря чтений у источника,
+/// который их извлекает, отвергается раньше как [`index::ContentDefect`].
+/// Нулевая прежняя величина отказа не даёт: относительное сравнение с пустой
+/// базой ничего не измеряет, а `update` берёт эталоном только исправную
+/// версию, у которой обязательный банк заведомо непуст.
+fn anomalous_shrinkage(
+    source: &Source,
+    baseline: &Manifest,
+    candidate: &BuildStats,
+) -> Option<String> {
+    let previous = index::content_amount(source, &baseline.corpus.stats);
+    let current = index::content_amount(source, candidate);
+    let mut amounts = vec![(
+        "записей обязательных банков",
+        current.records,
+        previous.records,
+    )];
+    if let (Some(now), Some(before)) = (current.readings, previous.readings) {
+        amounts.push(("пригодных чтений", now, before));
+    }
+    let lost: Vec<String> = amounts
+        .into_iter()
+        .filter(|(_, now, before)| now.saturating_mul(RETAINED_CONTENT_FACTOR) < *before)
+        .map(|(label, now, before)| format!("{label} {now} против {before}"))
+        .collect();
+    if lost.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "содержимое архива аномально меньше активной исправной версии (revision {}): {} — потеряно больше половины; кандидат не активируется",
+        baseline.index_json.revision,
+        lost.join(", ")
+    ))
+}
+
 /// Проверка архива, построение индекса и манифест в каталоге staging.
+///
+/// `baseline` — активная исправная версия того же словаря, если она есть:
+/// она задаёт планку полноты для кандидата и позволяет не перестраивать
+/// индекс, когда скачанный архив совпал с ней по SHA-256.
 fn prepare(
     staging: &Path,
     source: &Source,
@@ -234,6 +293,7 @@ fn prepare(
     digest: &FileDigest,
     checked_at: &str,
     options: &Options,
+    baseline: Option<&Manifest>,
 ) -> Result<Manifest> {
     let archive_path = staging.join(store::ARCHIVE_FILE);
     let (mut archive, inspection) = Archive::open(&archive_path, source, options.limits)?;
@@ -258,6 +318,24 @@ fn prepare(
     meta.insert("revision".to_owned(), inspection.index.revision.clone());
     meta.insert("title".to_owned(), inspection.index.title.clone());
     let stats = index::build(&mut archive, &inspection, source, &index_path, &meta)?;
+    // Содержательная полнота: обязательный банк, в котором нет ни одной
+    // записи, и лексический корпус без единого чтения — это не словарь.
+    // Проверка до манифеста и до активации, чтобы синтаксически верный
+    // неполный архив не заменил рабочий.
+    if let Some(defect) = index::content_defect(source, &stats) {
+        return Err(Error::format(format!(
+            "архив отклонён для словаря {}: {}; неполный словарь не активируется",
+            source.id,
+            defect.describe()
+        )));
+    }
+    // Аномальное сокращение относительно прежней исправной версии: тот же
+    // отказ до манифеста и активации, поэтому прежний корпус и реестр целы.
+    if let Some(baseline) = baseline
+        && let Some(message) = anomalous_shrinkage(source, baseline, &stats)
+    {
+        return Err(Error::new(Code::UpstreamUnexpected, message));
+    }
     let index_digest = upstream::digest_file(&index_path)?;
     let manifest = Manifest {
         schema: store::MANIFEST_SCHEMA.into(),
@@ -344,12 +422,16 @@ enum Fetch<'a> {
 }
 
 /// Получает архив в новый каталог staging, собирает и активирует версию.
+///
+/// `baseline` — прежняя исправная версия при обновлении: она отсеивает
+/// аномально сокращённый кандидат и избавляет от переиндексации, когда
+/// скачанный архив совпал с ней по SHA-256. При установке с нуля её нет.
 fn obtain_and_activate(
     store: &Store,
     source: &Source,
     fetch: Fetch<'_>,
     options: &Options,
-    unchanged_if: Option<&str>,
+    baseline: Option<&Manifest>,
 ) -> Result<Option<(String, Manifest)>> {
     let staging = store.new_staging()?;
     let result = (|| {
@@ -395,10 +477,18 @@ fn obtain_and_activate(
                 (artifact, digest)
             }
         };
-        if unchanged_if == Some(digest.sha256.as_str()) {
+        if baseline.is_some_and(|b| b.archive.sha256 == digest.sha256) {
             return Ok(None);
         }
-        let manifest = prepare(&staging, source, &artifact, &digest, &checked_at, options)?;
+        let manifest = prepare(
+            &staging,
+            source,
+            &artifact,
+            &digest,
+            &checked_at,
+            options,
+            baseline,
+        )?;
         let version = activate(store, source, &staging, &manifest)?;
         Ok(Some((version, manifest)))
     })();
@@ -648,12 +738,15 @@ pub fn update(
             }
         };
         // Глубокая проверка: повреждённая активная версия того же артефакта
-        // не считается актуальной, и update её восстанавливает.
-        let healthy = manifest.as_ref().ok().filter(|m| {
+        // не считается актуальной, и update её восстанавливает. Она же —
+        // эталон полноты: испорченный или устаревший корпус не может
+        // служить образцом, а сравнение с ним ещё и маскировало бы причину
+        // — перестроить индекс такой версии важнее, чем измерить потерю.
+        let baseline = manifest.as_ref().ok().filter(|m| {
             m.corpus.schema == CORPUS_SCHEMA
                 && verify_version(&store, source, &version, m, true).is_empty()
         });
-        if let Some(m) = healthy
+        if let Some(m) = baseline
             && matches!(compare(m, &remote).0, Outcome::UpToDate)
         {
             let mut item = ItemReport::new(source.id, Outcome::UpToDate, compare(m, &remote).1);
@@ -662,14 +755,13 @@ pub fn update(
             report.push(item);
             continue;
         }
-        let unchanged_if = healthy.map(|m| m.archive.sha256.clone());
         let remote_copy = remote.clone();
         let mut item = match obtain_and_activate(
             &store,
             source,
             Fetch::Remote(transport, remote),
             options,
-            unchanged_if.as_deref(),
+            baseline,
         ) {
             Ok(Some((version, manifest))) => {
                 let mut item = installed_item(
@@ -769,6 +861,13 @@ fn problem(code: Code, message: impl Into<String>) -> Problem {
 }
 
 /// Проверка одной версии. `deep` — с хешированием и quick_check SQLite.
+///
+/// Собираются все виды проблем, какие удалось установить: неполнота корпуса
+/// не отменяет проверку целостности файлов, иначе вызывающая сторона увидела
+/// бы только дефект содержимого и не узнала о повреждённом архиве или индексе.
+/// Пропускаются только проверки, для которых физическое состояние файлов
+/// делает их заведомо бессмысленными: отсутствующий или неточного размера
+/// файл нечего хешировать и открывать.
 fn verify_version(
     store: &Store,
     source: &Source,
@@ -783,7 +882,14 @@ fn verify_version(
             "недопустимое имя версии в реестре",
         )];
     };
-    if manifest.corpus.schema != CORPUS_SCHEMA {
+    // Устаревшая схема корпуса: перестраивать её — дело `update`, а не
+    // `verify`. Счётчики чужой схемы значат другое, поэтому проверка SQLite
+    // пропускается — иначе тот же порок сообщался бы дважды (манифестом и
+    // отказом `Index::open`) и мог бы дать ложное расхождение счётчиков, —
+    // но целостность файлов проверяется: испорченный файл испорчен при любой
+    // схеме.
+    let schema_outdated = manifest.corpus.schema != CORPUS_SCHEMA;
+    if schema_outdated {
         problems.push(problem(
             Code::IndexCorrupt,
             format!(
@@ -792,29 +898,50 @@ fn verify_version(
             ),
         ));
     }
+    // Содержательная неполнота: версия, установленная до появления проверки,
+    // остаётся активной, `verify` её не исправляет, а только показывает.
+    // `update` такую версию не считает актуальной и либо переустановит рабочий
+    // артефакт, либо откажет на неполном, сохранив прежнюю.
+    if let Some(defect) = index::content_defect(source, &manifest.corpus.stats) {
+        problems.push(problem(
+            Code::InvalidFormat,
+            format!(
+                "в установленном корпусе словаря {} {}: словарь неполон; исправный артефакт вернёт update, иначе удалите словарь и установите заново",
+                source.id,
+                defect.describe()
+            ),
+        ));
+    }
     let archive = dir.join(store::ARCHIVE_FILE);
     let index_path = dir.join(store::INDEX_FILE);
+    let mut file_is_useless = false;
     for (path, bytes) in [
         (&archive, manifest.archive.bytes),
         (&index_path, manifest.corpus.bytes),
     ] {
         match fs::metadata(path) {
             Ok(meta) if meta.len() == bytes => {}
-            Ok(meta) => problems.push(problem(
-                Code::IndexCorrupt,
-                format!(
-                    "{}: {} байт, в манифесте {bytes}",
-                    path.display(),
-                    meta.len()
-                ),
-            )),
-            Err(e) => problems.push(problem(
-                Code::IndexCorrupt,
-                format!("{}: {e}", path.display()),
-            )),
+            Ok(meta) => {
+                file_is_useless = true;
+                problems.push(problem(
+                    Code::IndexCorrupt,
+                    format!(
+                        "{}: {} байт, в манифесте {bytes}",
+                        path.display(),
+                        meta.len()
+                    ),
+                ));
+            }
+            Err(e) => {
+                file_is_useless = true;
+                problems.push(problem(
+                    Code::IndexCorrupt,
+                    format!("{}: {e}", path.display()),
+                ));
+            }
         }
     }
-    if !problems.is_empty() || !deep {
+    if file_is_useless || !deep {
         return problems;
     }
     match upstream::digest_file(&archive) {
@@ -833,7 +960,11 @@ fn verify_version(
         )),
         Err(e) => problems.push(problem(e.code, e.message)),
     }
-    if !problems.is_empty() {
+    // Дальше индекс проверяется, даже если расхождение уже найдено: две
+    // независимые проверки одного файла говорят о разном, и вызывающая
+    // сторона должна видеть обе — и потерю файла, и его порчу. Исключение —
+    // чужая схема корпуса: её счётчики несоизмеримы с нашими.
+    if schema_outdated {
         return problems;
     }
     let checked = Index::open(&index_path).and_then(|index| {

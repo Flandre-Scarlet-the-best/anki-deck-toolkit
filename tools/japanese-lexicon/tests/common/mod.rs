@@ -257,9 +257,56 @@ pub fn jpdb_rows(revision: &str, rows: &[Value]) -> Vec<u8> {
     ])
 }
 
+/// Архив нужного источника с корректным `index.json` и единственным банком,
+/// в котором нет ни одной записи: структурно верный, содержательно пустой.
+pub fn empty_dictionary(title: &str, revision: &str, bank: &str) -> Vec<u8> {
+    zip_bytes(vec![
+        file(
+            "index.json",
+            &json!({"title": title, "format": 3, "revision": revision}),
+        ),
+        file(bank, &json!([])),
+    ])
+}
+
+/// Jitendex-подобный архив ровно с заданными строками банка статей: нужен там,
+/// где проверяется содержание корпуса, а не разбор конкретных статей.
+pub fn jitendex_rows(revision: &str, rows: &[Value]) -> Vec<u8> {
+    zip_bytes(vec![
+        file(
+            "index.json",
+            &json!({"title": format!("Jitendex.org [{revision}]"), "format": 3, "revision": revision}),
+        ),
+        file("term_bank_1.json", &Value::Array(rows.to_vec())),
+    ])
+}
+
+/// Пары написание/чтение для словарей, собранных по числу статей: нужны там,
+/// где проверяется сравнение версий по содержанию, а не поиск.
+pub const LEXICON_PAIRS: [(&str, &str); 9] = [
+    ("学校", "がっこう"),
+    ("今日", "きょう"),
+    ("山", "やま"),
+    ("川", "かわ"),
+    ("本", "ほん"),
+    ("犬", "いぬ"),
+    ("猫", "ねこ"),
+    ("空", "そら"),
+    ("花", "はな"),
+];
+
+/// Jitendex-подобный архив из указанных статей; каждая даёт одно чтение.
+pub fn lexicon_archive(revision: &str, pairs: &[(&str, &str)]) -> Vec<u8> {
+    let rows: Vec<Value> = pairs
+        .iter()
+        .map(|(surface, reading)| json!([surface, reading, "", "", 200, ["meaning"], 1, ""]))
+        .collect();
+    jitendex_rows(revision, &rows)
+}
+
 /// Дублирует запись центрального каталога ZIP: писатель `zip` повторяющихся имён
 /// не создаёт, а читатель объединяет их во внутренней карте, поэтому архив
-/// собирается правкой байтов — дубликат ссылается на тот же local header.
+/// собирается правкой байтов — дубликат ссылается на тот же локальный заголовок.
 pub fn duplicate_central_record(zip: &[u8], name: &str) -> Vec<u8> {
     let eocd = zip.len() - 22;
     let entries = u16::from_le_bytes(zip[eocd + 10..eocd + 12].try_into().unwrap());
@@ -319,7 +366,7 @@ pub struct Published {
     pub digest_override: Option<String>,
 }
 
-/// Поддельный upstream: те же URL и формы ответов, что у GitHub.
+/// Поддельный источник публикации: те же URL и формы ответов, что у GitHub.
 pub struct FakeUpstream {
     pub published: Mutex<BTreeMap<&'static str, Published>>,
     pub overrides: Mutex<BTreeMap<String, Reply>>,
