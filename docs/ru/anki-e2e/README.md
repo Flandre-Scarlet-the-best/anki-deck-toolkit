@@ -31,6 +31,7 @@ cargo run -p anki-e2e -- full
 | `patch` | `patch` | `patch install/status/repair/remove`, стёртый bootstrap, повреждённый payload, изменённый upstream, `restore`, загрузка после перезапуска |
 | `crowdanki` | `crowdanki` | настоящие export/import с PNG, диалог CrowdAnki (OK и Cancel), отказы предвалидации, перенос в чистую базу с сохранением GUID, `ready` |
 | `run --scenarios input_export` | `input_export` (также в `full`) | настоящий `sync-input`, две корневые колоды и дочерняя с другой моделью, физические SHA, V1→V2→V3, независимый output, повтор и рестарт, одноимённые профили разных баз |
+| `run --scenarios roundtrip` | `roundtrip` (также в `full`) | полный цикл: V1 в input, `prepare_first`, правка B штатным `edit`, `publish-output --apply` с подтверждённым диалогом CrowdAnki и readback (`published`, PNG/MP3 SHA), правка в Anki V3 → `sync-input` → `refresh_unchanged`; отмена диалога, изменение Anki после подготовки, удаление заметки в JSON (`readback_mismatch`) |
 | `process` | `process` | `launch/restart/stop`, отказ при модальном окне и busy, смерть процесса, чужой процесс |
 | `errors` | `errors` | отказ в установщике, отключённый аддон, чужой слушатель порта, чужой профиль, сломанный аддон |
 | `gui` | `addons`, `crowdanki` | основные штатные диалоги и уведомления |
@@ -608,6 +609,8 @@ evidence и пароль VNC, `anki-e2e-real-site-downloads` — загрузк�
 `desktop.md`. Он не читает и не пишет пользовательские `Anki2`, `decks/**` и
 `.asset-store/`. `input_export` создаёт отдельный синтетический репозиторий
 внутри контейнера: `input` публикует и проверяет только production-владелец,
-стенд сверяет его inventory с живым job и известным PNG. Набор расширяется новым сценарием в
-`src/agent/scenarios.rs` без изменения Docker-архитектуры — например, для
-дальнейшего обмена `input → output → Anki`.
+стенд сверяет его inventory с живым job и известным PNG. `roundtrip` так же
+работает в собственном синтетическом репозитории: содержимое Anki стенд
+сверяет через upstream AnkiConnect, рабочую копию — через файлы `output`, а
+подтверждения — через `exchange-status` и `input-status`. Набор расширяется
+новым сценарием в `src/agent/scenarios.rs` без изменения Docker-архитектуры.

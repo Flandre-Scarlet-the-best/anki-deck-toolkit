@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod input_export;
+mod roundtrip;
 
 pub type Outcome = Result<(), Fail>;
 
@@ -1504,6 +1505,7 @@ pub fn by_name(name: &str) -> Option<fn(&mut Ctx, &mut Fixtures) -> Outcome> {
         "patch" => patch,
         "crowdanki" => crowdanki,
         "input_export" => input_export::run,
+        "roundtrip" => roundtrip::run,
         "process" => process,
         "errors" => errors,
         _ => return None,

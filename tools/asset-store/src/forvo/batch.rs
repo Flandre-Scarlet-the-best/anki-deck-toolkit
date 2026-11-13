@@ -1,8 +1,8 @@
 //! Forvo-пакет сохраняет полученные байты до импорта, используя единственный SafeBatchRuntime.
 use super::brave::fetch::{self as brave_fetch, BraveOptions, BraveSession, BrowserBinding};
 use super::{
-    Acquisition, ForvoEvidence, ForvoSession, acquire, import_acquisition, pauses_batch,
-    provider_code,
+    Acquisition, Attempt, Candidate, Collection, ForvoEvidence, ForvoSession, acquire,
+    import_acquisition, pauses_batch, provider_code,
 };
 use crate::{
     AssetError, AssetStore, ErrorCode,
@@ -61,11 +61,17 @@ pub struct FetchPlan {
     pub schema_version: u32,
     pub items: Vec<FetchItem>,
 }
+/// Элемент плана. С `reading` — прежний путь: одна лучшая запись и импорт в
+/// `pronunciation_audio` пары. Без `reading` — полный сбор: все пригодные
+/// записи японского блока точной страницы `surface` сохраняются как исходники
+/// без чтения и без импорта; чтения устанавливает последующий анализ.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FetchItem {
     pub surface: String,
-    pub reading: String,
+    #[serde(default)]
+    pub reading: Option<String>,
+    #[serde(default)]
     pub replace_expected_sha256: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,13 +126,61 @@ pub struct StoredAcquisition {
     pub blob: RuntimeBlobRef,
     pub evidence: ForvoEvidence,
 }
+/// Наблюдения полного сбора: записи блока и доказанные отказы отдельных
+/// записей. Неудача одной записи не скрывает остальные.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionReport {
+    pub candidates: Vec<Candidate>,
+    pub rejected: Vec<Attempt>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
-    pub request: Pronunciation,
+    /// Пара прежнего пути (одна запись и импорт в домен).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<Pronunciation>,
+    /// Написание полного сбора без чтения.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
     pub replace_expected_sha256: Option<String>,
     pub acquisition: Option<StoredAcquisition>,
+    /// Записи полного сбора: у каждой собственные байты и свидетельство.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collected: Vec<StoredAcquisition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<CollectionReport>,
     pub outcome: Option<Failure>,
+}
+
+impl Item {
+    /// Написание точной страницы Forvo — единственный вход получения.
+    pub fn surface(&self) -> &str {
+        match (&self.request, &self.surface) {
+            (Some(request), _) => &request.surface,
+            (None, Some(surface)) => surface,
+            (None, None) => "",
+        }
+    }
+
+    /// Элемент полного сбора по написанию без чтения.
+    pub fn collects(&self) -> bool {
+        self.request.is_none()
+    }
+
+    /// ID уже обработанных записей: возобновление их не скачивает повторно.
+    pub fn collected_ids(&self) -> std::collections::BTreeSet<String> {
+        self.collected
+            .iter()
+            .map(|c| c.evidence.selected_record_id.clone())
+            .chain(
+                self.collection
+                    .iter()
+                    .flat_map(|c| c.rejected.iter().map(|a| a.record_id.clone())),
+            )
+            .collect()
+    }
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -179,10 +233,12 @@ impl RuntimeBatchState for ForvoBatch {
     fn maximum_blob_bytes(&self) -> u64 {
         MAX_AUDIO_BYTES
     }
+    /// Каждый MP3 состояния: одиночное получение и все записи полного сбора.
     fn referenced_blobs(&self) -> Vec<RuntimeBlobRef> {
         self.items
             .iter()
-            .filter_map(|i| i.acquisition.as_ref().map(|a| a.blob.clone()))
+            .flat_map(|i| i.acquisition.iter().chain(&i.collected))
+            .map(|a| a.blob.clone())
             .collect()
     }
     fn validate(&self) -> Result<(), AssetError> {
@@ -212,8 +268,29 @@ impl RuntimeBatchState for ForvoBatch {
         }
         let mut seen = std::collections::BTreeSet::new();
         for item in &self.items {
-            if Pronunciation::from_identity(&item.request.identity())? != item.request
-                || !seen.insert(item.request.identity())
+            let key = match (&item.request, &item.surface) {
+                (Some(request), None) => {
+                    if Pronunciation::from_identity(&request.identity())? != *request
+                        || !item.collected.is_empty()
+                        || item.collection.is_some()
+                    {
+                        return Err(invalid());
+                    }
+                    request.identity().key
+                }
+                (None, Some(surface)) => {
+                    if crate::pronunciation::selection::normalize_forvo_surface(surface)?
+                        != *surface
+                        || item.acquisition.is_some()
+                        || item.replace_expected_sha256.is_some()
+                    {
+                        return Err(invalid());
+                    }
+                    format!("surface:{surface}")
+                }
+                _ => return Err(invalid()),
+            };
+            if !seen.insert(key)
                 || item
                     .replace_expected_sha256
                     .as_deref()
@@ -224,14 +301,26 @@ impl RuntimeBatchState for ForvoBatch {
             if let Some(acquisition) = &item.acquisition {
                 acquisition
                     .evidence
-                    .validate(&item.request, &acquisition.blob.sha256)?;
+                    .validate(item.surface(), &acquisition.blob.sha256)?;
+            }
+            let mut records = std::collections::BTreeSet::new();
+            for collected in &item.collected {
+                collected
+                    .evidence
+                    .validate(item.surface(), &collected.blob.sha256)?;
+                if collected.evidence.acquisition_mode.as_deref() != Some(super::COLLECT_ALL_MODE)
+                    || !records.insert(collected.evidence.selected_record_id.as_str())
+                {
+                    return Err(invalid());
+                }
             }
             if let Some(outcome) = &item.outcome
                 && (outcome.code.is_empty()
                     || outcome.code.len() > 80
                     || outcome.message.is_empty()
                     || outcome.message.len() > 2048
-                    || outcome.code == "imported" && item.acquisition.is_none())
+                    || outcome.code == "imported" && item.acquisition.is_none()
+                    || outcome.code == "collected" && item.collected.is_empty())
             {
                 return Err(invalid());
             }
@@ -281,10 +370,42 @@ fn start_inner(
         .items
         .into_iter()
         .map(|i| {
+            let (request, surface) = match &i.reading {
+                Some(reading) => (Some(Pronunciation::new(&i.surface, reading)?), None),
+                None => {
+                    if i.replace_expected_sha256.is_some() {
+                        return Err(AssetError::new(
+                            ErrorCode::InvalidIdentity,
+                            "полный сбор по написанию ничего не импортирует: replace_expected_sha256 без reading недопустим",
+                        ));
+                    }
+                    let surface =
+                        crate::pronunciation::selection::normalize_forvo_surface(&i.surface)?;
+                    // Собранные записи потом связываются с парами этого написания:
+                    // имя `<surface>.mp3`, которое `Pronunciation` не примет
+                    // (имя устройства, длина), отвергается до скачивания. Только
+                    // здесь, а не в проверке состояния: сохранённые пакеты
+                    // продолжают загружаться.
+                    crate::domain::validate_safe_consumer_filename(
+                        &format!("{surface}.mp3"),
+                        crate::DetectedFormat::Mp3,
+                    )
+                    .map_err(|_| {
+                        AssetError::new(
+                            ErrorCode::InvalidIdentity,
+                            "написание не представимо безопасным именем страницы и файла",
+                        )
+                    })?;
+                    (None, Some(surface))
+                }
+            };
             Ok(Item {
-                request: Pronunciation::new(&i.surface, &i.reading)?,
+                request,
+                surface,
                 replace_expected_sha256: i.replace_expected_sha256,
                 acquisition: None,
+                collected: Vec::new(),
+                collection: None,
                 outcome: None,
             })
         })
@@ -428,6 +549,36 @@ fn bound_options(
     Ok(options)
 }
 
+/// Закрепляет за пакетом подключённую сессию Brave: первую — всегда, а
+/// привязку без `instance_id` (расширение до 0.3) дополняет экземпляром, если
+/// прежняя привязка принимает текущую сессию. Общая для получения и полного
+/// сбора, чтобы ни одна ветка не продолжала пакет с другим экземпляром после
+/// `setup --repin`. Возвращает `true`, если привязка изменилась.
+fn bind_session(batch: &mut ForvoBatch, session: Option<&Session>, stage: &str) -> bool {
+    let Some(Session::Brave(brave)) = session else {
+        return false;
+    };
+    bind_browser(batch, brave.binding(), stage)
+}
+
+pub(super) fn bind_browser(batch: &mut ForvoBatch, actual: BrowserBinding, stage: &str) -> bool {
+    let record = match &batch.browser {
+        None => true,
+        Some(bound) => {
+            bound.instance_id.is_none() && actual.instance_id.is_some() && bound.accepts(&actual)
+        }
+    };
+    if record {
+        tracing::info!(event = "forvo_batch_browser_bound", stage, target = %actual.target,
+            browser = actual.browser.id(), "Пакет закреплён за браузерной сессией");
+        batch.browser = Some(actual);
+        if batch.schema_version == 2 {
+            batch.schema_version = 3;
+        }
+    }
+    record
+}
+
 /// Сессия выбранного транспорта; открывается лениво, только если элементу нужны байты.
 enum Session {
     Cdp(Box<ForvoSession>),
@@ -523,7 +674,7 @@ async fn acquire_item(
     match session {
         Session::Cdp(session) => (
             tokio::select! {
-                r = acquire(session, request) => r,
+                r = acquire(session, &request.surface) => r,
                 _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume")),
                 r = cancellation(store, id) => { if let Err(e) = r { Err(e) } else { Err(AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён")) } },
             },
@@ -532,7 +683,7 @@ async fn acquire_item(
         Session::Brave(session) => {
             let (tx, rx) = tokio::sync::watch::channel(false);
             session.set_interrupt(Some(rx));
-            let work = brave_fetch::acquire(session, request);
+            let work = brave_fetch::acquire(session, &request.surface);
             tokio::pin!(work);
             let stop = tokio::select! {
                 r = &mut work => return (r, None),
@@ -580,6 +731,239 @@ async fn finish_interrupted(
             )
         }
     }
+}
+
+/// Полный сбор одного написания с наблюдением Ctrl+C и `batch-cancel`.
+/// Частичный результат не теряется: сбор пишет записи во внешний
+/// `Collection`, поэтому завершённые записи переживают сброс future, а
+/// остановка становится причиной паузы.
+async fn collect_item(
+    session: &mut Session,
+    store: &AssetStore,
+    id: &str,
+    surface: &str,
+    skip: &std::collections::BTreeSet<String>,
+) -> Collection {
+    let mut collection = Collection::default();
+    let stop = match session {
+        Session::Cdp(session) => {
+            let signal = async {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => AssetError::new(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume"),
+                    r = cancellation(store, id) => r.err().unwrap_or_else(|| AssetError::new(ErrorCode::Interrupted, "Forvo-пакет отменён")),
+                }
+            };
+            run_collection(
+                super::collect(session, surface, skip, &mut collection),
+                signal,
+                None,
+            )
+            .await
+        }
+        Session::Brave(session) => {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            session.set_interrupt(Some(rx));
+            let signal = async {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет прерван; продолжите через batch-resume цели",
+                        serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
+                    r = cancellation(store, id) => match r {
+                        Err(e) => e,
+                        Ok(()) => AssetError::with_details(ErrorCode::Interrupted, "Forvo-пакет отменён",
+                            serde_json::json!({"provider":"forvo_brave","code":"interrupted"})),
+                    },
+                }
+            };
+            run_collection(
+                brave_fetch::acquire_collection(session, surface, skip, &mut collection),
+                signal,
+                Some((tx, BRAVE_INTERRUPT_GRACE)),
+            )
+            .await
+        }
+    };
+    if let Some(stop) = stop {
+        collection.stop = Some(stop);
+    }
+    collection
+}
+
+/// Выполняет сбор до завершения или сигнала остановки и возвращает остановку,
+/// если она пришла. Без `cooperative` (CDP) future сбора сразу сбрасывается.
+/// С ним (расширение) сессии передаётся прерывание и даётся `grace` на
+/// освобождение собственной загрузки; по истечении — остановка с
+/// `recovery_required`. Записи, уже переданные сбором во внешний
+/// `Collection`, в обоих случаях сохраняются.
+pub(super) async fn run_collection(
+    work: impl std::future::Future<Output = ()>,
+    signal: impl std::future::Future<Output = AssetError>,
+    cooperative: Option<(tokio::sync::watch::Sender<bool>, Duration)>,
+) -> Option<AssetError> {
+    tokio::pin!(work);
+    let stop = tokio::select! {
+        () = &mut work => return None,
+        stop = signal => stop,
+    };
+    let Some((interrupt, grace)) = cooperative else {
+        return Some(stop);
+    };
+    tracing::warn!(
+        event = "brave_batch_stop_requested",
+        stage = "collect",
+        code = provider_code(&stop),
+        "Получена остановка; собственная операция загрузки освобождается"
+    );
+    let _ = interrupt.send(true);
+    match tokio::time::timeout(grace, work).await {
+        Ok(()) => Some(stop),
+        Err(_) => {
+            let mut stop = stop;
+            stop.details["recovery_required"] = serde_json::json!(true);
+            Some(stop)
+        }
+    }
+}
+
+/// Сбор, остановленный неудачным закрытием браузера (например, после
+/// неуспешного интерактивного восстановления входа), может уже содержать
+/// проверенные записи: они фиксируются до возврата исходной ошибки, чтобы
+/// `batch-resume` не скачивал их повторно. Ошибка фиксации добавляется к
+/// сведениям об очистке. Без такой остановки сбор возвращается как есть.
+pub(super) fn checkpoint_before_cleanup_failure(
+    runtime: &mut SafeBatchRuntime,
+    batch: &mut ForvoBatch,
+    index: usize,
+    collection: Collection,
+) -> Result<Collection, AssetError> {
+    let Some(mut error) = collection
+        .stop
+        .as_ref()
+        .filter(|e| !e.details["browser_cleanup"].is_null())
+        .map(|e| AssetError::with_details(e.code, e.message.clone(), e.details.clone()))
+    else {
+        return Ok(collection);
+    };
+    if let Err(save) = checkpoint_collection(runtime, batch, index, collection) {
+        error.details["browser_cleanup"]["checkpoint_error"] = serde_json::json!({
+            "code": save.code.as_str(), "message": save.message, "details": save.details
+        });
+    }
+    Err(error)
+}
+
+/// Фиксирует результат полного сбора: байты каждой записи — отдельным blob
+/// (одинаковые байты хранятся один раз, свидетельства — у каждой записи),
+/// отказы записей — в отчёте сбора, остановка — паузой пакета.
+pub(super) fn checkpoint_collection(
+    runtime: &mut SafeBatchRuntime,
+    batch: &mut ForvoBatch,
+    index: usize,
+    collection: Collection,
+) -> Result<AcquisitionProgress, AssetError> {
+    let item = &mut batch.items[index];
+    let mut report = item.collection.take().unwrap_or_default();
+    if let Some(candidates) = collection.candidates {
+        report.candidates = candidates;
+    }
+    for record in collection.records {
+        if item
+            .collected
+            .iter()
+            .any(|c| c.evidence.selected_record_id == record.evidence.selected_record_id)
+        {
+            continue;
+        }
+        let blob = runtime.persist_blob_with_limit(&record.bytes, "mp3", MAX_AUDIO_BYTES)?;
+        item.collected.push(StoredAcquisition {
+            blob,
+            evidence: record.evidence,
+        });
+    }
+    for attempt in collection.rejected {
+        if !report
+            .rejected
+            .iter()
+            .any(|a| a.record_id == attempt.record_id)
+        {
+            report.rejected.push(attempt);
+        }
+    }
+    item.collection = Some(report);
+    if batch.cancelled {
+        // Отмена запрещает продолжение, но не стирает завершённые записи: они
+        // фиксируются, а `paused` и `outcome` остаются как у отменённого пакета.
+        tracing::warn!(
+            event = "forvo_batch_cancelled",
+            stage = "collect",
+            "Пакет Forvo отменён; завершённые записи сохранены"
+        );
+        batch.revision += 1;
+        runtime.save(batch)?;
+        return Ok(AcquisitionProgress::Paused);
+    }
+    let progress = match collection.stop {
+        Some(e) if pauses_batch(&e) || e.code == ErrorCode::Interrupted => {
+            tracing::warn!(
+                event = "forvo_batch_paused",
+                stage = "collect",
+                code = provider_code(&e),
+                "Пакет Forvo приостановлен; собранные записи сохранены"
+            );
+            batch.paused = Some(e.into());
+            AcquisitionProgress::Paused
+        }
+        // Уже собранные записи (например, до паузы) определяют итог элемента:
+        // последующая ошибка страницы не превращает его в отказ, а остаётся
+        // в сообщении итога.
+        Some(e) if !item.collected.is_empty() => {
+            item.outcome = Some(Failure {
+                code: "collected".into(),
+                message: format!(
+                    "Собрано записей: {}; дальнейший сбор остановлен ({}); чтения не установлены — их определяет анализ selection",
+                    item.collected.len(),
+                    provider_code(&e)
+                ),
+                recovery_required: false,
+                report: None,
+            });
+            batch.paused = None;
+            AcquisitionProgress::Ready
+        }
+        Some(e) => {
+            item.outcome = Some(e.into());
+            batch.paused = None;
+            AcquisitionProgress::Rejected
+        }
+        None if item.collected.is_empty() => {
+            item.outcome = Some(Failure {
+                code: "no_records_collected".into(),
+                message: "В японском блоке точного слова нет записи с проверенным MP3".into(),
+                recovery_required: false,
+                report: item.collection.as_ref().map(|c| CandidateReport {
+                    candidates: c.candidates.clone(),
+                    attempts: c.rejected.clone(),
+                }),
+            });
+            batch.paused = None;
+            AcquisitionProgress::Rejected
+        }
+        None => {
+            item.outcome = Some(Failure {
+                code: "collected".into(),
+                message: format!(
+                    "Собрано записей: {}; чтения не установлены — их определяет анализ selection",
+                    item.collected.len()
+                ),
+                recovery_required: false,
+                report: None,
+            });
+            batch.paused = None;
+            AcquisitionProgress::Ready
+        }
+    };
+    batch.revision += 1;
+    runtime.save(batch)?;
+    Ok(progress)
 }
 
 /// Единая граница фиксации результата получения; до Ready импорт невозможен.
@@ -718,9 +1102,84 @@ pub async fn resume_prepared(
             }
             let timer = BrowserItemTimer::new(BrowserItemContext::without_generation(
                 "forvo_web",
-                &batch.items[index].request.surface,
+                batch.items[index].surface(),
                 1,
             ));
+            if batch.items[index].collects() {
+                let stage = timer.stage("collect");
+                let surface = batch.items[index].surface().to_owned();
+                let skip = batch.items[index].collected_ids();
+                runtime.release_lock()?;
+                let launched = if session.is_none() {
+                    launch(store, id, &backend).await.map(|s| {
+                        session = Some(s);
+                    })
+                } else {
+                    Ok(())
+                };
+                let mut collection = match launched {
+                    Err(e) => Collection {
+                        stop: Some(e),
+                        ..Collection::default()
+                    },
+                    Ok(()) => {
+                        collect_item(
+                            session.as_mut().expect("session"),
+                            store,
+                            id,
+                            &surface,
+                            &skip,
+                        )
+                        .await
+                    }
+                };
+                if session
+                    .as_ref()
+                    .is_some_and(|s| matches!(s, Session::Brave(s) if s.recovery_required()))
+                {
+                    let stop = collection.stop.get_or_insert_with(|| {
+                        AssetError::with_details(
+                            ErrorCode::Interrupted,
+                            "Собранные байты сохранены; требуется освобождение собственной загрузки при следующем сопряжении",
+                            serde_json::json!({"code":"cleanup_incomplete"}),
+                        )
+                    });
+                    stop.details["recovery_required"] = serde_json::json!(true);
+                }
+                runtime.reacquire_lock()?;
+                batch = reload_after_acquisition(&mut runtime)?;
+                // Сохраняется вместе с фиксацией сбора ниже.
+                bind_session(&mut batch, session.as_ref(), "collect");
+                let collection =
+                    checkpoint_before_cleanup_failure(&mut runtime, &mut batch, index, collection)?;
+                // Завершённые записи фиксируются и при отмене пакета.
+                let cancelled = batch.cancelled;
+                let code = collection.stop.as_ref().map(|e| provider_code(e).to_owned());
+                let progress = checkpoint_collection(&mut runtime, &mut batch, index, collection)?;
+                if cancelled {
+                    break;
+                }
+                match progress {
+                    AcquisitionProgress::Ready => {
+                        stage.finish_success();
+                        timer.finish_success();
+                        done += 1;
+                    }
+                    AcquisitionProgress::Paused => {
+                        let code = code.unwrap_or_default();
+                        stage.finish_failure(&code, true, None);
+                        timer.finish_failure(&code, true, None);
+                        break;
+                    }
+                    AcquisitionProgress::Rejected => {
+                        let code = code.unwrap_or_else(|| "no_records_collected".into());
+                        stage.finish_failure(&code, false, None);
+                        timer.finish_failure(&code, false, None);
+                        done += 1;
+                    }
+                }
+                continue;
+            }
             if batch.items[index].acquisition.is_none() {
                 let stage = timer.stage("acquire");
                 runtime.release_lock()?;
@@ -738,7 +1197,7 @@ pub async fn resume_prepared(
                             session.as_mut().expect("session"),
                             store,
                             id,
-                            &batch.items[index].request,
+                            batch.items[index].request.as_ref().expect("пара прежнего пути"),
                         )
                         .await
                     }
@@ -764,22 +1223,9 @@ pub async fn resume_prepared(
                 runtime.reacquire_lock()?;
                 batch = reload_after_acquisition(&mut runtime)?;
                 // Первая подключённая сессия закрепляется за пакетом.
-                if let Some(Session::Brave(brave)) = &session {
-                    let actual = brave.binding();
-                    let record = match &batch.browser {
-                        None => true,
-                        Some(bound) => bound.instance_id.is_none() && actual.instance_id.is_some() && bound.accepts(&actual),
-                    };
-                    if record {
-                        tracing::info!(event = "forvo_batch_browser_bound", stage = "acquire", target = %actual.target,
-                            browser = actual.browser.id(), "Пакет закреплён за браузерной сессией");
-                        batch.browser = Some(actual);
-                        if batch.schema_version == 2 {
-                            batch.schema_version = 3;
-                        }
-                        batch.revision += 1;
-                        runtime.save(&batch)?;
-                    }
+                if bind_session(&mut batch, session.as_ref(), "acquire") {
+                    batch.revision += 1;
+                    runtime.save(&batch)?;
                 }
                 if let Err(e) = &acquisition
                     && !e.details["browser_cleanup"].is_null()
@@ -823,10 +1269,11 @@ pub async fn resume_prepared(
             let item = &batch.items[index];
             let stage = timer.stage("import_mp3");
             let saved = item.acquisition.as_ref().expect("checkpoint");
+            let request = item.request.as_ref().expect("пара прежнего пути");
             let result = runtime.read_blob(&saved.blob).and_then(|bytes| {
                 import_acquisition(
                     store,
-                    &item.request,
+                    request,
                     &Acquisition {
                         bytes,
                         evidence: saved.evidence.clone(),
@@ -946,7 +1393,7 @@ mod cleanup_tests {
                 schema_version: 1,
                 items: vec![FetchItem {
                     surface: "水".into(),
-                    reading: "みず".into(),
+                    reading: Some("みず".into()),
                     replace_expected_sha256: None,
                 }],
             },
@@ -1005,7 +1452,7 @@ mod cleanup_tests {
                 schema_version: 1,
                 items: vec![FetchItem {
                     surface: "水".into(),
-                    reading: "みず".into(),
+                    reading: Some("みず".into()),
                     replace_expected_sha256: None,
                 }],
             },
@@ -1057,7 +1504,7 @@ mod browser_target_tests {
             schema_version: 1,
             items: vec![FetchItem {
                 surface: "水".into(),
-                reading: "みず".into(),
+                reading: Some("みず".into()),
                 replace_expected_sha256: None,
             }],
         };

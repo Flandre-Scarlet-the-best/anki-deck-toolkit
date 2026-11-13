@@ -4,6 +4,7 @@
 //! повторяются, кэш результатов переиспользуется без вызова моделей, отчёт и
 //! повторная проверка входа. Настоящий инференс проверяют тесты
 //! `tools/speech-recognize`, решения распознавания — модульные тесты.
+use asset_store::hashing::sha256_hex;
 use asset_store::temp_workspace::TempWorkspace;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -683,4 +684,666 @@ fn eval_refuses_invalid_labels_before_creating_the_report() {
         }
         assert!(!out.exists(), "{name}");
     }
+}
+
+fn selection(f: &Fixture, args: &[&str]) -> Output {
+    Command::new(BIN)
+        .arg("selection")
+        .args(args)
+        .current_dir(&f.root)
+        .output()
+        .unwrap()
+}
+
+/// Сквозной путь без карточек: пакет распознавания → приём исходников без
+/// чтения → связь с результатами (без вызова моделей) → пакет свидетельств →
+/// авто-выбор без вопросов → обзор → адресный ответ пользователя → чтение по
+/// явной политике. `decks/**` не открывается.
+#[test]
+fn selection_links_recognizer_results_without_cards_and_routes_decisions() {
+    let f = fixture();
+    let targets = manifest(&f);
+    let mut start: Vec<String> = vec![
+        "--input".into(),
+        f.input.to_str().unwrap().into(),
+        "--targets".into(),
+        targets.to_str().unwrap().into(),
+        "--enhancer".into(),
+        "none".into(),
+    ];
+    start.extend(models_args(&f));
+    let refs: Vec<&str> = start.iter().map(String::as_str).collect();
+    let started = run(&f, "batch-start", &refs);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stdout)
+    );
+
+    // Защищённые данные не читаются даже как каталог исходников: пригодный
+    // MP3 внутри `decks/` отвергается по границе, а не по пустому набору.
+    fs::create_dir_all(f.root.join("decks")).unwrap();
+    fs::copy(f.input.join("生.mp3"), f.root.join("decks/生.mp3")).unwrap();
+    fs::write(f.root.join("AGENTS.md"), b"").unwrap();
+    let refused = selection(&f, &["intake", "--batch-id", "sel", "--dir", "decks"]);
+    assert!(!refused.status.success());
+    assert_eq!(
+        json(&refused)["error"]["code"],
+        "boundary_violation",
+        "{}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    // Хранилище по умолчанию: `--repository-root` = текущий каталог, без `--store`.
+    assert!(
+        !f.root
+            .join(".asset-store/pronunciation-audio/.runtime/batches/sel/state.json")
+            .exists(),
+        "отвергнутый приём не создаёт пакет"
+    );
+
+    let intake = json(&selection(
+        &f,
+        &[
+            "intake",
+            "--batch-id",
+            "sel",
+            "--dir",
+            f.input.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(intake["outcome"], "ok", "{intake}");
+    assert!(
+        f.root
+            .join(".asset-store/pronunciation-audio/.runtime/batches/sel/state.json")
+            .exists(),
+        "проверяемый путь пакета принадлежит фактическому хранилищу"
+    );
+    assert_eq!(
+        intake["result"]["added"].as_array().unwrap().len(),
+        2,
+        "{intake}"
+    );
+    assert_eq!(
+        intake["result"]["already_present"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let before = calls(&f).len();
+    let linked = json(&selection(
+        &f,
+        &[
+            "link-recognizer",
+            "--batch-id",
+            "sel",
+            "--workspace",
+            f.workspace.to_str().unwrap(),
+            "--recognizer-batch",
+            "b1",
+        ],
+    ));
+    assert_eq!(linked["outcome"], "ok", "{linked}");
+    assert_eq!(linked["result"]["links_created"], 2, "{linked}");
+    assert_eq!(linked["result"]["free_analyses"], 1, "{linked}");
+    assert_eq!(calls(&f).len(), before, "связывание не вызывает модели");
+
+    let status = json(&selection(
+        &f,
+        &["status", "--batch-id", "sel", "--filter", "all"],
+    ));
+    assert_eq!(status["result"]["groups"], 2, "{status}");
+    assert!(
+        status["result"]["perception_notice"]
+            .as_str()
+            .unwrap()
+            .contains("не прослушивание")
+    );
+    let auto = json(&selection(&f, &["auto-select", "--batch-id", "sel"]));
+    assert_eq!(auto["outcome"], "ok", "{auto}");
+    assert_eq!(auto["result"]["selected_deterministic"], 0, "{auto}");
+
+    let export = json(&selection(
+        &f,
+        &["review-export", "--batch-id", "sel", "--filter", "all"],
+    ));
+    assert_eq!(export["outcome"], "ok", "{export}");
+    let index = PathBuf::from(export["result"]["index"].as_str().unwrap());
+    assert!(fs::read_to_string(index).unwrap().contains("<audio"));
+
+    let group = status["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["reading"] == "なま")
+        .unwrap();
+    let candidate = group["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "source_original")
+        .unwrap();
+    let decided = json(&selection(
+        &f,
+        &[
+            "decide",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "なま",
+            "--candidate-id",
+            candidate["assessment"]["candidate_id"].as_str().unwrap(),
+            "--sha256",
+            candidate["addressed_sha256"].as_str().unwrap(),
+            "--authority",
+            "user-via-agent",
+            "--agent-id",
+            "codex-agent",
+            "--channel",
+            "agent-dialog",
+            "--statement",
+            "для なま выберите исходный файл",
+            "--reason",
+            "явный ответ пользователя",
+        ],
+    ));
+    assert_eq!(decided["outcome"], "ok", "{decided}");
+    assert_eq!(
+        decided["result"]["decision"]["authority"]["user_listened"],
+        false
+    );
+    let requests = f.root.join("requests.json");
+    fs::write(
+        &requests,
+        serde_json::to_vec(
+            &serde_json::json!({"schema_version":1,"items":[{"surface":"生","reading":"なま"}]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let read = json(&selection(
+        &f,
+        &[
+            "read",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+        ],
+    ));
+    assert_eq!(read["outcome"], "ok", "{read}");
+    assert_eq!(
+        read["result"]["assets"][0]["consumer_filename"],
+        "生_なま.mp3"
+    );
+    assert!(
+        read["result"]["assets"][0].get("bytes").is_none(),
+        "JSON просмотра не содержит байтов"
+    );
+    // Байты выдаются отдельной явной командой: каталог вывода — само
+    // разрешение потребить запись, повтор идемпотентен, `decks/**` запрещён.
+    let chosen = f.root.join("chosen");
+    let exported = json(&selection(
+        &f,
+        &[
+            "export",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+            "--out-dir",
+            chosen.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(exported["outcome"], "ok", "{exported}");
+    assert_eq!(
+        exported["result"]["exported"][0]["consumer_filename"],
+        "生_なま.mp3"
+    );
+    assert_eq!(exported["result"]["exported"][0]["written"], true);
+    let written = fs::read(chosen.join("生_なま.mp3")).unwrap();
+    assert_eq!(
+        sha256_hex(&written),
+        exported["result"]["exported"][0]["sha256"]
+            .as_str()
+            .unwrap()
+    );
+    assert_eq!(
+        exported["result"]["exported"][0]["sha256"],
+        read["result"]["assets"][0]["sha256"]
+    );
+    let repeated = json(&selection(
+        &f,
+        &[
+            "export",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+            "--out-dir",
+            chosen.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(repeated["result"]["exported"][0]["written"], false);
+    let refused_export = selection(
+        &f,
+        &[
+            "export",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+            "--out-dir",
+            "decks/chosen",
+        ],
+    );
+    assert!(
+        !refused_export.status.success(),
+        "decks/** не каталог вывода"
+    );
+    assert!(!f.root.join("decks/chosen").exists());
+    // Явная связь без распознавания и локальная экспертиза на фейковом воркере
+    // (нулевые эмиссии): вердикт не «поддерживает», цель ждёт пользователя.
+    let sha = candidate["source_sha256"].as_str().unwrap();
+    let linked = json(&selection(
+        &f,
+        &[
+            "link-target",
+            "--batch-id",
+            "sel",
+            "--source-sha256",
+            sha,
+            "--surface",
+            "生",
+            "--reading",
+            "しょう",
+        ],
+    ));
+    assert_eq!(linked["outcome"], "ok", "{linked}");
+    let manual = linked["result"]["link"]["candidates"][0]["candidate_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut audio: Vec<String> = [
+        "audio-review",
+        "--batch-id",
+        "sel",
+        "--candidate-id",
+        &manual,
+        "--enhancer",
+        "none",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    audio.extend(models_args(&f));
+    let refs: Vec<&str> = audio.iter().map(String::as_str).collect();
+    let reviewed = json(&selection(&f, &refs));
+    assert_eq!(reviewed["outcome"], "ok", "{reviewed}");
+    assert_ne!(reviewed["result"]["audio_review"]["verdict"], "supports");
+    assert_eq!(reviewed["result"]["audio_review"]["local"], true);
+    let decide = |extra: &[&str]| {
+        let mut args = vec![
+            "decide",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "しょう",
+            "--agent-id",
+            "codex-agent",
+            "--reason",
+            "проверка",
+        ];
+        args.extend_from_slice(extra);
+        json(&selection(&f, &args))
+    };
+    let missing_review = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--authority",
+        "agent-audio",
+    ]);
+    assert_eq!(missing_review["outcome"], "error", "{missing_review}");
+    let no_statement = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--authority",
+        "user-via-agent",
+        "--channel",
+        "agent-dialog",
+    ]);
+    assert_eq!(no_statement["outcome"], "error", "{no_statement}");
+    let review_id = reviewed["result"]["audio_review"]["review_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let unsupported = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--authority",
+        "agent-audio",
+        "--audio-review-id",
+        &review_id,
+    ]);
+    assert_eq!(
+        unsupported["outcome"], "error",
+        "неподдержанная экспертиза не даёт права выбора"
+    );
+    let rejected = decide(&[
+        "--candidate-id",
+        &manual,
+        "--sha256",
+        sha,
+        "--reject",
+        "--authority",
+        "user-via-agent",
+        "--channel",
+        "agent-dialog",
+        "--statement",
+        "это не しょう",
+    ]);
+    assert_eq!(
+        rejected["result"]["decision"]["action"]["kind"], "reject_candidate",
+        "{rejected}"
+    );
+    let deferred = decide(&[
+        "--defer",
+        "--authority",
+        "user-via-agent",
+        "--channel",
+        "agent-dialog",
+        "--statement",
+        "не знаю, отложите",
+    ]);
+    assert_eq!(
+        deferred["result"]["decision"]["action"]["kind"], "defer",
+        "{deferred}"
+    );
+
+    // Снимок до решений и аудиоэкспертизы устарел, даже если все строки пусты.
+    let review_id = export["result"]["review_id"].as_str().unwrap();
+    let applied = json(&selection(
+        &f,
+        &[
+            "review-apply",
+            "--batch-id",
+            "sel",
+            "--review-id",
+            review_id,
+        ],
+    ));
+    assert_eq!(applied["outcome"], "error", "{applied}");
+    // Новый пустой снимок текущей ревизии применяется без изменений.
+    let fresh = json(&selection(
+        &f,
+        &["review-export", "--batch-id", "sel", "--filter", "all"],
+    ));
+    assert_eq!(fresh["outcome"], "ok", "{fresh}");
+    let fresh_id = fresh["result"]["review_id"].as_str().unwrap();
+    let applied = json(&selection(
+        &f,
+        &["review-apply", "--batch-id", "sel", "--review-id", fresh_id],
+    ));
+    assert_eq!(applied["outcome"], "ok", "{applied}");
+    assert_eq!(applied["result"]["changed"], false);
+    // Файл решений, сохранённый страницей вне каталога снимка, проходит те же
+    // проверки; не-UTF-8 файл отвергается до применения.
+    let saved = f.root.join(format!("decisions-{fresh_id}.tsv"));
+    fs::copy(
+        f.root.join(format!(
+            ".asset-store/pronunciation-audio/.runtime/batches/sel/review-{fresh_id}/decisions.tsv"
+        )),
+        &saved,
+    )
+    .unwrap();
+    let from_page = json(&selection(
+        &f,
+        &[
+            "review-apply",
+            "--batch-id",
+            "sel",
+            "--review-id",
+            fresh_id,
+            "--decisions-file",
+            saved.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(from_page["outcome"], "ok", "{from_page}");
+    assert_eq!(from_page["result"]["changed"], false);
+    fs::write(&saved, [0xff, 0xfe]).unwrap();
+    let broken = json(&selection(
+        &f,
+        &[
+            "review-apply",
+            "--batch-id",
+            "sel",
+            "--review-id",
+            fresh_id,
+            "--decisions-file",
+            saved.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(broken["outcome"], "error", "{broken}");
+    // Материализация без выбранных интервалов ничего не создаёт, а адресная
+    // для пары с выбранным исходником — отказ без изменений.
+    let materialized = json(&selection(&f, &["materialize", "--batch-id", "sel"]));
+    assert_eq!(materialized["outcome"], "ok", "{materialized}");
+    assert!(
+        materialized["result"]["materialized"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let addressed = json(&selection(
+        &f,
+        &[
+            "materialize",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "なま",
+        ],
+    ));
+    assert_eq!(
+        addressed["error"]["code"], "invalid_transition",
+        "{addressed}"
+    );
+    // Явная публикация исходника без заявленного прослушивания: не Verified.
+    let promoted = json(&selection(
+        &f,
+        &[
+            "promote",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "なま",
+        ],
+    ));
+    assert_eq!(promoted["outcome"], "ok", "{promoted}");
+    assert_eq!(promoted["result"]["human_attestation_created"], false);
+    assert_ne!(promoted["result"]["asset"]["lifecycle"], "verified");
+    let refused = json(&selection(
+        &f,
+        &[
+            "promote",
+            "--batch-id",
+            "sel",
+            "--surface",
+            "生",
+            "--reading",
+            "なま",
+            "--attest-heard-decision",
+        ],
+    ));
+    assert_eq!(refused["outcome"], "error");
+
+    // Политика потребителя обязательна: значения по умолчанию нет.
+    let missing = selection(
+        &f,
+        &[
+            "read",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(2));
+
+    // Режим проверки фиксируется журналом; решение пользователя действует в
+    // любом режиме, а агентское в ручном режиме не применяется.
+    let delegated = json(&selection(
+        &f,
+        &[
+            "review-mode",
+            "--batch-id",
+            "sel",
+            "--mode",
+            "delegated",
+            "--agent-id",
+            "codex-agent",
+            "--agent-trust",
+            "agent-selected",
+            "--statement",
+            "решай сам",
+        ],
+    ));
+    assert_eq!(delegated["outcome"], "ok", "{delegated}");
+    assert_eq!(delegated["result"]["changed"], true);
+    let manual = json(&selection(
+        &f,
+        &[
+            "review-mode",
+            "--batch-id",
+            "sel",
+            "--mode",
+            "manual",
+            "--statement",
+            "проверю сам",
+        ],
+    ));
+    assert_eq!(manual["outcome"], "ok", "{manual}");
+    assert_eq!(manual["result"]["grant"]["mode"], "manual_user");
+    let still_read = json(&selection(
+        &f,
+        &[
+            "read",
+            "--batch-id",
+            "sel",
+            "--requests",
+            requests.to_str().unwrap(),
+            "--policy",
+            "human-decision",
+        ],
+    ));
+    assert_eq!(still_read["outcome"], "ok", "{still_read}");
+}
+
+/// Отказ отдельного файла при `link --intake-missing` остаётся исходом этого
+/// файла: операция не падает, а остальные результаты связываются.
+#[test]
+fn link_intake_missing_keeps_single_file_refusal_inside_the_report() {
+    let f = fixture();
+    let targets = manifest(&f);
+    let mut start: Vec<String> = vec![
+        "--input".into(),
+        f.input.to_str().unwrap().into(),
+        "--targets".into(),
+        targets.to_str().unwrap().into(),
+        "--enhancer".into(),
+        "none".into(),
+    ];
+    start.extend(models_args(&f));
+    let refs: Vec<&str> = start.iter().map(String::as_str).collect();
+    let started = run(&f, "batch-start", &refs);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stdout)
+    );
+    // Пакет выбора уже существует, но исходников входа в нём нет: для `sel`
+    // принят только посторонний MP3.
+    let extra = f.root.join("extra");
+    fs::create_dir_all(&extra).unwrap();
+    ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=700:duration=0.4:sample_rate=44100",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+        ],
+        &extra.join("other.mp3"),
+    );
+    let warmup = json(&selection(
+        &f,
+        &[
+            "intake",
+            "--batch-id",
+            "sel",
+            "--dir",
+            extra.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(warmup["outcome"], "ok", "{warmup}");
+
+    // Файл входа перестаёт быть обычным файлом уже после инвентаризации.
+    fs::remove_file(f.input.join("silence.mp3")).unwrap();
+    fs::create_dir(f.input.join("silence.mp3")).unwrap();
+
+    let linked = selection(
+        &f,
+        &[
+            "link-recognizer",
+            "--batch-id",
+            "sel",
+            "--workspace",
+            f.workspace.to_str().unwrap(),
+            "--recognizer-batch",
+            "b1",
+            "--intake-missing",
+        ],
+    );
+    assert!(
+        linked.status.success(),
+        "отказ одного файла не отменяет операцию: {}",
+        String::from_utf8_lossy(&linked.stdout)
+    );
+    let linked = json(&linked);
+    assert_eq!(linked["outcome"], "ok", "{linked}");
+    let rejected = linked["result"]["sources_rejected"]
+        .as_array()
+        .unwrap_or_else(|| panic!("нет поля отказов: {linked}"));
+    assert_eq!(rejected.len(), 1, "{linked}");
+    assert_eq!(rejected[0]["code"], "source_not_regular", "{linked}");
+    assert!(
+        linked["result"]["links_created"].as_u64().unwrap() >= 1,
+        "остальные результаты связаны: {linked}"
+    );
 }

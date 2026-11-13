@@ -2,7 +2,7 @@
 //! после сбоя дочитывает его, проверяет поколение и завершает тот же record_input.
 use super::source::{PendingJob, VerifiedExport, read_export};
 use crate::exchange::{
-    Confirmation, ExchangeError, ExchangeStore, InputRevision, Result, Snapshot,
+    Confirmation, DeckIdentity, ExchangeError, ExchangeStore, InputRevision, Result, Snapshot,
     filesystem::Directory,
 };
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs::File, path::Path};
 
 const OWNER: &str = "anki-repo-trusted-input-v1";
+/// Рабочая область владельца подготовки/импорта output рядом с input.
+pub(super) const WORK: &str = ".roundtrip";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +41,32 @@ struct Transaction {
     // None сохраняет смысл и checksum ранее записанных намерений.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     files_changed: Option<bool>,
+    /// Только для readback после импорта output: фиксация идёт через
+    /// `record_published` того же разрешения, а не через `record_input`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication: Option<PublicationRecord>,
+}
+
+/// Что именно было отправлено в Anki и на каком C это основано. Разрешение
+/// `Publication` не сериализуется: после сбоя exchange выдаёт его заново, и оно
+/// обязано совпасть с этими полями, иначе публикация не подтверждается.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PublicationRecord {
+    pub working_revision: String,
+    pub checked_input_sequence: u64,
+    pub base_sequence: u64,
+    pub import_job: String,
+}
+
+/// Узкая доверенная передача подтверждённого C подготовителю output.
+/// Каталог `current` открыт под блокировкой владельца input; содержимое ещё
+/// не прочитано: копирующий обязан сверить каждый байт с `inventory`.
+pub(super) struct ConfirmedSource {
+    pub current: Directory,
+    pub snapshot: Snapshot,
+    pub source_sequence: u64,
+    pub inventory: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,7 +84,7 @@ pub(super) struct Store {
     control: Control,
     _lock: File,
     #[cfg(test)]
-    fault: std::cell::Cell<Option<&'static str>>,
+    pub(super) fault: std::cell::Cell<Option<&'static str>>,
 }
 
 impl Store {
@@ -336,6 +364,28 @@ impl Store {
     }
 
     pub fn publish(&self, export: &VerifiedExport) -> Result<Value> {
+        self.publish_with(export, None)
+    }
+
+    /// Readback после импорта: те же staging, intent и recovery, но завершение
+    /// через `record_published`. Новый поток так не создаётся.
+    pub fn publish_readback(
+        &self,
+        export: &VerifiedExport,
+        publication: PublicationRecord,
+    ) -> Result<Value> {
+        let key = export.snapshot().identity().key();
+        if !self.exchange.read()?.streams.contains_key(&key) {
+            return Err(ExchangeError::Blocked("нет потока публикации".into()));
+        }
+        self.publish_with(export, Some(publication))
+    }
+
+    fn publish_with(
+        &self,
+        export: &VerifiedExport,
+        publication: Option<PublicationRecord>,
+    ) -> Result<Value> {
         self.verify_location()?;
         let snapshot = export.snapshot();
         let key = snapshot.identity().key();
@@ -361,6 +411,7 @@ impl Store {
                 previous: None,
                 unchanged: false,
                 files_changed: Some(true),
+                publication: None,
             };
             self.input
                 .publish(".new-stream.json", &encode_transaction(&reservation)?)?;
@@ -376,6 +427,8 @@ impl Store {
         if new_stream {
             self.checkpoint("created")?;
         }
+        // Повтор того же задания (в том числе readback после неизвестного итога)
+        // не выдаёт новую ревизию тем же байтам.
         if previous
             .as_ref()
             .is_some_and(|p| p.snapshot == *snapshot && p.evidence == export.evidence())
@@ -396,12 +449,20 @@ impl Store {
                 .child("current")?
                 .ok_or_else(|| corrupt("нет current"))?;
             verify_generation(&current, &receipt)?;
-            return Ok(
-                json!({"state":"published","name":snapshot.name(),"identity":snapshot.identity(),
+            let mut outcome = json!({"state":"published","name":snapshot.name(),"identity":snapshot.identity(),
                 "revision":snapshot.revision(),"source_sequence":receipt.sequence,"evidence":receipt.evidence,
                 "content_changed":false,"files_changed":false,"recovered":true,"inventory":receipt.inventory,
-                "input_directory":format!("decks/input/{key}/current")}),
-            );
+                "input_directory":format!("decks/input/{key}/current")});
+            if let Some(publication) = &publication {
+                // Истину о подтверждении даёт сохранённый published, как в `record`.
+                let confirmed = state.streams[&key].published.as_ref().is_some_and(|p| {
+                    p.confirmed_sequence == receipt.sequence
+                        && p.evidence == receipt.evidence
+                        && p.working_revision == publication.working_revision
+                });
+                outcome["publication_confirmed"] = json!(confirmed);
+            }
+            return Ok(outcome);
         }
         let sequence = previous
             .as_ref()
@@ -461,6 +522,7 @@ impl Store {
             previous,
             unchanged,
             files_changed: Some(files_changed),
+            publication,
         };
         // С этого момента любой сбой восстанавливается только из этого intent.
         dir.publish("transaction.json", &encode_transaction(&tx)?)?;
@@ -597,23 +659,21 @@ impl Store {
         }
         // record_input может успешно выполнить rename, но вернуть ошибку fsync.
         // Следующая попытка читает state и распознаёт тот же sequence/evidence.
-        let mut recorded = false;
+        let mut recorded = None;
         for _ in 0..8 {
             let state = self.check_exchange(tx)?;
-            let confirmation =
-                Confirmation::from_trusted_owner(tx.snapshot.clone(), tx.sequence, &tx.evidence)?;
-            match self.exchange.record_input(&state.token, confirmation) {
-                Ok(_) => {
-                    recorded = true;
+            match self.record(tx, &state) {
+                Ok(confirmed) => {
+                    recorded = Some(confirmed);
                     break;
                 }
                 Err(ExchangeError::StaleState) => continue,
                 Err(e) => return Err(e),
             }
         }
-        if !recorded {
+        let Some(publication_confirmed) = recorded else {
             return Err(ExchangeError::StaleState);
-        }
+        };
         self.verify_location()?;
         if !dir.is_same_child(&self.input, &key)? || !current.is_same_child(dir, "current")? {
             // Intent и previous сохраняются, даже если метаданные уже записаны.
@@ -621,13 +681,160 @@ impl Store {
         }
         #[cfg(test)]
         self.checkpoint("recorded")?;
-        dir.publish("receipt.json", &encode_transaction(tx)?)?;
+        // Receipt описывает фактически сохранённые байты и C. Неподтверждённая
+        // публикация не оставляет в нём записи об отправленном B.
+        let mut receipt = tx.clone();
+        if publication_confirmed == Some(false) {
+            receipt.publication = None;
+        }
+        dir.publish("receipt.json", &encode_transaction(&receipt)?)?;
         #[cfg(test)]
         self.checkpoint("receipt")?;
         dir.remove_tree("previous")?;
         dir.remove_file("transaction.json")?;
         self.verify_location()?;
-        Ok(published(tx))
+        let mut outcome = published(tx);
+        if let Some(confirmed) = publication_confirmed {
+            outcome["publication_confirmed"] = json!(confirmed);
+        }
+        Ok(outcome)
+    }
+
+    /// `Some(true)` — exchange подтвердил публикацию B; `Some(false)` — тот же
+    /// readback сохранён лишь как наблюдённый C; `None` — обычный вход.
+    fn record(&self, tx: &Transaction, state: &crate::exchange::StateView) -> Result<Option<bool>> {
+        let key = tx.snapshot.identity().key();
+        let confirmation =
+            Confirmation::from_trusted_owner(tx.snapshot.clone(), tx.sequence, &tx.evidence)?;
+        let Some(publication) = &tx.publication else {
+            self.exchange.record_input(&state.token, confirmation)?;
+            return Ok(None);
+        };
+        let stream = state.streams.get(&key);
+        let already = stream.is_some_and(|s| {
+            s.current.source_sequence == tx.sequence
+                && s.current.snapshot == tx.snapshot
+                && s.current.evidence == tx.evidence
+        });
+        if already {
+            // Повтор после неизвестного итога: истину даёт сохранённый published.
+            let confirmed = stream.and_then(|s| s.published.as_ref()).is_some_and(|p| {
+                p.confirmed_sequence == tx.sequence
+                    && p.evidence == tx.evidence
+                    && p.working_revision == publication.working_revision
+            });
+            return Ok(Some(confirmed));
+        }
+        let permit = match self.exchange.plan_publication(tx.snapshot.identity()) {
+            Ok(permit)
+                if permit.working_revision() == publication.working_revision
+                    && permit.source_sequence() == publication.checked_input_sequence
+                    && permit.base_sequence() == publication.base_sequence =>
+            {
+                Some(permit)
+            }
+            Ok(_) | Err(ExchangeError::Blocked(_)) => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(permit) = permit {
+            #[cfg(test)]
+            self.checkpoint("permit")?;
+            match self
+                .exchange
+                .record_published(&permit, confirmation.clone())
+            {
+                Ok(_) => return Ok(Some(true)),
+                // B изменился после readback: подтверждение публикации невозможно.
+                Err(ExchangeError::Blocked(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // Readback честно фиксируется как наблюдённое состояние Anki без
+        // ложного published; B и база не меняются.
+        let state = self.check_exchange(tx)?;
+        self.exchange.record_input(&state.token, confirmation)?;
+        Ok(Some(false))
+    }
+
+    /// Проверенный C для подготовки output. Требует согласованных receipt и
+    /// exchange без незавершённых intent; байты сверяет копирующий.
+    pub fn confirmed_source(&self, identity: &DeckIdentity) -> Result<ConfirmedSource> {
+        self.verify_location()?;
+        if self.input.names()?.iter().any(|n| n == ".new-stream.json") {
+            return Err(ExchangeError::Blocked("input_recovery_required".into()));
+        }
+        let key = identity.key();
+        let state = self.exchange.read()?;
+        let stream = state
+            .streams
+            .get(&key)
+            .ok_or_else(|| ExchangeError::Blocked("нет подтверждённого входа".into()))?;
+        let dir = self
+            .input
+            .child(&key)?
+            .ok_or_else(|| corrupt("нет каталога подтверждённого потока"))?;
+        dir.require_private()?;
+        if dir.names()? != ["current", "receipt.json"] {
+            return Err(ExchangeError::Blocked("input_recovery_required".into()));
+        }
+        let receipt = read_transaction(&dir, "receipt.json")?;
+        if receipt.snapshot != stream.current.snapshot
+            || receipt.sequence != stream.current.source_sequence
+            || receipt.evidence != stream.current.evidence
+        {
+            return Err(corrupt("receipt и exchange не согласованы"));
+        }
+        let current = dir
+            .child("current")?
+            .ok_or_else(|| corrupt("нет current"))?;
+        if !current.is_same_child(&dir, "current")? || !dir.is_same_child(&self.input, &key)? {
+            return Err(corrupt("поколение подменено"));
+        }
+        Ok(ConfirmedSource {
+            current,
+            snapshot: receipt.snapshot,
+            source_sequence: receipt.sequence,
+            inventory: receipt.inventory,
+        })
+    }
+
+    pub fn exchange(&self) -> &ExchangeStore {
+        &self.exchange
+    }
+
+    pub fn decks(&self) -> &Directory {
+        &self.decks
+    }
+
+    /// Приватная рабочая область подготовки/публикации output; создаётся явно.
+    pub fn work_area(&self, create: bool) -> Result<Option<Directory>> {
+        self.verify_location()?;
+        let area = if create {
+            Some(self.decks.ensure_child(WORK)?.0)
+        } else {
+            self.decks.child(WORK)?
+        };
+        if let Some(area) = &area {
+            area.require_private()?;
+            if !area.is_same_child(&self.decks, WORK)? {
+                return Err(ExchangeError::UnsafePath(
+                    "рабочая область подменена".into(),
+                ));
+            }
+        }
+        Ok(area)
+    }
+
+    /// Незавершённая публикация output блокирует обычный sync-input этой колоды:
+    /// иначе свежий C сделал бы разрешение устаревшим до проверки readback.
+    pub fn publication_pending(&self, identity_key: &str) -> Result<bool> {
+        let Some(area) = self.work_area(false)? else {
+            return Ok(false);
+        };
+        let Some(dir) = area.child(identity_key)? else {
+            return Ok(false);
+        };
+        Ok(dir.names()?.iter().any(|n| n == "publish.json"))
     }
 
     fn check_exchange(&self, tx: &Transaction) -> Result<crate::exchange::StateView> {
@@ -657,7 +864,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn checkpoint(&self, step: &'static str) -> Result<()> {
+    pub(super) fn checkpoint(&self, step: &'static str) -> Result<()> {
         if self.fault.get() == Some(step) {
             self.fault.set(None);
             return Err(
@@ -767,7 +974,7 @@ fn read_transaction(dir: &Directory, name: &str) -> Result<Transaction> {
     Ok(envelope.transaction)
 }
 
-fn is_temporary(name: &str, targets: &[&str]) -> bool {
+pub(super) fn is_temporary(name: &str, targets: &[&str]) -> bool {
     targets.iter().any(|target| {
         name.strip_prefix(&format!(".{target}.tmp-"))
             .is_some_and(|suffix| {

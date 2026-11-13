@@ -111,40 +111,14 @@ impl Directory {
     }
 
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
-        plain_filename(name)?;
-        let mut file: File = openat(
-            &self.0,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(|e| ExchangeError::UnsafePath(format!("файл {name:?}: {e}")))?
-        .into();
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > MAX_FILE_BYTES {
-            return Err(ExchangeError::UnsafePath(format!(
-                "не обычный единственный файл или превышен лимит: {name}"
-            )));
-        }
+        let (file, before) = self.open_regular(name)?;
         let mut bytes = Vec::new();
-        (&mut file)
-            .take(MAX_FILE_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+        (&file).take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err(ExchangeError::UnsafePath("файл вырос сверх лимита".into()));
         }
-        let after = file.metadata()?;
-        let linked = fs::symlink_metadata(self.fd_path().join(name))?;
-        if metadata.dev() != linked.dev()
-            || metadata.ino() != linked.ino()
-            || metadata.len() != after.len()
-            || metadata.mtime_nsec() != after.mtime_nsec()
-            || metadata.mtime() != after.mtime()
-            || metadata.ctime_nsec() != after.ctime_nsec()
-            || metadata.ctime() != after.ctime()
-            || after.nlink() != 1
-            || bytes.len() as u64 != after.len()
-        {
+        self.unchanged_after(name, &before, &file)?;
+        if bytes.len() as u64 != before.len() {
             return Err(ExchangeError::UnsafePath(
                 "файл изменился при чтении".into(),
             ));
@@ -161,14 +135,16 @@ impl Directory {
                 .file_name()
                 .into_string()
                 .map_err(|_| ExchangeError::UnsafePath("имя media не UTF-8".into()))?;
-            let bytes = self.read(&name)?;
-            total += bytes.len() as u64;
+            // Потоковый SHA-256 с теми же проверками обычного единственного файла,
+            // лимита и неизменности при чтении; байты media в памяти не удерживаются.
+            let (hash, size) = self.stream_hash(&name)?;
+            total += size;
             if total > MAX_TOTAL_BYTES || hashes.len() >= MAX_FILES {
                 return Err(ExchangeError::UnsafePath(
                     "превышен лимит media снимка".into(),
                 ));
             }
-            hashes.insert(name, asset_store::hashing::sha256_hex(bytes));
+            hashes.insert(name, hash);
         }
         Ok(hashes)
     }
@@ -262,6 +238,150 @@ impl Directory {
         self.sync()
     }
 
+    /// Перемещение собственного ребёнка в другой уже открытый каталог той же ФС.
+    /// Назначение никогда не заменяется; оба каталога синхронизируются.
+    pub fn rename_into(&self, from: &str, target: &Self, to: &str) -> Result<()> {
+        plain_filename(from)?;
+        plain_filename(to)?;
+        rustix::fs::renameat_with(
+            &self.0,
+            from,
+            &target.0,
+            to,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(std::io::Error::from)?;
+        target.sync()?;
+        self.sync()
+    }
+
+    /// Путь ребёнка через собственный дескриптор; только для API, принимающих
+    /// путь (ExportLock). Совпадение inode проверяется отдельно через [`Self::same_inode`].
+    pub fn child_path(&self, name: &str) -> Result<PathBuf> {
+        plain_filename(name)?;
+        Ok(self.fd_path().join(name))
+    }
+
+    /// Совпадает ли этот каталог с inode уже открытого файла (например, ExportLock).
+    pub fn same_inode(&self, file: &File) -> Result<bool> {
+        let opened = self.0.metadata()?;
+        let other = file.metadata()?;
+        Ok(opened.dev() == other.dev() && opened.ino() == other.ino())
+    }
+
+    /// Тип ребёнка без перехода по symlink: `None` — отсутствует.
+    pub fn entry_is_dir(&self, name: &str) -> Result<Option<bool>> {
+        plain_filename(name)?;
+        match fs::symlink_metadata(self.fd_path().join(name)) {
+            Ok(metadata) if metadata.is_dir() => Ok(Some(true)),
+            Ok(metadata) if metadata.is_file() => Ok(Some(false)),
+            Ok(_) => Err(ExchangeError::UnsafePath(format!(
+                "не обычный файл или каталог: {name}"
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn open_regular(&self, name: &str) -> Result<(File, fs::Metadata)> {
+        plain_filename(name)?;
+        let file: File = openat(
+            &self.0,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|e| ExchangeError::UnsafePath(format!("файл {name:?}: {e}")))?
+        .into();
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > MAX_FILE_BYTES {
+            return Err(ExchangeError::UnsafePath(format!(
+                "не обычный единственный файл или превышен лимит: {name}"
+            )));
+        }
+        Ok((file, metadata))
+    }
+
+    fn unchanged_after(&self, name: &str, before: &fs::Metadata, file: &File) -> Result<()> {
+        let after = file.metadata()?;
+        let linked = fs::symlink_metadata(self.fd_path().join(name))?;
+        if before.dev() != linked.dev()
+            || before.ino() != linked.ino()
+            || before.len() != after.len()
+            || before.mtime() != after.mtime()
+            || before.mtime_nsec() != after.mtime_nsec()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+            || after.nlink() != 1
+        {
+            return Err(ExchangeError::UnsafePath(
+                "файл изменился при чтении".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// SHA-256 и размер файла ограниченным буфером, без удержания байтов в памяти.
+    pub fn stream_hash(&self, name: &str) -> Result<(String, u64)> {
+        use sha2::Digest;
+        let (file, before) = self.open_regular(name)?;
+        let mut hasher = sha2::Sha256::new();
+        let mut buffer = vec![0_u8; 1 << 20];
+        let mut total = 0_u64;
+        // Растущий во время чтения файл читается не дальше одного лишнего байта.
+        let mut limited = (&file).take(before.len() + 1);
+        loop {
+            let read = limited.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            hasher.update(&buffer[..read]);
+        }
+        self.unchanged_after(name, &before, &file)?;
+        if total != before.len() {
+            return Err(ExchangeError::UnsafePath("размер файла изменился".into()));
+        }
+        Ok((hex(&hasher.finalize()), total))
+    }
+
+    /// Потоковая копия в новый файл другого каталога: `O_EXCL`, без symlink,
+    /// `sync_all` копии. Возвращает SHA-256 фактически записанных байтов.
+    pub fn copy_into(&self, name: &str, target: &Self, target_name: &str) -> Result<String> {
+        use sha2::Digest;
+        use std::io::Write;
+        plain_filename(target_name)?;
+        let (source, before) = self.open_regular(name)?;
+        let mut output: File = openat(
+            &target.0,
+            target_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(std::io::Error::from)?
+        .into();
+        let mut hasher = sha2::Sha256::new();
+        let mut buffer = vec![0_u8; 1 << 20];
+        let mut total = 0_u64;
+        // Растущий источник не копируется дальше одного лишнего байта.
+        let mut limited = (&source).take(before.len() + 1);
+        loop {
+            let read = limited.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            hasher.update(&buffer[..read]);
+            output.write_all(&buffer[..read])?;
+        }
+        output.sync_all()?;
+        self.unchanged_after(name, &before, &source)?;
+        if total != before.len() {
+            return Err(ExchangeError::UnsafePath("размер файла изменился".into()));
+        }
+        Ok(hex(&hasher.finalize()))
+    }
+
     pub fn remove_file(&self, name: &str) -> Result<()> {
         // read проверяет обычный файл и отсутствие hardlink/symlink.
         self.read(name)?;
@@ -292,7 +412,15 @@ impl Directory {
     }
 }
 
-pub(super) fn plain_filename(name: &str) -> Result<()> {
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes.iter().fold(String::with_capacity(64), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
+pub(crate) fn plain_filename(name: &str) -> Result<()> {
     super::identity::validate_component(name)?;
     if name.len() > 255 {
         return Err(ExchangeError::UnsafePath(

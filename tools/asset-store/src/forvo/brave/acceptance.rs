@@ -363,14 +363,11 @@ pub async fn open_word(bridge: &mut Bridge, surface: &str) -> Result<Value, Asse
     )
 }
 
-pub async fn candidates(
-    bridge: &mut Bridge,
-    request: &Pronunciation,
-) -> Result<Vec<Candidate>, AssetError> {
+pub async fn candidates(bridge: &mut Bridge, surface: &str) -> Result<Vec<Candidate>, AssetError> {
     let value = bridge
         .call(
             "dom",
-            json!({"surface":request.surface,"action":"expand"}),
+            json!({"surface":surface,"action":"expand"}),
             Duration::from_secs(15),
         )
         .await?;
@@ -1070,7 +1067,7 @@ async fn run_flow(
         ));
     }
     report.push("forvo_page_auth", Status::Pass, page_evidence);
-    let ranked = candidates(bridge, request)
+    let ranked = candidates(bridge, &request.surface)
         .await
         .inspect_err(|e| report.fail("candidates", e))?;
     report.push("candidates", if ranked.is_empty() { Status::Fail } else { Status::Pass }, json!({"section":"ja","count":ranked.len(),
@@ -1135,7 +1132,7 @@ pub async fn download_selected(
     let acquired = super::fetch::download_candidate(
         bridge,
         state.platform,
-        request,
+        &request.surface,
         selected,
         op_id,
         &options.limits,

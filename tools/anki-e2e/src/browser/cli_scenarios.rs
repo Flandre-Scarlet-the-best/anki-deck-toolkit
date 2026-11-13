@@ -585,6 +585,7 @@ fn checkpoint(
             record_id: record.into(),
             code: "downloaded".into(),
         }],
+        acquisition_mode: None,
     };
     if import {
         asset_store::forvo::import_acquisition(
@@ -601,7 +602,7 @@ fn checkpoint(
     let item = state
         .items
         .iter_mut()
-        .find(|i| i.request == request)
+        .find(|i| i.request.as_ref() == Some(&request))
         .ok_or("нет элемента")?;
     item.acquisition = Some(StoredAcquisition { blob, evidence });
     state.revision += 1;

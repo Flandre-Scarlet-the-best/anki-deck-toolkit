@@ -155,6 +155,29 @@ pub trait AssetDomainPolicy: std::fmt::Debug + Send + Sync {
         false
     }
 
+    /// Допускает ли домен у **существующей** записи прежнее имя потребителя
+    /// вместо текущего канонического. Новые записи всегда получают имя из
+    /// `canonical_location`; историческое имя сохраняется без молчаливого
+    /// переименования до явной замены записи. По умолчанию — нет.
+    fn accepts_historical_consumer_filename(
+        &self,
+        _identity: &AssetIdentity,
+        _filename: &str,
+    ) -> bool {
+        false
+    }
+
+    /// Совпадает ли имя записи с текущим каноническим или допустимым
+    /// историческим именем этой идентичности.
+    fn record_consumer_filename_matches(
+        &self,
+        identity: &AssetIdentity,
+        recorded: &str,
+        expected: &str,
+    ) -> bool {
+        recorded == expected || self.accepts_historical_consumer_filename(identity, recorded)
+    }
+
     /// Возвращает расположение, использовавшееся прежней схемой, если домен
     /// существовал в ней.
     fn legacy_location(
@@ -225,7 +248,11 @@ pub trait AssetDomainPolicy: std::fmt::Debug + Send + Sync {
         validate_safe_consumer_filename(&expected.consumer_filename, record.format)?;
         validate_safe_storage_path(&expected.storage_path)?;
         if record.storage_path != expected.storage_path
-            || record.consumer_filename != expected.consumer_filename
+            || !self.record_consumer_filename_matches(
+                &record.identity,
+                &record.consumer_filename,
+                &expected.consumer_filename,
+            )
         {
             return Err(AssetError::new(
                 ErrorCode::ManifestCorrupt,

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub const CONNECT: &str = "2055492159";
 pub const CROWD: &str = "1788670778";
-pub const PATCH_VERSION: &str = "1.1.0";
+pub const PATCH_VERSION: &str = "1.2.0";
 pub(crate) const COMPATIBILITY: &str = include_str!("compatibility.json");
 pub(crate) type Result<T> = std::result::Result<T, DomainError>;
 
@@ -119,6 +119,39 @@ pub enum Action {
         #[arg(long, default_value = ".")]
         repository: PathBuf,
     },
+    /// План или применение подготовки decks/output из подтверждённого input по решению exchange.
+    PrepareOutput {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        /// Зарегистрированный каталог рабочей копии (имя из exchange-status).
+        #[arg(
+            long = "output",
+            required_unless_present = "all",
+            conflicts_with = "all"
+        )]
+        output: Vec<String>,
+        /// Все зарегистрированные потоки.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// План или проверенный импорт рабочей копии в связанный профиль: CrowdAnki + readback.
+    PublishOutput {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long = "output", required = true)]
+        output: Vec<String>,
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        wait_seconds: u64,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Состояние обмена A/C/B и незавершённых операций без записи и без Anki.
+    ExchangeStatus {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
 }
 
 impl Options {
@@ -133,8 +166,11 @@ impl Options {
         if let Action::Import { source, .. } = &self.action {
             paths.push(("Источник CrowdAnki", source.as_path()));
         }
-        if let Action::SyncInput { repository, .. } | Action::InputStatus { repository } =
-            &self.action
+        if let Action::SyncInput { repository, .. }
+        | Action::InputStatus { repository }
+        | Action::PrepareOutput { repository, .. }
+        | Action::PublishOutput { repository, .. }
+        | Action::ExchangeStatus { repository } = &self.action
         {
             paths.push(("Корень публикации input", repository.as_path()));
         }
@@ -170,8 +206,23 @@ pub fn execute(options: &Options) -> Result<Value> {
     for (role, p) in options.paths() {
         crate::layout::guard_local_path(p, role)?;
     }
-    if let Action::InputStatus { repository } = &options.action {
-        return input::status(repository);
+    // Команды без живой Anki не выполняют обнаружение установки.
+    match &options.action {
+        Action::InputStatus { repository } => return input::status(repository),
+        Action::ExchangeStatus { repository } => return Ok(input::exchange_status(repository)),
+        Action::PrepareOutput {
+            repository,
+            output,
+            all,
+            apply,
+        } => return Ok(input::prepare_output(repository, output, *all, *apply)),
+        Action::PublishOutput {
+            repository,
+            output,
+            apply: false,
+            ..
+        } => return Ok(input::publish_plan(repository, output)),
+        _ => {}
     }
     let target = environment::resolve(options)?;
     match &options.action {
@@ -204,7 +255,17 @@ pub fn execute(options: &Options) -> Result<Value> {
             *wait_seconds,
             *apply,
         ),
-        Action::InputStatus { .. } => unreachable!("handled before Desktop discovery"),
+        Action::PublishOutput {
+            repository,
+            output,
+            wait_seconds,
+            ..
+        } => input::publish_apply(&target, options, repository, output, *wait_seconds),
+        Action::InputStatus { .. }
+        | Action::ExchangeStatus { .. }
+        | Action::PrepareOutput { .. } => {
+            unreachable!("команда обрабатывается до обнаружения Desktop")
+        }
     }
 }
 
@@ -285,9 +346,21 @@ pub fn render_text(value: &Value) -> String {
                 item["name"].as_str().unwrap_or("?"),
                 item["state"].as_str().unwrap_or("planned"),
                 item.get("reason")
+                    .filter(|r| !r.is_null())
                     .map(|r| format!(" — {r}"))
                     .unwrap_or_default()
             ));
+            if let Some(action) = item["action"].as_str() {
+                lines.push(format!("  Решение exchange: {action}"));
+            }
+            if let Some(output) = item["output_directory"].as_str() {
+                lines.push(format!("  Рабочая копия: {output}"));
+            }
+            for key in ["expected_user_action", "next"] {
+                if let Some(text) = item[key].as_str() {
+                    lines.push(format!("  {text}"));
+                }
+            }
             if let Some(sequence) = item["source_sequence"].as_u64() {
                 lines.push(format!(
                     "  Подтверждение {sequence}, ревизия {}",
@@ -360,6 +433,19 @@ fn state_text(state: &str) -> &str {
 }
 
 pub(crate) fn exit_code(options: &Options, value: &Value) -> u8 {
+    if matches!(
+        options.action,
+        Action::PrepareOutput { .. } | Action::PublishOutput { .. } | Action::ExchangeStatus { .. }
+    ) {
+        return if matches!(
+            value["state"].as_str(),
+            Some("prepare_plan" | "publish_plan" | "succeeded")
+        ) {
+            0
+        } else {
+            6
+        };
+    }
     if matches!(options.action, Action::SyncInput { .. }) {
         return if matches!(value["state"].as_str(), Some("input_plan" | "succeeded")) {
             0

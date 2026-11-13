@@ -83,7 +83,8 @@ pub struct StateView {
     pub streams: BTreeMap<String, StreamState>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+// Deserialize нужен только журналу переноса; разрешением остаётся лишь `Preparation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparationAction {
     PrepareFirst,
@@ -120,11 +121,28 @@ impl Preparation {
     pub fn action(&self) -> PreparationAction {
         self.action
     }
+    pub fn identity(&self) -> &DeckIdentity {
+        &self.identity
+    }
+    /// Ревизия C, для которой выдано решение; владелец переноса сверяет с ней байты.
+    pub fn input_revision(&self) -> &str {
+        &self.input_revision
+    }
 }
 
 impl Publication {
     pub fn working_revision(&self) -> &str {
         &self.working_revision
+    }
+    pub fn identity(&self) -> &DeckIdentity {
+        &self.identity
+    }
+    /// Номер C, проверенного перед импортом; readback обязан получить следующий.
+    pub fn source_sequence(&self) -> u64 {
+        self.source_sequence
+    }
+    pub fn base_sequence(&self) -> u64 {
+        self.base_sequence
     }
 }
 

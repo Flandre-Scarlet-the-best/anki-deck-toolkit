@@ -1,6 +1,37 @@
-//! Оркестратор единственного привилегированного пути Anki → input.
+//! Оркестратор единственного привилегированного пути Anki → input и
+//! управляемого цикла input → output → Anki с подтверждённым readback.
+mod prepare;
+mod publication;
 mod publish;
 mod source;
+mod work;
+
+pub(super) fn prepare_output(
+    repository: &Path,
+    outputs: &[String],
+    all: bool,
+    apply: bool,
+) -> Value {
+    prepare::run(repository, outputs, all, apply)
+}
+
+pub(super) fn exchange_status(repository: &Path) -> Value {
+    prepare::status(repository)
+}
+
+pub(super) fn publish_plan(repository: &Path, outputs: &[String]) -> Value {
+    publication::plan(repository, outputs)
+}
+
+pub(super) fn publish_apply(
+    t: &Target,
+    o: &Options,
+    repository: &Path,
+    outputs: &[String],
+    wait_seconds: u64,
+) -> Result<Value> {
+    publication::apply(t, o, repository, outputs, wait_seconds)
+}
 
 use super::{
     Options, Result,
@@ -79,11 +110,17 @@ pub(super) fn run(
         let result = export_one(&target, o, &catalog, &deck, &key, &mut store, wait_seconds);
         match result {
             Ok(value) => outcomes.push(value),
-            Err(e) => outcomes.push(json!({"name":deck["name"],"state":"failed",
+            Err(e) => {
+                // Отказ из-за незавершённой публикации выдаётся до экспорта:
+                // экспорт мог выполниться только по ранее сохранённому заданию.
+                let may_have_completed =
+                    e.details["reason"] != "publication_pending" || store.pending(&key).is_some();
+                outcomes.push(json!({"name":deck["name"],"state":"failed",
                 "reason":e.details["reason"],"message":e.message,
                 "job_id":e.details.get("job_id").cloned().unwrap_or_else(|| json!(store.pending(&key).map(|p| p.id.clone()))),
                 "attempt_closed":e.details["attempt_closed"],
-                "anki_export_may_have_completed":true,"input_confirmed":false})),
+                "anki_export_may_have_completed":may_have_completed,"input_confirmed":false}));
+            }
         }
     }
     let succeeded = outcomes.iter().all(|v| v["state"] == "published");
@@ -207,6 +244,59 @@ fn export_one(
     store: &mut publish::Store,
     wait_seconds: u64,
 ) -> Result<Value> {
+    export_guarded(t, o, catalog, deck, key, store, wait_seconds).map(|(published, _)| published)
+}
+
+/// Тот же путь `sync-input`, плюс охрана импорта из этого же живого экспорта:
+/// отпечаток коллекции и media подтверждённого C (`None`, если адаптер его не
+/// дал — тогда импорт не отправляется).
+fn export_guarded(
+    t: &Target,
+    o: &Options,
+    catalog: &Value,
+    deck: &Value,
+    key: &str,
+    store: &mut publish::Store,
+    wait_seconds: u64,
+) -> Result<(Value, Option<Value>)> {
+    if let Some(uuid) = deck["crowdanki_uuid"].as_str()
+        && let Ok(profile) =
+            crate::exchange::ProfileId::new(catalog["profile_id"].as_str().unwrap_or_default())
+        && let Ok(identity) = crate::exchange::DeckIdentity::new(profile, uuid)
+        && store
+            .publication_pending(&identity.key())
+            .map_err(publication_error)?
+    {
+        return Err(error(
+            "publication_pending",
+            "Для колоды есть незавершённая публикация output; повторите publish-output --apply, чтобы проверить прежний импорт",
+        ));
+    }
+    let (verified, job) = obtain_export(t, o, catalog, deck, key, store, wait_seconds)?;
+    let mut published = store.publish(&verified).map_err(publication_error)?;
+    published["job_id"] = json!(job.id);
+    published["anki_export_state"] = json!("succeeded");
+    published["input_confirmed"] = json!(true);
+    if store.finish_job(key).is_err() {
+        // Надёжно сохранённый C уже доказан. Ошибка уборки pending не отменяет
+        // подтверждение; повтор сверит тот же job без новой ревизии.
+        published["pending_cleanup"] = json!("unknown");
+        published["next"] = json!("Повторите sync-input для проверки завершения служебной записи");
+    }
+    Ok((published, verified.import_guard()))
+}
+
+/// Живой экспорт до проверенных байтов. Pending job остаётся сохранённым:
+/// вызывающий завершает его только после надёжной публикации результата.
+fn obtain_export(
+    t: &Target,
+    o: &Options,
+    catalog: &Value,
+    deck: &Value,
+    key: &str,
+    store: &mut publish::Store,
+    wait_seconds: u64,
+) -> Result<(source::VerifiedExport, source::PendingJob)> {
     if let Some(old) = store
         .pending_named(
             catalog["profile_id"].as_str().unwrap_or(""),
@@ -269,22 +359,10 @@ fn export_one(
                 }
             }
             Some("succeeded") => {
-                let verified = match source::verify(&current, &job, &result) {
-                    Ok(verified) => verified,
-                    Err(e) => return Err(close_rejected_attempt(store, key, &job, e)?),
+                return match source::verify(&current, &job, &result) {
+                    Ok(verified) => Ok((verified, job)),
+                    Err(e) => Err(close_rejected_attempt(store, key, &job, e)?),
                 };
-                let mut published = store.publish(&verified).map_err(publication_error)?;
-                published["job_id"] = json!(job.id);
-                published["anki_export_state"] = json!("succeeded");
-                published["input_confirmed"] = json!(true);
-                if store.finish_job(key).is_err() {
-                    // Надёжно сохранённый C уже доказан. Ошибка уборки pending не отменяет
-                    // подтверждение; повтор сверит тот же job без новой ревизии.
-                    published["pending_cleanup"] = json!("unknown");
-                    published["next"] =
-                        json!("Повторите sync-input для проверки завершения служебной записи");
-                }
-                return Ok(published);
             }
             Some("failed" | "cancelled" | "interrupted") => {
                 store.finish_job(key).map_err(publication_error)?;

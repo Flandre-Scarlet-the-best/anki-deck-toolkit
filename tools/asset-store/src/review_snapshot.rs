@@ -10,7 +10,7 @@
 //! - редактируемый `decisions.tsv`, где человек меняет только первую колонку,
 //!   а подпись, схема, пакет, идентичность и остальные колонки неизменны;
 //! - повторный export того же снимка не перезаписывает заполненный файл решений;
-//! - чтение отклоняет файл целиком при подмене снимка, копии изображения,
+//! - чтение отклоняет файл целиком при подмене снимка, копии кандидата,
 //!   подписи, колонки, порядка или числа строк.
 //!
 //! Слой не знает ни браузера, ни провайдера, ни уровня доверия. Необязательные
@@ -18,7 +18,7 @@
 //! строке только с привязкой к её идентичности и точному SHA (`ReviewRow::validate`)
 //! и никогда не становятся решением: решение — только явная первая колонка.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -35,6 +35,12 @@ pub(crate) trait ReviewRow: Serialize + DeserializeOwned {
     fn identity(&self) -> &AssetIdentity;
     /// Имя копии изображения в каталоге снимка и точный SHA её байтов.
     fn image(&self) -> Option<(&str, &str)>;
+    /// Все точные копии строки (имя и SHA). По умолчанию — единственная копия
+    /// [`Self::image`]; аудиоадаптер прикладывает несколько файлов на строку
+    /// (оригинал, полная обработанная запись, извлечённые фрагменты).
+    fn files(&self) -> Vec<(&str, &str)> {
+        self.image().into_iter().collect()
+    }
     /// Неизменяемые колонки строки после колонки решения.
     fn columns(&self) -> String;
     /// Предметная проверка целостности строки при чтении (например, что
@@ -51,6 +57,9 @@ pub(crate) struct ReviewSnapshot<R> {
     pub schema_version: u32,
     pub batch_id: String,
     pub validator: ValidatorIdentity,
+    /// Ревизия владельца, если предметный адаптер её проверяет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_revision: Option<u64>,
     pub rows: Vec<R>,
 }
 
@@ -90,7 +99,7 @@ fn signature<R>(snapshot: &ReviewSnapshot<R>, format: &ReviewFormat, id: &str) -
     format!("@review\t{}\t{}\t{id}", format.schema, snapshot.batch_id)
 }
 
-fn decisions_template<R: ReviewRow>(
+pub(crate) fn decisions_template<R: ReviewRow>(
     snapshot: &ReviewSnapshot<R>,
     format: &ReviewFormat,
     id: &str,
@@ -109,13 +118,13 @@ fn decisions_template<R: ReviewRow>(
 }
 
 /// Создаёт или повторно открывает снимок. Каталог открывает владелец runtime
-/// пакета под своей блокировкой; `read_image` возвращает проверенные байты
-/// кандидата строки из сохранённого состояния.
+/// пакета под своей блокировкой; `read_candidate` возвращает проверенные байты
+/// названной копии строки из сохранённого состояния.
 pub(crate) fn export<R: ReviewRow>(
     open_directory: impl FnOnce(&str) -> Result<ArtifactDirectory, AssetError>,
     snapshot: &ReviewSnapshot<R>,
     format: &ReviewFormat,
-    mut read_image: impl FnMut(&R) -> Result<Vec<u8>, AssetError>,
+    mut read_candidate: impl FnMut(&R, &str) -> Result<Vec<u8>, AssetError>,
 ) -> Result<(ReviewBundle, ArtifactDirectory), AssetError> {
     if snapshot.schema_version != format.schema {
         return Err(invalid("схема снимка review не совпадает с форматом"));
@@ -126,24 +135,28 @@ pub(crate) fn export<R: ReviewRow>(
     // Повторный export не перезаписывает уже заполненный файл редактора.
     match directory.read("snapshot.json") {
         Ok(existing) if existing == encoded => {
+            // Один файл может входить в несколько строк: проверяем копию один раз.
+            let mut checked: BTreeMap<&str, &str> = BTreeMap::new();
             for row in &snapshot.rows {
-                let Some((filename, sha256)) = row.image() else {
-                    continue;
-                };
-                match directory.read(filename) {
-                    Ok(bytes) if sha256_hex(&bytes) == sha256 => {}
-                    Ok(_) => return Err(invalid("копия изображения review изменена")),
-                    Err(error) if error.code == ErrorCode::MissingAssetFile => {
-                        let bytes = read_image(row)?;
-                        if sha256_hex(&bytes) != sha256 {
-                            return Err(invalid("исходный кандидат review изменён"));
-                        }
-                        directory.write_if_absent(filename, &bytes)?;
-                        if sha256_hex(&directory.read(filename)?) != sha256 {
-                            return Err(invalid("копия изображения review изменена"));
-                        }
+                for (filename, sha256) in row.files() {
+                    if checked.insert(filename, sha256).is_some() {
+                        continue;
                     }
-                    Err(error) => return Err(error),
+                    match directory.read(filename) {
+                        Ok(bytes) if sha256_hex(&bytes) == sha256 => {}
+                        Ok(_) => return Err(invalid("копия файла review изменена")),
+                        Err(error) if error.code == ErrorCode::MissingAssetFile => {
+                            let bytes = read_candidate(row, filename)?;
+                            if sha256_hex(&bytes) != sha256 {
+                                return Err(invalid("исходный кандидат review изменён"));
+                            }
+                            directory.write_if_absent(filename, &bytes)?;
+                            if sha256_hex(&directory.read(filename)?) != sha256 {
+                                return Err(invalid("копия файла review изменена"));
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             }
             match directory.read("decisions.tsv") {
@@ -160,15 +173,19 @@ pub(crate) fn export<R: ReviewRow>(
         }
         Ok(_) => return Err(invalid("содержимое снимка review не совпадает с его SHA")),
         Err(error) if error.code == ErrorCode::MissingAssetFile => {
+            // Один файл может входить в несколько строк: копия пишется один раз.
+            let mut written: BTreeMap<&str, &str> = BTreeMap::new();
             for row in &snapshot.rows {
-                let Some((filename, sha256)) = row.image() else {
-                    continue;
-                };
-                let bytes = read_image(row)?;
-                if sha256_hex(&bytes) != sha256 {
-                    return Err(invalid("исходный кандидат review изменён"));
+                for (filename, sha256) in row.files() {
+                    if written.insert(filename, sha256).is_some() {
+                        continue;
+                    }
+                    let bytes = read_candidate(row, filename)?;
+                    if sha256_hex(&bytes) != sha256 {
+                        return Err(invalid("исходный кандидат review изменён"));
+                    }
+                    directory.write(filename, &bytes)?;
                 }
-                directory.write(filename, &bytes)?;
             }
             directory.write(
                 "decisions.tsv",
@@ -194,6 +211,19 @@ pub(crate) fn read<R: ReviewRow>(
     id: &str,
     format: &ReviewFormat,
 ) -> Result<(ReviewSnapshot<R>, Vec<ReviewCell>), AssetError> {
+    read_with_decisions(open_directory, batch_id, id, format, None)
+}
+
+/// Как [`read`], но текст решений может прийти из отдельного файла
+/// (например, сохранённого страницей обзора). Он проверяется теми же
+/// правилами: подпись снимка, неизменные колонки, порядок и число строк.
+pub(crate) fn read_with_decisions<R: ReviewRow>(
+    open_directory: impl FnOnce(&str) -> Result<ArtifactDirectory, AssetError>,
+    batch_id: &str,
+    id: &str,
+    format: &ReviewFormat,
+    decisions: Option<&str>,
+) -> Result<(ReviewSnapshot<R>, Vec<ReviewCell>), AssetError> {
     crate::batch_runtime::validate_hash(id)?;
     let directory = open_directory(&directory_name(id))?;
     let encoded = directory.read("snapshot.json")?;
@@ -207,16 +237,21 @@ pub(crate) fn read<R: ReviewRow>(
     }
     for row in &snapshot.rows {
         row.validate()?;
-        if let Some((filename, sha256)) = row.image()
-            && sha256_hex(&directory.read(filename)?) != sha256
-        {
-            return Err(invalid("SHA копии изображения review не совпадает"));
+        for (filename, sha256) in row.files() {
+            if sha256_hex(&directory.read(filename)?) != sha256 {
+                return Err(invalid("SHA копии файла review не совпадает"));
+            }
         }
     }
-    let bytes = directory.read("decisions.tsv")?;
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| invalid("файл решений должен быть UTF-8"))?;
-    let cells = parse_cells(&snapshot, format, id, text)?;
+    let cells = match decisions {
+        Some(text) => parse_cells(&snapshot, format, id, text)?,
+        None => {
+            let bytes = directory.read("decisions.tsv")?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| invalid("файл решений должен быть UTF-8"))?;
+            parse_cells(&snapshot, format, id, text)?
+        }
+    };
     Ok((snapshot, cells))
 }
 

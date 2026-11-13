@@ -12,13 +12,14 @@ pub mod kana;
 pub mod normalizer;
 pub mod normalizer_batch;
 pub mod normalizer_report;
-mod probe;
+pub(crate) mod probe;
 pub mod recognizer;
 pub mod recognizer_backend;
 pub mod recognizer_batch;
 pub mod recognizer_eval;
 pub mod recognizer_pipeline;
 pub mod recognizer_report;
+pub mod selection;
 
 use std::io::Read;
 use std::path::Path;
@@ -50,7 +51,23 @@ pub struct Pronunciation {
 }
 
 impl Pronunciation {
+    /// Новая пара. У одиночного кандзи чтение входит в имя
+    /// `<surface>_<reading>.mp3`; без `_` и символов пути в чтении граница
+    /// однозначна, поэтому разные пары не дают одного имени.
     pub fn new(surface: &str, reading: &str) -> Result<Self, AssetError> {
+        let value = Self::parse(surface, reading)?;
+        if value.surface_is_single_kanji() && !value.reading_fits_consumer_filename() {
+            return Err(invalid(
+                "reading одиночного кандзи не представимо однозначной частью имени файла (запрещены _ и символы пути)",
+            ));
+        }
+        Ok(value)
+    }
+
+    /// Общая проверка пары без ограничения символов чтения одиночного кандзи:
+    /// прежний импорт его не вводил, и историческая запись не должна блокировать
+    /// хранилище. Такая запись сохраняет имя `<surface>.mp3`.
+    fn parse(surface: &str, reading: &str) -> Result<Self, AssetError> {
         let value = Self {
             surface: surface.nfc().collect(),
             reading: reading.nfc().collect(),
@@ -85,7 +102,42 @@ impl Pronunciation {
         }
     }
 
+    /// Написание — одиночный кандзи: только у него разные чтения одного
+    /// написания реально встречаются как отдельные карточки.
+    fn surface_is_single_kanji(&self) -> bool {
+        crate::kanji_domain::parse_kanji_character(&self.surface).is_ok()
+    }
+
+    fn reading_fits_consumer_filename(&self) -> bool {
+        !(self
+            .reading
+            .contains(['<', '>', '"', '|', '?', '*', '[', ']', '_', '/', '\\', ':'])
+            || self.reading.ends_with(['.', ' ']))
+    }
+
+    /// Чтение входит в имя только у одиночного кандзи и только тогда, когда
+    /// оно однозначно представимо; историческое непредставимое чтение остаётся
+    /// в прежнем имени `<surface>.mp3`.
+    fn reading_in_consumer_filename(&self) -> bool {
+        self.surface_is_single_kanji() && self.reading_fits_consumer_filename()
+    }
+
+    /// Имя готового MP3 этой пары у потребителя. Одиночный кандзи —
+    /// `<surface>_<reading>.mp3` (`生_せい.mp3`, `生_なま.mp3`): его чтения не
+    /// конфликтуют. Любое другое написание — `<surface>.mp3` (`こいつ.mp3`).
+    /// Это имя результата, а не запрос Forvo.
     pub fn consumer_filename(&self) -> String {
+        if self.reading_in_consumer_filename() {
+            format!("{}_{}.mp3", self.surface, self.reading)
+        } else {
+            self.legacy_consumer_filename()
+        }
+    }
+
+    /// Имя `<surface>.mp3`. Для слов это и есть текущее имя; у исторических
+    /// записей одиночного кандзи оно сохраняется как есть без молчаливого
+    /// переименования.
+    pub fn legacy_consumer_filename(&self) -> String {
         format!("{}.mp3", self.surface)
     }
 
@@ -96,7 +148,7 @@ impl Pronunciation {
         }
         let [surface, reading]: [String; 2] = serde_json::from_str(&identity.key)
             .map_err(|_| invalid("ключ должен быть канонической парой surface/reading"))?;
-        let value = Self::new(&surface, &reading)?;
+        let value = Self::parse(&surface, &reading)?;
         if value.identity() != *identity {
             return Err(invalid("идентичность должна быть канонической NFC-парой"));
         }
@@ -167,6 +219,17 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
     fn consumer_name_key(&self, name: &str) -> String {
         name.nfc().collect::<String>().to_lowercase()
     }
+    fn proves_legacy_consumer_filename(&self, identity: &AssetIdentity, filename: &str) -> bool {
+        Pronunciation::from_identity(identity)
+            .is_ok_and(|request| request.legacy_consumer_filename() == filename)
+    }
+    fn accepts_historical_consumer_filename(
+        &self,
+        identity: &AssetIdentity,
+        filename: &str,
+    ) -> bool {
+        self.proves_legacy_consumer_filename(identity, filename)
+    }
     fn trust_semantics(&self) -> TrustSemantics {
         TrustSemantics::HUMAN_WITH_CURRENT_VALIDATION
     }
@@ -191,7 +254,24 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
             .domain_metadata
             .as_ref()
             .ok_or_else(|| invalid("нет метаданных произношения"))?;
-        if metadata != &serde_json::json!(request) && metadata.get("derivation").is_some() {
+        if metadata != &serde_json::json!(request) && metadata.get("selection_derivative").is_some()
+        {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct SelectionMetadata {
+                surface: String,
+                reading: String,
+                selection_derivative: derivation::SelectionDerivative,
+            }
+            let parsed: SelectionMetadata = serde_json::from_value(metadata.clone())
+                .map_err(|_| invalid("неподдерживаемые метаданные производного MP3 выбора"))?;
+            if parsed.surface != request.surface || parsed.reading != request.reading {
+                return Err(invalid("метаданные не совпадают с идентичностью"));
+            }
+            parsed
+                .selection_derivative
+                .validate(&request, &record.sha256, &record.provenance)?;
+        } else if metadata != &serde_json::json!(request) && metadata.get("derivation").is_some() {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct DerivedMetadata {
@@ -227,12 +307,14 @@ impl AssetDomainPolicy for PronunciationDomainPolicy {
                     "метаданные не совпадают с идентичностью/происхождением",
                 ));
             }
-            parsed.forvo.validate(&request, &record.sha256)?;
+            parsed.forvo.validate(&request.surface, &record.sha256)?;
         } else if record.provenance.source_kind == "forvo_web" {
             return Err(invalid(
                 "Forvo требует полного происхождения для конкретного SHA",
             ));
-        } else if record.provenance.source_kind == derivation::DERIVED_SOURCE_KIND {
+        } else if record.provenance.source_kind == derivation::DERIVED_SOURCE_KIND
+            || record.provenance.source_kind == derivation::SELECTION_SOURCE_KIND
+        {
             return Err(invalid(
                 "производный MP3 требует полного свидетельства обработки",
             ));
@@ -402,11 +484,41 @@ pub(crate) fn import_derived_bytes(
     )
 }
 
+/// Производный MP3 пакета выбора: фрагмент, материализованный интервал или
+/// обработанная запись конкретного чтения со свидетельством цепочки.
+pub(crate) fn import_selection_derived_bytes(
+    store: &AssetStore,
+    request: &Pronunciation,
+    bytes: &[u8],
+    derivative: &derivation::SelectionDerivative,
+    replace_expected: Option<String>,
+) -> Result<AssetRecord, AssetError> {
+    let source_name =
+        derivation::selection_source_name(&derivative.transform, &derivative.source_sha256);
+    derivative.validate(
+        request,
+        &sha256_hex(bytes),
+        &Provenance {
+            source_kind: derivation::SELECTION_SOURCE_KIND.into(),
+            source_name: source_name.clone(),
+        },
+    )?;
+    import_source(
+        store,
+        request,
+        bytes,
+        &source_name,
+        replace_expected,
+        Origin::Selection(derivative),
+    )
+}
+
 #[derive(Clone, Copy)]
 enum Origin<'a> {
     Local,
     Forvo(&'a crate::forvo::ForvoEvidence),
     Derived(&'a derivation::AudioDerivation, bool),
+    Selection(&'a derivation::SelectionDerivative),
 }
 
 pub(crate) fn import_forvo_bytes(
@@ -416,7 +528,7 @@ pub(crate) fn import_forvo_bytes(
     evidence: &crate::forvo::ForvoEvidence,
     replace_expected: Option<String>,
 ) -> Result<AssetRecord, AssetError> {
-    evidence.validate(request, &sha256_hex(bytes))?;
+    evidence.validate(&request.surface, &sha256_hex(bytes))?;
     import_source(
         store,
         request,
@@ -470,7 +582,9 @@ fn import_source(
                 crate::store::VerifiedReplacement::Forbidden
             },
         ),
-        Origin::Forvo(_) if replacing => store.ingest_with_metadata_cas(request, provenance),
+        Origin::Forvo(_) | Origin::Selection(_) if replacing => {
+            store.ingest_with_metadata_cas(request, provenance)
+        }
         _ => store.ingest_with_provenance(request, provenance),
     };
     let outcome = ingest(
@@ -486,6 +600,9 @@ fn import_source(
                 Origin::Derived(derivation, _) => {
                     serde_json::json!({"surface":request.surface,"reading":request.reading,"derivation":derivation})
                 }
+                Origin::Selection(derivative) => {
+                    serde_json::json!({"surface":request.surface,"reading":request.reading,"selection_derivative":derivative})
+                }
                 Origin::Local => serde_json::json!(request),
             }),
             replace_expected_sha256: replace_expected,
@@ -494,6 +611,7 @@ fn import_source(
             source_kind: match origin {
                 Origin::Forvo(_) => "forvo_web",
                 Origin::Derived(..) => derivation::DERIVED_SOURCE_KIND,
+                Origin::Selection(_) => derivation::SELECTION_SOURCE_KIND,
                 Origin::Local => "local_import",
             }
             .into(),
@@ -504,6 +622,7 @@ fn import_source(
         && outcome.asset.provenance.source_kind
             != match origin {
                 Origin::Forvo(_) => "forvo_web",
+                Origin::Selection(_) => derivation::SELECTION_SOURCE_KIND,
                 _ => derivation::DERIVED_SOURCE_KIND,
             }
     {

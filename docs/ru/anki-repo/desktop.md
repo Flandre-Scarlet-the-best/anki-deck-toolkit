@@ -2,10 +2,12 @@
 
 Владелец контракта — `anki_repo::desktop` и группа `anki-repo anki`.
 Они готовят AnkiConnect и вызывают установленный CrowdAnki. Идентичностями,
-ревизиями и обменом владеет [exchange](exchange.md); этот адаптер не переносит
+ревизиями и обменом владеет [exchange](exchange.md); сам адаптер не переносит
 `input ↔ output`. Отдельный закрытый владелец
 [`desktop::input`](input-export.md) публикует только проверенные результаты живого
-экспорта в `input`; обычные Desktop jobs по-прежнему работают со spool.
+экспорта в `input`, а также ведёт [управляемый цикл](roundtrip.md)
+`prepare-output`/`publish-output`/`exchange-status` поверх тех же jobs;
+обычные Desktop jobs по-прежнему работают со spool.
 
 ## Выбор установки
 

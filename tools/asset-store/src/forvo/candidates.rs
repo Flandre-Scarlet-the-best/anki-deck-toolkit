@@ -1,5 +1,5 @@
 use super::{ForvoSession, error};
-use crate::{AssetError, pronunciation::Pronunciation};
+use crate::AssetError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,11 +113,8 @@ impl ForvoSession {
             .into_value()
             .map_err(|_| error("dom_changed", "Неизвестная структура кандидатов Forvo"))
     }
-    pub async fn candidates(
-        &mut self,
-        request: &Pronunciation,
-    ) -> Result<Vec<Candidate>, AssetError> {
-        self.navigate(&word_url(&request.surface)).await?;
+    pub async fn candidates(&mut self, surface: &str) -> Result<Vec<Candidate>, AssetError> {
+        self.navigate(&word_url(surface)).await?;
         self.require_authenticated().await?;
         // DOM слова может появиться до выполнения отложенных скриптов интерфейса.
         // Ждём DOMContentLoaded, который нужен обычной кнопке сайта, а не завершения сетевых запросов рекламы.
@@ -134,7 +131,7 @@ impl ForvoSession {
                 "Интерфейс слова не завершил DOMContentLoaded; повторите позже",
             ));
         }
-        let expected = serde_json::json!(word_url(&request.surface));
+        let expected = serde_json::json!(word_url(surface));
         let missing=self.browser().page().evaluate_expression(format!("location.href === {expected} && performance.getEntriesByType('navigation')[0]?.responseStatus === 404")).await
             .map_err(|_|error("browser_recovery_required","Не удалось проверить ответ страницы слова"))?
             .into_value::<bool>().map_err(|_|error("dom_changed","Неизвестное состояние страницы слова"))?;
@@ -144,7 +141,7 @@ impl ForvoSession {
                 "Forvo вернул 404 для точной страницы слова",
             ));
         }
-        validated(self.dom(&request.surface, "expand", "").await?)
+        validated(self.dom(surface, "expand", "").await?)
     }
 }
 
