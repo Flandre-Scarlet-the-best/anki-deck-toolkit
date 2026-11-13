@@ -801,7 +801,11 @@ fn cli_cache_run_managed_directories_override_included_cargo_config() {
     let report = json(&output);
     let managed_target = fixture.cache_dir.join("target");
     assert_eq!(report["target_dir"], managed_target.to_str().unwrap());
-    assert!(managed_target.join("debug/deps").is_dir());
+    assert!(
+        contains_cargo_check_artifact(&managed_target),
+        "Cargo не записал артефакт проверки в управляемый каталог сборки {}",
+        managed_target.display()
+    );
     assert!(
         !outside_target.exists(),
         "Cargo записал данные вне управляемого каталога сборки"
@@ -1239,6 +1243,31 @@ fn allocated_bytes(path: &Path) -> u64 {
         total = total.saturating_add(metadata.blocks() * 512);
     }
     total
+}
+
+/// Признак того, что Cargo записал промежуточный артефакт проверки в каталог.
+///
+/// Раскладка каталога сборки — внутренняя деталь Cargo, и она меняется между
+/// версиями: до 1.100 метаданные проверки (`*.rmeta`) лежали в `debug/deps`,
+/// начиная с 1.100 — в `debug/build/<пакет>/<хеш>/out`, а каталог `deps` больше
+/// не создаётся. Поэтому признак ищется по расширению артефакта, а не по пути,
+/// который закреплял бы конкретную версию Cargo.
+fn contains_cargo_check_artifact(target: &Path) -> bool {
+    let mut pending = vec![target.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rmeta") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn directory_entry_names(path: &Path) -> Vec<OsString> {
