@@ -202,23 +202,22 @@ impl Cli {
         .map_err(|e| e.message)
     }
 
-    /// SHA и состояние жизненного цикла ресурса точной пары, если он импортирован.
-    fn asset(&self, surface: &str, reading: &str) -> Result<Option<(String, String)>> {
-        let identity = Pronunciation::new(surface, reading)
-            .map_err(|e| e.message)?
-            .identity();
-        Ok(self
+    /// Полный снимок канонических произношений: замечает любое неожиданное чтение.
+    pub(super) fn canonical_audio(&self) -> Result<Value> {
+        let records = self
             .open_store()?
             .verify_integrity()
-            .map_err(|e| e.message)?
+            .map_err(|e| e.message)?;
+        let records: Vec<_> = records
             .into_iter()
-            .find(|r| r.identity == identity)
-            .map(|r| (r.sha256, r.lifecycle.as_str().to_owned())))
+            .filter(|r| r.identity.namespace == "pronunciation_audio")
+            .collect();
+        serde_json::to_value(records).map_err(|e| e.to_string())
     }
 
-    pub(super) fn plan(&self, dir: &Path, name: &str, words: &[(&str, &str)]) -> Result<PathBuf> {
+    pub(super) fn plan(&self, dir: &Path, name: &str, words: &[&str]) -> Result<PathBuf> {
         let path = dir.join(format!("{name}.json"));
-        let items: Vec<_> = words.iter().map(|(s, _)| json!({"surface":s})).collect();
+        let items: Vec<_> = words.iter().map(|s| json!({"surface":s})).collect();
         std::fs::write(
             &path,
             serde_json::to_vec(&json!({"schema_version":1,"items":items})).expect("JSON"),
@@ -305,7 +304,7 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
         .await?;
     let result = &run.out["result"];
     let sha_a = sha(env, fixture::RECORD_A);
-    let asset = cli.asset(fixture::WORD, fixture::READING)?;
+    let asset = cli.canonical_audio()?;
     let source = &result["source"]["source"];
     env.out.check(
         "forvo brave fetch сохранил оригинальный MP3 лучшей записи в отдельное тестовое хранилище",
@@ -313,14 +312,14 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
             && result["transport"] == "brave_extension"
             && result["acquisition"]["selected_record_id"] == fixture::RECORD_A
             && result["acquisition"]["downloaded_sha256"] == sha_a.as_str()
-            && asset.is_none()
+            && asset == json!([])
             && source["blob"]["sha256"] == sha_a,
         json!({"run":run.summary(),"asset":asset,"expected_sha256":sha_a}),
     );
     env.out.check(
-        "техническая проверка не дала фонетического доверия (ресурс не Verified)",
-        asset.is_none() && source["evidence"]["selected_record_id"] == fixture::RECORD_A,
-        json!({"lifecycle":asset.as_ref().map(|a| &a.1)}),
+        "Forvo не создал канонических произношений ни с каким чтением",
+        asset == json!([]) && source["evidence"]["selected_record_id"] == fixture::RECORD_A,
+        json!({"canonical_audio":asset}),
     );
     env.out.check(
         "одна сетевая загрузка, собственный файл удалён, smoke-копий в evidence/ нет, вкладки пользователя не изменены",
@@ -338,7 +337,7 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
         .await?;
     env.out.check(
         "повторный fetch тех же байтов успешен и не создаёт второго ресурса",
-        again.code == 0 && cli.asset(fixture::WORD, fixture::READING)? == asset,
+        again.code == 0 && cli.canonical_audio()? == asset,
         again.summary(),
     );
     // Без ffprobe/ffmpeg проверка MP3 недоступна: блокер, а не «плохая запись».
@@ -354,7 +353,7 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
         "недоступная проверка MP3 → technical_validation_failed, ресурс не импортирован, файл удалён",
         unverifiable.code == 3
             && unverifiable.error_code() == "technical_validation_failed"
-            && cli.asset(fixture::WORD_3, fixture::READING_3)?.is_none()
+            && cli.canonical_audio()? == json!([])
             && download_files(&env.downloads()).is_empty(),
         json!({"run":unverifiable.summary(),"downloads":files_json(&env.downloads())}),
     );
@@ -362,15 +361,11 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
     env.residual_clean().await
 }
 
-/// Пакет из трёх слов: переход к следующему кандидату, CAS-импорт, resume без
+/// Пакет из трёх слов: переход к следующему кандидату, сохранение оригинала, resume без
 /// повторных загрузок, закреплённый транспорт и совместимость состояния v1.
 pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
     let cli = blocked_without_cli(env)?;
-    let words = [
-        (fixture::WORD, fixture::READING),
-        (fixture::WORD_2, fixture::READING_2),
-        (fixture::WORD_3, fixture::READING_3),
-    ];
+    let words = [fixture::WORD, fixture::WORD_2, fixture::WORD_3];
     let plan = cli.plan(&env.dir, "plan", &words)?;
     let plan = plan.to_string_lossy().into_owned();
     env.ctx
@@ -390,22 +385,22 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
         )
         .await?;
     let expected = [
-        (fixture::WORD, fixture::READING, fixture::RECORD_A),
-        (fixture::WORD_2, fixture::READING_2, fixture::RECORD_2_NEXT),
-        (fixture::WORD_3, fixture::READING_3, fixture::RECORD_3),
+        (fixture::WORD, fixture::RECORD_A),
+        (fixture::WORD_2, fixture::RECORD_2_NEXT),
+        (fixture::WORD_3, fixture::RECORD_3),
     ];
     let mut stored = Vec::new();
     let mut store_ok = true;
-    for (surface, reading, record) in expected {
-        let asset = cli.asset(surface, reading)?;
-        store_ok &= asset.is_none()
+    for (surface, record) in expected {
+        let asset = cli.canonical_audio()?;
+        store_ok &= asset == json!([])
             && item(&run, surface)["acquisition"]["blob"]["sha256"] == sha(env, record);
         stored.push(
             json!({"surface":surface,"record":record,"asset":asset,"expected":sha(env, record)}),
         );
     }
     env.out.check(
-        "пакет из трёх разных слов сохранил оригинальные MP3 выбранных записей (не Verified)",
+        "пакет из трёх разных слов сохранил оригинальные MP3 выбранных записей (без канонических произношений)",
         run.code == 0
             && run.outcome() == "ok"
             && run.out["result"]["effective_transport"] == "brave_extension"
@@ -463,14 +458,7 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
             "status_transport":status.out["result"]["effective_transport"]}),
     );
     // max-items: обрабатывается ровно один элемент, остальные ждут.
-    let small = cli.plan(
-        &env.dir,
-        "small",
-        &[
-            (fixture::WORD_3, fixture::READING_3),
-            (fixture::WORD, fixture::READING),
-        ],
-    )?;
+    let small = cli.plan(&env.dir, "small", &[fixture::WORD_3, fixture::WORD])?;
     let small_store = env.dir.join("store-max-items");
     let mut limited_cli = Cli::new(env).expect("cli");
     limited_cli.store = small_store;
@@ -525,15 +513,7 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
     env.residual_clean().await
 }
 
-fn checkpoint(
-    cli: &Cli,
-    id: &str,
-    surface: &str,
-    _reading: &str,
-    bytes: &[u8],
-    record: &str,
-    _completed: bool,
-) -> Result<()> {
+fn checkpoint(cli: &Cli, id: &str, surface: &str, bytes: &[u8], record: &str) -> Result<()> {
     let store = cli.open_store()?;
     let mut runtime = SafeBatchRuntime::open(store.root(), id).map_err(|e| e.message)?;
     let mut state: ForvoBatch = runtime
@@ -577,14 +557,7 @@ fn checkpoint(
 pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
     let cli = blocked_without_cli(env)?;
     let fixture = env.ctx.fixture.clone();
-    let both = cli.plan(
-        &env.dir,
-        "both",
-        &[
-            (fixture::WORD, fixture::READING),
-            (fixture::WORD_3, fixture::READING_3),
-        ],
-    )?;
+    let both = cli.plan(&env.dir, "both", &[fixture::WORD, fixture::WORD_3])?;
     let both = both.to_string_lossy().into_owned();
     // 1. Ctrl+C, пока собственная загрузка идёт.
     let (gate, rx) = Gate::new();
@@ -641,7 +614,7 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
         .await?;
     let (gate, rx) = Gate::new();
     fixture.set(fixture::RECORD_A, Behavior::HoldBody(rx));
-    let one = cli.plan(&env.dir, "one", &[(fixture::WORD, fixture::READING)])?;
+    let one = cli.plan(&env.dir, "one", &[fixture::WORD])?;
     let one = one.to_string_lossy().into_owned();
     let mut cancel_cli = Cli::new(env).expect("cli");
     cancel_cli.store = env.dir.join("store-cancel");
@@ -756,12 +729,12 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
             && fixture.requests_for(fixture::RECORD_A) == 1
             && files.len() == 1
             && sha_of(&files, user_b) == Some(sha(env, fixture::RECORD_B))
-            && crash_cli.asset(fixture::WORD, fixture::READING)?.is_none()
+            && crash_cli.canonical_audio()? == json!([])
             && item(&recovered, fixture::WORD)["acquisition"]["blob"]["sha256"] == sha(env, fixture::RECORD_A),
         json!({"run":recovered.summary(),"recovery_logged":recovery_logged,
             "downloads":files_json(&env.downloads())}),
     );
-    // 5. Checkpoint сохранён, импорт не выполнен; 6. импорт выполнен, итог не записан.
+    // Сохранённые оригиналы без итогового статуса: resume завершает проверку без загрузок.
     fixture.reset();
     let mut point_cli = Cli::new(env).expect("cli");
     point_cli.store = env.dir.join("store-checkpoint");
@@ -785,19 +758,15 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
         &point_cli,
         "points",
         fixture::WORD,
-        fixture::READING,
         &bytes_a,
         fixture::RECORD_A,
-        false,
     )?;
     checkpoint(
         &point_cli,
         "points",
         fixture::WORD_3,
-        fixture::READING_3,
         &bytes_3,
         fixture::RECORD_3,
-        true,
     )?;
     let finished = point_cli
         .run(true, &["batch-resume", "--batch-id", "points"])
@@ -808,13 +777,9 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
             && finished.code == 0
             && codes(&finished).iter().all(|c| c == "acquired")
             && fixture.log().iter().all(|p| !p.starts_with("/download/"))
-            && point_cli
-                .asset(fixture::WORD, fixture::READING)?
-                .is_none()
+            && point_cli.canonical_audio()? == json!([])
             && item(&finished, fixture::WORD)["acquisition"]["blob"]["sha256"] == sha256_hex(&bytes_a)
-            && point_cli
-                .asset(fixture::WORD_3, fixture::READING_3)?
-                .is_none()
+            && point_cli.canonical_audio()? == json!([])
             && item(&finished, fixture::WORD_3)["acquisition"]["blob"]["sha256"] == sha256_hex(&bytes_3),
         json!({"run":finished.summary(),"fixture_requests":fixture.log()}),
     );
@@ -835,14 +800,7 @@ pub async fn cli_foreign_downloads(env: &mut Env<'_>) -> Result<()> {
         ))
         .await?;
     let user_other = env.browser.user_tab("https://forvo.com/").await?;
-    let plan = cli.plan(
-        &env.dir,
-        "plan",
-        &[
-            (fixture::WORD, fixture::READING),
-            (fixture::WORD_3, fixture::READING_3),
-        ],
-    )?;
+    let plan = cli.plan(&env.dir, "plan", &[fixture::WORD, fixture::WORD_3])?;
     let (gate, rx) = Gate::new();
     fixture.set(fixture::RECORD_A, Behavior::HoldHeaders(rx));
     let child = cli.spawn(
@@ -903,6 +861,164 @@ pub async fn cli_foreign_downloads(env: &mut Env<'_>) -> Result<()> {
             && files.iter().all(|(n, _, _)| n == user_a || n == "user-notes.bin" || n.starts_with("pronunciation_ja_3661006 (")),
         json!({"run":resumed.summary(),"downloads":files_json(&env.downloads())}),
     );
+    env.connect().await?;
+    env.residual_clean().await
+}
+
+/// Настоящий CDP CLI: событие до завершения, подтверждение DOM, deadline и SIGTERM.
+/// Авторизация управляется только локальным HTTPS fixture, не внешним Forvo.
+pub async fn cli_human_wait(env: &mut Env<'_>) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let cli = blocked_without_cli(env)?;
+    // Событие ready стабилизирует старт тестового браузера до проверки профиля CDP.
+    env.connect().await?;
+    if let Some(mut connection) = env.conn.take() {
+        connection.bridge.disconnect().await;
+    }
+    let wrapper = env.dir.join("human-fixture-chromium.sh");
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    let resolver = format!(
+        "--host-resolver-rules=MAP forvo.com 127.0.0.1:{}, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        env.ctx.fixture.port
+    );
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec {} --no-proxy-server --ignore-certificate-errors {} \"$@\"\n",
+            quote(&env.ctx.chrome.to_string_lossy()),
+            quote(&resolver)
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    for mode in [
+        "authenticated",
+        "timed_out",
+        "interrupted",
+        "fetch_interrupted",
+    ] {
+        env.ctx.fixture.reset();
+        let wait = if mode == "timed_out" { "1" } else { "30" };
+        let mut command = if mode == "fetch_interrupted" {
+            cli.command(
+                false,
+                &[
+                    "--mode",
+                    "chromium_first",
+                    "fetch",
+                    "--surface",
+                    fixture::WORD_LOGIN,
+                ],
+            )
+        } else {
+            cli.command(
+                false,
+                &[
+                    "--mode",
+                    "chromium_first",
+                    "login",
+                    "--surface",
+                    fixture::WORD_LOGIN,
+                    "--timeout-seconds",
+                    wait,
+                ],
+            )
+        };
+        command.env("CHROME_BIN", &wrapper).stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        let stderr = child.stderr.take().ok_or("нет stderr")?;
+        let mut lines = BufReader::new(stderr).lines();
+        let mut observed_stderr = Vec::new();
+        let event = loop {
+            let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? else {
+                let run = Cli::finish(child).await?;
+                return Err(format!(
+                    "нет события ожидания: stdout={}, stderr={observed_stderr:?}",
+                    run.out
+                ));
+            };
+            observed_stderr.push(line.clone());
+            if let Ok(value) = serde_json::from_str::<Value>(&line)
+                && value["event"] == "human_interaction_required"
+            {
+                break value;
+            }
+        };
+        let alive = child.try_wait().map_err(|e| e.to_string())?.is_none();
+        match mode {
+            "authenticated" => env.ctx.fixture.allow_human_auth(),
+            "interrupted" | "fetch_interrupted" => signal(&child, rustix::process::Signal::TERM)?,
+            _ => (),
+        }
+        let events = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    events.push(value);
+                }
+            }
+            events
+        });
+        let run = Cli::finish(child).await?;
+        let events = events.await.map_err(|e| e.to_string())?;
+        let ended = events.iter().any(|e| {
+            e["event"] == "human_interaction_finished"
+                && e["session_id"] == event["session_id"]
+                && e["outcome"]
+                    == if mode == "fetch_interrupted" {
+                        "interrupted"
+                    } else {
+                        mode
+                    }
+        });
+        let expected = match mode {
+            "authenticated" => run.code == 0 && run.out["result"]["auth_state"] == "authenticated",
+            "timed_out" => {
+                run.code == 3 && run.out["error"]["details"]["human_wait"] == "timed_out"
+            }
+            _ => run.code == 130 && run.out["error"]["code"] == "interrupted",
+        };
+        env.out.check(format!("ручной CDP-шаг {mode}: NDJSON до выхода, итоговый JSON и управляемая очистка"),
+            alive && ended && expected && event["wait_mode"] == "deadline" && event["timeout_seconds"] == if mode == "fetch_interrupted" { 300 } else { wait.parse::<u64>().unwrap() },
+            json!({"run":run.summary(),"stdout":run.out,"started":event,"events":events,"alive_at_event":alive}));
+        env.out.check(
+            "ручной шаг не скачивает MP3 и не создаёт Forvo-пакетов",
+            env.ctx
+                .fixture
+                .log()
+                .iter()
+                .all(|p| !p.starts_with("/download/"))
+                && !cli.store.join(".runtime/batches").exists(),
+            json!({"requests":env.ctx.fixture.log()}),
+        );
+    }
+    env.ctx.fixture.reset();
+    let extension = cli
+        .run(true, &["fetch", "--surface", fixture::WORD_LOGIN])
+        .await?;
+    let log = std::fs::read_to_string(&cli.log).map_err(|e| e.to_string())?;
+    let emitted = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|e| {
+            e["event"] == "human_interaction_required"
+                && e["wait_mode"] == "resume_required"
+                && e["timeout_seconds"].is_null()
+        });
+    env.out.check(
+        "расширение возвращает ручной next_action и событие resume_required без загрузок",
+        extension.code == 3
+            && extension.error_code() == "login_required"
+            && emitted
+            && extension.out["error"]["details"]["next_action"].is_string()
+            && !cli.store.join(".runtime/batches").exists(),
+        json!({"stdout":extension.out,"event_observed":emitted}),
+    );
+    env.ctx.fixture.reset();
     env.connect().await?;
     env.residual_clean().await
 }

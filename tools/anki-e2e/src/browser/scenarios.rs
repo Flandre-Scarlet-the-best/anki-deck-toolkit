@@ -186,6 +186,7 @@ async fn body(name: &str, env: &mut Env<'_>) -> Result<()> {
         "save_as_prompt" => save_as_prompt(env).await,
         "browser_restart" => browser_restart(env).await,
         "cli_fetch" => super::cli_scenarios::cli_fetch(env).await,
+        "cli_human_wait" => super::cli_scenarios::cli_human_wait(env).await,
         "cli_batch" => super::cli_scenarios::cli_batch(env).await,
         "cli_batch_load" => super::load::run(env).await,
         "cli_batch_faults" => super::faults::run(env).await,

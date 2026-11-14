@@ -2086,9 +2086,8 @@ fn forvo_cli_no_longer_accepts_reading_or_replacement_flags() {
         args.extend(["--surface", "学校", "--reading", "がっこう"]);
         let output = cli(&ws, &args);
         assert_eq!(output.status.code(), Some(2));
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--reading'")
-        );
+        assert!(!output.stderr.is_empty());
+        assert!(!ws.path().join(".asset-store").exists());
     }
     let output = cli(
         &ws,

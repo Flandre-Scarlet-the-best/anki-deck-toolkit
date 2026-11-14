@@ -103,10 +103,7 @@ impl Drop for Permissions {
 
 pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     let cli = Cli::new(env).ok_or(MISSING_CLI)?;
-    let words = [
-        (fixture::WORD, fixture::READING),
-        (fixture::WORD_3, fixture::READING_3),
-    ];
+    let words = [fixture::WORD, fixture::WORD_3];
     let plan = cli.plan(&env.dir, "fault-plan", &words)?;
     let plan = plan.to_string_lossy().into_owned();
     let fixture = env.ctx.fixture.clone();
@@ -302,10 +299,7 @@ pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
         .insert("volume_capacity_bytes".into(), json!(capacity));
     let mut cli = Cli::new(env).ok_or(MISSING_CLI)?;
     cli.store = volume.store();
-    let words = [
-        (fixture::WORD, fixture::READING),
-        (fixture::WORD_3, fixture::READING_3),
-    ];
+    let words = [fixture::WORD, fixture::WORD_3];
     let plan = cli.plan(&env.dir, "space-plan", &words)?;
     let fixture = env.ctx.fixture.clone();
     let (gate, rx) = Gate::new();

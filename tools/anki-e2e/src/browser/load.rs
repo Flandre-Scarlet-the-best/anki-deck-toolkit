@@ -167,10 +167,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         let words: Vec<_> = (0..env.ctx.batch_items as usize)
             .map(|i| fixture::load_word(batch * env.ctx.batch_items as usize + i))
             .collect();
-        let pairs: Vec<_> = words
-            .iter()
-            .map(|(s, r, _)| (s.as_str(), r.as_str()))
-            .collect();
+        let pairs: Vec<_> = words.iter().map(|(s, _)| s.as_str()).collect();
         let id = format!("load-{batch}");
         let plan = cli.plan(&env.dir, &id, &pairs)?;
         println!(
@@ -204,7 +201,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             tokio::select! {
                 result = &mut finished => break result?,
                 _ = interval.tick() => observer.sample(),
-                _ = heartbeat.tick() => println!("  {id}: CLI работает {:.0} с, fixture загрузок {}", started.elapsed().as_secs_f64(), words.iter().map(|(_,_,r)|env.ctx.fixture.requests_for(r)).sum::<usize>()),
+                _ = heartbeat.tick() => println!("  {id}: CLI работает {:.0} с, fixture загрузок {}", started.elapsed().as_secs_f64(), words.iter().map(|(_,r)|env.ctx.fixture.requests_for(r)).sum::<usize>()),
             }
         };
         let seconds = started.elapsed().as_secs_f64();
@@ -218,7 +215,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             .map_err(|e| e.message)?
             .ok_or("нет checkpoint")?;
         evidence_ok &= state.items.len() == words.len();
-        for ((surface, _, record), saved) in words.iter().zip(&state.items) {
+        for ((surface, record), saved) in words.iter().zip(&state.items) {
             let expected_sha = crate::util::sha256_hex(&env.ctx.fixture.bytes_for(record));
             let Some(acquisition) = &saved.acquisition else {
                 evidence_ok = false;
@@ -244,7 +241,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         drop(store);
         let requests_before: Vec<_> = words
             .iter()
-            .map(|(_, _, r)| env.ctx.fixture.requests_for(r))
+            .map(|(_, r)| env.ctx.fixture.requests_for(r))
             .collect();
         let revision = run.out["result"]["revision"].clone();
         let resume_started = Instant::now();
@@ -252,7 +249,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         let resume_s = resume_started.elapsed().as_secs_f64();
         let requests_after: Vec<_> = words
             .iter()
-            .map(|(_, _, r)| env.ctx.fixture.requests_for(r))
+            .map(|(_, r)| env.ctx.fixture.requests_for(r))
             .collect();
         let snapshot = resources(env, &observer_page).await?;
         let diagnostics = timings(&run);

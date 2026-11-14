@@ -182,15 +182,8 @@ pub async fn extension_release_update(env: &mut Env<'_>) -> Result<()> {
     let dir = env.ctx.extension_dir.clone();
     let state_before = std::fs::read(&state_path).map_err(|e| e.to_string())?;
     let pairing_before = std::fs::read(dir.join("pairing.json")).map_err(|e| e.to_string())?;
-    // Пакет до обновления: один элемент импортирован, второй ждёт продолжения.
-    let plan = cli.plan(
-        &env.dir,
-        "before-update",
-        &[
-            (fixture::WORD_3, fixture::READING_3),
-            (fixture::WORD, fixture::READING),
-        ],
-    )?;
+    // Пакет до обновления: оригинал одного элемента сохранён, второй ждёт продолжения.
+    let plan = cli.plan(&env.dir, "before-update", &[fixture::WORD_3, fixture::WORD])?;
     let started = cli
         .run(
             true,
@@ -340,7 +333,7 @@ pub async fn extension_release_update(env: &mut Env<'_>) -> Result<()> {
         .await?;
     let after_resume = requests(env, &records);
     env.out.check(
-        "batch-resume после обновления завершает пакет той же сессией; импортированный элемент не скачивается повторно",
+        "batch-resume после обновления завершает пакет той же сессией; сохранённый элемент не скачивается повторно",
         resumed.code == 0
             && codes(&resumed) == [json!("acquired"), json!("acquired")]
             && resumed.out["result"]["browser"] == binding
@@ -397,6 +390,30 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
     }
     let fixture_chrome = fixture_chrome.to_string_lossy().into_owned();
     let fixture_cdp = [("CHROME_BIN", fixture_chrome.as_str())];
+
+    // CDP получает оригинал и повторно читает его даже при недоступном Chromium.
+    let downloads_before = env.ctx.fixture.requests_for(fixture::RECORD_A);
+    let cdp = cli
+        .generic(
+            &["--config", &chromium_first],
+            &["fetch", "--surface", fixture::WORD],
+            &fixture_cdp,
+        )
+        .await?;
+    let cdp_repeat = cli
+        .generic(
+            &["--config", &chromium_first],
+            &["fetch", "--surface", fixture::WORD],
+            &broken_cdp,
+        )
+        .await?;
+    env.out.check("CDP fetch и повтор reused=true без запуска Chromium и второй загрузки",
+        cdp.code == 0 && cdp_repeat.code == 0 && cdp.out["result"]["reused"] == false
+            && cdp_repeat.out["result"]["reused"] == true
+            && cdp.out["result"]["source"] == cdp_repeat.out["result"]["source"]
+            && env.ctx.fixture.requests_for(fixture::RECORD_A) == downloads_before + 1
+            && cli.canonical_audio()? == json!([]),
+        json!({"first":cdp.out,"repeat":cdp_repeat.out,"downloads":env.ctx.fixture.requests_for(fixture::RECORD_A)-downloads_before}));
 
     // 1. extension_only: CDP не запускается даже для проверки.
     cli.profile = env.dir.join("cdp-profile-extension-only");
@@ -490,14 +507,7 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
     );
     // 4. Новый пакет: транспорт выбирается до создания; preflight CDP не удался → пакет адаптера.
     cli.profile = env.dir.join("cdp-profile-batch");
-    let plan = cli.plan(
-        &env.dir,
-        "routed",
-        &[
-            (fixture::WORD_2, fixture::READING_2),
-            (fixture::WORD, fixture::READING),
-        ],
-    )?;
+    let plan = cli.plan(&env.dir, "routed", &[fixture::WORD_2, fixture::WORD])?;
     let records = [fixture::RECORD_2_TOP, fixture::RECORD_A];
     let started = cli
         .generic(

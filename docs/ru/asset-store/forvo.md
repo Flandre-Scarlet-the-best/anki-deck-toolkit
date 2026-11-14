@@ -290,3 +290,27 @@ cargo test -p asset-store --lib --locked forvo::tests::browser_ -- --ignored
 
 Они не заменяют живую приёмку: настоящий вход, несколько скачиваний и независимый
 повторный запуск. Внешний блокер Cloudflare не считается успешным скачиванием.
+
+## Ручное ожидание и восстановление одиночного получения
+
+`fetch` обоих транспортов возвращает `source` (включая `batch_id`),
+`acquisition` и `reused` (`true` при повторном использовании). При незавершённой
+очистке команда завершается ошибкой: те же поля находятся в `error.details`
+рядом с `recovery_required=true` и `next_action`. Сохранённый оригинал остаётся
+доступен; переключение транспорта не обходит recovery, challenge или блокер.
+`batch-cancel` сохраняет обязательство очистки. `batch-resume` отменённого
+пакета с recovery подключается только для очистки и ничего не скачивает.
+
+В ручном CDP-шаге CLI немедленно выдаёт NDJSON в stderr:
+`event=human_interaction_required`, `session_id`, `action`, `wait_mode=deadline`,
+`timeout_seconds`, `hint`, `next_action`. Автовосстановление ждёт 300 секунд,
+`login` — выбранный `--timeout-seconds`. stdout сохраняет один итоговый JSON.
+Событие `human_interaction_finished` завершает ожидание; истечение срока даёт
+`human_wait=timed_out`, штатное прерывание — `interrupted` с очисткой собственного
+браузера. При `SIGKILL` итоговый JSON не гарантируется. Авторизацию подтверждает
+сам CLI, а не ответ пользователя. Протокол агента — в
+[anki-live-testing](../../../.agents/skills/anki-live-testing/references/forvo-human-interaction.md).
+
+Расширение при challenge/входе выдаёт то же событие с
+`wait_mode=resume_required`, `timeout_seconds=null` и своим `next_action`:
+текущая команда завершается отказом, дальнейший шаг требует явного повтора.

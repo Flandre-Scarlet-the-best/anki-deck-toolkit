@@ -139,6 +139,12 @@ pub(crate) fn browser_auth_error(
         ),
         _ => return error,
     };
+    if matches!(
+        code.as_str(),
+        "challenge_required" | "login_required" | "session_expired"
+    ) {
+        crate::forvo::interaction::extension_required(&code, &action);
+    }
     error.message = action.clone();
     error.details["provider"] = json!("forvo_brave");
     error.details["next_action"] = json!(action);
@@ -468,7 +474,7 @@ pub async fn fetch(
         Some(&session.binding()),
     ) {
         Ok(Some(source)) => serde_json::from_value(source["source"]["evidence"].clone())
-            .map(|evidence| (source, evidence))
+            .map(|evidence| (source, evidence, true))
             .map_err(|_| {
                 super::super::error(
                     "invalid_forvo_evidence",
@@ -480,14 +486,14 @@ pub async fn fetch(
             .await
             .and_then(|acquisition| {
                 let evidence = acquisition.evidence.clone();
-                let source = crate::forvo::batch::save_original(
+                let source = crate::forvo::batch::save_original_pending_cleanup(
                     store,
                     surface,
                     acquisition,
                     crate::forvo::batch::Transport::BraveExtension,
                     Some(session.binding()),
                 )?;
-                Ok((source, evidence))
+                Ok((source, evidence, false))
             }),
     };
     let after = session.snapshot().await;
@@ -507,32 +513,49 @@ pub async fn fetch(
         Ok(v) if options.close_tab => v["recovery_required"] == true,
         _ => browser["recovery_required"] == true || closed.is_err(),
     });
-    let (source, evidence) = acquired.map_err(|mut e| {
+    let (source, evidence, reused) = acquired.map_err(|mut e| {
         e.details["browser"] = browser.clone();
         e
     })?;
-    if browser["recovery_required"] == true {
-        crate::forvo::batch::require_recovery(
-            store,
-            source["batch_id"].as_str().expect("сохранённый пакет"),
-            Some(binding),
-        )
-        .map_err(|mut error| {
-            error.details["source"] = source.clone();
-            error.details["browser"] = browser.clone();
-            error
-        })?;
-    }
-    if let Err(mut e) = closed {
+    if browser["recovery_required"] == true || closed.is_err() {
+        let mut e = closed.err().unwrap_or_else(|| {
+            super::super::error(
+                "cleanup_incomplete",
+                "Оригинал сохранён; требуется освобождение собственной загрузки",
+            )
+        });
+        e.details["recovery_required"] = json!(true);
+        e.details["reused"] = json!(reused);
+        e.details["next_action"] = json!(crate::forvo::batch::resume_action(
+            source["batch_id"].as_str().expect("пакет"),
+            Some(&binding)
+        ));
         e.details["browser"] = browser;
         e.details["source"] = json!(source);
         e.details["acquisition"] = json!(evidence);
+        if let Err(checkpoint) = crate::forvo::batch::require_recovery(
+            store,
+            source["batch_id"].as_str().expect("пакет"),
+            Some(binding),
+        ) {
+            e.details["checkpoint_error"] =
+                json!({"code":provider_code(&checkpoint),"message":checkpoint.message});
+        }
         return Err(e);
     }
+    crate::forvo::batch::complete_original_cleanup(
+        store,
+        source["batch_id"].as_str().expect("пакет"),
+    )
+    .map_err(|mut error| {
+        error.details["source"] = source.clone();
+        error.details["acquisition"] = json!(evidence);
+        error
+    })?;
     tracing::info!(event = "brave_fetch_acquired", stage = "save_original", sha256 = %evidence.downloaded_sha256,
         record_id = %evidence.selected_record_id, "Оригинальный MP3 сохранён без чтения");
     Ok(
-        json!({"transport":"brave_extension","source":source,"acquisition":evidence,"browser":browser}),
+        json!({"transport":"brave_extension","source":source,"acquisition":evidence,"browser":browser,"reused":reused}),
     )
 }
 

@@ -96,14 +96,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         println!("  аварийное окно {window}");
         let mut cli = Cli::new(env).ok_or(MISSING_CLI)?;
         cli.store = env.dir.join(format!("store-{window}"));
-        let plan = cli.plan(
-            &env.dir,
-            window,
-            &[
-                (fixture::WORD, fixture::READING),
-                (fixture::WORD_3, fixture::READING_3),
-            ],
-        )?;
+        let plan = cli.plan(&env.dir, window, &[fixture::WORD, fixture::WORD_3])?;
         let invocation = cli.command(
             true,
             &[
@@ -265,7 +258,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     env.ctx.fixture.reset();
     let mut cli = Cli::new(env).ok_or(MISSING_CLI)?;
     cli.store = env.dir.join("store-release");
-    let plan = cli.plan(&env.dir, "release", &[(fixture::WORD, fixture::READING)])?;
+    let plan = cli.plan(&env.dir, "release", &[fixture::WORD])?;
     let released = cli
         .run(
             true,
