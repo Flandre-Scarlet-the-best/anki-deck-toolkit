@@ -298,6 +298,8 @@ cargo test -p asset-store --lib --locked forvo::tests::browser_ -- --ignored
 очистке команда завершается ошибкой: те же поля находятся в `error.details`
 рядом с `recovery_required=true` и `next_action`. Сохранённый оригинал остаётся
 доступен; переключение транспорта не обходит recovery, challenge или блокер.
+Истечение ручного ожидания запрещает fallback, даже если наблюдаемый код
+сайта — `login_required` или `session_expired`.
 `batch-cancel` сохраняет обязательство очистки. `batch-resume` отменённого
 пакета с recovery подключается только для очистки и ничего не скачивает.
 

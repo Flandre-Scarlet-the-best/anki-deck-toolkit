@@ -1262,3 +1262,40 @@ async fn cancel_before_resume_has_no_browser_commands() {
     );
     assert!(lock(&h.world).commands.is_empty());
 }
+
+#[tokio::test]
+async fn smoke_accepts_surface_without_reading_and_releases_its_download() {
+    let h = harness(vec![(
+        "学校",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    let report = acceptance::smoke(acceptance::SmokeOptions {
+        state_dir: h.options.state_dir.clone(),
+        target: None,
+        wait: h.options.wait,
+        surface: "学校".into(),
+        probe_downloads_api: false,
+        close_tab: true,
+        keep_download: false,
+        limits: h.options.limits,
+        interrupt: None,
+    })
+    .await
+    .unwrap();
+    let selection = report
+        .steps
+        .iter()
+        .find(|step| step.name == "selection")
+        .unwrap();
+    assert!(matches!(selection.status, acceptance::Status::Pass));
+    assert_eq!(selection.evidence["surface"], "学校");
+    assert!(selection.evidence.get("reading").is_none());
+    assert_eq!(selection.evidence["record_id"], "10");
+    assert!(report.steps.iter().all(|step| matches!(
+        step.status,
+        acceptance::Status::Pass | acceptance::Status::NotTested
+    )));
+    assert_eq!(lock(&h.world).begins, ["10"]);
+    assert!(lock(&h.world).op.is_none());
+    assert_eq!(std::fs::read_dir(&h.downloads).unwrap().count(), 0);
+}

@@ -46,6 +46,12 @@ pub fn backend_failure(
     if error.code == ErrorCode::Interrupted {
         return Err("interrupted".into());
     }
+    if let Some(outcome) = error.details["human_wait"].as_str() {
+        return Err(format!("human_wait_{outcome}"));
+    }
+    if error.details["human_wait_pending"] == true {
+        return Err("human_wait_pending".into());
+    }
     let code = provider_code(error);
     match (stage, code) {
         (
@@ -182,5 +188,22 @@ mod tests {
             backend_failure(Stage::Launch, &error, true),
             Err("cleanup_incomplete".into())
         );
+    }
+    #[test]
+    fn timed_out_manual_login_never_falls_back_to_another_browser() {
+        for code in ["login_required", "session_expired", "challenge_required"] {
+            let mut error = failure(code);
+            error.details["human_wait"] = json!("timed_out");
+            assert_eq!(
+                backend_failure(Stage::BeforeDownload, &error, true),
+                Err("human_wait_timed_out".into())
+            );
+            error.details.as_object_mut().unwrap().remove("human_wait");
+            error.details["human_wait_pending"] = json!(true);
+            assert_eq!(
+                backend_failure(Stage::BeforeDownload, &error, true),
+                Err("human_wait_pending".into())
+            );
+        }
     }
 }
