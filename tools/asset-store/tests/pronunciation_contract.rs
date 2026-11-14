@@ -189,7 +189,7 @@ fn same_sha_local_source_requires_metadata_cas_to_become_forvo_and_revokes_trust
 #[test]
 fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
     use asset_store::batch_runtime::SafeBatchRuntime;
-    use asset_store::forvo::{self, batch as web_batch};
+    use asset_store::forvo::batch as web_batch;
     let workspace = TempWorkspace::create("forvo-batch-resume").unwrap();
     let store = store(&workspace.path().join("audio"));
     let request = request();
@@ -197,8 +197,6 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
         schema_version: 1,
         items: vec![web_batch::FetchItem {
             surface: request.surface.clone(),
-            reading: Some(request.reading.clone()),
-            replace_expected_sha256: None,
         }],
     };
     web_batch::start(
@@ -221,7 +219,7 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
         runtime.save(&batch).unwrap();
     }
     // Смерть после импорта до outcome: возобновление повторяет ровно те же байты.
-    forvo::import_acquisition(&store, &request, &acquisition, None).unwrap();
+    assert!(store.verify_integrity().unwrap().is_empty());
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let batch = runtime
         .block_on(web_batch::resume(
@@ -233,7 +231,7 @@ fn forvo_batch_snapshots_resume_without_network_and_keeps_completed_items() {
             1,
         ))
         .unwrap();
-    assert_eq!(batch.items[0].outcome.as_ref().unwrap().code, "imported");
+    assert_eq!(batch.items[0].outcome.as_ref().unwrap().code, "acquired");
     // Восстановление прежнего состояния: завершённый пакет не должен оставаться paused.
     {
         let mut runtime = SafeBatchRuntime::open(store.root(), "web-resume").unwrap();
@@ -1208,8 +1206,6 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
             schema_version: 1,
             items: vec![web::FetchItem {
                 surface: request.surface.clone(),
-                reading: Some(request.reading.clone()),
-                replace_expected_sha256: None,
             }],
         },
         web::Transport::CdpChromium,
@@ -1264,7 +1260,7 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
             .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
     );
     assert!(lines.contains("browser_acquisition_stage"));
-    assert!(lines.contains("import_mp3"));
+    assert!(lines.contains("validate_saved_mp3"));
     assert!(lines.contains("audio_tool_missing"));
     assert!(!lines.contains("fixture-speaker"));
     let original_path = std::env::var_os("PATH").expect("для теста нужен PATH с FFmpeg и prlimit");
@@ -1275,21 +1271,14 @@ fn forvo_checkpoint_survives_missing_prlimit_and_resumes_without_browser() {
         String::from_utf8_lossy(&restored.stdout)
     );
     let value = json(&restored);
-    assert_eq!(value["result"]["items"][0]["outcome"]["code"], "imported");
+    assert_eq!(value["result"]["items"][0]["outcome"]["code"], "acquired");
     assert_eq!(
         value["result"]["items"][0]["acquisition"]["blob"]["sha256"],
         sha
     );
     assert!(!workspace.path().join(".codex/local/forvo-profile").exists());
     assert_ne!(value["result"]["diagnostic_log"], first_log);
-    let asset = store
-        .verify_integrity()
-        .unwrap()
-        .into_iter()
-        .find(|a| a.identity == request.identity())
-        .unwrap();
-    assert_eq!(asset.sha256, sha);
-    assert_eq!(asset.validation.unwrap().status, SemanticStatus::Uncertain);
+    assert!(store.verify_integrity().unwrap().is_empty());
 }
 #[test]
 fn forvo_cli_strict_plan_status_and_cancel_do_not_require_browser() {
@@ -1297,7 +1286,7 @@ fn forvo_cli_strict_plan_status_and_cancel_do_not_require_browser() {
     let plan = workspace.path().join("plan.json");
     fs::write(
         &plan,
-        r#"{"schema_version":1,"items":[{"surface":"元気","reading":"げんき"}]}"#,
+        r#"{"schema_version":1,"items":[{"surface":"元気"}]}"#,
     )
     .unwrap();
     let output = cli(
@@ -2080,4 +2069,37 @@ fn forvo_cli_accepts_separate_external_private_profile_and_preserves_it() {
     assert_eq!(json(&output)["error"]["details"]["code"], "gui_unavailable");
     assert_eq!(fs::read_dir(&profile).unwrap().count(), 1);
     assert!(!ws.path().join(".asset-store").exists());
+}
+
+#[test]
+fn forvo_cli_no_longer_accepts_reading_or_replacement_flags() {
+    let ws = TempWorkspace::create("forvo-cli-surface-only").unwrap();
+    for prefix in [
+        vec!["forvo", "fetch"],
+        vec!["forvo", "candidates"],
+        vec!["forvo", "browser", "fetch"],
+        vec!["forvo", "brave", "fetch"],
+        vec!["forvo", "browser", "smoke"],
+        vec!["forvo", "brave", "smoke"],
+    ] {
+        let mut args = prefix;
+        args.extend(["--surface", "学校", "--reading", "がっこう"]);
+        let output = cli(&ws, &args);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!output.stderr.is_empty());
+        assert!(!ws.path().join(".asset-store").exists());
+    }
+    let output = cli(
+        &ws,
+        &[
+            "forvo",
+            "fetch",
+            "--surface",
+            "学校",
+            "--replace-expected-sha256",
+            &"0".repeat(64),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!ws.path().join("store").exists());
 }

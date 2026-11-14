@@ -80,7 +80,7 @@ fn plan(env: &Env) -> PathBuf {
     let path = env.path().join("plan.json");
     std::fs::write(
         &path,
-        serde_json::to_vec(&json!({"schema_version":1,"items":[{"surface":"水","reading":"みず","replace_expected_sha256":null}]})).unwrap(),
+        serde_json::to_vec(&json!({"schema_version":1,"items":[{"surface":"水"}]})).unwrap(),
     )
     .unwrap();
     path
@@ -135,7 +135,7 @@ fn config_defaults_to_chromium_first_and_names_sources() {
 fn extension_only_never_starts_cdp_and_names_the_next_action() {
     let env = Env::new("forvo-extension-only");
     let generic = ["--mode", "extension_only"];
-    let fetch = json(&env.forvo(&generic, &["fetch", "--surface", "水", "--reading", "みず"]));
+    let fetch = json(&env.forvo(&generic, &["fetch", "--surface", "水"]));
     assert_eq!(code(&fetch), "adapter_not_configured", "{fetch}");
     assert!(fetch["error"]["details"]["next_action"].is_string());
     let decision = &fetch["error"]["details"]["transport_decision"];
@@ -144,7 +144,7 @@ fn extension_only_never_starts_cdp_and_names_the_next_action() {
     for args in [
         vec!["login"],
         vec!["check"],
-        vec!["candidates", "--surface", "水", "--reading", "みず"],
+        vec!["candidates", "--surface", "水"],
     ] {
         let value = json(&env.forvo(&generic, &args));
         assert_eq!(code(&value), "cdp_disabled_by_mode", "{args:?}");
@@ -170,7 +170,7 @@ fn extension_only_never_starts_cdp_and_names_the_next_action() {
 #[test]
 fn chromium_first_reports_backend_failure_without_secret_fallback() {
     let env = Env::new("forvo-chromium-first");
-    let fetch = json(&env.forvo(&[], &["fetch", "--surface", "水", "--reading", "みず"]));
+    let fetch = json(&env.forvo(&[], &["fetch", "--surface", "水"]));
     assert_eq!(code(&fetch), "browser_recovery_required", "{fetch}");
     let decision = &fetch["error"]["details"]["transport_decision"];
     assert_eq!(decision["mode"], "chromium_first");
@@ -228,11 +228,10 @@ fn generic_resume_follows_stored_extension_binding_and_keeps_mismatch_checks() {
     .unwrap();
     let plan: web::FetchPlan = serde_json::from_slice(&std::fs::read(plan(&env)).unwrap()).unwrap();
     web::start(&store, "ext", plan, web::Transport::BraveExtension).unwrap();
-    // Цель пакета сохранена до первого подключения (схема 4), как у batch-start адаптера.
+    // Цель пакета сохранена до первого подключения (схема 5), как у batch-start адаптера.
     let mut runtime =
         asset_store::batch_runtime::SafeBatchRuntime::open(store.root(), "ext").unwrap();
     let mut batch: web::ForvoBatch = runtime.load().unwrap().unwrap();
-    batch.schema_version = 4;
     batch.target = Some("brave".into());
     batch.revision += 1;
     runtime.save(&batch).unwrap();

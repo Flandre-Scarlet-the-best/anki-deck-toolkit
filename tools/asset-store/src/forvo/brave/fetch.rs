@@ -11,9 +11,8 @@ use super::acceptance::{self, Connection};
 use super::download::{self, Downloaded, Limits};
 use super::{Bridge, Platform, bridge_error};
 use crate::forvo::candidates::DomResult;
-use crate::forvo::evidence::{Acquisition, CandidateSource, acquire_from, import_acquisition};
+use crate::forvo::evidence::{Acquisition, CandidateSource, acquire_from};
 use crate::forvo::{Candidate, provider_code};
-use crate::pronunciation::Pronunciation;
 use crate::{AssetError, AssetStore, ErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -140,6 +139,12 @@ pub(crate) fn browser_auth_error(
         ),
         _ => return error,
     };
+    if matches!(
+        code.as_str(),
+        "challenge_required" | "login_required" | "session_expired"
+    ) {
+        crate::forvo::interaction::extension_required(&code, &action);
+    }
     error.message = action.clone();
     error.details["provider"] = json!("forvo_brave");
     error.details["next_action"] = json!(action);
@@ -450,32 +455,50 @@ pub async fn acquire(session: &mut BraveSession, surface: &str) -> Result<Acquis
     acquire_from(session, surface).await
 }
 
-/// Полный сбор записей японского блока точного слова тем же транспортом.
-/// Результат пишется в `out` по мере проверки записей и переживает сброс future.
-pub async fn acquire_collection(
-    session: &mut BraveSession,
-    surface: &str,
-    skip: &std::collections::BTreeSet<String>,
-    out: &mut super::super::Collection,
-) {
-    super::super::collect_from(session, surface, skip, out).await
-}
-
-/// Одиночный fetch: одно сопряжение, кандидаты, загрузка выбранного
-/// оригинального MP3 и импорт через `import_acquisition` с прежним уровнем доверия.
+/// Оригинал без чтения сохраняется в Forvo-пакете для Selection.
 pub async fn fetch(
     store: &AssetStore,
-    request: &Pronunciation,
-    replace_expected: Option<String>,
+    surface: &str,
     options: &BraveOptions,
     interrupt: Option<watch::Receiver<bool>>,
 ) -> Result<Value, AssetError> {
+    let normalized = crate::pronunciation::selection::normalize_forvo_surface(surface)?;
+    let surface = normalized.as_str();
     let mut session = BraveSession::connect(options).await?;
     session.set_interrupt(interrupt);
     let before = session.snapshot().await;
-    let acquired = acquire(&mut session, &request.surface).await;
+    let acquired = match crate::forvo::batch::saved_original(
+        store,
+        surface,
+        crate::forvo::batch::Transport::BraveExtension,
+        Some(&session.binding()),
+    ) {
+        Ok(Some(source)) => serde_json::from_value(source["source"]["evidence"].clone())
+            .map(|evidence| (source, evidence, true))
+            .map_err(|_| {
+                super::super::error(
+                    "invalid_forvo_evidence",
+                    "Некорректный сохранённый оригинал",
+                )
+            }),
+        Err(error) => Err(error),
+        Ok(None) => acquire(&mut session, surface)
+            .await
+            .and_then(|acquisition| {
+                let evidence = acquisition.evidence.clone();
+                let source = crate::forvo::batch::save_original_pending_cleanup(
+                    store,
+                    surface,
+                    acquisition,
+                    crate::forvo::batch::Transport::BraveExtension,
+                    Some(session.binding()),
+                )?;
+                Ok((source, evidence, false))
+            }),
+    };
     let after = session.snapshot().await;
     let summary = session.summary();
+    let binding = session.binding();
     let closed = session.close().await;
     let mut browser = summary;
     browser["user_tabs_untouched"] = match (&before, &after) {
@@ -490,25 +513,49 @@ pub async fn fetch(
         Ok(v) if options.close_tab => v["recovery_required"] == true,
         _ => browser["recovery_required"] == true || closed.is_err(),
     });
-    let acquisition = acquired.map_err(|mut e| {
+    let (source, evidence, reused) = acquired.map_err(|mut e| {
         e.details["browser"] = browser.clone();
         e
     })?;
-    let asset =
-        import_acquisition(store, request, &acquisition, replace_expected).map_err(|mut e| {
-            e.details["browser"] = browser.clone();
-            e
-        })?;
-    if let Err(mut e) = closed {
+    if browser["recovery_required"] == true || closed.is_err() {
+        let mut e = closed.err().unwrap_or_else(|| {
+            super::super::error(
+                "cleanup_incomplete",
+                "Оригинал сохранён; требуется освобождение собственной загрузки",
+            )
+        });
+        e.details["recovery_required"] = json!(true);
+        e.details["reused"] = json!(reused);
+        e.details["next_action"] = json!(crate::forvo::batch::resume_action(
+            source["batch_id"].as_str().expect("пакет"),
+            Some(&binding)
+        ));
         e.details["browser"] = browser;
-        e.details["asset"] = json!(asset);
-        e.details["acquisition"] = json!(acquisition.evidence);
+        e.details["source"] = json!(source);
+        e.details["acquisition"] = json!(evidence);
+        if let Err(checkpoint) = crate::forvo::batch::require_recovery(
+            store,
+            source["batch_id"].as_str().expect("пакет"),
+            Some(binding),
+        ) {
+            e.details["checkpoint_error"] =
+                json!({"code":provider_code(&checkpoint),"message":checkpoint.message});
+        }
         return Err(e);
     }
-    tracing::info!(event = "brave_fetch_imported", stage = "import", sha256 = %acquisition.evidence.downloaded_sha256,
-        record_id = %acquisition.evidence.selected_record_id, "Оригинальный MP3 импортирован");
+    crate::forvo::batch::complete_original_cleanup(
+        store,
+        source["batch_id"].as_str().expect("пакет"),
+    )
+    .map_err(|mut error| {
+        error.details["source"] = source.clone();
+        error.details["acquisition"] = json!(evidence);
+        error
+    })?;
+    tracing::info!(event = "brave_fetch_acquired", stage = "save_original", sha256 = %evidence.downloaded_sha256,
+        record_id = %evidence.selected_record_id, "Оригинальный MP3 сохранён без чтения");
     Ok(
-        json!({"transport":"brave_extension","asset":asset,"acquisition":acquisition.evidence,"browser":browser}),
+        json!({"transport":"brave_extension","source":source,"acquisition":evidence,"browser":browser,"reused":reused}),
     )
 }
 

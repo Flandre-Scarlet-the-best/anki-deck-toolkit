@@ -206,21 +206,14 @@ enum ForvoAction {
     },
     Check,
     /// Записи японского блока точной страницы слова. Поиск — только по
-    /// написанию; `--reading` прежних сценариев принимается, но в запросе к
-    /// Forvo не участвует.
+    /// написанию без скачивания MP3.
     Candidates {
         #[arg(long)]
         surface: String,
-        #[arg(long)]
-        reading: Option<String>,
     },
     Fetch {
         #[arg(long)]
         surface: String,
-        #[arg(long)]
-        reading: String,
-        #[arg(long)]
-        replace_expected_sha256: Option<String>,
     },
     BatchStart {
         #[arg(long)]
@@ -316,8 +309,6 @@ enum RunAction {
     Smoke {
         #[arg(long)]
         surface: String,
-        #[arg(long)]
-        reading: String,
         #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
         wait_seconds: u64,
         #[arg(long)]
@@ -328,15 +319,10 @@ enum RunAction {
         #[arg(long)]
         keep_download: bool,
     },
-    /// Получить оригинальный MP3 одного слова через браузер цели и импортировать его
-    /// в AssetStore (уровень доверия прежний: техническая проверка ≠ Verified).
+    /// Сохранить один оригинальный MP3 по написанию без чтения для Selection.
     Fetch {
         #[arg(long)]
         surface: String,
-        #[arg(long)]
-        reading: String,
-        #[arg(long)]
-        replace_expected_sha256: Option<String>,
         #[arg(long, default_value_t = 45, value_parser=clap::value_parser!(u64).range(1..=600))]
         wait_seconds: u64,
         /// Закрыть собственную вкладку адаптера по завершении.
@@ -1004,17 +990,17 @@ fn execute_forvo(
                 }}.await;
                 match value {Ok(mut v)=>{v["transport_decision"]=decision;Ok(v)},Err(mut e)=>{e.details["transport_decision"]=decision;Err(e)}}
             }
-            ForvoAction::Fetch{surface,reading,replace_expected_sha256}=>{
+            ForvoAction::Fetch{surface}=>{
                 let settings=generic.settings()?;
-                let request=Pronunciation::new(surface,reading)?;
-                routed_fetch(profile,&adapter_dir()?,&settings,request,replace_expected_sha256.clone(),output,&open_store).await
+                let request=crate::pronunciation::selection::normalize_forvo_surface(surface)?;
+                routed_fetch(profile,&adapter_dir()?,&settings,request,output,&open_store).await
             }
             _=>{
                 if generic.settings()?.mode==crate::user_config::ForvoMode::ExtensionOnly {
                     return Err(forvo::route::cdp_disabled(match action {ForvoAction::Login{..}=>"login",ForvoAction::Check=>"check",_=>"candidates"}));
                 }
                 // Проверяем входные пары до запуска браузера.
-                let request=match action {ForvoAction::Candidates{surface,reading}=>{if let Some(reading)=reading {Pronunciation::new(surface,reading)?;} Some(crate::pronunciation::selection::normalize_forvo_surface(surface)?)},_=>None};
+                let request=match action {ForvoAction::Candidates{surface}=>{ Some(crate::pronunciation::selection::normalize_forvo_surface(surface)?)},_=>None};
                 let mut session=if matches!(action,ForvoAction::Login{..}) { ForvoSession::launch_interactive(profile).await? } else { ForvoSession::launch(profile).await? };
                 let result=tokio::select! {
                     result=async {
@@ -1022,8 +1008,7 @@ fn execute_forvo(
                       loop {
                         let attempt: Result<serde_json::Value, AssetError> = async { match action {
                             ForvoAction::Login{timeout_seconds,surface}=>{
-                                eprintln!("Войдите вручную в открытом окне Forvo; пароль не передаётся CLI.");
-                                let surface=surface.as_deref().map(|s|Pronunciation::new(s,s).map(|r|r.surface)).transpose()?;
+                                let surface=surface.as_deref().map(crate::pronunciation::selection::normalize_forvo_surface).transpose()?;
                                 let state=session.check_at(true,std::time::Duration::from_secs(*timeout_seconds),surface.as_deref()).await?;
                                 if state!=AuthState::Authenticated {return Err(forvo::auth_error(state));}
                                 Ok(serde_json::json!({"auth_state":state}))
@@ -1045,7 +1030,7 @@ fn execute_forvo(
                         }
                       }
                     }=>result,
-                    _=tokio::signal::ctrl_c()=>Err(AssetError::new(ErrorCode::Interrupted,"Forvo прерван пользователем")),
+                    _=crate::forvo::interaction::interrupted()=>Err(crate::forvo::interaction::interrupted_error()),
                 };
                 let stopped = session.close().await;
                 match (result, stopped) {
@@ -1088,14 +1073,25 @@ struct CdpFailure {
 }
 
 /// Одиночный fetch через собственный Chromium: тот же порядок попыток,
-/// `ForvoEvidence` и импорт, что и прежде; дополнительно сообщается этап отказа.
+/// `ForvoEvidence` и сохранение оригинала; дополнительно сообщается этап отказа.
 async fn cdp_fetch(
     profile: &Path,
     store: &AssetStore,
-    request: &Pronunciation,
-    replace: Option<String>,
+    request: &str,
 ) -> Result<serde_json::Value, CdpFailure> {
     use crate::forvo::{self, ForvoSession, route::Stage};
+    if let Some(source) =
+        forvo::batch::saved_original(store, request, forvo::batch::Transport::CdpChromium, None)
+            .map_err(|error| CdpFailure {
+                error,
+                stage: Stage::AfterDownload,
+                cleanup_ok: false,
+            })?
+    {
+        return Ok(
+            serde_json::json!({"acquisition":source["source"]["evidence"],"source":source,"reused":true}),
+        );
+    }
     let mut session = ForvoSession::launch(profile)
         .await
         .map_err(|error| CdpFailure {
@@ -1105,11 +1101,12 @@ async fn cdp_fetch(
         })?;
     let result = tokio::select! {
         result = async {
-            let acquisition = forvo::acquire(&mut session, &request.surface).await?;
-            let asset = forvo::import_acquisition(store, request, &acquisition, replace)?;
-            Ok(serde_json::json!({"asset":asset,"acquisition":acquisition.evidence}))
+            let acquisition = forvo::acquire(&mut session, request).await?;
+            let evidence = acquisition.evidence.clone();
+            let source = forvo::batch::save_original_pending_cleanup(store, request, acquisition, forvo::batch::Transport::CdpChromium, None)?;
+            Ok(serde_json::json!({"source":source,"acquisition":evidence,"reused":false}))
         } => result,
-        _ = tokio::signal::ctrl_c() => Err(AssetError::new(ErrorCode::Interrupted, "Forvo прерван пользователем")),
+        _ = crate::forvo::interaction::interrupted() => Err(crate::forvo::interaction::interrupted_error()),
     };
     let stage = if session.download_started() {
         Stage::AfterDownload
@@ -1117,8 +1114,33 @@ async fn cdp_fetch(
         Stage::BeforeDownload
     };
     let stopped = session.close().await;
+    finish_cdp_fetch(store, result, stopped, stage)
+}
+
+fn finish_cdp_fetch(
+    store: &AssetStore,
+    result: Result<serde_json::Value, AssetError>,
+    stopped: Result<(), AssetError>,
+    stage: crate::forvo::route::Stage,
+) -> Result<serde_json::Value, CdpFailure> {
+    use crate::forvo::{self, route::Stage};
     match (result, stopped) {
-        (Ok(value), Ok(())) => Ok(value),
+        (Ok(value), Ok(())) => {
+            forvo::batch::complete_original_cleanup(
+                store,
+                value["source"]["batch_id"].as_str().expect("пакет"),
+            )
+            .map_err(|mut error| {
+                error.details["source"] = value["source"].clone();
+                error.details["acquisition"] = value["acquisition"].clone();
+                CdpFailure {
+                    error,
+                    stage: Stage::AfterDownload,
+                    cleanup_ok: false,
+                }
+            })?;
+            Ok(value)
+        }
         (Err(mut error), Err(cleanup)) => {
             error.details["browser_cleanup"] = serde_json::json!({"code":forvo::provider_code(&cleanup),"message":cleanup.message});
             Err(CdpFailure {
@@ -1132,11 +1154,30 @@ async fn cdp_fetch(
             stage,
             cleanup_ok: true,
         }),
-        (Ok(_), Err(cleanup)) => Err(CdpFailure {
-            error: cleanup,
-            stage: Stage::AfterDownload,
-            cleanup_ok: false,
-        }),
+        (Ok(value), Err(mut cleanup)) => {
+            cleanup.details["source"] = value["source"].clone();
+            cleanup.details["acquisition"] = value["acquisition"].clone();
+            cleanup.details["reused"] = value["reused"].clone();
+            cleanup.details["recovery_required"] = serde_json::json!(true);
+            cleanup.details["next_action"] = serde_json::json!(forvo::batch::resume_action(
+                value["source"]["batch_id"]
+                    .as_str()
+                    .expect("сохранённый пакет"),
+                None
+            ));
+            if let Err(error) = forvo::batch::require_recovery(
+                store,
+                value["source"]["batch_id"].as_str().expect("пакет"),
+                None,
+            ) {
+                cleanup.details["checkpoint_error"] = serde_json::json!({"code":forvo::provider_code(&error),"message":error.message});
+            }
+            Err(CdpFailure {
+                error: cleanup,
+                stage: Stage::AfterDownload,
+                cleanup_ok: false,
+            })
+        }
     }
 }
 
@@ -1146,8 +1187,7 @@ async fn routed_fetch(
     profile: &Path,
     adapter_dir: &Path,
     settings: &crate::user_config::ForvoSettings,
-    request: Pronunciation,
-    replace: Option<String>,
+    request: String,
     output: Output,
     open_store: &dyn Fn(bool) -> Result<AssetStore, AssetError>,
 ) -> Result<serde_json::Value, AssetError> {
@@ -1162,7 +1202,6 @@ async fn routed_fetch(
             adapter_dir,
             target,
             &request,
-            replace,
             output,
             open_store,
             settings,
@@ -1171,7 +1210,7 @@ async fn routed_fetch(
         .await;
     }
     let store = open_store(true)?;
-    let failure = match cdp_fetch(profile, &store, &request, replace.clone()).await {
+    let failure = match cdp_fetch(profile, &store, &request).await {
         Ok(mut value) => {
             decision.attempt("cdp_chromium", None, None);
             decision.selected = Some("cdp_chromium");
@@ -1199,7 +1238,6 @@ async fn routed_fetch(
                 adapter_dir,
                 Some(state.target),
                 &request,
-                replace,
                 output,
                 open_store,
                 settings,
@@ -1228,17 +1266,14 @@ async fn routed_fetch(
 async fn extension_fetch(
     adapter_dir: &Path,
     target: Option<String>,
-    request: &Pronunciation,
-    replace: Option<String>,
+    request: &str,
     output: Output,
     open_store: &dyn Fn(bool) -> Result<AssetStore, AssetError>,
     settings: &crate::user_config::ForvoSettings,
     decision: crate::forvo::route::Decision,
 ) -> Result<serde_json::Value, AssetError> {
     let run = RunAction::Fetch {
-        surface: request.surface.clone(),
-        reading: request.reading.clone(),
-        replace_expected_sha256: replace,
+        surface: request.into(),
         wait_seconds: 45,
         close_tab: false,
     };
@@ -1626,7 +1661,6 @@ async fn run_brave(
             ),
             AdapterCommand::Run(RunAction::Smoke {
                 surface,
-                reading,
                 wait_seconds,
                 probe_downloads_api,
                 close_tab,
@@ -1637,7 +1671,6 @@ async fn run_brave(
                     target: target.clone(),
                     wait: Duration::from_secs(*wait_seconds),
                     surface: surface.clone(),
-                    reading: reading.clone(),
                     probe_downloads_api: *probe_downloads_api,
                     close_tab: *close_tab,
                     keep_download: *keep_download,
@@ -1656,18 +1689,15 @@ async fn run_brave(
             }
             AdapterCommand::Run(RunAction::Fetch {
                 surface,
-                reading,
-                replace_expected_sha256,
                 wait_seconds,
                 close_tab,
             }) => {
                 // Пара проверяется до подключения к браузеру.
-                let request = Pronunciation::new(surface, reading)?;
+                let request = crate::pronunciation::selection::normalize_forvo_surface(surface)?;
                 let store = open_store(true)?;
                 brave::fetch::fetch(
                     &store,
                     &request,
-                    replace_expected_sha256.clone(),
                     &brave_options(&state_dir, target.clone(), *wait_seconds, *close_tab),
                     Some(interrupt_rx.clone()),
                 )
@@ -1719,15 +1749,15 @@ async fn run_brave(
     tokio::pin!(work);
     let result = tokio::select! {
         result = &mut work => result,
-        _ = tokio::signal::ctrl_c(), if !graceful_interrupt => Err(adapter_interrupted(false)),
-        _ = tokio::signal::ctrl_c(), if graceful_interrupt => {
+        _ = crate::forvo::interaction::interrupted(), if !graceful_interrupt => Err(adapter_interrupted(false)),
+        _ = crate::forvo::interaction::interrupted(), if graceful_interrupt => {
             let _ = interrupt_tx.send(true);
             tokio::select! {
                 result = tokio::time::timeout(Duration::from_secs(20), &mut work) => match result {
                     Ok(Err(error)) => Err(error),
                     _ => Err(adapter_interrupted(false)),
                 },
-                _ = tokio::signal::ctrl_c() => Err(adapter_interrupted(true)),
+                _ = crate::forvo::interaction::interrupted() => Err(adapter_interrupted(true)),
             }
         }
     };
@@ -1822,8 +1852,9 @@ fn finish_brave_run(
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterCommand, RunAction, adapter_interrupted, batch_start_failure, finish_brave_run,
-        run_forvo_batch_logged, waits_for_brave_download_cleanup, with_update_notice,
+        AdapterCommand, Output, RunAction, adapter_interrupted, batch_start_failure, cdp_fetch,
+        finish_brave_run, finish_cdp_fetch, routed_fetch, run_forvo_batch_logged,
+        waits_for_brave_download_cleanup, with_update_notice,
     };
     use crate::forvo::{ForvoSession, batch::Backend};
     use crate::temp_workspace::TempWorkspace;
@@ -1947,7 +1978,6 @@ mod tests {
     fn download_actions_wait_for_cleanup_after_ctrl_c() {
         let smoke = RunAction::Smoke {
             surface: "元気".into(),
-            reading: "げんき".into(),
             wait_seconds: 45,
             probe_downloads_api: false,
             close_tab: false,
@@ -1962,8 +1992,6 @@ mod tests {
         let close = RunAction::Close { wait_seconds: 45 };
         let fetch = RunAction::Fetch {
             surface: "元気".into(),
-            reading: "げんき".into(),
-            replace_expected_sha256: None,
             wait_seconds: 45,
             close_tab: false,
         };
@@ -2005,5 +2033,268 @@ mod tests {
 
         assert_eq!(output, result);
         assert!(!adapter_state.exists());
+    }
+    fn original_fixture(store: &AssetStore, pending_cleanup: bool) -> serde_json::Value {
+        use crate::forvo::{Acquisition, Attempt, ForvoEvidence, RANKING, batch};
+        let bytes = crate::forvo::tests::synthetic_mp3();
+        let evidence = ForvoEvidence {
+            schema_version: 1,
+            page_url: crate::forvo::word_url("学校"),
+            downloaded_sha256: crate::hashing::sha256_hex(&bytes),
+            selected_record_id: "10".into(),
+            ranking_policy: RANKING.into(),
+            candidates: vec![crate::forvo::tests::candidate("10", Some(5), None, None)],
+            attempts: vec![Attempt {
+                record_id: "10".into(),
+                code: "downloaded".into(),
+            }],
+            acquisition_mode: None,
+        };
+        let save = if pending_cleanup {
+            batch::save_original_pending_cleanup
+        } else {
+            batch::save_original
+        };
+        save(
+            store,
+            "学校",
+            Acquisition { bytes, evidence },
+            batch::Transport::CdpChromium,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cdp_fetch_reuses_and_finishes_partial_checkpoint_without_chromium() {
+        use crate::forvo::batch;
+        let workspace = TempWorkspace::create("cdp-single-reuse").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let source = original_fixture(&store, false);
+        let id = source["batch_id"].as_str().unwrap();
+        let before = batch::status(&store, id).unwrap();
+        {
+            let mut runtime =
+                crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+            let mut partial: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+            partial.items[0].outcome = None;
+            partial.revision += 1;
+            runtime.save(&partial).unwrap();
+        }
+        let profile = workspace.path().join("must-not-launch");
+        for _ in 0..2 {
+            let result = cdp_fetch(&profile, &store, "学校")
+                .await
+                .unwrap_or_else(|e| panic!("{}", e.error));
+            assert_eq!(result["reused"], true);
+            assert_eq!(result["source"], source);
+            assert_eq!(result["acquisition"], source["source"]["evidence"]);
+        }
+        let done = batch::status(&store, id).unwrap();
+        assert_eq!(done.items[0].outcome.as_ref().unwrap().code, "acquired");
+        assert_eq!(done.revision, before.revision + 2);
+        assert!(!profile.exists());
+        assert!(store.verify_integrity().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cdp_cleanup_failure_exposes_original_and_blocks_routed_fallback() {
+        use crate::forvo::{self, batch, route::Stage};
+        let workspace = TempWorkspace::create("cdp-cleanup-result").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let source = original_fixture(&store, true);
+        let acquired =
+            json!({"source":source,"acquisition":source["source"]["evidence"],"reused":false});
+        let error = finish_cdp_fetch(
+            &store,
+            Ok(acquired),
+            Err(forvo::error(
+                "browser_cleanup_failed",
+                "закрытие не подтверждено",
+            )),
+            Stage::AfterDownload,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(forvo::provider_code(&error.error), "browser_cleanup_failed");
+        assert!(!error.cleanup_ok);
+        assert_eq!(error.error.details["source"], source);
+        assert_eq!(
+            error.error.details["acquisition"],
+            source["source"]["evidence"]
+        );
+        assert_eq!(error.error.details["reused"], false);
+        assert_eq!(error.error.details["recovery_required"], true);
+        assert!(
+            error.error.details["next_action"]
+                .as_str()
+                .unwrap()
+                .contains(source["batch_id"].as_str().unwrap())
+        );
+        let profile = workspace.path().join("no-browser");
+        let config = workspace.path().join("config.toml");
+        std::fs::write(&config, "[forvo]\nupdate_check = \"off\"\n").unwrap();
+        let settings = crate::user_config::forvo(&crate::user_config::ForvoOverrides {
+            config: Some(config),
+            ..Default::default()
+        })
+        .unwrap();
+        let routed = routed_fetch(
+            &profile,
+            &workspace.path().join("no-adapter"),
+            &settings,
+            "学校".into(),
+            Output::Json,
+            &|_| {
+                AssetStore::open_existing_with_policy(
+                    StoreOptions::new(store.root()),
+                    crate::pronunciation::PronunciationDomainPolicy,
+                )
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(routed.details["source"], source);
+        assert_eq!(routed.details["reused"], true);
+        assert_eq!(
+            routed.details["transport_decision"]["fallback"]["allowed"],
+            false
+        );
+        assert!(!profile.exists());
+        assert!(
+            batch::status(&store, source["batch_id"].as_str().unwrap())
+                .unwrap()
+                .paused
+                .unwrap()
+                .recovery_required
+        );
+    }
+    #[tokio::test]
+    async fn cdp_fetch_rejects_invalid_partial_original_without_losing_error_or_reloading() {
+        use crate::forvo::batch;
+        let workspace = TempWorkspace::create("cdp-invalid-original").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let source = original_fixture(&store, false);
+        let id = source["batch_id"].as_str().unwrap();
+        let corrupt = "это не MP3".as_bytes();
+        let sha = crate::hashing::sha256_hex(corrupt);
+        {
+            let mut runtime =
+                crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+            let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+            let blob = runtime.persist_blob(corrupt, "mp3").unwrap();
+            let saved = state.items[0].acquisition.as_mut().unwrap();
+            saved.blob = blob;
+            saved.evidence.downloaded_sha256 = sha.clone();
+            state.items[0].outcome = None;
+            state.revision += 1;
+            runtime.save(&state).unwrap();
+        }
+        let profile = workspace.path().join("must-not-launch");
+        let error = cdp_fetch(&profile, &store, "学校")
+            .await
+            .err()
+            .unwrap()
+            .error;
+        assert_eq!(error.code, ErrorCode::ValidatorFailure);
+        assert_eq!(error.details["source"]["batch_id"], id);
+        assert_eq!(error.details["source"]["source"]["blob"]["sha256"], sha);
+        assert_eq!(error.details["acquisition"]["downloaded_sha256"], sha);
+        assert_eq!(error.details["reused"], true);
+        assert!(error.details["next_action"].as_str().unwrap().contains(id));
+        let state = batch::status(&store, id).unwrap();
+        assert!(state.items[0].outcome.is_none());
+        let runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+        assert_eq!(
+            runtime
+                .read_blob(&state.items[0].acquisition.as_ref().unwrap().blob)
+                .unwrap(),
+            corrupt
+        );
+        assert!(!profile.exists());
+        assert!(store.verify_integrity().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cdp_fetch_does_not_hide_terminal_failure_or_restart_a_cancelled_original() {
+        use crate::forvo::batch;
+        let workspace = TempWorkspace::create("cdp-terminal-original").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let source = original_fixture(&store, false);
+        let id = source["batch_id"].as_str().unwrap();
+        {
+            let mut runtime =
+                crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+            let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+            state.items[0].outcome = Some(batch::Failure {
+                code: "validator_failure".into(),
+                message: "Ранее сохранён итоговый отказ проверки".into(),
+                report: None,
+                recovery_required: false,
+            });
+            state.revision += 1;
+            runtime.save(&state).unwrap();
+        }
+        let profile = workspace.path().join("must-not-launch");
+        let terminal = cdp_fetch(&profile, &store, "学校")
+            .await
+            .err()
+            .unwrap()
+            .error;
+        assert_eq!(crate::forvo::provider_code(&terminal), "original_not_ready");
+        assert_eq!(terminal.details["source"], source);
+        assert_eq!(
+            terminal.details["acquisition"],
+            source["source"]["evidence"]
+        );
+        assert_eq!(terminal.details["reused"], true);
+        assert!(
+            terminal.details["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("batch-status")
+        );
+        assert_eq!(
+            batch::status(&store, id).unwrap().items[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .code,
+            "validator_failure"
+        );
+        {
+            let mut runtime =
+                crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+            let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+            state.items[0].acquisition = None;
+            state.items[0].outcome = None;
+            state.cancelled = true;
+            state.revision += 1;
+            runtime.save(&state).unwrap();
+        }
+        let cancelled = cdp_fetch(&profile, &store, "学校")
+            .await
+            .err()
+            .unwrap()
+            .error;
+        assert_eq!(crate::forvo::provider_code(&cancelled), "batch_cancelled");
+        assert!(batch::status(&store, id).unwrap().cancelled);
+        assert!(!profile.exists());
     }
 }

@@ -9,13 +9,12 @@ pub mod brave;
 mod candidates;
 mod download;
 mod evidence;
+pub(crate) mod interaction;
 pub mod route;
 use crate::browser_runtime::{BrowserRuntimeConfig, BrowserSession};
 pub use candidates::{Candidate, Gender, RANKING, rank, word_url};
-pub(crate) use evidence::collect_from;
 pub use evidence::{
-    Acquisition, Attempt, COLLECT_ALL_MODE, CollectedRecord, Collection, ForvoEvidence, acquire,
-    collect, import_acquisition,
+    Acquisition, Attempt, COLLECT_ALL_MODE, ForvoEvidence, acquire, import_acquisition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +35,27 @@ pub fn error(code: &str, action: &str) -> AssetError {
         action,
         serde_json::json!({"provider":"forvo_web", "code":code,"next_action":action}),
     )
+}
+
+/// Один шаг ожидания проверки: прерывание сильнее одновременно готового
+/// результата и дедлайна. Протокол ручного шага требует, чтобы гонка с
+/// внешним сигналом давала `interrupted`, а не `authenticated`; без явного
+/// приоритета выбор среди готовых веток был бы случайным.
+async fn wait_step<Check, Interrupt>(
+    check: Check,
+    deadline: tokio::time::Instant,
+    interrupt: Interrupt,
+) -> Option<Result<AuthState, AssetError>>
+where
+    Check: std::future::Future<Output = Result<AuthState, AssetError>>,
+    Interrupt: std::future::Future<Output = AssetError>,
+{
+    tokio::select! {
+        biased;
+        error = interrupt => Some(Err(error)),
+        state = check => Some(state),
+        _ = tokio::time::sleep_until(deadline) => None,
+    }
 }
 pub struct ForvoSession {
     browser: Option<BrowserSession>,
@@ -77,7 +97,7 @@ impl ForvoSession {
         tokio::pin!(launch);
         tokio::select! {
             result=&mut launch=>result,
-            _=tokio::signal::ctrl_c()=>{
+            _=interaction::interrupted()=>{
                 match launch.await {
                     Ok(session) => session.close().await?,
                     Err(e) if provider_code(&e)=="browser_cleanup_failed" => return Err(e),
@@ -132,10 +152,13 @@ impl ForvoSession {
                 .find(|code| message.contains(code))
                 .unwrap_or("browser_recovery_required")
             };
-            error(
+            let mut failure = error(
                 code,
                 "Проверьте GUI, Chromium и свободный собственный профиль; повторите forvo login",
-            )
+            );
+            failure.details["browser_error"] =
+                serde_json::json!(crate::diagnostics::safe_message(&message));
+            failure
         })
     }
     /// Начиналась ли загрузка записи в этой сессии.
@@ -214,12 +237,6 @@ impl ForvoSession {
             return Ok(false);
         }
         self.stop_browser().await?;
-        tracing::info!(
-            event = "forvo_interaction",
-            stage = "authentication",
-            "Требуется ручное взаимодействие с Forvo"
-        );
-        eprintln!("Для продолжения войдите в Forvo или завершите проверку в открывшемся окне.");
         self.start_browser(true).await?;
         let result = self
             .check_at(true, Duration::from_secs(300), surface)
@@ -343,19 +360,49 @@ impl ForvoSession {
                 "https://forvo.com/".into()
             }
         });
-        self.navigate(&target).await?;
+        let mut interaction = login.then(|| interaction::begin(wait)).transpose()?;
         let deadline = tokio::time::Instant::now() + wait;
-        loop {
-            let state = self.auth_state().await?;
-            if state == AuthState::Authenticated
-                || (!login && state != AuthState::PageUnstable)
-                || tokio::time::Instant::now() >= deadline
-            {
-                return Ok(state);
+        let mut last_state = AuthState::PageUnstable;
+        let result = async {
+            self.navigate(&target).await?;
+            loop {
+                let state = self.auth_state().await?;
+                last_state = state;
+                if state == AuthState::Authenticated || (!login && state != AuthState::PageUnstable)
+                {
+                    return Ok(state);
+                }
+                // Ожидание изменения DOM; deadline и сигналы наблюдаются вокруг всей операции.
+                wait_dom(self.browser().page()).await;
             }
-            // Ожидание изменения DOM; при навигации прежний контекст выполнения исчезает.
-            wait_dom(self.browser().page()).await;
+        };
+        let result = wait_step(result, deadline, async {
+            interaction::wait_interrupt(&mut interaction).await;
+            let mut error = interaction::interrupted_error();
+            error.details["human_wait_pending"] = serde_json::json!(true);
+            error
+        })
+        .await;
+        let result = result.unwrap_or_else(|| {
+            if login {
+                let mut error = auth_error(last_state);
+                error.details["human_wait"] = serde_json::json!("timed_out");
+                error.details["timeout_seconds"] = serde_json::json!(wait.as_secs());
+                Err(error)
+            } else {
+                Ok(last_state)
+            }
+        });
+        if let Some(id) = interaction {
+            let outcome = match &result {
+                Ok(AuthState::Authenticated) => "authenticated",
+                Err(e) if e.code == ErrorCode::Interrupted => "interrupted",
+                Err(e) if e.details["human_wait"] == "timed_out" => "timed_out",
+                _ => "failed",
+            };
+            id.finish(outcome);
         }
+        result
     }
 }
 
@@ -564,4 +611,4 @@ pub fn pauses_batch(error: &AssetError) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -103,10 +103,7 @@ impl Drop for Permissions {
 
 pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     let cli = Cli::new(env).ok_or(MISSING_CLI)?;
-    let words = [
-        (fixture::WORD, fixture::READING),
-        (fixture::WORD_3, fixture::READING_3),
-    ];
+    let words = [fixture::WORD, fixture::WORD_3];
     let plan = cli.plan(&env.dir, "fault-plan", &words)?;
     let plan = plan.to_string_lossy().into_owned();
     let fixture = env.ctx.fixture.clone();
@@ -157,63 +154,6 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     env.out.check("после восстановления доступа первая запись не скачивается; вторая повторяется один раз (байты ещё не checkpoint)",
         recovered.code==0 && fixture.requests_for(fixture::RECORD_A)==1 && fixture.requests_for(fixture::RECORD_3)==2,
         json!({"exit":recovered.code,"requests_first":fixture.requests_for(fixture::RECORD_A),"requests_second":fixture.requests_for(fixture::RECORD_3),"result":recovered.out["result"]}));
-
-    // Отказ CAS-импорта после реально записанного на диск checkpoint: resume обязан
-    // использовать подтверждённые байты, а не повторять загрузку.
-    let mut importing = Cli::new(env).expect("cli");
-    importing.store = env.dir.join("store-import-failure");
-    let (gate, rx) = Gate::new();
-    fixture.set(fixture::RECORD_3, Behavior::HoldBody(rx));
-    let counts = (
-        fixture.requests_for(fixture::RECORD_A),
-        fixture.requests_for(fixture::RECORD_3),
-    );
-    let child = importing.spawn(
-        true,
-        &[
-            "batch-start",
-            "--batch-id",
-            "import-failure",
-            "--plan",
-            &plan,
-            "--close-tab",
-        ],
-    )?;
-    if !fixture
-        .wait_request(fixture::RECORD_3, counts.1 + 1, Duration::from_secs(60))
-        .await
-    {
-        return Err("нет второй загрузки для отказа импорта".into());
-    }
-    let permissions = Permissions::deny(
-        &[&importing.store.join(".runtime/assets")],
-        0o500,
-        Access::WRITE_OK,
-    )?;
-    gate.open();
-    let paused = Cli::finish(child).await?;
-    drop(permissions);
-    let checkpoint = &paused.out["result"]["items"][1]["acquisition"];
-    env.out.check(
-        "ошибка импорта приостанавливает пакет с настоящими сохранёнными байтами",
-        paused.out["outcome"] == "paused"
-            && !checkpoint.is_null()
-            && paused.out["result"]["items"][1]["outcome"].is_null(),
-        json!({"exit":paused.code,"paused":paused.out["result"]["paused"],"checkpoint":checkpoint}),
-    );
-    fixture.set(fixture::RECORD_3, Behavior::Normal);
-    let resumed = importing
-        .run(
-            true,
-            &[
-                "batch-resume",
-                "--batch-id",
-                "import-failure",
-                "--close-tab",
-            ],
-        )
-        .await?;
-    env.out.check("после отказа импорта resume использует checkpoint без повторных скачиваний",resumed.code==0 && fixture.requests_for(fixture::RECORD_A)==counts.0+1 && fixture.requests_for(fixture::RECORD_3)==counts.1+1,json!({"exit":resumed.code,"downloads_first":fixture.requests_for(fixture::RECORD_A)-counts.0,"downloads_second":fixture.requests_for(fixture::RECORD_3)-counts.1}));
 
     let mut corrupt = Cli::new(env).expect("cli");
     corrupt.store = env.dir.join("store-corrupt");
@@ -359,10 +299,7 @@ pub(super) async fn enospc(env: &mut Env<'_>) -> Result<()> {
         .insert("volume_capacity_bytes".into(), json!(capacity));
     let mut cli = Cli::new(env).ok_or(MISSING_CLI)?;
     cli.store = volume.store();
-    let words = [
-        (fixture::WORD, fixture::READING),
-        (fixture::WORD_3, fixture::READING_3),
-    ];
+    let words = [fixture::WORD, fixture::WORD_3];
     let plan = cli.plan(&env.dir, "space-plan", &words)?;
     let fixture = env.ctx.fixture.clone();
     let (gate, rx) = Gate::new();
