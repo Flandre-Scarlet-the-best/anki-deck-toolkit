@@ -62,7 +62,7 @@ update_check = "weekly"     # редкая проверка новой верс�
 
 Предметная ошибка не даёт права на переход: `rate_limited`, `access_denied`,
 `challenge_required`, `word_not_found`, `candidates_exhausted`, ошибки аудио,
-импорта и диска, чужая загрузка, `browser_profile_not_owned`,
+проверки MP3 и диска, чужая загрузка, `browser_profile_not_owned`,
 `browser_cleanup_failed`, прерывание. Такая ошибка возвращается как есть.
 Решение и причина всегда в `transport_decision` результата или ошибки: `mode`,
 `mode_source`, `attempts` (транспорт, этап, код), `fallback` (`used`, `reason`,
