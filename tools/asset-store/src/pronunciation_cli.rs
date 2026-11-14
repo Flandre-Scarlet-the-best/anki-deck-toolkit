@@ -2177,4 +2177,124 @@ mod tests {
                 .recovery_required
         );
     }
+    #[tokio::test]
+    async fn cdp_fetch_rejects_invalid_partial_original_without_losing_error_or_reloading() {
+        use crate::forvo::batch;
+        let workspace = TempWorkspace::create("cdp-invalid-original").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let source = original_fixture(&store, false);
+        let id = source["batch_id"].as_str().unwrap();
+        let corrupt = "это не MP3".as_bytes();
+        let sha = crate::hashing::sha256_hex(corrupt);
+        {
+            let mut runtime =
+                crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+            let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+            let blob = runtime.persist_blob(corrupt, "mp3").unwrap();
+            let saved = state.items[0].acquisition.as_mut().unwrap();
+            saved.blob = blob;
+            saved.evidence.downloaded_sha256 = sha.clone();
+            state.items[0].outcome = None;
+            state.revision += 1;
+            runtime.save(&state).unwrap();
+        }
+        let profile = workspace.path().join("must-not-launch");
+        let error = cdp_fetch(&profile, &store, "学校")
+            .await
+            .err()
+            .unwrap()
+            .error;
+        assert_eq!(error.code, ErrorCode::ValidatorFailure);
+        assert_eq!(error.details["source"]["batch_id"], id);
+        assert_eq!(error.details["source"]["source"]["blob"]["sha256"], sha);
+        assert_eq!(error.details["acquisition"]["downloaded_sha256"], sha);
+        assert_eq!(error.details["reused"], true);
+        assert!(error.details["next_action"].as_str().unwrap().contains(id));
+        let state = batch::status(&store, id).unwrap();
+        assert!(state.items[0].outcome.is_none());
+        let runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+        assert_eq!(
+            runtime
+                .read_blob(&state.items[0].acquisition.as_ref().unwrap().blob)
+                .unwrap(),
+            corrupt
+        );
+        assert!(!profile.exists());
+        assert!(store.verify_integrity().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cdp_fetch_does_not_hide_terminal_failure_or_restart_a_cancelled_original() {
+        use crate::forvo::batch;
+        let workspace = TempWorkspace::create("cdp-terminal-original").unwrap();
+        let store = AssetStore::open_with_policy(
+            StoreOptions::new(workspace.path().join("store")),
+            crate::pronunciation::PronunciationDomainPolicy,
+        )
+        .unwrap();
+        let source = original_fixture(&store, false);
+        let id = source["batch_id"].as_str().unwrap();
+        {
+            let mut runtime =
+                crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+            let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+            state.items[0].outcome = Some(batch::Failure {
+                code: "validator_failure".into(),
+                message: "Ранее сохранён итоговый отказ проверки".into(),
+                report: None,
+                recovery_required: false,
+            });
+            state.revision += 1;
+            runtime.save(&state).unwrap();
+        }
+        let profile = workspace.path().join("must-not-launch");
+        let terminal = cdp_fetch(&profile, &store, "学校")
+            .await
+            .err()
+            .unwrap()
+            .error;
+        assert_eq!(crate::forvo::provider_code(&terminal), "original_not_ready");
+        assert_eq!(terminal.details["source"], source);
+        assert_eq!(
+            terminal.details["acquisition"],
+            source["source"]["evidence"]
+        );
+        assert_eq!(terminal.details["reused"], true);
+        assert!(
+            terminal.details["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("batch-status")
+        );
+        assert_eq!(
+            batch::status(&store, id).unwrap().items[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .code,
+            "validator_failure"
+        );
+        {
+            let mut runtime =
+                crate::batch_runtime::SafeBatchRuntime::open(store.root(), id).unwrap();
+            let mut state: batch::ForvoBatch = runtime.load().unwrap().unwrap();
+            state.items[0].acquisition = None;
+            state.items[0].outcome = None;
+            state.cancelled = true;
+            state.revision += 1;
+            runtime.save(&state).unwrap();
+        }
+        let cancelled = cdp_fetch(&profile, &store, "学校")
+            .await
+            .err()
+            .unwrap()
+            .error;
+        assert_eq!(crate::forvo::provider_code(&cancelled), "batch_cancelled");
+        assert!(batch::status(&store, id).unwrap().cancelled);
+        assert!(!profile.exists());
+    }
 }

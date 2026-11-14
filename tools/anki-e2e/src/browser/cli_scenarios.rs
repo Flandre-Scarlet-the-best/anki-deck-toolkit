@@ -91,7 +91,11 @@ impl Cli {
                 .arg("--target")
                 .arg(&self.target);
         } else {
-            command.arg("--profile").arg(&self.profile);
+            command
+                .arg("--profile")
+                .arg(&self.profile)
+                .arg("--adapter-state-dir")
+                .arg(&self.state);
         }
         command.args(args);
         if let Some(path) = &self.path_override {
@@ -881,7 +885,7 @@ pub async fn cli_human_wait(env: &mut Env<'_>) -> Result<()> {
         "--host-resolver-rules=MAP forvo.com 127.0.0.1:{}, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
         env.ctx.fixture.port
     );
-    std::fs::write(
+    tokio::fs::write(
         &wrapper,
         format!(
             "#!/bin/sh\nexec {} --no-proxy-server --ignore-certificate-errors {} \"$@\"\n",
@@ -889,10 +893,12 @@ pub async fn cli_human_wait(env: &mut Env<'_>) -> Result<()> {
             quote(&resolver)
         ),
     )
+    .await
     .map_err(|e| e.to_string())?;
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+        tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+            .await
             .map_err(|e| e.to_string())?;
     }
     for mode in [
@@ -1000,7 +1006,9 @@ pub async fn cli_human_wait(env: &mut Env<'_>) -> Result<()> {
     let extension = cli
         .run(true, &["fetch", "--surface", fixture::WORD_LOGIN])
         .await?;
-    let log = std::fs::read_to_string(&cli.log).map_err(|e| e.to_string())?;
+    let log = tokio::fs::read_to_string(&cli.log)
+        .await
+        .map_err(|e| e.to_string())?;
     let emitted = log
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())

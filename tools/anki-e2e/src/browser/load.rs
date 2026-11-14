@@ -167,11 +167,11 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         let words: Vec<_> = (0..env.ctx.batch_items as usize)
             .map(|i| fixture::load_word(batch * env.ctx.batch_items as usize + i))
             .collect();
-        let pairs: Vec<_> = words.iter().map(|(s, _)| s.as_str()).collect();
+        let surfaces: Vec<_> = words.iter().map(|(s, _)| s.as_str()).collect();
         let id = format!("load-{batch}");
-        let plan = cli.plan(&env.dir, &id, &pairs)?;
+        let plan = cli.plan(&env.dir, &id, &surfaces)?;
         println!(
-            "  пакет {}/{}, {} разных пар",
+            "  пакет {}/{}, {} разных написаний",
             batch + 1,
             env.ctx.batch_count,
             words.len()
@@ -268,7 +268,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
                     .as_array()
                     .is_some_and(|values| values.len() == words.len())
             });
-        let batch_report = json!({"batch_id":id,"plan":pairs,"batch_wall_s":seconds,"seconds_per_word":seconds/words.len() as f64,
+        let batch_report = json!({"batch_id":id,"plan":surfaces,"batch_wall_s":seconds,"seconds_per_word":seconds/words.len() as f64,
             "successful_words_per_second":if evidence_ok { Some(words.len() as f64/seconds) } else { None },
             "originals":state.items.iter().filter(|i|i.outcome.as_ref().is_some_and(|o|o.code=="acquired")).count(),
             "revision":revision,"resume_revision":resumed.out["result"]["revision"],"resume_wall_s":resume_s,

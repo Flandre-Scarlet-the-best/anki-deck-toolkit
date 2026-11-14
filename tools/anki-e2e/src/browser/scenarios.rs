@@ -13,7 +13,6 @@ use asset_store::forvo::brave::acceptance::{self, Connection, SmokeOptions};
 use asset_store::forvo::brave::download::{self, Limits, Progress, StatusFacts};
 use asset_store::forvo::brave::{self as brave, GROUP_TITLE, Platform};
 use asset_store::forvo::{Candidate, provider_code};
-use asset_store::pronunciation::Pronunciation;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -39,19 +38,6 @@ pub(super) fn code<T>(result: &std::result::Result<T, AssetError>) -> String {
         Ok(_) => "ok".into(),
         Err(e) => provider_code(e).to_owned(),
     }
-}
-
-fn request(word: &str) -> Pronunciation {
-    let reading = match word {
-        fixture::WORD => fixture::READING,
-        fixture::WORD_DOM_CHANGED => "べつご",
-        fixture::WORD_OTHER_LANGUAGE => "えいご",
-        fixture::WORD_PHRASES => "くご",
-        fixture::WORD_LOGIN => "みにんしょう",
-        fixture::WORD_MISMATCHED_BUTTON => "ごき",
-        _ => "ごさき",
-    };
-    Pronunciation::new(word, reading).expect("корректный запрос fixture")
 }
 
 fn word_url(word: &str) -> String {
@@ -282,7 +268,7 @@ impl Env<'_> {
         acceptance::open_word(&mut conn.bridge, word)
             .await
             .map_err(err)?;
-        let ranked = acceptance::candidates(&mut conn.bridge, &request(word).surface)
+        let ranked = acceptance::candidates(&mut conn.bridge, word)
             .await
             .map_err(err)?;
         ranked
@@ -301,7 +287,7 @@ impl Env<'_> {
         let result = download::acquire(
             &mut conn.bridge,
             Platform::Linux,
-            &request(word).surface,
+            word,
             candidate,
             &op,
             &limits,
@@ -465,7 +451,7 @@ async fn auth_and_candidates(env: &mut Env<'_>) -> Result<()> {
         acceptance::open_word(&mut conn.bridge, fixture::WORD)
             .await
             .map_err(err)?;
-        acceptance::candidates(&mut conn.bridge, &request(fixture::WORD).surface)
+        acceptance::candidates(&mut conn.bridge, fixture::WORD)
             .await
             .map_err(err)?
     };
@@ -497,7 +483,7 @@ async fn auth_and_candidates(env: &mut Env<'_>) -> Result<()> {
     ] {
         let conn = env.conn.as_mut().expect("bridge");
         let result = match acceptance::open_word(&mut conn.bridge, word).await {
-            Ok(_) => acceptance::candidates(&mut conn.bridge, &request(word).surface)
+            Ok(_) => acceptance::candidates(&mut conn.bridge, word)
                 .await
                 .map(|_| ()),
             Err(e) => Err(e),
@@ -621,7 +607,7 @@ async fn recent_user_download(env: &mut Env<'_>) -> Result<()> {
         .await?;
     let decision = download::classify(
         &complete,
-        &request(fixture::WORD).surface,
+        fixture::WORD,
         fixture::RECORD_A,
         &Limits::default(),
     );
@@ -677,14 +663,14 @@ async fn concurrent_downloads(env: &mut Env<'_>) -> Result<()> {
         Ok(())
     };
     let conn = env.conn.as_mut().expect("bridge");
-    let request = request(fixture::WORD);
+    let surface = fixture::WORD;
     let limits = Limits::default();
     let mut no_interrupt = None;
     let (acquired, side) = tokio::join!(
         download::acquire(
             &mut conn.bridge,
             Platform::Linux,
-            &request.surface,
+            surface,
             &candidate,
             &op,
             &limits,
@@ -741,7 +727,7 @@ async fn concurrent_downloads(env: &mut Env<'_>) -> Result<()> {
         download::acquire(
             &mut conn.bridge,
             Platform::Linux,
-            &request.surface,
+            surface,
             &candidate,
             &op,
             &limits,
@@ -893,7 +879,7 @@ async fn service_worker_restart(env: &mut Env<'_>) -> Result<()> {
     let extension_id = env.conn().peer.extension_id.clone();
     let downloads = env.downloads();
     let fixture = env.ctx.fixture.clone();
-    let request = request(fixture::WORD);
+    let surface = fixture::WORD;
     let limits = Limits::default();
     // 1. Рестарт до связывания: загрузка ещё не появилась.
     let (gate, rx) = Gate::new();
@@ -919,7 +905,7 @@ async fn service_worker_restart(env: &mut Env<'_>) -> Result<()> {
         download::acquire(
             &mut conn.bridge,
             Platform::Linux,
-            &request.surface,
+            surface,
             &candidate,
             &op,
             &limits,
@@ -966,7 +952,7 @@ async fn service_worker_restart(env: &mut Env<'_>) -> Result<()> {
         download::acquire(
             &mut conn.bridge,
             Platform::Linux,
-            &request.surface,
+            surface,
             &candidate,
             &op,
             &limits,
@@ -1020,18 +1006,17 @@ async fn bridge_reconnect(env: &mut Env<'_>) -> Result<()> {
         json!({"reconnect_ms":reconnect_ms,"bound_before":bound.bound_id,"bound_after":after.bound_id}),
     );
     gate.open();
-    let request = request(fixture::WORD);
+    let surface = fixture::WORD;
     let limits = Limits::default();
     let done = env
         .poll(&op, Duration::from_secs(20), |f| {
             !matches!(
-                download::classify(f, &request.surface, &candidate.record_id, &limits),
+                download::classify(f, surface, &candidate.record_id, &limits),
                 Progress::Waiting(_)
             )
         })
         .await?;
-    let verified = match download::classify(&done, &request.surface, &candidate.record_id, &limits)
-    {
+    let verified = match download::classify(&done, surface, &candidate.record_id, &limits) {
         Progress::Complete(item) => download::verify_file(Platform::Linux, &item)
             .map(|(_, b)| sha256_hex(&b))
             .map_err(err),
@@ -1069,17 +1054,17 @@ async fn own_tab_closed(env: &mut Env<'_>) -> Result<()> {
         return Err("собственный запрос не пришёл".into());
     }
     let closed = env.call("close", json!({})).await.map_err(err)?;
-    let request = request(fixture::WORD);
+    let surface = fixture::WORD;
     let limits = Limits::default();
     let facts = env
         .poll(&op, Duration::from_secs(10), |f| {
             matches!(
-                download::classify(f, &request.surface, &candidate.record_id, &limits),
+                download::classify(f, surface, &candidate.record_id, &limits),
                 Progress::Failed(_)
             )
         })
         .await?;
-    let progress = download::classify(&facts, &request.surface, &candidate.record_id, &limits);
+    let progress = download::classify(&facts, surface, &candidate.record_id, &limits);
     env.out.check(
         "закрытие собственной вкладки до начала загрузки → own_tab_closed",
         closed["closed"] == true && progress == Progress::Failed("own_tab_closed"),

@@ -863,13 +863,14 @@ pub fn saved_original(
     {
         let mut error = super::error(
             "original_not_ready",
-            "Завершите проверку сохранённого оригинала через batch-resume",
+            "Сохранённый оригинал имеет итоговый отказ; проверьте состояние и передайте его на проверку через Selection",
         );
         error.details["acquisition"] = source["source"]["evidence"].clone();
         error.details["source"] = source;
         error.details["reused"] = serde_json::json!(true);
-        error.details["next_action"] =
-            serde_json::json!(resume_action(&id, batch.browser.as_ref()));
+        error.details["next_action"] = serde_json::json!(format!(
+            "pronunciation-assets forvo batch-status --batch-id {id}; затем проверьте оригинал через Selection"
+        ));
         return Err(error);
     }
     Ok(Some(source))
