@@ -277,8 +277,12 @@ async fn invalid_saved_mp3_is_rejected_and_canonical_resource_is_untouched() {
     )
     .unwrap();
     let existing = Pronunciation::new("え", "え").unwrap();
+    // Канонический ресурс и оригинал Forvo получают разные записи: иначе
+    // повторный импорт тех же байтов неотличим от неизменности ресурса.
+    let canonical = synthetic_mp3_tone(523);
+    crate::pronunciation::import_bytes(&store, &existing, &canonical, "fixture.mp3", None).unwrap();
+    let canonical_before = store.verify_integrity().unwrap();
     let valid = synthetic_mp3();
-    crate::pronunciation::import_bytes(&store, &existing, &valid, "fixture.mp3", None).unwrap();
     batch::start(
         &store,
         "terminal",
@@ -328,7 +332,11 @@ async fn invalid_saved_mp3_is_rejected_and_canonical_resource_is_untouched() {
         "validator_failure"
     );
     assert_eq!(result.items[1].outcome.as_ref().unwrap().code, "acquired");
-    assert_eq!(store.verify_integrity().unwrap().len(), 1);
+    assert_eq!(store.verify_integrity().unwrap(), canonical_before);
+    assert_eq!(
+        result.items[1].acquisition.as_ref().unwrap().blob.sha256,
+        crate::hashing::sha256_hex(&valid)
+    );
     assert!(!workspace.path().join("never-created").exists());
 }
 
@@ -1069,6 +1077,41 @@ async fn surface_acquisition_stops_at_success_and_selection_has_no_reading() {
         assert!(!text.contains("plan_reading"));
         assert!(store.verify_integrity().unwrap().is_empty());
     }
+}
+
+/// Сохранённый пакет без каталога оригиналов — повреждение, а не отсутствие:
+/// повтор одиночного запроса не должен молча скачивать оригинал заново.
+#[tokio::test]
+async fn package_without_candidates_is_damage_not_absence() {
+    let bytes = synthetic_mp3();
+    let mut src = source(vec![Ok(bytes.clone())]);
+    let acquired = evidence::acquire_from(&mut src, "学校").await.unwrap();
+    let workspace = crate::temp_workspace::TempWorkspace::create("forvo-damaged").unwrap();
+    let store = crate::AssetStore::open_with_policy(
+        crate::StoreOptions::new(workspace.path().join("store")),
+        crate::pronunciation::PronunciationDomainPolicy,
+    )
+    .unwrap();
+    let saved = batch::save_original(
+        &store,
+        "学校",
+        acquired,
+        batch::Transport::CdpChromium,
+        None,
+    )
+    .unwrap();
+    let id = saved["batch_id"].as_str().unwrap().to_owned();
+    let directory = store.root().join(".runtime/batches").join(&id);
+    std::fs::remove_dir_all(directory.join("candidates")).unwrap();
+
+    let error =
+        batch::saved_original(&store, "学校", batch::Transport::CdpChromium, None).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::ManifestCorrupt);
+    assert!(!directory.join("candidates").exists());
+    assert!(
+        crate::batch_runtime::SafeBatchRuntime::open_existing(store.root(), &id).is_err(),
+        "повреждённый пакет не выдаётся за отсутствующий"
+    );
 }
 
 #[tokio::test]

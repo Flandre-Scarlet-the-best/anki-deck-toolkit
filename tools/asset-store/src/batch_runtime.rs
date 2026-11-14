@@ -276,6 +276,7 @@ impl SafeBatchRuntime {
     }
     /// Открывает существующий runtime без создания каталогов или очистки файлов.
     /// Отсутствие компонента означает отсутствие пакета; ссылки отвергаются dirfd/NOFOLLOW.
+    /// Пакет без каталога оригиналов при сохранённом состоянии — повреждение и отказ.
     pub fn open_existing(store_root: &Path, batch_id: &str) -> Result<Option<Self>, AssetError> {
         Self::open_mode(store_root, batch_id, false)
     }
@@ -324,6 +325,16 @@ impl SafeBatchRuntime {
         };
         flock(&directory, FlockOperation::LockExclusive).map_err(boundary_io)?;
         let Some(blobs) = directory_at(&directory, "candidates")? else {
+            // Каталог сохранённого пакета без `candidates` — повреждение, а не
+            // отсутствие пакета: иначе повтор одиночного запроса теряет
+            // сохранённый оригинал и скачивает его заново. Пакет, у которого
+            // состояния ещё нет, отсутствующим остаётся.
+            if !create && entry_exists(&directory, "state.json")? {
+                return Err(AssetError::new(
+                    ErrorCode::ManifestCorrupt,
+                    "каталог оригиналов runtime-пакета отсутствует при сохранённом состоянии",
+                ));
+            }
             return Ok(None);
         };
         if create {
@@ -948,6 +959,15 @@ fn existing_directory(parent: &File, name: &str) -> Result<Option<File>, AssetEr
     ) {
         Ok(fd) => Ok(Some(File::from(fd))),
         Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+        Err(error) => Err(boundary_io(error)),
+    }
+}
+
+/// Есть ли запись по имени внутри каталога; ссылка не разыменовывается.
+fn entry_exists(parent: &File, name: &str) -> Result<bool, AssetError> {
+    match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(true),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
         Err(error) => Err(boundary_io(error)),
     }
 }
