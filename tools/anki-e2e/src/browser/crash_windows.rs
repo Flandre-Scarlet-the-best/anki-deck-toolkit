@@ -91,12 +91,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
     {
         return Err("контрольная чужая загрузка не получена".into());
     }
-    for window in [
-        "blob_sync",
-        "checkpoint_sync",
-        "import_sync",
-        "outcome_sync",
-    ] {
+    for window in ["blob_sync", "checkpoint_sync", "outcome_sync"] {
         env.ctx.fixture.reset();
         println!("  аварийное окно {window}");
         let mut cli = Cli::new(env).ok_or(MISSING_CLI)?;
@@ -178,7 +173,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             .find_map(|line| line.strip_prefix("ANKI_E2E_CRASH="))
             .and_then(|text| serde_json::from_str(text).ok())
             .ok_or_else(|| format!("{window}: нет доказательства GDB; см. gdb-{window}.*.log"))?;
-        let checkpointed = matches!(window, "import_sync" | "outcome_sync");
+        let checkpointed = window == "outcome_sync";
         let state_path = cli.store.join(".runtime/batches/window/state.json");
         let bytes = std::fs::read(&state_path).map_err(|e| e.to_string())?;
         let actual_state_sha = crate::util::sha256_hex(&bytes);
@@ -209,7 +204,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             let mut runtime =
                 SafeBatchRuntime::open(store.root(), "window").map_err(|e| e.message)?;
             let state: ForvoBatch = runtime.load().map_err(|e| e.message)?.ok_or("нет state")?;
-            env.out.check(format!("{window}: первый импорт и подтверждённые blobs читаются после SIGKILL"),state.items[0].outcome.as_ref().is_some_and(|o|o.code=="imported") && state.items[1].acquisition.is_some()==checkpointed,json!({"revision":state.revision,"second_checkpointed":state.items[1].acquisition.is_some()}));
+            env.out.check(format!("{window}: первый оригинал и подтверждённые blobs читаются после SIGKILL"),state.items[0].outcome.as_ref().is_some_and(|o|o.code=="acquired") && state.items[1].acquisition.is_some()==checkpointed,json!({"revision":state.revision,"second_checkpointed":state.items[1].acquisition.is_some()}));
         }
         let resumed = cli
             .run(
@@ -224,7 +219,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
                 items.len() == 2
                     && items
                         .iter()
-                        .all(|item| item["outcome"]["code"] == "imported")
+                        .all(|item| item["outcome"]["code"] == "acquired")
             });
         env.out.check(format!("{window}: resume завершает пакет с объяснимым числом загрузок"),resumed.code==0 && imports && env.ctx.fixture.requests_for(fixture::RECORD_A)==1 && env.ctx.fixture.requests_for(fixture::RECORD_3)==second_downloads,json!({"exit":resumed.code,"downloads_first":env.ctx.fixture.requests_for(fixture::RECORD_A),"downloads_second":env.ctx.fixture.requests_for(fixture::RECORD_3),"expected_second":second_downloads,"reason":if checkpointed {"подтверждённый checkpoint исключает скачивание"} else {"вторые байты ещё не подтверждены state.json; повтор необходим"}}));
         let again = cli
@@ -237,12 +232,12 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         // Staging импорта создаётся до блокировки хранилища, поэтому владелец
         // такого файла после SIGKILL недоказуем и он не удаляется автоматически.
         // Ограничение фиксируется явно: не больше одного файла на убитый импорт.
-        let staging_allowed = if window == "import_sync" { 1 } else { 0 };
+        let staging_allowed = 0;
         env.out.check(
-            format!("{window}: остаток staging импорта хранилища не превышает одного файла убитого импорта"),
+            format!("{window}: Forvo не создаёт staging канонического импорта"),
             staging.len() <= staging_allowed,
             json!({"ingest_staging":staging,"allowed":staging_allowed,
-                "reason":"staging AssetStore создаётся до блокировки хранилища; владелец после SIGKILL недоказуем — известное ограничение, не удаляется автоматически"}),
+                "reason":"Forvo сохраняет только исходные blob пакета, без канонического импорта"}),
         );
         env.connect().await?;
         let ping = env
@@ -258,7 +253,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
                 && ping["listeners"]["active_observers"] == 0
                 && ping["operation"].is_null(),
             json!({"ping":ping,"own_tab_expected":tab_expected,
-                "reason":if checkpointed {"resume без скачивания не подключает браузер (офлайн-импорт); вкладку убитого процесса освобождает следующая сессия"} else {"resume скачивал заново и закрыл вкладку по --close-tab"}}),
+                "reason":if checkpointed {"resume без скачивания не подключает браузер (проверка сохранённого оригинала); вкладку убитого процесса освобождает следующая сессия"} else {"resume скачивал заново и закрыл вкладку по --close-tab"}}),
         );
         env.residual_clean().await?;
         if let Some(mut conn) = env.conn.take() {

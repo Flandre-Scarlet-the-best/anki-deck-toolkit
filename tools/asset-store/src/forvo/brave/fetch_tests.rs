@@ -8,6 +8,7 @@ use crate::forvo::batch::{self, Backend, FetchItem, FetchPlan, Transport};
 use crate::forvo::tests::{candidate, synthetic_mp3};
 use crate::forvo::{Gender, pauses_batch};
 use crate::hashing::{encode_lower_hex, sha256_hex};
+use crate::pronunciation::Pronunciation;
 use crate::temp_workspace::TempWorkspace;
 use async_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use futures::StreamExt;
@@ -602,10 +603,8 @@ fn plan(words: &[(&str, &str)]) -> FetchPlan {
         schema_version: 1,
         items: words
             .iter()
-            .map(|(s, r)| FetchItem {
+            .map(|(s, _)| FetchItem {
                 surface: (*s).into(),
-                reading: Some((*r).into()),
-                replace_expected_sha256: None,
             })
             .collect(),
     }
@@ -645,7 +644,7 @@ async fn brave_batch_checkpoints_imports_and_never_redownloads() {
     let first = batch::resume(&store, "brave", Backend::Brave(&h.options), 1)
         .await
         .unwrap();
-    assert_eq!(first.items[0].outcome.as_ref().unwrap().code, "imported");
+    assert_eq!(first.items[0].outcome.as_ref().unwrap().code, "acquired");
     assert!(first.items[1..].iter().all(|i| i.outcome.is_none()));
     let done = batch::resume(&store, "brave", Backend::Brave(&h.options), 10)
         .await
@@ -654,7 +653,7 @@ async fn brave_batch_checkpoints_imports_and_never_redownloads() {
     assert!(
         done.items
             .iter()
-            .all(|i| i.outcome.as_ref().unwrap().code == "imported")
+            .all(|i| i.outcome.as_ref().unwrap().code == "acquired")
     );
     assert_eq!(done.transport(), Transport::BraveExtension);
     assert_eq!(lock(&h.world).begins, ["11", "21", "31"]);
@@ -664,16 +663,13 @@ async fn brave_batch_checkpoints_imports_and_never_redownloads() {
         .unwrap();
     assert_eq!(again.revision, done.revision);
     assert_eq!(lock(&h.world).begins.len(), 3);
-    for (surface, reading) in words {
-        let request = Pronunciation::new(surface, reading).unwrap();
-        let record = store
-            .verify_integrity()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.identity == request.identity())
-            .expect("ресурс импортирован");
-        assert_eq!(record.sha256, sha256_hex(&mp3));
-        assert_ne!(record.lifecycle, crate::model::LifecycleState::Verified);
+    assert!(store.verify_integrity().unwrap().is_empty());
+    for item in &done.items {
+        assert!(item.request.is_none());
+        assert_eq!(
+            item.acquisition.as_ref().unwrap().blob.sha256,
+            sha256_hex(&mp3)
+        );
     }
     assert_eq!(std::fs::read_dir(&h.downloads).unwrap().count(), 0);
 }
@@ -707,7 +703,7 @@ async fn blocker_pauses_batch_and_resume_continues_after_recovery() {
     assert!(
         done.items
             .iter()
-            .all(|i| i.outcome.as_ref().unwrap().code == "imported")
+            .all(|i| i.outcome.as_ref().unwrap().code == "acquired")
     );
 }
 
@@ -731,7 +727,7 @@ async fn batch_is_bound_to_first_browser_session() {
     let first = batch::resume(&store, "bound", Backend::Brave(&h.options), 1)
         .await
         .unwrap();
-    assert_eq!(first.schema_version, 3);
+    assert_eq!(first.schema_version, 5);
     let binding = first.browser.clone().expect("пакет закреплён за сессией");
     assert_eq!(
         (
@@ -778,7 +774,7 @@ async fn batch_is_bound_to_first_browser_session() {
 }
 
 #[test]
-fn unbound_pre_selection_batch_continues_only_with_brave_target() {
+fn historical_extension_batch_refuses_resume_before_connecting() {
     let workspace = TempWorkspace::create("forvo-v2-batch").unwrap();
     let store = store(workspace.path());
     let mut runtime = crate::batch_runtime::SafeBatchRuntime::open(store.root(), "v2").unwrap();
@@ -806,8 +802,7 @@ fn unbound_pre_selection_batch_continues_only_with_brave_target() {
         ))
         .err()
         .unwrap();
-    assert_eq!(provider_code(&error), "browser_mismatch");
-    assert_eq!(error.details["batch_target"], "brave");
+    assert_eq!(provider_code(&error), "legacy_forvo_batch");
     assert!(!workspace.path().join("no-adapter").exists());
 }
 
@@ -844,13 +839,12 @@ fn legacy_cdp_state_stays_readable_and_bound_to_cdp() {
         ))
         .err()
         .unwrap();
-    assert_eq!(provider_code(&error), "transport_mismatch");
-    assert_eq!(error.details["batch_transport"], "cdp_chromium");
+    assert_eq!(provider_code(&error), "legacy_forvo_batch");
     assert!(
         error.details["next_action"]
             .as_str()
             .unwrap()
-            .starts_with("pronunciation-assets forvo batch-resume")
+            .contains("новый план")
     );
     // Отмена работает без браузера и сохраняет версию 1.
     let cancelled = batch::cancel(&store, "old").unwrap();
@@ -958,7 +952,7 @@ fn candidate_changed_points_to_the_actual_target_and_operation() {
 }
 
 #[tokio::test]
-async fn explicit_close_error_keeps_imported_asset_and_successful_close_is_reported() {
+async fn explicit_close_error_keeps_original_and_successful_close_is_reported() {
     let mut h = harness(vec![(
         "元気",
         vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
@@ -967,13 +961,13 @@ async fn explicit_close_error_keeps_imported_asset_and_successful_close_is_repor
     lock(&h.world).fail_close = true;
     let store = store(&h.root);
     let request = Pronunciation::new("元気", "げんき").unwrap();
-    let error = fetch(&store, &request, None, &h.options, None)
+    let error = fetch(&store, &request.surface, &h.options, None)
         .await
         .unwrap_err();
     assert_eq!(provider_code(&error), "ownership_unproven");
     assert_eq!(error.details["recovery_required"], true);
-    assert!(!error.details["asset"].is_null());
-    assert_eq!(store.verify_integrity().unwrap().len(), 1);
+    assert!(!error.details["source"].is_null());
+    assert!(store.verify_integrity().unwrap().is_empty());
     lock(&h.world).fail_close = false;
     let session = BraveSession::connect(&h.options).await.unwrap();
     assert_eq!(session.close().await.unwrap()["own_group_absent"], true);
@@ -1012,7 +1006,7 @@ async fn release_failure_keeps_bytes_and_batch_resume_recovers_without_download(
         .await
         .unwrap();
     assert!(done.paused.is_none());
-    assert_eq!(done.items[0].outcome.as_ref().unwrap().code, "imported");
+    assert_eq!(done.items[0].outcome.as_ref().unwrap().code, "acquired");
     assert_eq!(lock(&h.world).begins.len(), 1);
     assert!(lock(&h.world).op.is_none());
 }
@@ -1052,24 +1046,16 @@ async fn repinned_browser_mismatch_resume_action_contains_batch_id() {
 }
 
 #[tokio::test]
-async fn single_release_failure_reports_recovery_without_discarding_import() {
+async fn single_release_failure_reports_recovery_without_discarding_original() {
     let h = harness(vec![(
         "元気",
         vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
     )]);
     lock(&h.world).fail_release = true;
     let store = store(&h.root);
-    let result = fetch(
-        &store,
-        &Pronunciation::new("元気", "げんき").unwrap(),
-        None,
-        &h.options,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = fetch(&store, "元気", &h.options, None).await.unwrap();
     assert_eq!(result["browser"]["recovery_required"], true);
-    assert_eq!(store.verify_integrity().unwrap().len(), 1);
+    assert!(store.verify_integrity().unwrap().is_empty());
     lock(&h.world).fail_release = false;
     let session = BraveSession::connect(&h.options).await.unwrap();
     assert_eq!(session.summary()["recovery_required"], false);
@@ -1099,7 +1085,7 @@ async fn batch_explicit_close_failure_does_not_undo_import_or_hide_failure() {
     assert_eq!(provider_code(&error), "ownership_unproven");
     assert_eq!(error.details["recovery_required"], true);
     let saved = batch::status(&store, "close").unwrap();
-    assert_eq!(saved.items[0].outcome.as_ref().unwrap().code, "imported");
+    assert_eq!(saved.items[0].outcome.as_ref().unwrap().code, "acquired");
     assert!(saved.paused.unwrap().recovery_required);
     lock(&h.world).fail_close = false;
     let done = batch::resume(&store, "close", Backend::Brave(&h.options), 1)
@@ -1107,4 +1093,21 @@ async fn batch_explicit_close_failure_does_not_undo_import_or_hide_failure() {
         .unwrap();
     assert!(done.paused.is_none());
     assert_eq!(lock(&h.world).begins.len(), 1);
+}
+
+#[tokio::test]
+async fn repeated_single_fetch_reuses_original_without_another_download() {
+    let h = harness(vec![(
+        "学校",
+        vec![
+            record("10", 5, Body::Bytes(synthetic_mp3())),
+            record("20", 1, Body::Bytes(synthetic_mp3())),
+        ],
+    )]);
+    let store = store(&h.root);
+    let first = fetch(&store, "学校", &h.options, None).await.unwrap();
+    let second = fetch(&store, "学校", &h.options, None).await.unwrap();
+    assert_eq!(first["source"], second["source"]);
+    assert_eq!(lock(&h.world).begins, ["10"]);
+    assert!(store.verify_integrity().unwrap().is_empty());
 }

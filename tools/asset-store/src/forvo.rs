@@ -12,10 +12,8 @@ mod evidence;
 pub mod route;
 use crate::browser_runtime::{BrowserRuntimeConfig, BrowserSession};
 pub use candidates::{Candidate, Gender, RANKING, rank, word_url};
-pub(crate) use evidence::collect_from;
 pub use evidence::{
-    Acquisition, Attempt, COLLECT_ALL_MODE, CollectedRecord, Collection, ForvoEvidence, acquire,
-    collect, import_acquisition,
+    Acquisition, Attempt, COLLECT_ALL_MODE, ForvoEvidence, acquire, import_acquisition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

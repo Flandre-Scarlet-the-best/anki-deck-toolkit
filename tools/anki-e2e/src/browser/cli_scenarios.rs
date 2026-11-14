@@ -218,10 +218,7 @@ impl Cli {
 
     pub(super) fn plan(&self, dir: &Path, name: &str, words: &[(&str, &str)]) -> Result<PathBuf> {
         let path = dir.join(format!("{name}.json"));
-        let items: Vec<_> = words
-            .iter()
-            .map(|(s, r)| json!({"surface":s,"reading":r}))
-            .collect();
+        let items: Vec<_> = words.iter().map(|(s, _)| json!({"surface":s})).collect();
         std::fs::write(
             &path,
             serde_json::to_vec(&json!({"schema_version":1,"items":items})).expect("JSON"),
@@ -261,7 +258,11 @@ pub(super) fn requests(env: &Env, records: &[&str]) -> Value {
 pub(super) fn item<'a>(run: &'a Run, surface: &str) -> &'a Value {
     run.out["result"]["items"]
         .as_array()
-        .and_then(|items| items.iter().find(|i| i["request"]["surface"] == surface))
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|i| i["surface"] == surface || i["request"]["surface"] == surface)
+        })
         .unwrap_or(&Value::Null)
 }
 
@@ -299,32 +300,26 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
     let run = cli
         .run(
             true,
-            &[
-                "fetch",
-                "--surface",
-                fixture::WORD,
-                "--reading",
-                fixture::READING,
-                "--wait-seconds",
-                "30",
-            ],
+            &["fetch", "--surface", fixture::WORD, "--wait-seconds", "30"],
         )
         .await?;
     let result = &run.out["result"];
     let sha_a = sha(env, fixture::RECORD_A);
     let asset = cli.asset(fixture::WORD, fixture::READING)?;
+    let source = &result["source"]["source"];
     env.out.check(
-        "forvo brave fetch импортировал оригинальный MP3 лучшей записи в отдельное тестовое хранилище",
+        "forvo brave fetch сохранил оригинальный MP3 лучшей записи в отдельное тестовое хранилище",
         run.code == 0
             && result["transport"] == "brave_extension"
             && result["acquisition"]["selected_record_id"] == fixture::RECORD_A
             && result["acquisition"]["downloaded_sha256"] == sha_a.as_str()
-            && asset.as_ref().is_some_and(|(s, _)| *s == sha_a),
+            && asset.is_none()
+            && source["blob"]["sha256"] == sha_a,
         json!({"run":run.summary(),"asset":asset,"expected_sha256":sha_a}),
     );
     env.out.check(
         "техническая проверка не дала фонетического доверия (ресурс не Verified)",
-        asset.as_ref().is_some_and(|(_, l)| l != "verified"),
+        asset.is_none() && source["evidence"]["selected_record_id"] == fixture::RECORD_A,
         json!({"lifecycle":asset.as_ref().map(|a| &a.1)}),
     );
     env.out.check(
@@ -339,16 +334,7 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
     );
     // Повтор тех же байтов: ресурс и доверие не меняются.
     let again = cli
-        .run(
-            true,
-            &[
-                "fetch",
-                "--surface",
-                fixture::WORD,
-                "--reading",
-                fixture::READING,
-            ],
-        )
+        .run(true, &["fetch", "--surface", fixture::WORD])
         .await?;
     env.out.check(
         "повторный fetch тех же байтов успешен и не создаёт второго ресурса",
@@ -360,16 +346,7 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
     std::fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
     cli.path_override = Some(empty);
     let unverifiable = cli
-        .run(
-            true,
-            &[
-                "fetch",
-                "--surface",
-                fixture::WORD_3,
-                "--reading",
-                fixture::READING_3,
-            ],
-        )
+        .run(true, &["fetch", "--surface", fixture::WORD_3])
         .await?;
     cli.path_override = None;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -421,19 +398,18 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
     let mut store_ok = true;
     for (surface, reading, record) in expected {
         let asset = cli.asset(surface, reading)?;
-        store_ok &= asset
-            .as_ref()
-            .is_some_and(|(s, l)| *s == sha(env, record) && l != "verified");
+        store_ok &= asset.is_none()
+            && item(&run, surface)["acquisition"]["blob"]["sha256"] == sha(env, record);
         stored.push(
             json!({"surface":surface,"record":record,"asset":asset,"expected":sha(env, record)}),
         );
     }
     env.out.check(
-        "пакет из трёх разных слов импортировал оригинальные MP3 выбранных записей (не Verified)",
+        "пакет из трёх разных слов сохранил оригинальные MP3 выбранных записей (не Verified)",
         run.code == 0
             && run.outcome() == "ok"
             && run.out["result"]["effective_transport"] == "brave_extension"
-            && codes(&run).iter().all(|c| c == "imported")
+            && codes(&run).iter().all(|c| c == "acquired")
             && store_ok,
         json!({"run":run.summary(),"items":codes(&run),"store":stored}),
     );
@@ -514,7 +490,7 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
         .await?;
     env.out.check(
         "--max-items 1 обрабатывает ровно один элемент; остальные остаются незавершёнными",
-        limited.code == 0 && codes(&limited) == [json!("imported"), Value::Null],
+        limited.code == 0 && codes(&limited) == [json!("acquired"), Value::Null],
         json!({"run":limited.summary(),"items":codes(&limited)}),
     );
     // Состояние версии 1 так, как его сохранял прежний CDP-код.
@@ -537,7 +513,7 @@ pub async fn cli_batch(env: &mut Env<'_>) -> Result<()> {
     env.out.check(
         "пакет v1 (CDP) читается, остаётся CDP и не продолжается через Brave",
         brave_resume.code == 3
-            && brave_resume.error_code() == "transport_mismatch"
+            && brave_resume.error_code() == "legacy_forvo_batch"
             && legacy_status.code == 0
             && legacy_status.out["result"]["schema_version"] == 1
             && legacy_status.out["result"]["effective_transport"] == "cdp_chromium"
@@ -553,13 +529,12 @@ fn checkpoint(
     cli: &Cli,
     id: &str,
     surface: &str,
-    reading: &str,
+    _reading: &str,
     bytes: &[u8],
     record: &str,
-    import: bool,
+    _completed: bool,
 ) -> Result<()> {
     let store = cli.open_store()?;
-    let request = Pronunciation::new(surface, reading).map_err(|e| e.message)?;
     let mut runtime = SafeBatchRuntime::open(store.root(), id).map_err(|e| e.message)?;
     let mut state: ForvoBatch = runtime
         .load()
@@ -587,22 +562,10 @@ fn checkpoint(
         }],
         acquisition_mode: None,
     };
-    if import {
-        asset_store::forvo::import_acquisition(
-            &store,
-            &request,
-            &asset_store::forvo::Acquisition {
-                bytes: bytes.to_vec(),
-                evidence: evidence.clone(),
-            },
-            None,
-        )
-        .map_err(|e| e.message)?;
-    }
     let item = state
         .items
         .iter_mut()
-        .find(|i| i.request.as_ref() == Some(&request))
+        .find(|i| i.surface() == surface)
         .ok_or("нет элемента")?;
     item.acquisition = Some(StoredAcquisition { blob, evidence });
     state.revision += 1;
@@ -610,7 +573,7 @@ fn checkpoint(
 }
 
 /// Ctrl+C и падение во время загрузки, `batch-cancel` и `batch-status` во время
-/// работы, два исполнителя одного пакета, восстановление после checkpoint и после импорта.
+/// работы, два исполнителя одного пакета, восстановление после checkpoint и перед итоговым статусом.
 pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
     let cli = blocked_without_cli(env)?;
     let fixture = env.ctx.fixture.clone();
@@ -662,7 +625,7 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
     env.out.check(
         "resume после Ctrl+C доводит пакет; прерванная запись скачана заново один раз",
         resumed.code == 0
-            && codes(&resumed).iter().all(|c| c == "imported")
+            && codes(&resumed).iter().all(|c| c == "acquired")
             && fixture.requests_for(fixture::RECORD_A) == 1
             && fixture.requests_for(fixture::RECORD_3) == 1,
         json!({"run":resumed.summary(),"requests":requests(env,&[fixture::RECORD_A,fixture::RECORD_3])}),
@@ -754,7 +717,7 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
                 .as_str()
                 .is_some_and(|m| m.contains("исполняется"))
             && first.code == 0
-            && codes(&first) == [json!("imported")]
+            && codes(&first) == [json!("acquired")]
             && fixture.requests_for(fixture::RECORD_A) == 1,
         json!({"second":second.summary(),"second_message":second.out["error"]["message"],"first":first.summary()}),
     );
@@ -789,11 +752,12 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
         "после SIGKILL resume освобождает прошлую собственную операцию и завершает пакет; чужой файл цел",
         recovered.code == 0
             && recovery_logged
-            && codes(&recovered) == [json!("imported")]
+            && codes(&recovered) == [json!("acquired")]
             && fixture.requests_for(fixture::RECORD_A) == 1
             && files.len() == 1
             && sha_of(&files, user_b) == Some(sha(env, fixture::RECORD_B))
-            && crash_cli.asset(fixture::WORD, fixture::READING)?.is_some(),
+            && crash_cli.asset(fixture::WORD, fixture::READING)?.is_none()
+            && item(&recovered, fixture::WORD)["acquisition"]["blob"]["sha256"] == sha(env, fixture::RECORD_A),
         json!({"run":recovered.summary(),"recovery_logged":recovery_logged,
             "downloads":files_json(&env.downloads())}),
     );
@@ -839,19 +803,19 @@ pub async fn cli_batch_recovery(env: &mut Env<'_>) -> Result<()> {
         .run(true, &["batch-resume", "--batch-id", "points"])
         .await?;
     env.out.check(
-        "resume после checkpoint и после импорта берёт сохранённые байты без браузерных загрузок",
+        "resume после checkpoint и перед итоговым статусом берёт сохранённые байты без браузерных загрузок",
         zero.code == 0
             && finished.code == 0
-            && codes(&finished).iter().all(|c| c == "imported")
+            && codes(&finished).iter().all(|c| c == "acquired")
             && fixture.log().iter().all(|p| !p.starts_with("/download/"))
             && point_cli
                 .asset(fixture::WORD, fixture::READING)?
-                .map(|a| a.0)
-                == Some(sha256_hex(&bytes_a))
+                .is_none()
+            && item(&finished, fixture::WORD)["acquisition"]["blob"]["sha256"] == sha256_hex(&bytes_a)
             && point_cli
                 .asset(fixture::WORD_3, fixture::READING_3)?
-                .map(|a| a.0)
-                == Some(sha256_hex(&bytes_3)),
+                .is_none()
+            && item(&finished, fixture::WORD_3)["acquisition"]["blob"]["sha256"] == sha256_hex(&bytes_3),
         json!({"run":finished.summary(),"fixture_requests":fixture.log()}),
     );
     env.connect().await?;
@@ -932,7 +896,7 @@ pub async fn cli_foreign_downloads(env: &mut Env<'_>) -> Result<()> {
     env.out.check(
         "повторный запуск завершил пакет; удалены только собственные файлы, файлы пользователя целы",
         resumed.code == 0
-            && codes(&resumed).iter().all(|c| c == "imported")
+            && codes(&resumed).iter().all(|c| c == "acquired")
             && files.len() >= 2
             && sha_of(&files, user_a) == Some(sha(env, fixture::RECORD_A))
             && sha_of(&files, "user-notes.bin") == Some(user_sha)

@@ -209,7 +209,7 @@ pub async fn extension_release_update(env: &mut Env<'_>) -> Result<()> {
         .await?;
     env.out.check(
         "до обновления пакет расширения обработал один элемент из двух",
-        started.code == 0 && codes(&started) == [json!("imported"), Value::Null],
+        started.code == 0 && codes(&started) == [json!("acquired"), Value::Null],
         started.summary(),
     );
     let binding = started.out["result"]["browser"].clone();
@@ -342,10 +342,10 @@ pub async fn extension_release_update(env: &mut Env<'_>) -> Result<()> {
     env.out.check(
         "batch-resume после обновления завершает пакет той же сессией; импортированный элемент не скачивается повторно",
         resumed.code == 0
-            && codes(&resumed) == [json!("imported"), json!("imported")]
+            && codes(&resumed) == [json!("acquired"), json!("acquired")]
             && resumed.out["result"]["browser"] == binding
             && after_resume[fixture::RECORD_3] == before_resume[fixture::RECORD_3]
-            && item(&resumed, fixture::WORD)["outcome"]["code"] == "imported",
+            && item(&resumed, fixture::WORD)["outcome"]["code"] == "acquired",
         json!({"run":resumed.summary(),"requests_before":before_resume,"requests_after":after_resume,
             "binding_before":binding,"binding_after":resumed.out["result"]["browser"]}),
     );
@@ -403,19 +403,13 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
     let only = cli
         .generic(
             &["--config", &extension_only],
-            &[
-                "fetch",
-                "--surface",
-                fixture::WORD,
-                "--reading",
-                fixture::READING,
-            ],
+            &["fetch", "--surface", fixture::WORD],
             &[],
         )
         .await?;
     let decision = &only.out["result"]["transport_decision"];
     env.out.check(
-        "extension_only: общий fetch импортировал оригинальный MP3 через адаптер, собственный Chromium не запускался",
+        "extension_only: общий fetch сохранил оригинальный MP3 через адаптер, собственный Chromium не запускался",
         only.code == 0
             && only.out["result"]["acquisition"]["downloaded_sha256"] == sha256_hex(&env.ctx.fixture.bytes_for(fixture::RECORD_A))
             && decision["mode"] == "extension_only"
@@ -429,13 +423,7 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
     let fallback = cli
         .generic(
             &["--config", &chromium_first],
-            &[
-                "fetch",
-                "--surface",
-                fixture::WORD_3,
-                "--reading",
-                fixture::READING_3,
-            ],
+            &["fetch", "--surface", fixture::WORD_3],
             &broken_cdp,
         )
         .await?;
@@ -465,13 +453,7 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
     let domain = cli
         .generic(
             &["--config", &chromium_first],
-            &[
-                "fetch",
-                "--surface",
-                fixture::WORD_DOM_CHANGED,
-                "--reading",
-                "べつご",
-            ],
+            &["fetch", "--surface", fixture::WORD_DOM_CHANGED],
             &fixture_cdp,
         )
         .await?;
@@ -536,10 +518,10 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
         "общий batch-start: CDP не запустился до записи состояния → пакет адаптера с целью, сохранённой до подключения",
         started.code == 0
             && started.out["result"]["effective_transport"] == "brave_extension"
-            && started.out["result"]["schema_version"] == 4
+            && started.out["result"]["schema_version"] == 5
             && started.out["result"]["target"] == target.as_str()
             && started.out["result"]["transport_decision"]["fallback"]["used"] == true
-            && codes(&started) == [json!("imported"), Value::Null],
+            && codes(&started) == [json!("acquired"), Value::Null],
         json!({"run":started.summary(),"decision":started.out["result"]["transport_decision"]}),
     );
     let before = requests(env, &records);
@@ -556,7 +538,7 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
     env.out.check(
         "batch-resume после смены конфигурации идёт по сохранённой привязке; Chromium не запускается, повторной загрузки нет",
         resumed.code == 0
-            && codes(&resumed) == [json!("imported"), json!("imported")]
+            && codes(&resumed) == [json!("acquired"), json!("acquired")]
             && resumed.out["result"]["transport_decision"]["source"] == "batch_binding"
             && resumed.out["result"]["browser"] == started.out["result"]["browser"]
             && after[fixture::RECORD_2_TOP] == before[fixture::RECORD_2_TOP]

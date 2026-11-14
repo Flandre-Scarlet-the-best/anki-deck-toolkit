@@ -370,7 +370,6 @@ fn smoke_options(
         target: Some(env.ctx.target.clone()),
         wait: Duration::from_secs(30),
         surface: fixture::WORD.into(),
-        reading: fixture::READING.into(),
         probe_downloads_api: false,
         close_tab: false,
         keep_download: keep,

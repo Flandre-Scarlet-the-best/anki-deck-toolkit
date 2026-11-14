@@ -73,7 +73,7 @@ fn timings(run: &Run) -> Value {
             }
             if event == "browser_acquisition_stage" {
                 let name = fields["stage"].as_str().unwrap_or("unknown");
-                if name == "import_mp3" {
+                if name == "validate_saved_mp3" {
                     imported.insert(fields["identity"].as_str().unwrap_or_default().to_owned());
                 }
                 stages
@@ -92,7 +92,7 @@ fn timings(run: &Run) -> Value {
             .collect(),
     );
     json!({"items":items,"item_distribution_ms":distribution,"acquisition_items":acquisition_items,"stage_duration_ms":stages,"events":events,
-        "coverage":"границы внешних элементов items задаёт предшествующий import_mp3; candidates включает вкладку/навигацию/кандидатов; download_and_validate_mp3 включает загрузку, проверку и освобождение файла; acquire охватывает эти фазы и первое подключение; import_mp3 включает чтение blob и CAS-импорт; checkpoint и окончательная очистка входят только в batch_wall_s; вложенные фазы не суммируются с acquire"})
+        "coverage":"границы внешних элементов items задаёт предшествующий validate_saved_mp3; candidates включает вкладку/навигацию/кандидатов; download_and_validate_mp3 включает загрузку, проверку и освобождение файла; acquire охватывает эти фазы и первое подключение; validate_saved_mp3 включает чтение blob и техническую проверку; checkpoint и окончательная очистка входят только в batch_wall_s; вложенные фазы не суммируются с acquire"})
 }
 
 fn distribution(mut values: Vec<u64>) -> Value {
@@ -218,7 +218,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             .map_err(|e| e.message)?
             .ok_or("нет checkpoint")?;
         evidence_ok &= state.items.len() == words.len();
-        for ((surface, reading, record), saved) in words.iter().zip(&state.items) {
+        for ((surface, _, record), saved) in words.iter().zip(&state.items) {
             let expected_sha = crate::util::sha256_hex(&env.ctx.fixture.bytes_for(record));
             let Some(acquisition) = &saved.acquisition else {
                 evidence_ok = false;
@@ -227,13 +227,9 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             let bytes = runtime
                 .read_blob(&acquisition.blob)
                 .map_err(|e| e.message)?;
-            let Some(request) = &saved.request else {
-                evidence_ok = false;
-                continue;
-            };
-            evidence_ok &= request.surface == *surface
-                && request.reading == *reading
-                && saved.outcome.as_ref().is_some_and(|o| o.code == "imported")
+            evidence_ok &= saved.surface() == *surface
+                && saved.request.is_none()
+                && saved.outcome.as_ref().is_some_and(|o| o.code == "acquired")
                 && acquisition.evidence.selected_record_id == *record
                 && acquisition.evidence.page_url == asset_store::forvo::word_url(surface)
                 && acquisition.evidence.ranking_policy == RANKING
@@ -242,13 +238,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
                 && acquisition.evidence.attempts[0].record_id == *record
                 && acquisition.evidence.attempts[0].code == "downloaded"
                 && crate::util::sha256_hex(&bytes) == expected_sha
-                && integrity.iter().any(|r| {
-                    r.identity == request.identity()
-                        && r.sha256 == expected_sha
-                        && r.lifecycle.as_str() != "verified"
-                        && std::fs::read(store.root().join(".runtime").join(&r.storage_path))
-                            .is_ok_and(|bytes| crate::util::sha256_hex(&bytes) == expected_sha)
-                });
+                && integrity.is_empty();
         }
         drop(runtime);
         drop(store);
@@ -271,7 +261,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             .is_some_and(|items| items.len() == words.len())
             && [
                 "acquire",
-                "import_mp3",
+                "validate_saved_mp3",
                 "candidates",
                 "download_and_validate_mp3",
             ]
@@ -283,7 +273,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
             });
         let batch_report = json!({"batch_id":id,"plan":pairs,"batch_wall_s":seconds,"seconds_per_word":seconds/words.len() as f64,
             "successful_words_per_second":if evidence_ok { Some(words.len() as f64/seconds) } else { None },
-            "imports":state.items.iter().filter(|i|i.outcome.as_ref().is_some_and(|o|o.code=="imported")).count(),
+            "originals":state.items.iter().filter(|i|i.outcome.as_ref().is_some_and(|o|o.code=="acquired")).count(),
             "revision":revision,"resume_revision":resumed.out["result"]["revision"],"resume_wall_s":resume_s,
             "state_bytes":cli.store.join(".runtime/batches").join(&id).join("state.json").metadata().map_err(|e|e.to_string())?.len(),
             "logs":observation::files(&cli.store.join(".runtime/batches").join(&id).join("logs"))?,
@@ -292,7 +282,7 @@ pub(super) async fn run(env: &mut Env<'_>) -> Result<()> {
         let no_repeat =
             requests_before.iter().all(|n| *n == 1) && requests_after == requests_before;
         env.out.check(
-            format!("{id}: все пары, SHA, ForvoEvidence и импорт без Verified"),
+            format!("{id}: все написания, SHA, ForvoEvidence и исходники без чтения"),
             evidence_ok,
             json!({"exit":run.code,"items":state.items.len()}),
         );
