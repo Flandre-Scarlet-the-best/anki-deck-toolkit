@@ -193,7 +193,8 @@ Forvo может отдельно проверить Download после усп�
 ## Происхождение и доверие
 
 Оригинальные проверенные MP3 сохраняются в управляемых blob существующего
-`SafeBatchRuntime` внутри `.asset-store/.runtime/batches/`. Свидетельство
+`SafeBatchRuntime` внутри `<store>/.runtime/batches/` (по умолчанию
+`.asset-store/pronunciation-audio/.runtime/batches/`). Свидетельство
 `ForvoEvidence` схемы 1 связывает SHA с точной страницей, ID записи, доступными
 метаданными диктора, ранжированным списком и фактическими попытками.
 `fetch` возвращает `source.batch_id` и `source.source` (blob и evidence).
