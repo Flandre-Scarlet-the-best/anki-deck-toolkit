@@ -955,6 +955,11 @@ pub async fn cli_human_wait(env: &mut Env<'_>) -> Result<()> {
             }
         };
         let alive = child.try_wait().map_err(|e| e.to_string())?.is_none();
+        // У режима `timed_out` собственный срок — 1 с: процесс может завершиться
+        // между публикацией события и чтением строки, и тогда живость зависит от
+        // планировщика, а не от поведения CLI. Событие такого шага доказывается
+        // парой `human_interaction_finished`/`timed_out` и итоговым JSON.
+        let alive_required = mode != "timed_out";
         match mode {
             "authenticated" => env.ctx.fixture.allow_human_auth(),
             "interrupted" | "fetch_interrupted" => signal(&child, rustix::process::Signal::TERM)?,
@@ -988,8 +993,15 @@ pub async fn cli_human_wait(env: &mut Env<'_>) -> Result<()> {
             }
             _ => run.code == 130 && run.out["error"]["code"] == "interrupted",
         };
-        env.out.check(format!("ручной CDP-шаг {mode}: NDJSON до выхода, итоговый JSON и управляемая очистка"),
-            alive && ended && expected && event["wait_mode"] == "deadline" && event["timeout_seconds"] == if mode == "fetch_interrupted" { 300 } else { wait.parse::<u64>().unwrap() },
+        let label = if alive_required {
+            format!("ручной CDP-шаг {mode}: NDJSON до выхода, итоговый JSON и управляемая очистка")
+        } else {
+            format!(
+                "ручной CDP-шаг {mode}: событие опубликовано до собственного срока, итоговый JSON и управляемая очистка"
+            )
+        };
+        env.out.check(label,
+            (!alive_required || alive) && ended && expected && event["wait_mode"] == "deadline" && event["timeout_seconds"] == if mode == "fetch_interrupted" { 300 } else { wait.parse::<u64>().unwrap() },
             json!({"run":run.summary(),"stdout":run.out,"started":event,"events":events,"alive_at_event":alive}));
         env.out.check(
             "ручной шаг не скачивает MP3 и не создаёт Forvo-пакетов",

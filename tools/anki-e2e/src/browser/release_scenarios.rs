@@ -408,7 +408,12 @@ pub async fn cli_transport_routing(env: &mut Env<'_>) -> Result<()> {
         )
         .await?;
     env.out.check("CDP fetch и повтор reused=true без запуска Chromium и второй загрузки",
+        // Первый запрос обязан пройти именно CDP: иначе отказ запуска Chromium
+        // молча превращает оба запроса в адаптерные и скрывает поломку CDP.
         cdp.code == 0 && cdp_repeat.code == 0 && cdp.out["result"]["reused"] == false
+            && cdp.out["result"]["transport_decision"]["selected"] == "cdp_chromium"
+            && cdp.out["result"]["transport_decision"]["cdp_attempted"] == true
+            && cdp.out["result"]["transport_decision"]["fallback"]["used"] == false
             && cdp_repeat.out["result"]["reused"] == true
             && cdp.out["result"]["source"] == cdp_repeat.out["result"]["source"]
             && env.ctx.fixture.requests_for(fixture::RECORD_A) == downloads_before + 1
