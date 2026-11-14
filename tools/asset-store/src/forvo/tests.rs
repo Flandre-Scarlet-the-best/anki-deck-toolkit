@@ -1150,13 +1150,19 @@ async fn historical_collection_preserves_all_blobs_but_never_resumes() {
         crate::pronunciation::PronunciationDomainPolicy,
     )
     .unwrap();
-    let bytes = synthetic_mp3();
+    // Разные записи — разные сохранённые оригиналы: проверка обязана обходить
+    // все blob, а не только первый.
+    let tones = [synthetic_mp3(), synthetic_mp3_tone(523)];
     let mut runtime = SafeBatchRuntime::open(store.root(), "history").unwrap();
-    let blob = runtime.persist_blob(&bytes, "mp3").unwrap();
+    let blobs: Vec<_> = tones
+        .iter()
+        .map(|bytes| runtime.persist_blob(bytes, "mp3").unwrap())
+        .collect();
     let records: Vec<_> = ["1", "2"]
         .into_iter()
-        .map(|id| {
-            let mut e = evidence(&bytes, "学校");
+        .zip(tones.iter().zip(blobs.iter()))
+        .map(|(id, (bytes, blob))| {
+            let mut e = evidence(bytes, "学校");
             e.schema_version = 2;
             e.acquisition_mode = Some(COLLECT_ALL_MODE.into());
             e.candidates = vec![
@@ -1199,7 +1205,7 @@ async fn historical_collection_preserves_all_blobs_but_never_resumes() {
     let path = store
         .root()
         .join(".runtime/batches/history")
-        .join(&blob.storage_path);
+        .join(&blobs[1].storage_path);
     std::fs::remove_file(&path).unwrap();
     assert_eq!(
         batch::status(&store, "history").unwrap_err().code,
@@ -1219,7 +1225,7 @@ async fn historical_collection_preserves_all_blobs_but_never_resumes() {
         batch::status(&store, "history").unwrap_err().code,
         ErrorCode::BoundaryViolation
     );
-    std::fs::write(&path, &bytes).unwrap();
+    std::fs::write(&path, &tones[1]).unwrap();
     assert_eq!(
         batch::cancel(&store, "history").unwrap().items[0]
             .collected
