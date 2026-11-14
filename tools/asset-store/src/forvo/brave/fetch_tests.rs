@@ -1114,6 +1114,37 @@ async fn batch_explicit_close_failure_preserves_original_and_reports_failure() {
 }
 
 #[tokio::test]
+async fn recovery_closes_own_tab_even_without_close_tab_flag() {
+    let mut h = harness(vec![(
+        "元気",
+        vec![record("10", 5, Body::Bytes(synthetic_mp3()))],
+    )]);
+    h.options.close_tab = true;
+    lock(&h.world).fail_close = true;
+    let store = store(&h.root);
+    batch::start(&store, "close", plan(&["元気"]), Transport::BraveExtension).unwrap();
+    batch::resume(&store, "close", Backend::Brave(&h.options), 1)
+        .await
+        .unwrap_err();
+    let saved = batch::status(&store, "close").unwrap();
+    assert!(saved.paused.as_ref().is_some_and(|p| p.recovery_required));
+    lock(&h.world).fail_close = false;
+    lock(&h.world).commands.clear();
+    // Текущий вызов не просит закрывать собственную вкладку: долг очистки
+    // выполняется и подтверждается расширением до снятия паузы.
+    let quiet = BraveOptions {
+        close_tab: false,
+        ..h.options.clone()
+    };
+    let done = batch::resume(&store, "close", Backend::Brave(&quiet), 1)
+        .await
+        .unwrap();
+    assert!(done.paused.is_none());
+    assert!(lock(&h.world).commands.iter().any(|op| op == "close"));
+    assert_eq!(lock(&h.world).begins.len(), 1);
+}
+
+#[tokio::test]
 async fn repeated_single_fetch_reuses_original_without_another_download() {
     let h = harness(vec![(
         "学校",

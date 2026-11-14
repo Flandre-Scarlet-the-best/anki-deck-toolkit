@@ -1056,7 +1056,22 @@ pub async fn resume_prepared(
         // всё равно требует сопряжения до завершения.
         if batch.paused.as_ref().is_some_and(|p| p.recovery_required) {
             runtime.release_lock()?;
-            let connected = launch(store, id, &backend, true).await;
+            // Долг очистки мог остаться от запуска с явным закрытием вкладки:
+            // восстановление освобождает собственные ресурсы целиком и требует
+            // подтверждения отсутствия вкладки, даже если текущий вызов не
+            // передал --close-tab. Иначе пауза снималась бы без очистки.
+            let closing;
+            let cleanup_backend = match &backend {
+                Backend::Cdp { profile } => Backend::Cdp { profile },
+                Backend::Brave(options) => {
+                    closing = BraveOptions {
+                        close_tab: true,
+                        ..(*options).clone()
+                    };
+                    Backend::Brave(&closing)
+                }
+            };
+            let connected = launch(store, id, &cleanup_backend, true).await;
             let recovered = match connected {
                 Ok(connected) => connected.close().await,
                 Err(error) => Err(error),

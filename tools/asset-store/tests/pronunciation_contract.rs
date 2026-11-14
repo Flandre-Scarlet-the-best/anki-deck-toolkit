@@ -2087,7 +2087,9 @@ fn forvo_cli_no_longer_accepts_reading_or_replacement_flags() {
         let output = cli(&ws, &args);
         assert_eq!(output.status.code(), Some(2));
         assert!(!output.stderr.is_empty());
-        assert!(!ws.path().join(".asset-store").exists());
+        // Помощник `cli` пишет в `--store <ws>/store`: проверяется фактическое
+        // место записи, а не путь по умолчанию.
+        assert!(!ws.path().join("store").exists());
     }
     let output = cli(
         &ws,
