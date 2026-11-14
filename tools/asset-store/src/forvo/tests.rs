@@ -1114,6 +1114,33 @@ async fn package_without_candidates_is_damage_not_absence() {
     );
 }
 
+/// Гонка прерывания и готовой проверки: протокол ручного шага требует
+/// `interrupted`, поэтому одновременно готовое прерывание побеждает.
+#[tokio::test]
+async fn interruption_wins_over_simultaneously_ready_check_result() {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    for _ in 0..64 {
+        let outcome = wait_step(
+            std::future::ready(Ok(AuthState::Authenticated)),
+            deadline,
+            std::future::ready(interaction::interrupted_error()),
+        )
+        .await;
+        let error = outcome
+            .expect("шаг не должен завершаться по дедлайну")
+            .unwrap_err();
+        assert_eq!(error.code, crate::ErrorCode::Interrupted);
+    }
+    // Без готового прерывания результат проверки остаётся победителем.
+    let outcome = wait_step(
+        std::future::ready(Ok(AuthState::Authenticated)),
+        deadline,
+        std::future::pending::<AssetError>(),
+    )
+    .await;
+    assert!(matches!(outcome, Some(Ok(AuthState::Authenticated))));
+}
+
 #[tokio::test]
 async fn historical_collection_preserves_all_blobs_but_never_resumes() {
     use crate::batch_runtime::SafeBatchRuntime;

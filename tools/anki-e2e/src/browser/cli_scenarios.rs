@@ -335,14 +335,19 @@ pub async fn cli_fetch(env: &mut Env<'_>) -> Result<()> {
         json!({"requests":requests(env,&[fixture::RECORD_A]),"downloads":files_json(&env.downloads()),
             "browser":result["browser"]}),
     );
-    // Повтор тех же байтов: ресурс и доверие не меняются.
+    // Повтор тех же байтов: ресурс и доверие не меняются, новой загрузки нет.
     let again = cli
         .run(true, &["fetch", "--surface", fixture::WORD])
         .await?;
+    let repeated = &again.out["result"];
     env.out.check(
-        "повторный fetch тех же байтов успешен и не создаёт второго ресурса",
-        again.code == 0 && cli.canonical_audio()? == asset,
-        again.summary(),
+        "повторный fetch тех же байтов успешен, использует сохранённый оригинал и не создаёт второго ресурса",
+        again.code == 0
+            && cli.canonical_audio()? == asset
+            && repeated["reused"] == true
+            && repeated["source"]["source"] == *source
+            && env.ctx.fixture.requests_for(fixture::RECORD_A) == 1,
+        json!({"run":again.summary(),"first":result,"requests":requests(env,&[fixture::RECORD_A])}),
     );
     // Без ffprobe/ffmpeg проверка MP3 недоступна: блокер, а не «плохая запись».
     let empty = env.dir.join("empty-path");

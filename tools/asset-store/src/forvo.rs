@@ -36,6 +36,27 @@ pub fn error(code: &str, action: &str) -> AssetError {
         serde_json::json!({"provider":"forvo_web", "code":code,"next_action":action}),
     )
 }
+
+/// Один шаг ожидания проверки: прерывание сильнее одновременно готового
+/// результата и дедлайна. Протокол ручного шага требует, чтобы гонка с
+/// внешним сигналом давала `interrupted`, а не `authenticated`; без явного
+/// приоритета выбор среди готовых веток был бы случайным.
+async fn wait_step<Check, Interrupt>(
+    check: Check,
+    deadline: tokio::time::Instant,
+    interrupt: Interrupt,
+) -> Option<Result<AuthState, AssetError>>
+where
+    Check: std::future::Future<Output = Result<AuthState, AssetError>>,
+    Interrupt: std::future::Future<Output = AssetError>,
+{
+    tokio::select! {
+        biased;
+        error = interrupt => Some(Err(error)),
+        state = check => Some(state),
+        _ = tokio::time::sleep_until(deadline) => None,
+    }
+}
 pub struct ForvoSession {
     browser: Option<BrowserSession>,
     pending_stop: Option<tokio::task::JoinHandle<Result<(), String>>>,
@@ -355,15 +376,13 @@ impl ForvoSession {
                 wait_dom(self.browser().page()).await;
             }
         };
-        let result = tokio::select! {
-            result = result => Some(result),
-            _ = tokio::time::sleep_until(deadline) => None,
-            _ = interaction::wait_interrupt(&mut interaction), if login => {
-                let mut error = interaction::interrupted_error();
-                error.details["human_wait_pending"] = serde_json::json!(true);
-                Some(Err(error))
-            }
-        };
+        let result = wait_step(result, deadline, async {
+            interaction::wait_interrupt(&mut interaction).await;
+            let mut error = interaction::interrupted_error();
+            error.details["human_wait_pending"] = serde_json::json!(true);
+            error
+        })
+        .await;
         let result = result.unwrap_or_else(|| {
             if login {
                 let mut error = auth_error(last_state);

@@ -1154,17 +1154,25 @@ async fn cancellation_during_late_checkpoint_preserves_bytes_and_cleanup_debt() 
             Transport::BraveExtension,
         )
         .unwrap();
-        let (running, cancelled_revision) = tokio::join!(
-            batch::resume(&store, "late", Backend::Brave(&h.options), 10),
-            async {
-                reached.notified().await;
-                let cancelled = batch::cancel(&store, "late").unwrap();
-                assert!(cancelled.cancelled);
-                let revision = cancelled.revision;
-                proceed.notify_one();
-                revision
-            }
-        );
+        // Ошибка `batch::resume` до `download_release` не пошлёт `reached`,
+        // поэтому ожидание ограничено: иначе тест зависает вместо сообщения
+        // исходного отказа.
+        let (running, cancelled_revision) =
+            tokio::time::timeout(std::time::Duration::from_secs(120), async {
+                tokio::join!(
+                    batch::resume(&store, "late", Backend::Brave(&h.options), 10),
+                    async {
+                        reached.notified().await;
+                        let cancelled = batch::cancel(&store, "late").unwrap();
+                        assert!(cancelled.cancelled);
+                        let revision = cancelled.revision;
+                        proceed.notify_one();
+                        revision
+                    }
+                )
+            })
+            .await
+            .expect("пакет должен дойти до download_release за отведённое время");
         let saved = running.unwrap();
         assert!(saved.cancelled);
         assert!(saved.revision > cancelled_revision);
