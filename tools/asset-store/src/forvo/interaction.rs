@@ -153,8 +153,91 @@ mod tests {
             "human_interaction_required"
         );
     }
+    const SIGNAL_TEST_CHILD_ENV: &str = "ASSET_STORE_FORVO_SIGNAL_TEST_CHILD";
+    const SIGNAL_TEST_NAME: &str =
+        "forvo::interaction::tests::immediate_signals_are_queued_before_wait_future_is_polled";
+    const SIGNAL_TEST_SUCCESS_MARKER: &str = "FORVO_SIGNAL_TEST_ASSERTIONS_PASSED";
+    const SIGNAL_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const SIGNAL_CHILD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+    async fn cleanup_signal_test_child(child: &mut tokio::process::Child) -> String {
+        let kill = tokio::time::timeout(SIGNAL_CHILD_CLEANUP_TIMEOUT, child.kill()).await;
+        let wait = tokio::time::timeout(SIGNAL_CHILD_CLEANUP_TIMEOUT, child.wait()).await;
+        format!("kill={kill:?}, wait={wait:?}")
+    }
+
+    async fn wait_for_signal_test_child(
+        child: &mut tokio::process::Child,
+    ) -> Result<std::process::ExitStatus, String> {
+        let pid = child.id();
+        match tokio::time::timeout(SIGNAL_TEST_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => Ok(status),
+            Ok(Err(error)) => {
+                let cleanup = cleanup_signal_test_child(child).await;
+                Err(format!(
+                    "не удалось дождаться дочернего теста сигналов (pid={pid:?}): {error}; очистка: {cleanup}"
+                ))
+            }
+            Err(_) => {
+                let cleanup = cleanup_signal_test_child(child).await;
+                Err(format!(
+                    "дочерний тест сигналов превысил срок {:?} (pid={pid:?}); очистка: {cleanup}",
+                    SIGNAL_TEST_TIMEOUT
+                ))
+            }
+        }
+    }
+
     #[tokio::test]
     async fn immediate_signals_are_queued_before_wait_future_is_polled() {
+        // SIGTERM/SIGHUP/SIGINT — сигналы всего процесса. Выполняем этот
+        // контрактный тест отдельно, чтобы не прерывать соседние unit-тесты.
+        if std::env::var_os(SIGNAL_TEST_CHILD_ENV).is_none() {
+            let mut child = tokio::process::Command::new(
+                std::env::current_exe().expect("исполняемый файл тестов"),
+            )
+            .args(["--exact", SIGNAL_TEST_NAME])
+            .env(SIGNAL_TEST_CHILD_ENV, "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            // Обработчик тестов должен показать маркер в stdout.
+            .arg("--nocapture")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("дочерний процесс теста сигналов должен запуститься");
+            let pid = child.id();
+            let wait_result = wait_for_signal_test_child(&mut child).await;
+            let output = tokio::time::timeout(
+                SIGNAL_CHILD_CLEANUP_TIMEOUT,
+                child.wait_with_output(),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("чтение вывода дочернего теста зависло (pid={pid:?}); ожидание: {wait_result:?}")
+            })
+            .unwrap_or_else(|error| {
+                panic!("не удалось прочитать вывод дочернего теста (pid={pid:?}); ожидание: {wait_result:?}: {error}")
+            });
+            let status = wait_result.unwrap_or_else(|error| {
+                panic!(
+                    "{error}; stdout: {}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            });
+            assert!(
+                status.success() && output.status.success(),
+                "дочерний тест сигналов завершился со статусом {status} (stdout: {}, pid={pid:?}); см. stderr",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(SIGNAL_TEST_SUCCESS_MARKER),
+                "точный фильтр не выполнил signal assertions (pid={pid:?}); stdout: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+
         use rustix::process::{Signal, getpid, kill_process};
         for signal in [Signal::TERM, Signal::HUP, Signal::INT] {
             let mut wait = Some(begin(Duration::from_secs(30)).unwrap());
@@ -164,6 +247,7 @@ mod tests {
                 .expect("сигнал сразу после события не должен теряться");
             wait.take().unwrap().finish("interrupted");
         }
+        println!("{SIGNAL_TEST_SUCCESS_MARKER}");
     }
 
     #[tokio::test]

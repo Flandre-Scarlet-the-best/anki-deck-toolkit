@@ -996,7 +996,18 @@ async fn auto_check_waits_out_briefly_held_lock_but_not_a_running_check() {
     release_lock.await.unwrap();
 
     // Идущую явную проверку автоматическая не дожидается.
-    let _held = check_lock(&state_dir, false).await.unwrap().unwrap();
+    let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let _held = loop {
+        match check_lock(&state_dir, false).await {
+            Ok(Some(lock)) if tokio::time::Instant::now() < lock_deadline => break lock,
+            Ok(Some(_lock)) => panic!("не удалось получить блокировку проверки выпусков за 2 с"),
+            Ok(None) if tokio::time::Instant::now() < lock_deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Ok(None) => panic!("блокировка проверки выпусков осталась занята после 2 с"),
+            Err(error) => panic!("не удалось получить блокировку проверки выпусков: {error}"),
+        }
+    };
     let started = std::time::Instant::now();
     assert!(
         auto_check(&state_dir, None, max_age, timeout)
