@@ -995,16 +995,19 @@ async fn auto_check_waits_out_briefly_held_lock_but_not_a_running_check() {
     assert_eq!(notice["available_version"], "99.2");
     release_lock.await.unwrap();
 
-    // Идущую явную проверку автоматическая не дожидается.
-    let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    // Идущую явную проверку автоматическая не дожидается: блокировка получена
+    // заранее, а повторные попытки ограничены тем же сроком, что и у `auto_check_lock`.
+    let lock_deadline = tokio::time::Instant::now() + AUTO_CHECK_LOCK_GRACE;
     let _held = loop {
         match check_lock(&state_dir, false).await {
-            Ok(Some(lock)) if tokio::time::Instant::now() < lock_deadline => break lock,
-            Ok(Some(_lock)) => panic!("не удалось получить блокировку проверки выпусков за 2 с"),
+            // Захват состоялся: задержка планировщика после него не делает его отказом.
+            Ok(Some(lock)) => break lock,
             Ok(None) if tokio::time::Instant::now() < lock_deadline => {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(AUTO_CHECK_LOCK_RETRY).await;
             }
-            Ok(None) => panic!("блокировка проверки выпусков осталась занята после 2 с"),
+            Ok(None) => {
+                panic!("блокировка проверки выпусков занята дольше {AUTO_CHECK_LOCK_GRACE:?}")
+            }
             Err(error) => panic!("не удалось получить блокировку проверки выпусков: {error}"),
         }
     };

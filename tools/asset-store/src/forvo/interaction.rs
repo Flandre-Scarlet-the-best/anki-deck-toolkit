@@ -127,6 +127,7 @@ pub(crate) fn interrupted_error() -> AssetError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
     #[derive(Default)]
     struct Writer {
         bytes: Vec<u8>,
@@ -160,80 +161,123 @@ mod tests {
     const SIGNAL_TEST_TIMEOUT: Duration = Duration::from_secs(10);
     const SIGNAL_CHILD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
-    async fn cleanup_signal_test_child(child: &mut tokio::process::Child) -> String {
-        let kill = tokio::time::timeout(SIGNAL_CHILD_CLEANUP_TIMEOUT, child.kill()).await;
-        let wait = tokio::time::timeout(SIGNAL_CHILD_CLEANUP_TIMEOUT, child.wait()).await;
-        format!("kill={kill:?}, wait={wait:?}")
+    /// Итог дочернего запуска: код выхода и прочитанный stdout.
+    #[derive(Debug)]
+    struct SignalChildOutcome {
+        status: std::process::ExitStatus,
+        stdout: Vec<u8>,
     }
 
+    /// Останавливает дочерний процесс и убирает его, не дожидаясь ответа дольше
+    /// `SIGNAL_CHILD_CLEANUP_TIMEOUT`; возвращает описание обеих операций.
+    async fn stop_signal_test_child(child: &mut tokio::process::Child) -> String {
+        let stop = tokio::time::timeout(SIGNAL_CHILD_CLEANUP_TIMEOUT, child.kill()).await;
+        let reap = tokio::time::timeout(SIGNAL_CHILD_CLEANUP_TIMEOUT, child.wait()).await;
+        format!("остановка={stop:?}, уборка={reap:?}")
+    }
+
+    /// Дожидается дочернего процесса в пределах `timeout` и читает его stdout.
+    /// Превышение срока и отказ ожидания не маскируются: процесс сначала
+    /// останавливается и убирается, а причина возвращается текстом, поэтому
+    /// вызывающий тест не оставляет работающих потомков.
     async fn wait_for_signal_test_child(
-        child: &mut tokio::process::Child,
-    ) -> Result<std::process::ExitStatus, String> {
+        mut child: tokio::process::Child,
+        timeout: Duration,
+    ) -> Result<SignalChildOutcome, String> {
         let pid = child.id();
-        match tokio::time::timeout(SIGNAL_TEST_TIMEOUT, child.wait()).await {
-            Ok(Ok(status)) => Ok(status),
+        let mut stdout = child
+            .stdout
+            .take()
+            .expect("stdout дочернего процесса подключён к каналу");
+        let waited = tokio::time::timeout(timeout, child.wait()).await;
+        let status = match waited {
+            Ok(Ok(status)) => status,
             Ok(Err(error)) => {
-                let cleanup = cleanup_signal_test_child(child).await;
-                Err(format!(
-                    "не удалось дождаться дочернего теста сигналов (pid={pid:?}): {error}; очистка: {cleanup}"
-                ))
+                let cleanup = stop_signal_test_child(&mut child).await;
+                return Err(format!(
+                    "ожидание дочернего процесса отказало (pid={pid:?}): {error}; {cleanup}"
+                ));
             }
             Err(_) => {
-                let cleanup = cleanup_signal_test_child(child).await;
-                Err(format!(
-                    "дочерний тест сигналов превысил срок {:?} (pid={pid:?}); очистка: {cleanup}",
-                    SIGNAL_TEST_TIMEOUT
-                ))
+                let cleanup = stop_signal_test_child(&mut child).await;
+                return Err(format!(
+                    "дочерний процесс превысил срок {timeout:?} (pid={pid:?}); {cleanup}"
+                ));
             }
+        };
+        // Единственный писатель в этот поток завершён, поэтому чтение доходит до
+        // конца потока; ошибка чтения не подменяется успехом.
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.map_err(|error| {
+            format!("чтение stdout дочернего процесса отказало (pid={pid:?}): {error}")
+        })?;
+        Ok(SignalChildOutcome {
+            status,
+            stdout: bytes,
+        })
+    }
+
+    /// Проверяет итог дочернего запуска: успешный код выхода и контрольный маркер,
+    /// который печатается только после всех проверок сигналов. Возвращает текст
+    /// отказа вместо паники, чтобы те же проверки проходили и заглушки.
+    fn signal_test_child_failure(outcome: &SignalChildOutcome) -> Option<String> {
+        let stdout = String::from_utf8_lossy(&outcome.stdout);
+        if !outcome.status.success() {
+            return Some(format!(
+                "дочерний процесс завершился со статусом {}; stdout: {stdout}",
+                outcome.status
+            ));
         }
+        if !stdout.contains(SIGNAL_TEST_SUCCESS_MARKER) {
+            return Some(format!(
+                "точный фильтр не выполнил проверки сигналов и не оставил маркер \
+                 {SIGNAL_TEST_SUCCESS_MARKER}; stdout: {stdout}"
+            ));
+        }
+        None
+    }
+
+    /// Заглушка дочернего процесса для проверок обвязки: команда завершается по
+    /// правилам своего сценария, поэтому отказ и превышение срока воспроизводимы.
+    fn signal_test_stub(script: &str) -> tokio::process::Child {
+        tokio::process::Command::new("sh")
+            .args(["-c", script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("заглушка дочернего процесса запускается")
     }
 
     #[tokio::test]
     async fn immediate_signals_are_queued_before_wait_future_is_polled() {
-        // SIGTERM/SIGHUP/SIGINT — сигналы всего процесса. Выполняем этот
-        // контрактный тест отдельно, чтобы не прерывать соседние unit-тесты.
+        // SIGTERM, SIGHUP и SIGINT действуют на весь процесс. Контракт проверяется
+        // отдельным процессом, чтобы сигналы не прерывали соседние модульные тесты.
         if std::env::var_os(SIGNAL_TEST_CHILD_ENV).is_none() {
-            let mut child = tokio::process::Command::new(
+            let mut command = tokio::process::Command::new(
                 std::env::current_exe().expect("исполняемый файл тестов"),
-            )
-            .args(["--exact", SIGNAL_TEST_NAME])
-            .env(SIGNAL_TEST_CHILD_ENV, "1")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            // Обработчик тестов должен показать маркер в stdout.
-            .arg("--nocapture")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("дочерний процесс теста сигналов должен запуститься");
-            let pid = child.id();
-            let wait_result = wait_for_signal_test_child(&mut child).await;
-            let output = tokio::time::timeout(
-                SIGNAL_CHILD_CLEANUP_TIMEOUT,
-                child.wait_with_output(),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                panic!("чтение вывода дочернего теста зависло (pid={pid:?}); ожидание: {wait_result:?}")
-            })
-            .unwrap_or_else(|error| {
-                panic!("не удалось прочитать вывод дочернего теста (pid={pid:?}); ожидание: {wait_result:?}: {error}")
-            });
-            let status = wait_result.unwrap_or_else(|error| {
-                panic!(
-                    "{error}; stdout: {}",
-                    String::from_utf8_lossy(&output.stdout)
-                )
-            });
-            assert!(
-                status.success() && output.status.success(),
-                "дочерний тест сигналов завершился со статусом {status} (stdout: {}, pid={pid:?}); см. stderr",
-                String::from_utf8_lossy(&output.stdout)
             );
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains(SIGNAL_TEST_SUCCESS_MARKER),
-                "точный фильтр не выполнил signal assertions (pid={pid:?}); stdout: {}",
-                String::from_utf8_lossy(&output.stdout)
+            // Точный фильтр запускает только контракт сигналов, а `--nocapture`
+            // показывает контрольный маркер в stdout дочернего процесса.
+            command
+                .args(["--exact", SIGNAL_TEST_NAME, "--nocapture"])
+                .env(SIGNAL_TEST_CHILD_ENV, "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .kill_on_drop(true);
+            let child = command
+                .spawn()
+                .expect("дочерний процесс теста сигналов должен запуститься");
+            let pid = child.id();
+            let outcome = wait_for_signal_test_child(child, SIGNAL_TEST_TIMEOUT)
+                .await
+                .unwrap_or_else(|failure| panic!("{failure}"));
+            assert_eq!(
+                signal_test_child_failure(&outcome),
+                None,
+                "дочерний тест сигналов не подтвердил контракт (pid={pid:?})"
             );
             return;
         }
@@ -248,6 +292,59 @@ mod tests {
             wait.take().unwrap().finish("interrupted");
         }
         println!("{SIGNAL_TEST_SUCCESS_MARKER}");
+    }
+
+    /// Зависший дочерний процесс не даёт ложного успеха и не остаётся работать:
+    /// обвязка останавливает его и убирает в пределах своего срока.
+    #[tokio::test]
+    async fn hung_signal_test_child_is_stopped_without_leftover_process() {
+        let child = signal_test_stub("exec sleep 30");
+        let pid = child.id().expect("у запущенной заглушки есть pid");
+        let started = std::time::Instant::now();
+        let failure = wait_for_signal_test_child(child, Duration::from_millis(200))
+            .await
+            .expect_err("зависший дочерний процесс не даёт итога");
+        assert!(failure.contains("превысил срок"), "{failure}");
+        assert!(started.elapsed() < SIGNAL_TEST_TIMEOUT, "{failure}");
+        // Убранный процесс не оставляет записи в /proc: остаться он уже не может.
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        assert!(
+            status.is_empty(),
+            "дочерний процесс {pid} остался: {status}"
+        );
+    }
+
+    /// Успешный код выхода без контрольного маркера не принимается за выполнение
+    /// проверок, а неуспешный код выхода виден и при оставленном маркере.
+    #[tokio::test]
+    async fn signal_test_child_outcome_requires_marker_and_success() {
+        let quiet = wait_for_signal_test_child(
+            signal_test_stub("echo посторонний вывод"),
+            SIGNAL_TEST_TIMEOUT,
+        )
+        .await
+        .expect("заглушка завершается");
+        let failure = signal_test_child_failure(&quiet).expect("без маркера итог не подтверждён");
+        assert!(failure.contains("не оставил маркер"), "{failure}");
+
+        let broken = wait_for_signal_test_child(
+            signal_test_stub(&format!("echo {SIGNAL_TEST_SUCCESS_MARKER}; exit 3")),
+            SIGNAL_TEST_TIMEOUT,
+        )
+        .await
+        .expect("заглушка завершается");
+        assert!(!broken.status.success());
+        let failure =
+            signal_test_child_failure(&broken).expect("ненулевой код выхода должен быть виден");
+        assert!(failure.contains("статусом"), "{failure}");
+
+        let passed = wait_for_signal_test_child(
+            signal_test_stub(&format!("echo {SIGNAL_TEST_SUCCESS_MARKER}")),
+            SIGNAL_TEST_TIMEOUT,
+        )
+        .await
+        .expect("заглушка завершается");
+        assert_eq!(signal_test_child_failure(&passed), None);
     }
 
     #[tokio::test]
