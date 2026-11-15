@@ -3061,6 +3061,7 @@ mod tests {
     #[test]
     fn orphan_gc_removes_only_allowlisted_browser_temp_objects() {
         let root = sandbox();
+        let (proc_root, _) = proc_fixture(root.path());
         let orphan = make_orphan(root.path(), Duration::from_secs(172800));
         let (_profile, _temp, _socket) = make_browser_temp_entries(&orphan);
         let unrelated = root
@@ -3070,8 +3071,25 @@ mod tests {
         fs::write(unrelated.join("keep"), b"unrelated global object").unwrap();
         set_old_directory_time(&orphan, Duration::from_secs(172800));
 
-        let report = cleanup_under(root.path(), Duration::ZERO).unwrap();
-        assert_eq!(report.removed, 1);
+        let report = cleanup_under_with_proc(root.path(), &proc_root, Duration::ZERO).unwrap();
+        assert_eq!(
+            (
+                report.removed,
+                report.skipped,
+                report.errors,
+                report.entries.len()
+            ),
+            (1, 0, 0, 1),
+            "GC report: {report:#?}; orphan_exists={}",
+            orphan.exists()
+        );
+        let entry = &report.entries[0];
+        assert_eq!(entry.path, orphan, "GC report: {report:#?}");
+        assert_eq!(entry.outcome, "removed", "GC report: {report:#?}");
+        assert_eq!(entry.ownership, "project-owned", "GC report: {report:#?}");
+        assert_eq!(entry.live, Some(false), "GC report: {report:#?}");
+        assert!(entry.bytes > 0, "GC report: {report:#?}");
+        assert_eq!(report.removed_bytes, entry.bytes, "GC report: {report:#?}");
         assert!(!orphan.exists());
         assert_eq!(
             fs::read(unrelated.join("keep")).unwrap(),

@@ -61,6 +61,14 @@ impl PersistentProfile {
             }
         })?;
         let lock = ProfileLock(file);
+        // Сначала отказываем по правам профиля: ошибка сканирования `/proc`
+        // не должна скрывать её. Для допустимого профиля проверка занятости остаётся.
+        let metadata = lock.0.metadata()?;
+        if metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(fail());
+        }
         // После аварии предыдущего владельца flock уже освобождён, но Chromium
         // мог пережить процесс CLI. Его профиль нельзя открыть повторно.
         crate::temp_workspace::TempWorkspace::ensure_no_live_process_references(path).map_err(
@@ -68,12 +76,6 @@ impl PersistentProfile {
                 io::Error::other("browser_profile_busy: предыдущий Chromium ещё использует профиль")
             },
         )?;
-        let metadata = lock.0.metadata()?;
-        if metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err(fail());
-        }
         let marker = path.join(".forvo-owner");
         match fs::OpenOptions::new()
             .read(true)
@@ -194,6 +196,37 @@ use std::os::unix::fs::DirBuilderExt;
 mod tests {
     use super::*;
     use crate::temp_workspace::TempWorkspace;
+
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    struct SpawnLoop {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<u32>>,
+    }
+
+    impl SpawnLoop {
+        fn stop_and_join(&mut self) -> std::thread::Result<u32> {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.thread.take().expect("spawner уже завершён").join()
+        }
+    }
+
+    impl Drop for SpawnLoop {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
     #[test]
     fn profile_is_private_exclusive_persistent_and_never_adopts_a_normal_profile() {
         let workspace = TempWorkspace::create("persistent-profile-test").unwrap();
@@ -300,20 +333,60 @@ mod tests {
     }
 
     #[test]
+    fn invalid_profile_permissions_precede_live_process_check() {
+        let workspace = TempWorkspace::create("persistent-profile-invalid-before-live").unwrap();
+        let path = workspace.path().join("forvo");
+        drop(PersistentProfile::open(&path).unwrap());
+        let path = fs::canonicalize(path).unwrap();
+        let user_data_dir = format!("--user-data-dir={}", path.display());
+        let process = ChildGuard(
+            std::process::Command::new("sh")
+                .args(["-c", "read line", "forvo-test"])
+                .arg(&user_data_dir)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let process_cmdline = format!("/proc/{}/cmdline", process.0.id());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !fs::read(&process_cmdline).is_ok_and(|cmdline| {
+            cmdline
+                .split(|byte| *byte == 0)
+                .any(|arg| arg == user_data_dir.as_bytes())
+        }) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+        let refused = PersistentProfile::open(&path).err().unwrap().to_string();
+        assert!(
+            refused.starts_with("browser_profile_not_owned:"),
+            "{refused}"
+        );
+        drop(process);
+        workspace.close().unwrap();
+    }
+
+    #[test]
     fn reopening_is_not_blocked_by_concurrent_process_spawns() {
         let workspace = TempWorkspace::create("persistent-profile-concurrent-spawn").unwrap();
         let path = workspace.path().join("forvo");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let spawner = {
-            let stop = stop.clone();
-            std::thread::spawn(move || {
-                let mut spawned = 0u32;
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::process::Command::new("true").status().unwrap();
-                    spawned += 1;
-                }
-                spawned
-            })
+        let mut spawner = SpawnLoop {
+            stop: stop.clone(),
+            thread: Some({
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    let mut spawned = 0u32;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::process::Command::new("true").status().unwrap();
+                        spawned += 1;
+                    }
+                    spawned
+                })
+            }),
         };
         let mut failures = Vec::new();
         for _ in 0..300 {
@@ -332,8 +405,7 @@ mod tests {
                 failures.push(error.to_string());
             }
         }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(spawner.join().unwrap() > 0);
+        assert!(spawner.stop_and_join().unwrap() > 0);
         assert!(
             failures.is_empty(),
             "{} отказов: {:?}",
