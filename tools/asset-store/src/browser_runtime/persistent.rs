@@ -214,7 +214,10 @@ mod tests {
     impl SpawnLoop {
         fn stop_and_join(&mut self) -> std::thread::Result<u32> {
             self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            self.thread.take().expect("spawner уже завершён").join()
+            self.thread
+                .take()
+                .expect("поток запуска процессов уже завершён")
+                .join()
         }
     }
 

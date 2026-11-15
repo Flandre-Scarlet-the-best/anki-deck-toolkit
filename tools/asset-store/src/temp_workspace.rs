@@ -3080,16 +3080,16 @@ mod tests {
                 report.entries.len()
             ),
             (1, 0, 0, 1),
-            "GC report: {report:#?}; orphan_exists={}",
+            "Отчёт GC: {report:#?}; осиротевший каталог существует: {}",
             orphan.exists()
         );
         let entry = &report.entries[0];
-        assert_eq!(entry.path, orphan, "GC report: {report:#?}");
-        assert_eq!(entry.outcome, "removed", "GC report: {report:#?}");
-        assert_eq!(entry.ownership, "project-owned", "GC report: {report:#?}");
-        assert_eq!(entry.live, Some(false), "GC report: {report:#?}");
-        assert!(entry.bytes > 0, "GC report: {report:#?}");
-        assert_eq!(report.removed_bytes, entry.bytes, "GC report: {report:#?}");
+        assert_eq!(entry.path, orphan, "Отчёт GC: {report:#?}");
+        assert_eq!(entry.outcome, "removed", "Отчёт GC: {report:#?}");
+        assert_eq!(entry.ownership, "project-owned", "Отчёт GC: {report:#?}");
+        assert_eq!(entry.live, Some(false), "Отчёт GC: {report:#?}");
+        assert!(entry.bytes > 0, "Отчёт GC: {report:#?}");
+        assert_eq!(report.removed_bytes, entry.bytes, "Отчёт GC: {report:#?}");
         assert!(!orphan.exists());
         assert_eq!(
             fs::read(unrelated.join("keep")).unwrap(),
