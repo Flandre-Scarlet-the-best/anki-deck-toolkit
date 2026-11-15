@@ -3063,13 +3063,15 @@ mod tests {
         let root = sandbox();
         let (proc_root, _) = proc_fixture(root.path());
         let orphan = make_orphan(root.path(), Duration::from_secs(172800));
-        let (_profile, _temp, _socket) = make_browser_temp_entries(&orphan);
+        let (_profile, temp, _socket) = make_browser_temp_entries(&orphan);
         let unrelated = root
             .path()
             .join(format!("org.chromium.Chromium.{}", &random_hex()[..6]));
         fs::create_dir(&unrelated).unwrap();
         fs::write(unrelated.join("keep"), b"unrelated global object").unwrap();
         set_old_directory_time(&orphan, Duration::from_secs(172800));
+        let stray = temp.join("stray");
+        fs::write(&stray, b"unallowlisted object inside the orphan tree").unwrap();
 
         let report = cleanup_under_with_proc(root.path(), &proc_root, Duration::ZERO).unwrap();
         assert_eq!(
@@ -3079,18 +3081,25 @@ mod tests {
                 report.errors,
                 report.entries.len()
             ),
-            (1, 0, 0, 1),
+            (0, 1, 0, 1),
             "Отчёт GC: {report:#?}; осиротевший каталог существует: {}",
             orphan.exists()
         );
         let entry = &report.entries[0];
         assert_eq!(entry.path, orphan, "Отчёт GC: {report:#?}");
-        assert_eq!(entry.outcome, "removed", "Отчёт GC: {report:#?}");
-        assert_eq!(entry.ownership, "project-owned", "Отчёт GC: {report:#?}");
-        assert_eq!(entry.live, Some(false), "Отчёт GC: {report:#?}");
-        assert!(entry.bytes > 0, "Отчёт GC: {report:#?}");
-        assert_eq!(report.removed_bytes, entry.bytes, "Отчёт GC: {report:#?}");
-        assert!(!orphan.exists());
+        assert_eq!(entry.outcome, "deferred", "Отчёт GC: {report:#?}");
+        assert_eq!(entry.ownership, "unknown", "Отчёт GC: {report:#?}");
+        assert_eq!(entry.live, None, "Отчёт GC: {report:#?}");
+        assert_eq!(entry.bytes, 0, "Отчёт GC: {report:#?}");
+        assert!(
+            entry.reason.contains("неизвестный файл"),
+            "Отчёт GC: {report:#?}"
+        );
+        assert!(orphan.exists());
+        assert_eq!(
+            fs::read(&stray).unwrap(),
+            b"unallowlisted object inside the orphan tree"
+        );
         assert_eq!(
             fs::read(unrelated.join("keep")).unwrap(),
             b"unrelated global object"
