@@ -17,10 +17,17 @@ jobs:
   renovate-rust:
     name: Валидация и извлечение Rust
     runs-on: ubuntu-latest
+    container:
+      # Официальный образ с установленным Renovate и нативным RE2; digest
+      # закрепляет всё дерево зависимостей без npm lifecycle scripts в job.
+      image: ghcr.io/renovatebot/renovate@sha256:8006b5506fade5fc5d94b94a30c7a9fcbbd56099eead430ffba9cfb916a9b6d9
+      options: --user 0
     timeout-minutes: 15
     steps:
       - name: Получить исходники
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       # GitHub проверяет paths для всего PR, поэтому пустые коммиты ревью
       # повторно запускают job. Успех прежнего запуска переиспользуется
@@ -38,22 +45,20 @@ jobs:
         if: steps.proof.outputs.cache-hit == 'true' && github.event_name != 'workflow_dispatch'
         run: echo "Полный Renovate test уже прошёл на идентичных файлах; повторный запуск не нужен"
 
-      - name: Установить Node.js для Renovate
+      - name: Проверить версию Renovate и нативный RE2
         if: steps.proof.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24'
-
-      - name: Установить официальный Renovate
-        if: steps.proof.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
-        run: npm install --no-save --no-package-lock --no-audit --no-fund renovate@44.149.3
+        run: |
+          test "$(renovate --version)" = 44.149.3
+          /usr/local/renovate/node -e 'const RE2 = require("/usr/local/renovate/node_modules/re2"); if (!new RE2("^a+$").test("aaa")) process.exit(1)'
 
       - name: Проверить конфигурацию штатным валидатором
         if: steps.proof.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
-        run: ./node_modules/.bin/renovate-config-validator --strict
+        run: renovate-config-validator --strict
 
       - name: Проверить настоящее извлечение и группировку Rust
         if: steps.proof.outputs.cache-hit != 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          RENOVATE_BINARY: /usr/local/sbin/renovate
         run: python3 .github/scripts/check_renovate_rust.py
 
       - name: Сохранить доказательство успешной проверки

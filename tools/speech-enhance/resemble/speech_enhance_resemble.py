@@ -17,7 +17,6 @@ import hashlib
 import io
 import json
 import os
-import pickle
 import shutil
 import stat
 import sys
@@ -167,29 +166,11 @@ def load_files(model_dir: Path) -> dict[str, bytes]:
         os.close(root_fd)
 
 
-# Ограниченный unpickler: чекпойнт ссылается ровно на эти глобалы.
-ALLOWED_GLOBALS = {
-    ("collections", "OrderedDict"),
-    ("__builtin__", "set"),
-    ("builtins", "set"),
-    ("torch", "HalfStorage"),
-    ("torch._utils", "_rebuild_tensor_v2"),
-}
+def load_checkpoint(data: bytes):
+    """Разбирает только типы, разрешённые PyTorch для весов."""
+    import torch
 
-
-class RestrictedUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        if (module, name) not in ALLOWED_GLOBALS:
-            raise pickle.UnpicklingError(f"запрещённый глобал {module}.{name}")
-        return super().find_class(module, name)
-
-
-class RestrictedPickle:
-    Unpickler = RestrictedUnpickler
-
-    @staticmethod
-    def load(file, **kwargs):
-        return RestrictedUnpickler(file, **kwargs).load()
+    return torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
 
 
 def parse_hparams(data: bytes):
@@ -241,17 +222,9 @@ def load_model(model_dir: Path):
     from resemble_enhance.inference import remove_weight_norm_recursively
 
     try:
-        # Чекпойнт DeepSpeed ссылается на `set` и `HalfStorage`. Разбор идёт
-        # собственным ограниченным unpickler с явным списком глобалов (уже
-        # списка `weights_only` torch); `weights_only=False` указан явно,
-        # потому что `weights_only=True` несовместим с `pickle_module`.
-        # Байты к этому моменту сверены по SHA-256 манифеста.
-        state = torch.load(
-            io.BytesIO(files[FILES[0][0]]),
-            map_location="cpu",
-            pickle_module=RestrictedPickle,
-            weights_only=False,
-        )["module"]
+        # Байты сверены с манифестом; PyTorch дополнительно ограничивает
+        # десериализацию без пользовательского списка разрешённых глобалов.
+        state = load_checkpoint(files[FILES[0][0]])["module"]
     except Exception as e:  # noqa: BLE001 — любой отказ разбора = порча весов
         fail("model_corrupt", f"чекпойнт не разбирается: {e}", EXIT_MODEL)
     prefix = "denoiser."

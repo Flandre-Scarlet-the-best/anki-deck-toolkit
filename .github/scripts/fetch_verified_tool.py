@@ -26,16 +26,23 @@ self-hosted раннера), иначе ``RUNNER_TEMP`` (GitHub-hosted: ката
 её же берёт обслуживание кэша (``prune_stale``), чтобы не удалить файл,
 который сейчас скачивается или используется.
 
+Каталог кэша должен принадлежать текущему UID и не допускать чужой записи;
+его компоненты не могут быть символическими ссылками. Файлы открываются без
+следования по ссылкам и должны быть обычными файлами с одной жёсткой ссылкой.
+Процессы того же UID имеют те же права и не изолируются этим контрактом.
+
 Единственная строка stdout — путь к проверенному архиву.
 """
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import http.client
 import json
 import os
 import re
+import stat
 import sys
 import time
 import urllib.error
@@ -70,13 +77,17 @@ class TransferError(Exception):
     """Попытка завершилась, но полученный файл не прошёл проверку."""
 
 
+class CacheSecurityError(Exception):
+    """Каталог кэша или файл в нём не удовлетворяет границе доверия."""
+
+
 def log(message: str) -> None:
     print(f"fetch_verified_tool: {message}", file=sys.stderr)
 
 
 def sha256_of(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with cache_file(path, os.O_RDONLY, "rb") as stream:
         while block := stream.read(CHUNK):
             digest.update(block)
     return digest.hexdigest()
@@ -90,10 +101,77 @@ def storage_dir() -> Path:
     raise SystemExit("fetch_verified_tool: не заданы ни CI_TOOL_CACHE, ни RUNNER_TEMP")
 
 
+def secure_directory(directory: Path, *, create: bool) -> Path:
+    """Проверить все компоненты пути, не переходя по символическим ссылкам.
+
+    Общий sticky-каталог вроде /tmp допустим только при доверенном владельце
+    каждого следующего компонента; сам кэш принадлежит текущему UID и не
+    доступен для записи другим пользователям. Процессы того же UID остаются
+    в одной границе доверия, в том числе после возврата пути вызывающему коду.
+    """
+    path = Path(os.path.abspath(directory))
+    if path == Path("/"):
+        raise CacheSecurityError("корневой каталог нельзя использовать как кэш")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        root = os.fstat(fd)
+        if root.st_uid != 0 or root.st_mode & 0o022:
+            raise CacheSecurityError("корень файловой системы недоверен")
+        parts = path.parts[1:]
+        for index, part in enumerate(parts):
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=fd)
+            except OSError as error:
+                raise CacheSecurityError(f"небезопасный компонент каталога кэша {part}: {error}") from error
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            last = index == len(parts) - 1
+            if info.st_uid not in (0, os.getuid()) or (last and info.st_uid != os.getuid()):
+                raise CacheSecurityError(f"недоверенный владелец каталога кэша: {path}")
+            if info.st_mode & 0o022 and (last or not info.st_mode & stat.S_ISVTX):
+                raise CacheSecurityError(f"каталог кэша доступен для чужой записи: {path}")
+        return path
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def cache_file(path: Path, flags: int, mode: str):
+    """Открыть только обычный файл текущего UID без ссылок и без усечения до проверки."""
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise CacheSecurityError(f"символическая ссылка вместо файла кэша: {path}") from error
+        raise
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_mode & 0o022):
+            raise CacheSecurityError(f"небезопасный файл кэша: {path}")
+        with os.fdopen(fd, mode) as stream:
+            fd = -1
+            yield stream
+    finally:
+        if fd != -1:
+            os.close(fd)
+
+
 @contextmanager
 def directory_lock(directory: Path, *, blocking: bool = True):
     """Исключительная блокировка каталога хранения; без ожидания — ``None``, если занят."""
-    with (directory / LOCK_NAME).open("a") as handle:
+    directory = secure_directory(directory, create=False)
+    with cache_file(directory / LOCK_NAME, os.O_RDWR | os.O_CREAT, "r+b") as handle:
         flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
         try:
             fcntl.flock(handle, flags)
@@ -111,11 +189,19 @@ def partial_path(directory: Path, name: str, expected: str) -> Path:
 
 
 def is_verified(path: Path, expected: str, size: int | None) -> bool:
-    if not path.is_file():
+    try:
+        with cache_file(path, os.O_RDONLY, "rb") as stream:
+            if size is not None and os.fstat(stream.fileno()).st_size != size:
+                return False
+            digest = hashlib.sha256()
+            while block := stream.read(CHUNK):
+                digest.update(block)
+            if digest.hexdigest() != expected:
+                return False
+            os.utime(stream.fileno(), None)
+            return True
+    except FileNotFoundError:
         return False
-    if size is not None and path.stat().st_size != size:
-        return False
-    return sha256_of(path) == expected
 
 
 def response_total(response, offset: int) -> int | None:
@@ -158,30 +244,30 @@ def checked_url(url: str) -> str:
 def transfer(url: str, partial: Path, size: int | None) -> None:
     """Одна передача: докачивает ``partial`` и проверяет число полученных байт."""
     request = urllib.request.Request(checked_url(url), headers={"Accept": "application/octet-stream"})
-    offset = partial.stat().st_size if partial.exists() else 0
-    if size is not None and offset > size:
-        partial.unlink()
-        offset = 0
-    if size is not None and offset == size:
-        return
-    if offset:
-        request.add_header("Range", f"bytes={offset}-")
-    try:
-        response = urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS)
-    except urllib.error.HTTPError as error:
-        error.close()
-        if error.code == 416:
-            partial.unlink(missing_ok=True)
-            raise TransferError("сервер отверг докачку (416), неполный файл отброшен") from error
-        raise
-    with response:
-        if response.status != 206:
-            # Сервер прислал файл целиком (Range не поддержан или не запрошен).
+    with cache_file(partial, os.O_RDWR | os.O_CREAT, "r+b") as stream:
+        offset = os.fstat(stream.fileno()).st_size
+        if size is not None and offset > size:
+            stream.truncate(0)
             offset = 0
-        total = response_total(response, offset)
-        if size is not None and total is not None and total != size:
-            raise TransferError(f"сервер сообщает размер {total} байт, закреплён {size}")
-        with partial.open("r+b" if offset else "wb") as stream:
+        if size is not None and offset == size:
+            return
+        if offset:
+            request.add_header("Range", f"bytes={offset}-")
+        try:
+            response = urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS)
+        except urllib.error.HTTPError as error:
+            error.close()
+            if error.code == 416:
+                stream.truncate(0)
+                raise TransferError("сервер отверг докачку (416), неполный файл отброшен") from error
+            raise
+        with response:
+            if response.status != 206:
+                # Сервер прислал файл целиком (Range не поддержан или не запрошен).
+                offset = 0
+            total = response_total(response, offset)
+            if size is not None and total is not None and total != size:
+                raise TransferError(f"сервер сообщает размер {total} байт, закреплён {size}")
             stream.seek(offset)
             stream.truncate()
             while block := response.read(CHUNK):
@@ -233,22 +319,21 @@ def github_asset_url(url: str) -> str | None:
 
 def fetch(url: str, expected: str, name: str, size: int | None = None, *,
           attempts: int = ATTEMPTS, sleep=time.sleep) -> Path:
+    if "/" in name or name.startswith(".") or not name:
+        raise ValueError("имя файла кэша должно быть одним компонентом без точки в начале")
     expected = expected.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("SHA-256 должен содержать 64 шестнадцатеричных символа")
     try:
         url = checked_url(url)
     except TransferError as error:
         raise SystemExit(f"fetch_verified_tool: {error}") from error
-    directory = storage_dir()
-    directory.mkdir(parents=True, exist_ok=True)
+    directory = secure_directory(storage_dir(), create=True)
     target = directory / name
     with directory_lock(directory):
-        if target.is_file():
-            if is_verified(target, expected, size):
-                # Время изменения — отметка последнего использования для обслуживания кэша.
-                os.utime(target)
-                log(f"{name} взят из {directory}, SHA-256 совпал")
-                return target
-            log(f"{target} не прошёл проверку, скачиваю заново")
+        if is_verified(target, expected, size):
+            log(f"{name} взят из {directory}, SHA-256 совпал")
+            return target
         partial = partial_path(directory, name, expected)
         last_error: BaseException | None = None
         transfer_url = url
@@ -288,7 +373,9 @@ def prune_stale(directory: Path, max_age_seconds: float, *, now: float | None = 
 
     Возвращает удалённые имена или ``None``, если каталог сейчас занят загрузкой.
     """
-    if not directory.is_dir():
+    try:
+        directory = secure_directory(directory, create=False)
+    except FileNotFoundError:
         return []
     now = time.time() if now is None else now
     with directory_lock(directory, blocking=False) as lock:
@@ -317,7 +404,10 @@ def main() -> int:
         raise SystemExit("fetch_verified_tool: --sha256 должно быть 64 шестнадцатеричными символами")
     if args.size is not None and args.size <= 0:
         raise SystemExit("fetch_verified_tool: --size должно быть положительным")
-    print(fetch(args.url, args.sha256, args.name, args.size))
+    try:
+        print(fetch(args.url, args.sha256, args.name, args.size))
+    except CacheSecurityError as error:
+        raise SystemExit(f"fetch_verified_tool: {error}") from error
     return 0
 
 

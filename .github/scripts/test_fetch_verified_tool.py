@@ -223,6 +223,91 @@ class CacheTests(FetchTestCase):
         self.assertEqual(source.requests, ["bytes=4000-", None])
 
 
+class CacheSecurityTests(FetchTestCase):
+    def test_partial_symlink_cannot_modify_external_file(self):
+        self.cache.mkdir()
+        outside = self.root / "outside"
+        outside.write_bytes(BODY[:4000])
+        fetch_verified_tool.partial_path(self.cache, "tool.tar.gz", SHA).symlink_to(outside)
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(outside.read_bytes(), BODY[:4000])
+        self.assertEqual(source.requests, [])
+
+    def test_partial_hardlink_cannot_modify_external_file(self):
+        self.cache.mkdir()
+        outside = self.root / "outside"
+        outside.write_bytes(BODY[:4000])
+        os.link(outside, fetch_verified_tool.partial_path(self.cache, "tool.tar.gz", SHA))
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(outside.read_bytes(), BODY[:4000])
+        self.assertEqual(source.requests, [])
+
+    def test_target_symlink_is_not_used_or_touched(self):
+        self.cache.mkdir()
+        outside = self.root / "outside"
+        outside.write_bytes(BODY)
+        os.utime(outside, (1, 1))
+        (self.cache / "tool.tar.gz").symlink_to(outside)
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(outside.stat().st_mtime, 1)
+        self.assertEqual(source.requests, [])
+
+    def test_target_hardlink_is_not_used_or_touched(self):
+        self.cache.mkdir()
+        outside = self.root / "outside"
+        outside.write_bytes(BODY)
+        os.utime(outside, (1, 1))
+        os.link(outside, self.cache / "tool.tar.gz")
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(outside.stat().st_mtime, 1)
+        self.assertEqual(source.requests, [])
+
+    def test_foreign_writable_cached_file_is_refused(self):
+        self.cache.mkdir()
+        cached = self.cache / "tool.tar.gz"
+        cached.write_bytes(BODY)
+        cached.chmod(0o666)
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(source.requests, [])
+
+    def test_lock_symlink_is_refused(self):
+        self.cache.mkdir()
+        outside = self.root / "outside"
+        outside.write_bytes(b"unchanged")
+        (self.cache / fetch_verified_tool.LOCK_NAME).symlink_to(outside)
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(outside.read_bytes(), b"unchanged")
+
+    def test_foreign_writable_cache_is_refused(self):
+        self.cache.mkdir(mode=0o777)
+        self.cache.chmod(0o777)
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(source.requests, [])
+
+    def test_symlinked_cache_is_refused(self):
+        real = self.root / "real"
+        real.mkdir()
+        self.cache.symlink_to(real, target_is_directory=True)
+        source = self.source([("full",)])
+        with self.assertRaises(fetch_verified_tool.CacheSecurityError):
+            self.fetch(source.url)
+        self.assertEqual(list(real.iterdir()), [])
+
+
 class GitHubFallbackTests(FetchTestCase):
     url = "https://github.com/owner/repo/releases/download/v1.2.3/tool.tar.gz"
     api = "https://api.github.com/repos/owner/repo/releases/assets/17"

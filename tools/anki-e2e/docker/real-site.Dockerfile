@@ -32,9 +32,9 @@ RUN apt-get update \
       ffmpeg fonts-noto-cjk procps jq \
  && rm -rf /var/lib/apt/lists/*
 # Официальная установка Brave Stable: https://brave.com/linux/
-RUN curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+RUN curl --proto '=https' --proto-redir '=https' -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
       https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg \
- && curl -fsSLo /etc/apt/sources.list.d/brave-browser-release.sources \
+ && curl --proto '=https' --proto-redir '=https' -fsSLo /etc/apt/sources.list.d/brave-browser-release.sources \
       https://brave-browser-apt-release.s3.brave.com/brave-browser.sources \
  && apt-get update \
  && apt-get install -y --no-install-recommends brave-browser \
