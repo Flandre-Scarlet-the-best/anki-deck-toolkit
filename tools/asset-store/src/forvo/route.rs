@@ -1,7 +1,7 @@
 //! Выбор транспорта общего пользовательского пути Forvo.
 //!
 //! Это только слой маршрутизации: кандидаты, ранжирование, попытки, проверка
-//! MP3, `ForvoEvidence`, staging, импорт, checkpoint и resume у обоих
+//! MP3, `ForvoEvidence`, сохранение оригинала, checkpoint и resume у обоих
 //! транспортов общие. Здесь решается лишь, какой транспорт исполняет операцию
 //! и допустим ли переход ко второму.
 //!
@@ -10,7 +10,7 @@
 //! собственный Chromium не запустился или его профиль занят; для одиночного
 //! `fetch` также — профиль CDP не авторизован, а загрузка ещё не начиналась.
 //! Отказы предметной области (domain failure) — ограничение Forvo, исчерпание
-//! кандидатов, ошибки аудио, импорта и диска, чужая загрузка, неопределённость
+//! кандидатов, ошибки аудио и диска, чужая загрузка, неопределённость
 //! владения, незавершённая уборка, прерывание — права на повтор через другую
 //! сессию не дают.
 use super::provider_code;
@@ -27,7 +27,7 @@ pub enum Stage {
     Launch,
     /// Сайт открыт, но загрузка записи не начиналась.
     BeforeDownload,
-    /// Загрузка начиналась или результат уже импортировался.
+    /// Загрузка начиналась или оригинал уже сохранён.
     AfterDownload,
 }
 
@@ -37,11 +37,20 @@ pub fn backend_failure(
     error: &AssetError,
     cleanup_ok: bool,
 ) -> Result<&'static str, String> {
-    if !cleanup_ok {
+    if !cleanup_ok
+        || error.details["recovery_required"] == true
+        || !error.details["browser_cleanup"].is_null()
+    {
         return Err("cleanup_incomplete".into());
     }
     if error.code == ErrorCode::Interrupted {
         return Err("interrupted".into());
+    }
+    if let Some(outcome) = error.details["human_wait"].as_str() {
+        return Err(format!("human_wait_{outcome}"));
+    }
+    if error.details["human_wait_pending"] == true {
+        return Err("human_wait_pending".into());
     }
     let code = provider_code(error);
     match (stage, code) {
@@ -164,5 +173,37 @@ mod tests {
             backend_failure(Stage::Launch, &interrupted, true),
             Err("interrupted".into())
         );
+    }
+    #[test]
+    fn recovery_markers_refuse_even_an_otherwise_eligible_launch_failure() {
+        let mut error = failure("browser_recovery_required");
+        error.details["recovery_required"] = json!(true);
+        assert_eq!(
+            backend_failure(Stage::Launch, &error, true),
+            Err("cleanup_incomplete".into())
+        );
+        error.details["recovery_required"] = json!(false);
+        error.details["browser_cleanup"] = json!({"code":"browser_cleanup_failed"});
+        assert_eq!(
+            backend_failure(Stage::Launch, &error, true),
+            Err("cleanup_incomplete".into())
+        );
+    }
+    #[test]
+    fn timed_out_manual_login_never_falls_back_to_another_browser() {
+        for code in ["login_required", "session_expired", "challenge_required"] {
+            let mut error = failure(code);
+            error.details["human_wait"] = json!("timed_out");
+            assert_eq!(
+                backend_failure(Stage::BeforeDownload, &error, true),
+                Err("human_wait_timed_out".into())
+            );
+            error.details.as_object_mut().unwrap().remove("human_wait");
+            error.details["human_wait_pending"] = json!(true);
+            assert_eq!(
+                backend_failure(Stage::BeforeDownload, &error, true),
+                Err("human_wait_pending".into())
+            );
+        }
     }
 }

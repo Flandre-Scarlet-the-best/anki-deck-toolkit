@@ -10,7 +10,7 @@ use crate::forvo::candidates::{DomResult, validated};
 use crate::forvo::{
     AuthObservation, AuthState, Candidate, RANKING, auth_error, provider_code, word_url,
 };
-use crate::pronunciation::{MAX_AUDIO_BYTES, Pronunciation, probe_mp3};
+use crate::pronunciation::{MAX_AUDIO_BYTES, probe_mp3};
 use crate::{AssetError, ErrorCode, hashing::sha256_hex};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -896,7 +896,6 @@ pub struct SmokeOptions {
     pub target: Option<String>,
     pub wait: Duration,
     pub surface: String,
-    pub reading: String,
     pub probe_downloads_api: bool,
     pub close_tab: bool,
     /// Оставить собственный скачанный файл в загрузках браузера (по умолчанию удаляется после копии в свидетельства).
@@ -925,7 +924,7 @@ pub async fn recover_previous(
 }
 
 pub async fn smoke(mut options: SmokeOptions) -> Result<Report, AssetError> {
-    let request = Pronunciation::new(&options.surface, &options.reading)?;
+    let request = crate::pronunciation::selection::normalize_forvo_surface(&options.surface)?;
     let mut report = Report::default();
     let mut connection =
         match connect(&options.state_dir, options.target.as_deref(), options.wait).await {
@@ -1023,7 +1022,7 @@ pub async fn smoke(mut options: SmokeOptions) -> Result<Report, AssetError> {
 
 async fn run_flow(
     connection: &mut Connection,
-    request: &Pronunciation,
+    request: &str,
     options: &mut SmokeOptions,
     report: &mut Report,
 ) -> Result<(), AssetError> {
@@ -1041,7 +1040,7 @@ async fn run_flow(
         },
         opened,
     );
-    let page = word_url(&request.surface);
+    let page = word_url(request);
     let navigation = bridge
         .call(
             "navigate",
@@ -1067,7 +1066,7 @@ async fn run_flow(
         ));
     }
     report.push("forvo_page_auth", Status::Pass, page_evidence);
-    let ranked = candidates(bridge, &request.surface)
+    let ranked = candidates(bridge, request)
         .await
         .inspect_err(|e| report.fail("candidates", e))?;
     report.push("candidates", if ranked.is_empty() { Status::Fail } else { Status::Pass }, json!({"section":"ja","count":ranked.len(),
@@ -1077,7 +1076,11 @@ async fn run_flow(
         report.fail("selection", &e);
         return Err(e);
     };
-    report.push("selection", Status::Pass, json!({"record_id":selected.record_id,"ranking_policy":RANKING,"surface":request.surface,"reading":request.reading}));
+    report.push(
+        "selection",
+        Status::Pass,
+        json!({"record_id":selected.record_id,"ranking_policy":RANKING,"surface":request}),
+    );
     let op_id = download::new_operation_id()?;
     let outcome = download_selected(
         bridge,
@@ -1121,7 +1124,7 @@ async fn run_flow(
 pub async fn download_selected(
     bridge: &mut Bridge,
     state: &AdapterState,
-    request: &Pronunciation,
+    request: &str,
     selected: &Candidate,
     op_id: &str,
     options: &mut SmokeOptions,
@@ -1132,7 +1135,7 @@ pub async fn download_selected(
     let acquired = super::fetch::download_candidate(
         bridge,
         state.platform,
-        &request.surface,
+        request,
         selected,
         op_id,
         &options.limits,

@@ -31,12 +31,10 @@ pub const WORD_WRONG_HREF: &str = "誤先";
 pub const USER_HOST: &str = "user-files.test";
 /// Независимые слова пакетных сценариев: свои записи и свои байты.
 pub const WORD_2: &str = "水";
-pub const READING_2: &str = "みず";
 /// Лучшая запись второго слова (ей сценарий подменяет ответ, проверяя переход к следующей).
 pub const RECORD_2_TOP: &str = "4100001";
 pub const RECORD_2_NEXT: &str = "4100002";
 pub const WORD_3: &str = "山";
-pub const READING_3: &str = "やま";
 pub const RECORD_3: &str = "4200001";
 
 /// Поведение ответа на загрузку записи.
@@ -75,6 +73,7 @@ struct Control {
 #[derive(Clone)]
 pub struct Fixture {
     pub port: u16,
+    human_ready: watch::Sender<bool>,
     control: Arc<Mutex<Control>>,
     pub mp3_a: Arc<Vec<u8>>,
     pub mp3_b: Arc<Vec<u8>>,
@@ -96,7 +95,11 @@ impl Fixture {
             .behaviors
             .insert(record.to_owned(), behavior);
     }
+    pub fn allow_human_auth(&self) {
+        self.human_ready.send_replace(true);
+    }
     pub fn reset(&self) {
+        self.human_ready.send_replace(false);
         let mut control = lock(&self.control);
         control.behaviors.clear();
         control.log.clear();
@@ -164,8 +167,10 @@ impl Fixture {
             .map_err(|e| format!("порт fixture: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let (stop, mut stopped) = watch::channel(false);
+        let (human_ready, _) = watch::channel(false);
         let fixture = Fixture {
             port,
+            human_ready,
             control: Arc::new(Mutex::new(Control::default())),
             mp3_a: Arc::new(mp3_a),
             mp3_b: Arc::new(mp3_b),
@@ -242,8 +247,27 @@ impl Fixture {
         let decoded = percent_decode(&path);
         let segments: Vec<&str> = decoded.split('/').filter(|s| !s.is_empty()).collect();
         match segments.as_slice() {
+            ["human-ready"] => {
+                let mut ready = self.human_ready.subscribe();
+                let mut stopped = self.stop.subscribe();
+                while !*ready.borrow_and_update() {
+                    tokio::select! {
+                        result = ready.changed() => { if result.is_err() { return Ok(()) } },
+                        _ = stopped.changed() => return Ok(()),
+                    }
+                }
+                respond(&mut stream, 200, "text/plain", &[], b"authenticated").await
+            }
             ["word", word] => match word_page(word) {
-                Some(html) => {
+                Some(mut html) => {
+                    if *word == WORD_LOGIN {
+                        html.push_str(&format!(
+                            r#"<script>fetch('/human-ready').then(() => {{
+                            document.querySelector('#header').outerHTML = {};
+                        }});</script>"#,
+                            serde_json::to_string(ACCOUNT).expect("HTML fixture")
+                        ));
+                    }
                     respond(
                         &mut stream,
                         200,
@@ -431,9 +455,9 @@ fn page(body: &str, account: bool) -> String {
 fn word_page(word: &str) -> Option<String> {
     // Только ограниченный синтетический корпус; произвольные слова fixture
     // по-прежнему отклоняет. Байты каждой записи готовит корпус прогона.
-    if let Some((surface, _, record)) = (0..LOAD_WORDS)
+    if let Some((surface, record)) = (0..LOAD_WORDS)
         .map(load_word)
-        .find(|(surface, _, _)| surface == word)
+        .find(|(surface, _)| surface == word)
     {
         return Some(page(
             &ja_section(
@@ -576,29 +600,28 @@ const KANA: &[char] = &[
 /// Размер синтетического корпуса нагрузки: все пары двух символов `KANA`.
 pub(super) const LOAD_WORDS: usize = KANA.len() * KANA.len();
 
-/// Детерминированные разные японские пары для нагрузки (не словарные статьи).
-pub(super) fn load_word(index: usize) -> (String, String, String) {
+/// Детерминированные разные японские написания для нагрузки (не словарные статьи).
+pub(super) fn load_word(index: usize) -> (String, String) {
     assert!(index < LOAD_WORDS);
     let base = KANA.len();
     let suffix = format!("{}{}", KANA[index / base], KANA[index % base]);
-    (
-        format!("試験{suffix}"),
-        format!("しけん{suffix}"),
-        (8_000_000 + index).to_string(),
-    )
+    (format!("試験{suffix}"), (8_000_000 + index).to_string())
 }
 
 #[cfg(test)]
 mod load_tests {
     use super::*;
     #[test]
-    fn load_corpus_has_distinct_valid_pairs_and_record_buttons() {
-        let mut pairs = std::collections::HashSet::new();
+    fn load_corpus_has_distinct_valid_surfaces_and_record_buttons() {
+        let mut surfaces = std::collections::HashSet::new();
         let mut records = std::collections::HashSet::new();
         for i in 0..LOAD_WORDS {
-            let (surface, reading, record) = load_word(i);
-            asset_store::pronunciation::Pronunciation::new(&surface, &reading).unwrap();
-            assert!(pairs.insert((surface.clone(), reading)));
+            let (surface, record) = load_word(i);
+            assert_eq!(
+                asset_store::pronunciation::selection::normalize_forvo_surface(&surface).unwrap(),
+                surface
+            );
+            assert!(surfaces.insert(surface.clone()));
             assert!(records.insert(record.clone()));
             let page = word_page(&surface).unwrap();
             assert!(page.contains(&format!("data-p4=\"{record}\"")));

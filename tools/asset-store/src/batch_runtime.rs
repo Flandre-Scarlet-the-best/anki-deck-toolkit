@@ -274,8 +274,23 @@ impl SafeBatchRuntime {
             path: self.directory_path.join(name),
         })
     }
+    /// Открывает существующий runtime без создания каталогов или очистки файлов.
+    /// Отсутствие компонента означает отсутствие пакета; ссылки отвергаются dirfd/NOFOLLOW.
+    /// Пакет без каталога оригиналов при сохранённом состоянии — повреждение и отказ.
+    pub fn open_existing(store_root: &Path, batch_id: &str) -> Result<Option<Self>, AssetError> {
+        Self::open_mode(store_root, batch_id, false)
+    }
+
     /// Корень должен принадлежать вызывающему владельцу хранилища.
     pub fn open(store_root: &Path, batch_id: &str) -> Result<Self, AssetError> {
+        Self::open_mode(store_root, batch_id, true)?.ok_or_else(path_error)
+    }
+
+    fn open_mode(
+        store_root: &Path,
+        batch_id: &str,
+        create: bool,
+    ) -> Result<Option<Self>, AssetError> {
         validate_batch_id(batch_id)?;
         let store_path = if store_root.is_absolute() {
             store_root.to_path_buf()
@@ -292,14 +307,41 @@ impl SafeBatchRuntime {
             )
             .map_err(boundary_io)?,
         );
-        let runtime = ensure_directory(&root, ".runtime")?;
-        let batches = ensure_directory(&runtime, "batches")?;
-        let directory = ensure_directory(&batches, batch_id)?;
+        let directory_at = |parent: &File, name: &str| {
+            if create {
+                ensure_directory(parent, name).map(Some)
+            } else {
+                existing_directory(parent, name)
+            }
+        };
+        let Some(runtime) = directory_at(&root, ".runtime")? else {
+            return Ok(None);
+        };
+        let Some(batches) = directory_at(&runtime, "batches")? else {
+            return Ok(None);
+        };
+        let Some(directory) = directory_at(&batches, batch_id)? else {
+            return Ok(None);
+        };
         flock(&directory, FlockOperation::LockExclusive).map_err(boundary_io)?;
-        let blobs = ensure_directory(&directory, "candidates")?;
-        remove_orphan_temporaries(&directory, batch_id)?;
-        remove_orphan_temporaries(&blobs, batch_id)?;
-        Ok(Self {
+        let Some(blobs) = directory_at(&directory, "candidates")? else {
+            // Каталог сохранённого пакета без `candidates` — повреждение, а не
+            // отсутствие пакета: иначе повтор одиночного запроса теряет
+            // сохранённый оригинал и скачивает его заново. Пакет, у которого
+            // состояния ещё нет, отсутствующим остаётся.
+            if !create && entry_exists(&directory, "state.json")? {
+                return Err(AssetError::new(
+                    ErrorCode::ManifestCorrupt,
+                    "каталог оригиналов runtime-пакета отсутствует при сохранённом состоянии",
+                ));
+            }
+            return Ok(None);
+        };
+        if create {
+            remove_orphan_temporaries(&directory, batch_id)?;
+            remove_orphan_temporaries(&blobs, batch_id)?;
+        }
+        Ok(Some(Self {
             directory,
             blobs,
             batch_id: batch_id.into(),
@@ -309,7 +351,11 @@ impl SafeBatchRuntime {
             needs_reload: false,
             verified_blob_keys: BTreeSet::new(),
             durable_state: None,
-        })
+        }))
+    }
+
+    pub(crate) fn lock_held(&self) -> bool {
+        self.locked
     }
 
     pub fn batch_id(&self) -> &str {
@@ -902,6 +948,28 @@ fn validate_leaf_name(name: &str) -> Result<(), AssetError> {
         return Err(path_error());
     }
     Ok(())
+}
+
+fn existing_directory(parent: &File, name: &str) -> Result<Option<File>, AssetError> {
+    match openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(fd) => Ok(Some(File::from(fd))),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+        Err(error) => Err(boundary_io(error)),
+    }
+}
+
+/// Есть ли запись по имени внутри каталога; ссылка не разыменовывается.
+fn entry_exists(parent: &File, name: &str) -> Result<bool, AssetError> {
+    match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(true),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+        Err(error) => Err(boundary_io(error)),
+    }
 }
 
 fn ensure_directory(parent: &File, name: &str) -> Result<File, AssetError> {

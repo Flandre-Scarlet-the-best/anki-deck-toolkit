@@ -16,8 +16,8 @@ import pathlib
 store = pathlib.Path(os.environ['ANKI_E2E_CRASH_STORE']).resolve()
 mode = os.environ['ANKI_E2E_CRASH_WINDOW']
 expected = os.environ['ANKI_E2E_CRASH_SHA256']
-if mode not in ('blob_sync', 'checkpoint_sync', 'import_sync', 'outcome_sync'):
-    raise gdb.GdbError('неизвестное окно аварии %r: ожидается blob_sync, checkpoint_sync, import_sync или outcome_sync' % mode)
+if mode not in ('blob_sync', 'checkpoint_sync', 'outcome_sync'):
+    raise gdb.GdbError('неизвестное окно аварии %r: ожидается blob_sync, checkpoint_sync или outcome_sync' % mode)
 batch = store / '.runtime' / 'batches' / 'window'
 state_path = batch / 'state.json'
 entering = {}
@@ -27,7 +27,7 @@ def read_json(path):
     return json.loads(path.read_bytes())
 
 def imported(item):
-    return (item.get('outcome') or {}).get('code') == 'imported'
+    return (item.get('outcome') or {}).get('code') == 'acquired'
 
 def on_fsync():
     global evidence
@@ -60,18 +60,12 @@ def on_fsync():
             if path.parent == batch and path.name.startswith('.tmp-') and not saved:
                 candidate = read_json(path)['items'][1]
                 target = candidate.get('acquisition') is not None and candidate.get('outcome') is None
-        elif mode == 'import_sync':
-            target = path == store / '.journal' / 'events.jsonl' and saved and second.get('outcome') is None
         elif mode == 'outcome_sync':
             if path.parent == batch and path.name.startswith('.tmp-') and saved and second.get('outcome') is None:
                 candidate = read_json(path)['items'][1]
-                records = read_json(store / '.runtime' / 'manifest.json')['assets']
-                pair = [second['request']['surface'], second['request']['reading']]
-                target = imported(candidate) and any(r['sha256'] == expected
-                    and json.loads(r['identity']['key']) == pair
-                    and r['lifecycle'] != 'verified'
-                    and hashlib.sha256((store / '.runtime' / r['storage_path']).read_bytes()).hexdigest() == expected
-                    for r in records)
+                original = candidate.get('acquisition') or {}
+                blob = original.get('blob') or {}
+                target = imported(candidate) and blob.get('sha256') == expected and hashlib.sha256((batch / blob['storage_path']).read_bytes()).hexdigest() == expected
         if target:
             syscall = {74: 'fsync', 75: 'fdatasync'}.get(int(gdb.selected_frame().read_register('orig_rax')), 'unknown')
             evidence = {'window': mode, 'syscall': syscall, 'edge': 'entry',

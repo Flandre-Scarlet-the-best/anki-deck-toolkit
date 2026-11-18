@@ -55,6 +55,7 @@ pub const SCENARIOS: &[&str] = &[
     "save_as_prompt",
     "browser_restart",
     "cli_fetch",
+    "cli_human_wait",
     "cli_batch",
     "cli_batch_recovery",
     "cli_foreign_downloads",
@@ -531,7 +532,7 @@ async fn execute(
         // искусственный прогрев content-addressed blobs уже после первого слова.
         if selected.iter().any(|name| name == "cli_batch_load") {
             for index in 0..usize::from(args.batch_items) * usize::from(args.batch_count) {
-                let (_, _, record) = fixture::load_word(index);
+                let (_, record) = fixture::load_word(index);
                 extra.insert(
                     record.clone(),
                     synthetic_mp3(
@@ -570,8 +571,8 @@ async fn execute(
     });
     if selected.iter().any(|name| name == "cli_batch_load") {
         let corpus:Vec<_>=(0..usize::from(args.batch_items)*usize::from(args.batch_count)).map(|index| {
-            let (surface,reading,record)=fixture::load_word(index);
-            json!({"surface":surface,"reading":reading,"record_id":record,"sha256":util::sha256_hex(&fixture.bytes_for(&record))})
+            let (surface,record)=fixture::load_word(index);
+            json!({"surface":surface,"record_id":record,"sha256":util::sha256_hex(&fixture.bytes_for(&record))})
         }).collect();
         if corpus
             .iter()
