@@ -3,9 +3,95 @@ use crate::{AssetError, ErrorCode};
 use serde_json::json;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+struct Signals {
+    count: tokio::sync::watch::Receiver<u64>,
+    stopped: Arc<AtomicBool>,
+}
+
+struct SignalRegistrations(Vec<signal_hook::SigId>);
+
+impl Drop for SignalRegistrations {
+    fn drop(&mut self) {
+        for id in self.0.drain(..) {
+            signal_hook::low_level::unregister(id);
+        }
+    }
+}
+
+tokio::task_local! {
+    static SIGNALS: Signals;
+}
+
+/// Подписки живут весь запуск команды, в том числе между асинхронными этапами.
+pub(crate) async fn with_signals<F: std::future::Future>(work: F) -> std::io::Result<F::Output> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let stopped = Arc::new(AtomicBool::new(false));
+    let mut registrations = SignalRegistrations(Vec::new());
+    for kind in [
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
+        registrations
+            .0
+            .push(signal_hook::flag::register(kind, Arc::clone(&stopped))?);
+    }
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    let (tx, rx) = tokio::sync::watch::channel(0_u64);
+    let watcher = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = interrupt.recv() => tx.send_modify(|count| *count = count.saturating_add(1)),
+                _ = terminate.recv() => tx.send_modify(|count| *count = count.saturating_add(1)),
+                _ = hangup.recv() => tx.send_modify(|count| *count = count.saturating_add(1)),
+            }
+        }
+    });
+    let result = SIGNALS.scope(Signals { count: rx, stopped }, work).await;
+    watcher.abort();
+    Ok(result)
+}
+
+async fn signal_count_at_least(target: u64) -> std::io::Result<()> {
+    if let Ok(signals) = SIGNALS.try_with(Clone::clone) {
+        if target == 1 && signals.stopped.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let mut rx = signals.count;
+        rx.wait_for(|count| *count >= target)
+            .await
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    } else {
+        // Библиотечные вызовы вне CLI сохраняют прежнее поведение.
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        let mut hup = signal(SignalKind::hangup())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = term.recv() => Ok(()),
+            _ = hup.recv() => Ok(()),
+        }
+    }
+}
+
+pub(crate) async fn interrupted_again() -> std::io::Result<()> {
+    signal_count_at_least(2).await
+}
+
+pub(crate) fn stop_requested() -> bool {
+    SIGNALS
+        .try_with(|signals| signals.stopped.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
 
 fn write_event(writer: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
     serde_json::to_writer(&mut *writer, value)?;
@@ -106,14 +192,7 @@ pub(crate) fn end(id: &str, outcome: &str) {
 
 /// Только команды Forvo: штатные сигналы проходят через ту же управляемую очистку.
 pub(crate) async fn interrupted() -> std::io::Result<()> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate())?;
-    let mut hup = signal(SignalKind::hangup())?;
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => result,
-        _ = term.recv() => Ok(()),
-        _ = hup.recv() => Ok(()),
-    }
+    signal_count_at_least(1).await
 }
 
 pub(crate) fn interrupted_error() -> AssetError {
@@ -173,5 +252,50 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn signal_between_waits_is_retained_and_second_signal_is_distinct() {
+        const CHILD: &str = "FORVO_SIGNAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "forvo::interaction::tests::signal_between_waits_is_retained_and_second_signal_is_distinct", "--nocapture"])
+                .env(CHILD, "1")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(with_signals(async {
+                use rustix::process::{Signal, getpid, kill_process};
+                // Сигнал поступает без активного interrupted(), как при записи checkpoint.
+                kill_process(getpid(), Signal::TERM).unwrap();
+                // kill подтверждает отправку, но ядро может доставить сигнал позже.
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !stop_requested() && std::time::Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                assert!(stop_requested());
+                tokio::time::timeout(Duration::from_secs(2), interrupted())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(stop_requested());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(30), interrupted_again())
+                        .await
+                        .is_err()
+                );
+                kill_process(getpid(), Signal::HUP).unwrap();
+                tokio::time::timeout(Duration::from_secs(2), interrupted_again())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }))
+            .unwrap();
     }
 }

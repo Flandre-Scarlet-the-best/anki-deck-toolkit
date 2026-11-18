@@ -899,7 +899,7 @@ fn execute_forvo(
     };
     let adapter_dir = || brave_state_dir(generic.adapter_state_dir.as_deref());
     let runtime = tokio::runtime::Runtime::new().map_err(|e| AssetError::io("runtime", e))?;
-    let result=runtime.block_on(async {
+    let result=runtime.block_on(crate::forvo::interaction::with_signals(async {
         match action {
             ForvoAction::Brave{..}|ForvoAction::Browser{..}=>{
                 let (state_dir,target,command)=adapter_command(action)?.expect("команда адаптера");
@@ -1041,7 +1041,7 @@ fn execute_forvo(
                 }
             }
         }
-    })?;
+    })).map_err(|e| AssetError::io("сигналы Forvo", e))??;
     let paused = result.get("paused").is_some_and(|v| !v.is_null());
     let cancelled = matches!(
         action,
@@ -1757,7 +1757,7 @@ async fn run_brave(
                     Ok(Err(error)) => Err(error),
                     _ => Err(adapter_interrupted(false)),
                 },
-                _ = crate::forvo::interaction::interrupted() => Err(adapter_interrupted(true)),
+                _ = crate::forvo::interaction::interrupted_again() => Err(adapter_interrupted(true)),
             }
         }
     };

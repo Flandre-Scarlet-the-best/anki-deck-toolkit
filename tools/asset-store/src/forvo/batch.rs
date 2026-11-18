@@ -1089,6 +1089,10 @@ pub async fn resume_prepared(
             if done >= max_items || batch.cancelled {
                 break;
             }
+            if super::interaction::stop_requested() {
+                checkpoint_acquisition(&mut runtime, &mut batch, index, Err(super::interaction::interrupted_error()))?;
+                break;
+            }
             let timer = BrowserItemTimer::new(BrowserItemContext::without_generation(
                 "forvo_web",
                 batch.items[index].surface(),
@@ -1202,6 +1206,10 @@ pub async fn resume_prepared(
                 continue;
             }
             stage.finish_success();
+            if super::interaction::stop_requested() {
+                checkpoint_acquisition(&mut runtime, &mut batch, index, Err(super::interaction::interrupted_error()))?;
+                break;
+            }
             batch.items[index].outcome = Some(Failure {
                 code: "acquired".into(),
                 message: "Оригинальный MP3 сохранён без чтения; доступен для Selection".into(),
@@ -1213,6 +1221,13 @@ pub async fn resume_prepared(
             batch.revision += 1;
             runtime.save(&batch)?;
             done += 1;
+        }
+        if super::interaction::stop_requested() && batch.paused.is_none() && !batch.cancelled {
+            if let Some(index) = batch.items.iter().position(|item| item.outcome.is_none()) {
+                checkpoint_acquisition(&mut runtime, &mut batch, index, Err(super::interaction::interrupted_error()))?;
+            } else {
+                return Err(super::interaction::interrupted_error());
+            }
         }
         Ok::<_, AssetError>(())
     }
